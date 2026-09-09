@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gdtoolkit.gd2py import convert_code
+from lark.exceptions import LarkError
 from radon.complexity import cc_visit
 
 
@@ -33,8 +34,13 @@ def collect_file(path: str | Path) -> tuple[list[FunctionComplexity], str | None
         return [], f"unreadable: {e}"
     try:
         return _collect_source(src, file_name=str(path)), None
-    except SyntaxError as e:
-        return [], f"gd2py conversion failed: {e}"
+    except (LarkError, SyntaxError) as e:
+        # gd2py first parses via a lark grammar (Python-keyword identifiers like
+        # `var def` → UnexpectedToken/UnexpectedCharacters, both LarkError),
+        # then the emitted code is compile()-checked (a syntax error like
+        # `def = 1`) which surfaces as Python SyntaxError. Both mean "this file
+        # cannot be measured" — a structural failure to report, never a crash.
+        return [], f"gd2py conversion failed: {type(e).__name__}: {e}"
 
 
 def collect_paths(paths: list[str | Path]) -> tuple[list[FunctionComplexity], list[dict]]:

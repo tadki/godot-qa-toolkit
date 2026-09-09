@@ -19,7 +19,12 @@ no agent/heuristic scoring inside tool code.
 | Complexity gate | `gqt complexity <paths...> [--warn 10] [--max 15]` | M1 |
 | Mutation runner | — | M2 |
 | Coverage | — | M2 |
-| MCP control plane | `mcp/` | M3 (migrates from KingOfLikes `.dev/godot-mcp/launch/`) |
+| Godot determinism | — | M2+ (logic/scheduling here; the deterministic commands register into the godot-mcp ① runtime addon) |
+
+> The godot-mcp control plane (launcher/proxy/shim/port arbitration) belongs to
+> the **godot-mcp runtime library** (①), not here. This library is the
+> tool-state half of a two-library split: run-time driving (①) vs test means
+> (②, this repo).
 
 ## Gherkin (self-authored)
 

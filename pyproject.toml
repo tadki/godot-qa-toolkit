@@ -1,0 +1,24 @@
+[project]
+name = "godot-qa-toolkit"
+version = "0.1.0"
+description = "Deterministic five-stage QA toolchain for Godot/GDScript: Gherkin runner, complexity gate, mutation and coverage (SEE-1256 plan, M1)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "gdtoolkit>=4.3",
+]
+
+[project.scripts]
+gqt = "godot_qa_toolkit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

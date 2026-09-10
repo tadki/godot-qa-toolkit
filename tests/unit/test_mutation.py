@@ -184,6 +184,26 @@ class TestRunMutation:
         assert s.get("killed", 0) == 0, "launch failure must never count as a kill"
         assert any("launch failed" in f["reason"] for f in result["failures"])
 
+    def test_baseline_timeout_returns_run_error_json_not_crash(self, tmp_path, monkeypatch):
+        # Revy QA retest HIGH: baseline run on a slow project (KOL baseline
+        # ~108s) exceeds the default --timeout 60 → TimeoutExpired propagated as
+        # a raw traceback with stdout 0 bytes and no JSON contract. It must be
+        # captured into the unified run_error JSON like the launch-failure case.
+        proj, target = self._write_project(tmp_path)
+
+        def timeout_run(root, timeout_s=60):
+            import subprocess
+            raise subprocess.TimeoutExpired(cmd="godot", timeout=timeout_s)
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", timeout_run
+        )
+        result = run_mutation(str(target), str(proj), budget=2, timeout_s=60)
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True, result["summary"]
+        assert "timed out" in result["failures"][0]["reason"]
+        assert set(result) >= {"tool", "ok", "summary", "failures"}
+
     def test_invokes_gut_via_res_path(self, tmp_path, monkeypatch):
         # The runner must ask godot to load GUT via res:// — an absolute -s path
         # makes godot fail to load the script regardless of its existence.

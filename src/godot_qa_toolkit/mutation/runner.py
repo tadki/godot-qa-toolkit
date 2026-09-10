@@ -281,7 +281,22 @@ def run_mutation(
 
         # Baseline：原文件的 GUT 结果（失败测试名集合）。pre-existing 失败
         # 不属于任何 mutant——kill 判定只看相对 baseline 的【新增】失败。
-        baseline_rc, baseline_tail = _run_gut_on_project(project_root, timeout_s=timeout_s)
+        # Revy QA retest 实证：baseline 必然花最久（本 KOL 项目 ~108s），默认
+        # --timeout 60 下 TimeoutExpired 漏网成原始 traceback（无统一 JSON）——
+        # 与 per-mutant 循环的 timeout 同款处理：归 run_error JSON 契约。
+        try:
+            baseline_rc, baseline_tail = _run_gut_on_project(project_root, timeout_s=timeout_s)
+        except subprocess.TimeoutExpired:
+            return {
+                "tool": "mutation",
+                "ok": False,
+                "summary": {"file": str(path), "run_error": True,
+                            "error": f"baseline GUT timed out after {timeout_s}s — mutation data untrustworthy"},
+                "failures": [{"reason": (
+                    f"baseline GUT timed out after {timeout_s}s (project's baseline run exceeds "
+                    f"the timeout — raise --timeout or check why tests are this slow)"
+                )}],
+            }
         if baseline_rc != 0 and _looks_like_godot_launch_failure(baseline_tail):
             return {
                 "tool": "mutation",

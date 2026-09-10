@@ -82,9 +82,16 @@ class TestRunMutation:
 
     def test_all_killed_returns_ok_true(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
+        # First call = baseline (clean pass); each mutant call fails on a NEW
+        # test name — baseline-diff kill semantics.
+        calls = {"n": 0}
+        def fake_run(root, timeout_s=60):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (0, "all pass")
+            return (1, f"* test_kill_{calls['n']}\n    [Failed]: caught\n")
         monkeypatch.setattr(
-            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60: (1, "fail"),  # tests fail = mutant killed
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
         )
         result = run_mutation(str(target), str(proj), budget=5)
         assert result["ok"] is True
@@ -93,9 +100,10 @@ class TestRunMutation:
 
     def test_survived_returns_ok_false(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
+        # Baseline and every mutant run: tests pass → mutants survive.
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60: (0, "pass"),  # tests pass = mutant survived
+            lambda root, timeout_s=60: (0, "pass"),
         )
         result = run_mutation(str(target), str(proj), budget=5)
         assert result["ok"] is False
@@ -107,7 +115,7 @@ class TestRunMutation:
         before = target.read_text()
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60: (1, "fail"),
+            lambda root, timeout_s=60: (0, "pass"),
         )
         run_mutation(str(target), str(proj), budget=3)
         assert target.read_text() == before
@@ -117,8 +125,12 @@ class TestRunMutation:
 
         def timeout_run(root, timeout_s=60):
             import subprocess
+            if timeout_run.calls == 0:
+                timeout_run.calls = 1
+                return (0, "baseline pass")
             raise subprocess.TimeoutExpired(cmd="godot", timeout=timeout_s)
 
+        timeout_run.calls = 0
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", timeout_run
         )
@@ -151,3 +163,83 @@ class TestRunMutation:
         result = run_mutation(str(target), str(proj), budget=4)
         s = result["summary"]
         assert s["kill_rate"] == round(s["killed"] / s["mutants"], 4)
+
+    def test_godot_launch_failure_is_not_counted_as_killed(self, tmp_path, monkeypatch):
+        # Revy QA FAIL: godot's "Attempt to open script ... File not found" also
+        # exits non-zero, which the runner misread as "mutant killed". A launch
+        # failure must surface as a run_error in the contract — not a kill —
+        # because it says nothing about whether tests caught the mutant. The
+        # baseline run hits the same failure, so run_mutation aborts early.
+        proj, target = self._write_project(tmp_path)
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60: (1, "ERROR: Attempt to open script 'res://addons/gut/gut_cmdln.gd' resulted in error 'File not found'"),
+        )
+        result = run_mutation(str(target), str(proj), budget=3)
+        assert result["ok"] is False
+        s = result["summary"]
+        # Baseline run hits the same launch failure → early abort, no mutant
+        # verdicts at all (killed key absent from the abort contract).
+        assert s.get("run_error") is True
+        assert s.get("killed", 0) == 0, "launch failure must never count as a kill"
+        assert any("launch failed" in f["reason"] for f in result["failures"])
+
+    def test_invokes_gut_via_res_path(self, tmp_path, monkeypatch):
+        # The runner must ask godot to load GUT via res:// — an absolute -s path
+        # makes godot fail to load the script regardless of its existence.
+        proj, target = self._write_project(tmp_path)
+        captured = {}
+
+        def fake_run(root, timeout_s=60):
+            captured["root"] = root
+            return (1, "fail")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        run_mutation(str(target), str(proj), budget=1)
+        # _run_gut_on_project itself constructs the command; assert indirectly by
+        # checking the module constant the real implementation derives from.
+        from godot_qa_toolkit.mutation import runner as m
+        assert m.GUT_SCRIPT_RES_PATH == "res://addons/gut/gut_cmdln.gd"
+
+    def test_preexisting_failures_do_not_count_as_killed(self, tmp_path, monkeypatch):
+        # KOL baseline GUT has pre-existing failures (headless virtual-cursor
+        # E2E): rc=1 even with the ORIGINAL file. Kill must be decided by the
+        # FAILING-TEST-NAME DIFF vs baseline, not by the exit code — otherwise
+        # every mutant on such a project is falsely "killed".
+        proj, target = self._write_project(tmp_path)
+        baseline = (1, "---- 2 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
+        mutant_same = (1, "---- 2 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
+
+        calls = {"n": 0}
+        def fake_run(root, timeout_s=60):
+            calls["n"] += 1
+            return baseline if calls["n"] == 1 else mutant_same
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        result = run_mutation(str(target), str(proj), budget=2)
+        s = result["summary"]
+        assert s["killed"] == 0, f"pre-existing failures must not be kills: {s}"
+        assert s["survived"] == s["mutants"]
+
+    def test_new_failure_counts_as_killed(self, tmp_path, monkeypatch):
+        # Baseline fails on test_old_flaky; the mutant additionally fails
+        # test_add — that NEW failure is a genuine kill.
+        proj, target = self._write_project(tmp_path)
+        calls = {"n": 0}
+        def fake_run(root, timeout_s=60):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (1, "---- 1 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
+            return (1, "---- 2 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n* test_add\n    [Failed]: new\n")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        result = run_mutation(str(target), str(proj), budget=2)
+        s = result["summary"]
+        assert s["killed"] == s["mutants"]
+        assert s["survived"] == 0

@@ -35,6 +35,21 @@ from pathlib import Path
 
 from gdtoolkit.parser import parser as gdtoolkit_parser
 
+# 与 mutation runner 同一套判定：godot 进程级失败（-s 脚本没加载起来）≠
+# 测试结果。res:// 是唯一可靠的 -s 形式（Revy QA FAIL 实证）。
+GUT_SCRIPT_RES_PATH = "res://addons/gut/gut_cmdln.gd"
+_GODOT_LAUNCH_ERROR_MARKERS = (
+    "attempt to open script",
+    "file not found",
+    "failed loading resource",
+    "error: failed to load script",
+)
+
+
+def _looks_like_godot_launch_failure(output: str) -> bool:
+    low = output.lower()
+    return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
+
 # 探针前缀：运行时函数 + 标记（避免与生产函数名冲突）。
 _PROBE_PREFIX = "__qa_cov_probe_"
 _HITS_FILE_PATTERN = "qa-coverage-hits.txt"
@@ -188,18 +203,21 @@ def run_coverage(
         # 插桩文件替换目标，跑 GUT，恢复
         path.write_text(instrumented, encoding="utf-8")
         try:
-            gut = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
-            if not os.path.isfile(gut):
-                raise FileNotFoundError(f"GUT runner not found: {gut}")
+            gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
+            if not os.path.isfile(gut_fs):
+                raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
             try:
+                # -s 必须用 res:// 形式：绝对路径会让 godot 拒绝加载（Revy QA
+                # FAIL 实证），退出码 1 且无任何命中——与"真实 0% 覆盖"不同，
+                # 必须区分，否则数据失真。
                 r = subprocess.run(
                     ["godot", "--headless", "--path", project_root,
-                     "-s", gut, "-gdir=res://tests/", "-gexit"],
+                     "-s", GUT_SCRIPT_RES_PATH, "-gdir=res://tests/", "-gexit"],
                     capture_output=True,
                     text=True,
                     timeout=timeout_s,
                 )
-                gut_tail = r.stdout[-1500:] if r.stdout else r.stderr[-800:]
+                gut_tail = (r.stdout + r.stderr)[-1500:]
             except subprocess.TimeoutExpired:
                 return {
                     "tool": "coverage",
@@ -214,6 +232,23 @@ def run_coverage(
         except Exception:
             path.write_text(backup, encoding="utf-8")
             raise
+
+        # godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖——数据不可信，显式报
+        # run_error 而非产出误导性的 0.0%（Revy QA FAIL 同根因）。
+        if r.returncode != 0 and _looks_like_godot_launch_failure(gut_tail):
+            return {
+                "tool": "coverage",
+                "ok": False,
+                "summary": {"file": str(path), "total_lines": total_lines,
+                            "covered_lines": 0, "coverage_percent": 0.0,
+                            "min_percent": min_percent,
+                            "run_error": True,
+                            "error": "godot launch failed — coverage data untrustworthy"},
+                "failures": [{"reason": (
+                    "godot launch failed (tests did not run): "
+                    f"{gut_tail.strip()[:200]}"
+                )}],
+            }
 
         # 收集命中行（只统计属于 executable_lines 的行——hits 文件里可能混入
         # 运行时多写入的无关行号；越界命中按无效忽略，不允许覆盖率超 100%）

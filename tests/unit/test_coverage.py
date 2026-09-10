@@ -107,6 +107,30 @@ class TestRunCoverage:
         assert set(result) >= {"tool", "ok", "summary", "failures"}
         assert result["tool"] == "coverage"
 
+    def test_godot_launch_failure_is_run_error_not_zero_coverage(self, tmp_path, monkeypatch):
+        # Revy QA FAIL (same root cause as mutation): a godot "File not found"
+        # launch failure exits 1 with empty hits — the runner must report a
+        # run_error (untrustworthy data), not a misleading 0.0% coverage.
+        proj, target = self._write_project(tmp_path)
+
+        def fake(*args, **kwargs):
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "ERROR: Attempt to open script 'res://addons/gut/gut_cmdln.gd' resulted in error 'File not found'"
+            return R()
+
+        monkeypatch.setattr("godot_qa_toolkit.coverage.runner.subprocess.run", fake)
+        result = run_coverage(str(target), str(proj))
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True, result["summary"]
+        assert any("run_error" in f or "godot" in f.get("reason", "").lower()
+                   for f in result["failures"])
+
+    def test_uses_res_path_for_gut(self):
+        from godot_qa_toolkit.coverage import runner as c
+        assert c.GUT_SCRIPT_RES_PATH == "res://addons/gut/gut_cmdln.gd"
+
     def _fake_run_writing_hits(self, proj, lines):
         def fake(*args, **kwargs):
             hits_file = os.path.join(proj, "qa-coverage-hits.txt")

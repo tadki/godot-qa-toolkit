@@ -1,0 +1,42 @@
+# pytest unit CI — qa-toolkit 自测层（SEE-1292 AC-DECPL-005/006 前置）
+# 纯 Python 工具自测：9 个测试文件 65 项，零 Godot 依赖（mutation/coverage 的
+# GUT 路径在单测里全部 mock）。见 docs/ci-cache-matrix.md 的归属判据与缓存矩阵。
+name: ci-pytest
+
+concurrency:
+  group: ci-pytest-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip (gdtoolkit wheel)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py3.12-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py3.12-
+
+      - name: Install
+        run: pip install -e . pytest
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -q

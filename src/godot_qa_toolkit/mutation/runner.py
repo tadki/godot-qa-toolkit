@@ -213,7 +213,7 @@ def _parse_failing_tests(gut_output: str) -> set[str]:
     GUT 结构：'* test_xxx' 开启一个测试，其后 [Failed] 行归属它；汇总行
     '---- N failing tests ----'。用测试名集合做 kill 判定——exit code 只能
     说明"有没有失败"，无法区分 pre-existing 失败与 mutant 引入的新失败
-    （KOL 基线在无头环境就有 pre-existing failures，Revy QA 实证）。
+    （被测项目基线在无头环境就可能有 pre-existing failures，Revy QA 实证）。
     """
     import re as _re
     ansi = _re.compile(r"\x1b\[[0-9;]*m")
@@ -281,7 +281,7 @@ def run_mutation(
 
         # Baseline：原文件的 GUT 结果（失败测试名集合）。pre-existing 失败
         # 不属于任何 mutant——kill 判定只看相对 baseline 的【新增】失败。
-        # Revy QA retest 实证：baseline 必然花最久（本 KOL 项目 ~108s），默认
+        # Revy QA retest 实证：baseline 必然花最久（实测项目 ~108s），默认
         # --timeout 60 下 TimeoutExpired 漏网成原始 traceback（无统一 JSON）——
         # 与 per-mutant 循环的 timeout 同款处理：归 run_error JSON 契约。
         try:
@@ -333,7 +333,7 @@ def run_mutation(
                 else:
                     # 测试失败——区分 pre-existing（基线就有）与 mutant 引入的
                     # 新失败：只有新失败才算 killed（Revy QA 第二层假阳性实证：
-                    # KOL 基线无头环境 rc=1 是常态，按 rc 判定则全部误杀）。
+                    # 某些项目基线无头环境 rc=1 是常态，按 rc 判定则全部误杀）。
                     new_failures = _parse_failing_tests(tail) - baseline_failures
                     if new_failures:
                         killed += 1

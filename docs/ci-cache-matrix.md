@@ -8,7 +8,7 @@
 |---|---|---|---|---|---|
 | **godot-mcp**（fork tadki/godot-mcp） | `ci.yml`（server build+test+protocol）、`launch-ci.yml`（fast tier，57 项 shell harness）、`launch-special.yml`（long/env/drift 三桶，dispatch+周 cron）、`release.yml`、`docs-live.yml`、`claude.yml` | push/PR main；special 手动+cron | **npm**（setup-node cache，server/package-lock）✅ 已落地；Godot 二进制 → 见 docs/godot-binary-cache-design.md（②c 落地） | npm ✅ | headless 可用（t1_import 类）；GUI 实机层留 dev box |
 | **KOL**（KingOfLikes-Godot） | `ci-gut-tests.yml`（GUT unit 硬闸口）、`ci-lint.yml`（Phase A advisory）、`pr-cleanup.yml` | push/PR master | **pip**（gdtoolkit，ci-lint）未缓存；**Godot 二进制** 未缓存（wget 每次下载）→ ②c 落地；`.godot/` 导入缓存可选进阶 | 无 ⏳ | headless GUT 必须；实机测留 dev box（§5.1） |
-| **qa-toolkit**（本库） | `ci-pytest.yml`（65 项 pytest 单测） | push master / 任意 PR | **pip**（gdtoolkit wheel）✅ 本轮落地 | ✅ | 零（单测全 mock GUT 路径） |
+| **qa-toolkit**（本库） | `ci-pytest.yml`（65 项 pytest 单测） | push master / 任意 PR / 手动 dispatch | **pip**（gdtoolkit wheel）✅ 本轮落地 | ✅ | 零（单测全 mock GUT 路径） |
 
 免费额度结论：三库全部 ubuntu runner（Linux 1× 计价），公共仓库无额度限制 / 私有仓库 2000 分钟月额度内余量充足；缓存收益为纯减时。
 

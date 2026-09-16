@@ -158,15 +158,29 @@ class TestCmdGherkinInProcess:
         assert rc == 2
         assert "cannot load steps module" in captured.err
 
-    def test_steps_file_without_register_raises_through(self, tmp_path):
-        # A file whose register() is absent must not be silently accepted:
-        # the AttributeError propagates (fail-fast, P0') rather than yielding
-        # a fake-green run.
+    def test_steps_file_without_register_is_caller_error(self, tmp_path, capsys):
+        # A steps module that cannot even satisfy its contract is an
+        # environment/caller problem (exit 2), never a fake test verdict.
         bad = tmp_path / "steps_bad.py"
         bad.write_text("X = 1\n", encoding="utf-8")
         args = _args("gherkin", str(self._feature(tmp_path)), "--steps", str(bad))
-        with pytest.raises(AttributeError):
-            cli_mod.cmd_gherkin(args)
+        rc = cli_mod.cmd_gherkin(args)
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "cannot load steps module" in captured.err
+
+    def test_steps_file_with_missing_import_is_caller_error(self, tmp_path, capsys):
+        # Mirrors the no-import-cache scenario (SEE-1306 D2): the steps module
+        # raises ImportError at exec time — environment not ready, not a red
+        # run. CI must see exit 2, not a false regression.
+        bad = tmp_path / "steps_dep.py"
+        bad.write_text("import no_such_module_xyz\n", encoding="utf-8")
+        args = _args("gherkin", str(self._feature(tmp_path)), "--steps", str(bad))
+        rc = cli_mod.cmd_gherkin(args)
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "cannot load steps module" in captured.err
+        assert captured.out == ""
 
     def test_failing_step_emits_failure_with_context(self, tmp_path, capsys):
         steps = tmp_path / "steps_fail.py"

@@ -50,6 +50,25 @@ def _load_steps_module(path: Path, registry: "Registry") -> None:
             sys.path.remove(steps_dir)
 
 
+def _try_load_steps(path: Path, registry: "Registry", *, label: str) -> bool:
+    """Load one steps module; on failure report as caller error (exit 2).
+
+    A steps module that cannot even import (missing sibling helper, missing
+    dependency, missing prerequisite like the game-side import cache) is an
+    environment/caller problem, NOT a test verdict: returning False lets the
+    CLI exit 2 with a stderr-only message instead of fabricating a red run
+    (SEE-1306 D2: `gqt gherkin` must not misreport "env not ready" as
+    "code regressed").
+    """
+    try:
+        _load_steps_module(path, registry)
+    except (ImportError, AttributeError, OSError, ValueError) as exc:
+        print(f"cannot load steps module: {label} ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
+        return False
+    return True
+
+
 def cmd_gherkin(args: argparse.Namespace) -> int:
     feature_path = Path(args.feature)
     registry = Registry()
@@ -67,9 +86,11 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
                 print(f"no steps modules found in directory: {args.steps}", file=sys.stderr)
                 return 2
             for mod_path in modules:
-                _load_steps_module(mod_path, registry)
+                if not _try_load_steps(mod_path, registry, label=args.steps):
+                    return 2
         elif steps_path.is_file():
-            _load_steps_module(steps_path, registry)
+            if not _try_load_steps(steps_path, registry, label=args.steps):
+                return 2
         else:
             print(f"cannot load steps module: {args.steps}", file=sys.stderr)
             return 2

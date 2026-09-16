@@ -26,19 +26,74 @@ def _emit(result: dict) -> int:
     return 0 if result["ok"] else 1
 
 
+def _load_steps_module(path: Path, registry: "Registry") -> None:
+    """Exec one steps file and call its register(). Caller validates existence."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(f"gqt_steps_{path.stem}", str(path))
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot build import spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    # spec_from_file_location does not put the module's directory on sys.path;
+    # a steps library that imports sibling helpers needs it there for the
+    # duration of the exec.
+    steps_dir = str(path.parent)
+    added = steps_dir not in sys.path
+    if added:
+        sys.path.insert(0, steps_dir)
+    try:
+        spec.loader.exec_module(module)
+        module.register(registry)
+    finally:
+        if added:
+            sys.path.remove(steps_dir)
+
+
+def _try_load_steps(path: Path, registry: "Registry", *, label: str) -> bool:
+    """Load one steps module; on failure report as caller error (exit 2).
+
+    A steps module that cannot even import (missing sibling helper, missing
+    dependency, missing prerequisite like the game-side import cache) is an
+    environment/caller problem, NOT a test verdict: returning False lets the
+    CLI exit 2 with a stderr-only message instead of fabricating a red run
+    (SEE-1306 D2: `gqt gherkin` must not misreport "env not ready" as
+    "code regressed").
+    """
+    try:
+        _load_steps_module(path, registry)
+    except (ImportError, AttributeError, OSError, ValueError) as exc:
+        print(f"cannot load steps module: {label} ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
+        return False
+    return True
+
+
 def cmd_gherkin(args: argparse.Namespace) -> int:
     feature_path = Path(args.feature)
     registry = Registry()
     if args.steps:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("gqt_steps", args.steps)
-        if spec is None or spec.loader is None:
+        steps_path = Path(args.steps)
+        if steps_path.is_dir():
+            # Library form (SEE-1306): every public module in the directory is
+            # a steps module; underscore-prefixed files are shared helpers and
+            # are skipped so their absence of register() is not an error.
+            modules = sorted(
+                p for p in steps_path.glob("*.py")
+                if not p.name.startswith("_")
+            )
+            if not modules:
+                print(f"no steps modules found in directory: {args.steps}", file=sys.stderr)
+                return 2
+            for mod_path in modules:
+                if not _try_load_steps(mod_path, registry, label=args.steps):
+                    return 2
+        elif steps_path.is_file():
+            if not _try_load_steps(steps_path, registry, label=args.steps):
+                return 2
+        else:
             print(f"cannot load steps module: {args.steps}", file=sys.stderr)
             return 2
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        module.register(registry)
     try:
         feature = parse(feature_path.read_text(encoding="utf-8"), path=str(feature_path))
     except GherkinSyntaxError as e:
@@ -50,7 +105,7 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
             "failures": [{"reason": str(e)}],
         }
         return _emit(result)
-    return _emit(run_feature(feature, registry))
+    return _emit(run_feature(feature, registry, scenario_timeout_s=args.timeout))
 
 
 def cmd_complexity(args: argparse.Namespace) -> int:
@@ -103,7 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("gherkin", help="run a .feature file")
     g.add_argument("feature", help="path to the .feature file")
-    g.add_argument("--steps", help="python module path exposing register(registry)")
+    g.add_argument("--steps", help="python module path, or directory of steps modules")
+    g.add_argument("--timeout", type=float, default=None,
+                   help="per-scenario wall-clock budget in seconds")
     g.set_defaults(func=cmd_gherkin)
 
     c = sub.add_parser("complexity", help="complexity gate over .gd files")

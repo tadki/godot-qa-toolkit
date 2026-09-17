@@ -40,6 +40,24 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
     return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
 
 
+def _godot_project_path(project_root: str) -> str:
+    """win64 godot 的 --path 语义：/mnt/... 形式的 WSL 绝对路径会被拒
+    （'Invalid project path'，QA ④ 实机实证——GUT 零测试执行且 rc≠0）。
+
+    与 mutation runner 同源修复：相对路径由 godot 自行解析（cwd 契约）；
+    绝对 /mnt/ 路径走 wslpath 转 Windows 形式（不可用时原样返回）。
+    """
+    if project_root.startswith("/mnt/"):
+        try:
+            r = subprocess.run(["wslpath", "-w", project_root],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return project_root
+
+
 # user:// 优先：win64@WSL 下项目 res:// 走 UNC 映射（//wsl.localhost/...），
 # FileAccess 对该路径的写入可见性/时序脆弱。user:// 是 Godot 管理的应用数据
 # 目录，两侧 OS 均为本地可靠文件系统。runner 侧按 user:// 目录约定读取。
@@ -394,7 +412,7 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
                 raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
             try:
                 r = subprocess.run(
-                    ["godot", "--headless", "--path", project_root,
+                    ["godot", "--headless", "--path", _godot_project_path(project_root),
                      "-s", GUT_SCRIPT_RES_PATH, "-gdir=res://tests/", "-gexit"],
                     capture_output=True,
                     text=True,

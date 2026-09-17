@@ -289,3 +289,56 @@ class TestH9GutOutputFormats:
         from godot_qa_toolkit.mutation.runner import _parse_failing_tests
         out = "- \x1b[31mtest_crlf_case\x1b[0m\r\n    \x1b[31m[Failed]\x1b[0m: x\r\n"
         assert _parse_failing_tests(out) == {"test_crlf_case"}
+
+
+class TestH10CoverageGodotPathFix:
+    """H10: coverage 侧 win64 --path 修复（QA ④ 实机实证：coverage runner 漏了
+    mutation 侧的 wslpath 修复，/mnt/ 绝对路径 → 'Invalid project path' 0.1s 静默失败）。"""
+
+    def test_godot_project_path_converts_wsl_mount(self, monkeypatch):
+        import godot_qa_toolkit.coverage.runner as c
+
+        calls = []
+
+        def fake_wslpath(args, **kw):
+            calls.append(args)
+            class R:
+                returncode = 0
+                stdout = "D:\\GodotProjects\\king-of-likes\n"
+            return R()
+
+        monkeypatch.setattr(c.subprocess, "run", fake_wslpath)
+        out = c._godot_project_path("/mnt/d/GodotProjects/king-of-likes")
+        assert out == "D:\\GodotProjects\\king-of-likes"
+        assert calls and calls[0][:1] == ["wslpath"]
+
+    def test_relative_path_passthrough(self):
+        from godot_qa_toolkit.coverage.runner import _godot_project_path
+        assert _godot_project_path(".") == "."
+        assert _godot_project_path("proj") == "proj"
+
+    def test_gut_invocation_uses_converted_path(self, tmp_path, monkeypatch):
+        import godot_qa_toolkit.coverage.runner as c
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        target = proj / "t.gd"
+        target.write_text("func f():\n\treturn 1\n")
+
+        seen = {}
+
+        def fake_run(args, **kw):
+            seen["args"] = args
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        monkeypatch.setattr(c.subprocess, "run", fake_run)
+        monkeypatch.setattr(c, "_godot_project_path", lambda p: "WIN:" + p)
+        # sink 不存在 → 哨兵 run_error（本测试只验证调用路径转换，不验证 sink）
+        c.run_coverage(str(target), str(proj))
+        assert seen["args"][3] == "WIN:" + str(proj)

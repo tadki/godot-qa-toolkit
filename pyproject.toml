@@ -21,4 +21,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --import-mode=importlib"
+# SEE-1308 §SPEC-003: `--import-mode=importlib` (with the tests/__init__.py
+# package already present) makes pytest resolve imports by module path instead
+# of honouring a stale `__editable__` egg-link that may point at a *different*
+# workdir. On a box with several KOL worktrees sharing the same Python
+# site-packages the egg-link can root at an old checkout, so
+# `import godot_qa_toolkit` inside the test process resolves to the wrong tree
+# and pytest spuriously fails. importlib mode + the PYTHONPATH convention in
+# README is the double-belt fix.

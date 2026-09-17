@@ -97,7 +97,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
   注意：该形态下 `summary` 无 `killed` 等键（消费方不要按默认 0 读取）。
 - 正常输出：`summary: {file, mutants, killed, survived, timeout, run_errors, kill_rate, budget}` + SEE-1312 新增 `{suspect, invalid_mutants, adaptive_timeout_s}`；`failures` = 非 killed 的 mutant 明细（verdict ∈ survived/timeout/run_error/suspect/invalid_mutant）。
 - **validity 契约**（SEE-1312）：`invalid_mutant` = 变异产物语法预检失败（算子 bug，提前剔除，不跑 GUT）；`suspect` = baseline 已有失败 ∧ mutant run 失败集合差集为空——无法区分「测试没抓住」与「测试没跑到」，保守标记，不计 killed 也不计 survived。
-- `ok = survived==0 且 timeout==0 且 run_errors==0`（suspect/invalid_mutant 不参与 ok 判定——它们是分类信号，不是失败判定）。
+- `ok = survived==0 且 timeout==0 且 run_errors==0 且 suspect==0`——suspect>0 时 ok=false（suspect = 「无法证明被杀死」，与 survived 同挡 gate）；`invalid_mutant` 不参与 ok 判定（语法预检剔除的算子 bug，属工具质量信号而非测试失败判定）。
 - 变异点 `kind` 枚举（**开放集合，按前缀归类**——消费方过滤 kind 时须容忍未知值）：`AOR` / `ROR` / `UOI` / `boundary` / `TERNARY`（cond_not + arm_swap）/ `GUARD_NOT`（守卫取反；守卫表达式内含可变异算子时去重跳过）/ `LOGICAL`（and⇄or）/ `MEMBERSHIP`（in→not in；`not in` 因 AST 无位置信息暂只支持单向）/ `IS_NOT`（is 取反）。
 
 ### 4.4 `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout 120]`

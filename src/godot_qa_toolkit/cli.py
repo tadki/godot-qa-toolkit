@@ -130,6 +130,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             project_root=args.project_root,
             budget=args.budget,
             timeout_s=args.timeout,
+            dry_run=args.dry_run,
+            tests_glob=args.tests,
         )
     except FileNotFoundError as e:
         result = {
@@ -181,6 +183,10 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--project-root", required=True, help="project root containing addons/gut/")
     m.add_argument("--budget", type=int, default=50, help="max mutants (default 50)")
     m.add_argument("--timeout", type=int, default=60, help="GUT timeout seconds (default 60)")
+    m.add_argument("--dry-run", action="store_true",
+                   help="list mutation sites without running GUT (SPEC-009)")
+    m.add_argument("--tests", default=None,
+                   help="scoped GUT dir for affected-test subset, e.g. res://tests/save/ (SPEC-009)")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

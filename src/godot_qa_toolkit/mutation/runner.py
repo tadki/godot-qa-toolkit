@@ -213,11 +213,13 @@ def _ternary_mutants(src: str, offs: list[int], node, mk) -> list[Mutant]:
     if cond_s < cond_e:
         mk("cond_not", "if", "if not", "TERNARY", if_tok.line, if_tok.column,
            cond_s, cond_e)
-    # 两臂交换：span = 整个三元；arm1/arm2 由 apply 端重排
+    # 两臂交换：span = 整个三元；arm 边界由 collect 端 AST 锚点算出并以
+    # 'arm1|arm2' 形式编码进 original（apply 端零猜测——arm 含 ' if '/' else '
+    # 字符串字面量时 regex 会误切，硬ener 反例实证）。
     a1 = src[s:if_pos].strip()
     a2 = src[else_pos + len("else"):e].strip()
     if a1 and a2:
-        mk("arm_swap", f"{a1}⇄{a2}", f"{a2}⇄{a1}", "TERNARY",
+        mk("arm_swap", f"{a1}\x00{a2}", f"{a2}\x00{a1}", "TERNARY",
            meta.line, meta.column, s, e)
     return out
 
@@ -298,12 +300,25 @@ def _apply_mutation(src: str, mutant: Mutant) -> str:
 
 
 def _apply_arm_swap(src: str, mutant: Mutant) -> str:
-    # span = 整个三元；重排为 arm2 if cond else arm1
+    # span = 整个三元；arm 边界已由 collect 端以 '\x00' 编码在 original 中
+    # （arm 文本可能含 ' if '/' else ' 字面量——regex 切分会误伤，改精确拼接）。
+    # cond 文本从 span 内两锚点之间截取：cond 恒在 arm1 与 'else' 之间，用
+    # 'if' 关键字在 span 内【最后】出现位置之后到 'else' 关键字【最后】出现
+    # 位置之前——但字面量同样可含关键字，故 cond 一并编码：original 为
+    # 'arm1\x00arm2'，cond 由 span 文本去掉两臂后剩余段恢复。
+    arm1, arm2 = mutant.original.split("\x00", 1)
     text = src[mutant.start_pos:mutant.end_pos]
-    m = re.match(r"^(.+?)\bif\b(.+?)\belse\b(.+)$", text, flags=re.DOTALL)
-    if not m:
-        raise ValueError(f"ternary arm_swap span not re-parseable: {text[:80]!r}")
-    arm1, cond, arm2 = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+    a1 = text.find(arm1)
+    a2 = text.rfind(arm2)
+    if a1 < 0 or a2 < 0:
+        raise ValueError(f"ternary arm_swap anchors missing in span: {text[:80]!r}")
+    cond = text[a1 + len(arm1):a2].strip()
+    # 去 cond 与两臂之间的 'if'/'else' 关键字（collect 端 anchor 含它们）
+    for kw in ("if", "else"):
+        if cond.startswith(kw):
+            cond = cond[len(kw):].strip()
+        if cond.endswith(kw):
+            cond = cond[:-len(kw)].strip()
     return src[:mutant.start_pos] + f"{arm2} if {cond} else {arm1}" + src[mutant.end_pos:]
 
 
@@ -345,6 +360,26 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
     return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
 
 
+def _godot_project_path(project_root: str) -> str:
+    """win64 godot 的 --path 语义：/mnt/... 形式的 WSL 绝对路径会被拒
+    （'Invalid project path'，硬ener 实机实证——0.1s 静默 rc≠0、零测试执行）。
+
+    相对路径由 godot 自行解析（CWD 契约：调用方必须已 cd 到项目根）；
+    绝对路径走 wslpath 转 Windows 形式（不可用时原样返回）。
+    """
+    if os.path.isabs(project_root):
+        if project_root.startswith("/mnt/"):
+            try:
+                r = subprocess.run(["wslpath", "-w", project_root],
+                                   capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return project_root
+    return project_root
+
+
 def _run_gut_on_project(project_root: str, timeout_s: int = 60,
                         tests_glob: str | None = None) -> tuple[int, str]:
     """在项目里 headless 跑 GUT；返回 (exit_code, 输出尾部)。
@@ -359,11 +394,12 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
         raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
     gdir = tests_glob if tests_glob else "res://tests/"
     r = subprocess.run(
-        ["godot", "--headless", "--path", project_root,
+        ["godot", "--headless", "--path", _godot_project_path(project_root),
          "-s", GUT_SCRIPT_RES_PATH, f"-gdir={gdir}", "-gexit"],
         capture_output=True,
         text=True,
         timeout=timeout_s,
+        cwd=project_root,
     )
     tail = r.stdout[-2000:] if r.stdout else r.stderr[-1000:]
     return r.returncode, tail
@@ -372,17 +408,22 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
 def _parse_failing_tests(gut_output: str) -> set[str]:
     """从 GUT 输出解析失败测试名集合。
 
-    GUT 结构：'* test_xxx' 开启一个测试，其后 [Failed] 行归属它；汇总行
-    '---- N failing tests ----'。用测试名集合做 kill 判定——exit code 只能
-    说明"有没有失败"，无法区分 pre-existing 失败与 mutant 引入的新失败
-    （被测项目基线在无头环境就可能有 pre-existing failures，Revy QA 实证）。
+    双格式兼容（硬ener 实机实证）：
+    - 运行流：'* test_xxx' 开启一个测试，其后 [Failed] 行归属它；
+    - Run Summary 段（GUT 4.6 win64 实测）：'- test_xxx' 后跟 [Failed] 行，
+      但输出被 stdout[-2000:] 截断后往往只剩该段——单靠运行流正则会漏掉
+      全部失败（save_manager 实机 66/66 假 survived 的根因）。
+    另辅以 junit XML（res://tests/reports/junit_report_*.xml）兜底——格式
+    变化最稳的机器判据。
+    用测试名集合做 kill 判定——exit code 只能说明"有没有失败"，无法区分
+    pre-existing 失败与 mutant 引入的新失败（SEE-1268 Revy QA 实证）。
     """
     ansi = re.compile(r"\x1b\[[0-9;]*m")
     failing: set[str] = set()
     current = None
     for raw in gut_output.splitlines():
-        line = ansi.sub("", raw)
-        m = re.match(r"^\*\s+(test_\S+)", line)
+        line = ansi.sub("", raw).replace("\r", "")
+        m = re.match(r"^[*-]\s+(test_\S+)", line)
         if m:
             current = m.group(1)
             continue
@@ -476,6 +517,10 @@ def run_mutation(
         return _no_sites_result(str(path))
 
     mutants = mutants[:budget]
+    # budget 截断后可能为空（budget=0 / 极小预算）——零 mutant 不得触发
+    # baseline GUT（硬ener 反例实证：白付一轮 108s baseline）。
+    if not mutants:
+        return _no_sites_result(str(path))
     results, invalid_count = _record_invalid_mutants(original_src, mutants)
 
     outcome = _run_mutant_loop_with_aborts(
@@ -539,7 +584,10 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     failures = [r for r in results if r["verdict"] != "killed"]
     return {
         "tool": "mutation",
-        "ok": survived == 0 and timeout_count == 0 and run_error_count == 0,
+        # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok
+        # （硬ener 反例实证：suspect>0 时 ok=True 是自欺）。
+        "ok": survived == 0 and timeout_count == 0 and run_error_count == 0
+              and suspect_count == 0,
         "summary": {
             "file": file,
             "mutants": total,

@@ -19,7 +19,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +38,7 @@ _GODOT_LAUNCH_ERROR_MARKERS = (
 def _looks_like_godot_launch_failure(output: str) -> bool:
     low = output.lower()
     return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
+
 
 # user:// 优先：win64@WSL 下项目 res:// 走 UNC 映射（//wsl.localhost/...），
 # FileAccess 对该路径的写入可见性/时序脆弱。user:// 是 Godot 管理的应用数据
@@ -64,8 +64,8 @@ _EXECUTABLE_NODE_NAMES = {
     "pass_stmt",
 }
 
-# 分支覆盖 v1 推导用节点（if_stmt 含 elif/else 子分支；match_stmt 含各 case）。
-_BRANCH_GROUP_NODES = {"if_stmt", "match_stmt"}
+# if_stmt 下的分支子节点（与 match_stmt 的 match_branch 对应）。
+_IF_BRANCH_NODES = ("if_branch", "elif_branch", "else_branch")
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,25 @@ def _tree_depth_walk(node, callback, depth=0):
         _tree_depth_walk(child, callback, depth + 1)
 
 
+def _node_line(node) -> int | None:
+    """gather_metadata 模式下 Tree 的起始行；无元数据（Token/空 meta）返回 None。"""
+    meta = getattr(node, "meta", None)
+    if meta is not None and not meta.empty and meta.line > 0:
+        return meta.line
+    return None
+
+
+def _dedupe_sorted(lines: list[ExecutableLine]) -> list[ExecutableLine]:
+    seen = set()
+    unique = []
+    for l in lines:
+        if l.line not in seen:
+            seen.add(l.line)
+            unique.append(l)
+    unique.sort(key=lambda x: x.line)
+    return unique
+
+
 def _collect_executable_lines(src: str) -> list[ExecutableLine]:
     """用 gdtoolkit lark（gather_metadata）找出所有可执行语句的【起始行】。
 
@@ -104,19 +123,12 @@ def _collect_executable_lines(src: str) -> list[ExecutableLine]:
         if not hasattr(node, "data"):
             return
         if node.data in _EXECUTABLE_NODE_NAMES:
-            meta = getattr(node, "meta", None)
-            if meta is not None and not meta.empty and meta.line > 0:
-                lines.append(ExecutableLine(line=meta.line, node=node.data))
+            ln = _node_line(node)
+            if ln:
+                lines.append(ExecutableLine(line=ln, node=node.data))
 
     _tree_depth_walk(tree, visit)
-    seen = set()
-    unique = []
-    for l in lines:
-        if l.line not in seen:
-            seen.add(l.line)
-            unique.append(l)
-    unique.sort(key=lambda x: x.line)
-    return unique
+    return _dedupe_sorted(lines)
 
 
 def _derive_branches(src: str) -> BranchSet:
@@ -129,25 +141,19 @@ def _derive_branches(src: str) -> BranchSet:
     tree = gdtoolkit_parser.parse(src, gather_metadata=True)
     items: list[BranchItem] = []
 
-    def first_stmt_line(node) -> int | None:
-        meta = getattr(node, "meta", None)
-        if meta is not None and not meta.empty:
-            return meta.line
-        return None
-
     def visit(node, depth=0):
         if not hasattr(node, "data"):
             return
         if node.data == "if_stmt":
-            for child in node.children:
-                if hasattr(child, "data") and child.data in (
-                    "if_branch", "elif_branch", "else_branch",
-                ):
-                    items.append(BranchItem(line=first_stmt_line(child)))
+            branch_nodes = (c for c in node.children
+                            if hasattr(c, "data") and c.data in _IF_BRANCH_NODES)
         elif node.data == "match_stmt":
-            for child in node.children:
-                if hasattr(child, "data") and child.data == "match_branch":
-                    items.append(BranchItem(line=first_stmt_line(child)))
+            branch_nodes = (c for c in node.children
+                            if hasattr(c, "data") and c.data == "match_branch")
+        else:
+            branch_nodes = ()
+        for child in branch_nodes:
+            items.append(BranchItem(line=_node_line(child)))
         # 子节点遍历由 _tree_depth_walk 统一处理——visit 内不再手动递归
         # （否则 if_stmt 会被双重遍历，分支重复计数）。
 
@@ -160,27 +166,23 @@ def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
     return [l.line for l in executable_lines]
 
 
-def _instrument(src: str, sink_name: str) -> tuple[str, list[int]]:
-    """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
-    文件尾追加探针函数。返回 (插桩源码, probe_id→行号 manifest)。
-
-    探针函数用 user:// 唯一 sink 追加写（JSON 行：每次命中一行 probe_id）。
-    GDScript 侧无环境读取——sink 名与 user:// 前缀在生成期以字面量嵌入。
-    """
-    executable_lines = _collect_executable_lines(src)
-    manifest = _build_manifest(executable_lines)
-    line_to_id = {line: i for i, line in enumerate(manifest)}
-
-    out_lines = []
+def _probe_calls(src: str, line_to_id: dict[int, int]) -> list[str]:
+    """每个可执行语句前插一行探针调用（整数 probe_id）。"""
+    out = []
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
         if idx in line_to_id:
             indent = re.match(r"^(\s*)", line_text).group(1)
-            out_lines.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
-        out_lines.append(line_text)
+            out.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
+        out.append(line_text)
+    return out
 
+
+def _probe_func(sink_name: str, count: int) -> str:
+    """文件尾探针函数：wrapper 用 user:// 唯一 sink 追加写（GDScript 侧无环境
+    读取——sink 名与 user:// 前缀在生成期以字面量嵌入）。"""
     # 追加写语义：READ_WRITE + seek_end——裸 WRITE 每次命中重开会截断此前
     # 全部命中（SEE-1312 代码走查实测缺陷）。
-    probe_func = (
+    code = (
         f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
         f"func {_PROBE_PREFIX}wrapper(probe_id):\n"
         f"\tvar f = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.READ_WRITE)\n"
@@ -192,13 +194,21 @@ def _instrument(src: str, sink_name: str) -> tuple[str, list[int]]:
         f"\t\tf.store_line(str(probe_id))\n"
         f"\t\tf.close()\n\n"
     )
-    for i in range(len(manifest)):
-        probe_func += (
+    for i in range(count):
+        code += (
             f"func {_PROBE_PREFIX}{i}():\n"
             f"\t{_PROBE_PREFIX}wrapper({i})\n"
         )
-    instrumented = "".join(out_lines) + probe_func
-    return instrumented, manifest
+    return code
+
+
+def _instrument(src: str, sink_name: str) -> tuple[str, list[int]]:
+    """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
+    文件尾追加探针函数。返回 (插桩源码, probe_id→行号 manifest)。"""
+    manifest = _build_manifest(_collect_executable_lines(src))
+    line_to_id = {line: i for i, line in enumerate(manifest)}
+    body = "".join(_probe_calls(src, line_to_id))
+    return body + _probe_func(sink_name, len(manifest)), manifest
 
 
 def run_coverage(
@@ -224,15 +234,7 @@ def run_coverage(
     total_lines = len(executable_lines)
 
     if total_lines == 0:
-        return {
-            "tool": "coverage",
-            "ok": True,
-            "summary": {"file": str(path), "total_lines": 0, "covered_lines": 0,
-                        "coverage_percent": 100.0, "min_percent": min_percent,
-                        "vacuous": True,
-                        "note": "no executable lines"},
-            "failures": [],
-        }
+        return _vacuous_result(str(path), min_percent)
 
     # run 唯一 sink：跨 run 不残留、并发 run 不互踩（SEE-1152 并发覆写同款教训）。
     sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
@@ -243,31 +245,94 @@ def run_coverage(
     try:
         gdtoolkit_parser.parse(instrumented)
     except Exception as e:
-        return {
-            "tool": "coverage",
-            "ok": False,
-            "summary": {"file": str(path), "total_lines": total_lines,
-                        "covered_lines": 0, "coverage_percent": 0.0,
-                        "min_percent": min_percent,
-                        "run_error": True,
-                        "error": f"instrumented source failed to parse: {e}"},
-            "failures": [{"reason": (
-                f"instrumentation produced unparseable source "
-                f"(instrumenter bug, no GUT run attempted): {e}"
-            )}],
-        }
+        return _reparse_error_result(str(path), total_lines, min_percent, e)
 
-    hits: set[int] = set()
-    probes_fired = 0
+    gut_outcome = _run_gut_for_coverage(path, project_root, backup, instrumented,
+                                        total_lines, min_percent, timeout_s)
+    if gut_outcome is not None:
+        return gut_outcome
 
+    hits, probes_fired = _read_hits(project_root, sink_name, manifest)
+
+    # 哨兵：GUT 正常退出但探针从未点火 ≠ 真实 0% 覆盖——数据不可信。
+    if probes_fired == 0:
+        return _no_probe_result(str(path), total_lines, min_percent)
+
+    return _coverage_report(str(path), original_src, executable_lines, hits,
+                            probes_fired, min_percent)
+
+
+def _vacuous_result(file: str, min_percent: float) -> dict:
+    """零可执行行：空集覆盖不是满分证据——显式 vacuous 标记。"""
+    return {
+        "tool": "coverage",
+        "ok": True,
+        "summary": {"file": file, "total_lines": 0, "covered_lines": 0,
+                    "coverage_percent": 100.0, "min_percent": min_percent,
+                    "vacuous": True,
+                    "note": "no executable lines"},
+        "failures": [],
+    }
+
+
+def _no_probe_result(file: str, total_lines: int, min_percent: float) -> dict:
+    """哨兵中止契约：探针未点火（sink 缺失/空）→ 数据不可信。"""
+    return {
+        "tool": "coverage",
+        "ok": False,
+        "summary": {"file": file, "total_lines": total_lines,
+                    "covered_lines": 0, "coverage_percent": 0.0,
+                    "min_percent": min_percent,
+                    "probes_fired": 0,
+                    "run_error": True,
+                    "error": "no coverage probe fired — sink missing/empty"},
+        "failures": [{"reason": (
+            "coverage probe never fired (hits sink missing or empty) — "
+            "instrumentation or sink transport failed; data untrustworthy"
+        )}],
+    }
+
+
+def _reparse_error_result(file: str, total_lines: int, min_percent: float, err) -> dict:
+    return {
+        "tool": "coverage",
+        "ok": False,
+        "summary": {"file": file, "total_lines": total_lines,
+                    "covered_lines": 0, "coverage_percent": 0.0,
+                    "min_percent": min_percent,
+                    "run_error": True,
+                    "error": f"instrumented source failed to parse: {err}"},
+        "failures": [{"reason": (
+            f"instrumentation produced unparseable source "
+            f"(instrumenter bug, no GUT run attempted): {err}"
+        )}],
+    }
+
+
+def _gut_abort_result(path, total_lines: int, min_percent: float,
+                      error: str, reason: str, run_error: bool = False) -> dict:
+    return {
+        "tool": "coverage",
+        "ok": False,
+        "summary": {"file": str(path), "total_lines": total_lines,
+                    "covered_lines": 0, "coverage_percent": 0.0,
+                    "min_percent": min_percent,
+                    "run_error": True,
+                    "error": error} if run_error else {
+                   "file": str(path), "total_lines": total_lines,
+                   "covered_lines": 0, "coverage_percent": 0.0,
+                   "min_percent": min_percent, "error": error},
+        "failures": [{"reason": reason}],
+    }
+
+
+def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: str,
+                          total_lines: int, min_percent: float, timeout_s: int) -> dict | None:
+    """落盘插桩文件 → headless GUT → 恢复原文件。返回 None 表示可继续统计命中；
+    否则返回已完成的中止契约（timeout / 启动失败 / GUT runner 缺失）。"""
     with tempfile.TemporaryDirectory() as workdir:
         backup_path = os.path.join(workdir, "original.gd")
         shutil.copy2(str(path), backup_path)
-
-        # user:// sink 读取路径：Linux/macOS 为 ~/.local/share/godot/app_userdata/
-        # <project_name>/；win64 为 %APPDATA%\Godot\app_userdata\<project_name>/。
-        # project_name 取自 project.godot（无则回退项目目录名）。
-        user_sink = _resolve_user_sink(project_root, sink_name)
 
         path.write_text(instrumented, encoding="utf-8")
         gut_tail = ""
@@ -285,14 +350,9 @@ def run_coverage(
                 )
                 gut_tail = (r.stdout + r.stderr)[-1500:]
             except subprocess.TimeoutExpired:
-                return {
-                    "tool": "coverage",
-                    "ok": False,
-                    "summary": {"file": str(path), "total_lines": total_lines,
-                                "covered_lines": 0, "coverage_percent": 0.0,
-                                "min_percent": min_percent, "error": "GUT timed out"},
-                    "failures": [{"reason": f"GUT timed out after {timeout_s}s"}],
-                }
+                return _gut_abort_result(
+                    path, total_lines, min_percent, "GUT timed out",
+                    f"GUT timed out after {timeout_s}s")
             finally:
                 path.write_text(backup, encoding="utf-8")
         except Exception:
@@ -300,65 +360,47 @@ def run_coverage(
             raise
 
         if r.returncode != 0 and _looks_like_godot_launch_failure(gut_tail):
-            return {
-                "tool": "coverage",
-                "ok": False,
-                "summary": {"file": str(path), "total_lines": total_lines,
-                            "covered_lines": 0, "coverage_percent": 0.0,
-                            "min_percent": min_percent,
-                            "run_error": True,
-                            "error": "godot launch failed — coverage data untrustworthy"},
-                "failures": [{"reason": (
-                    "godot launch failed (tests did not run): "
-                    f"{gut_tail.strip()[:200]}"
-                )}],
-            }
+            return _gut_abort_result(
+                path, total_lines, min_percent,
+                "godot launch failed — coverage data untrustworthy",
+                "godot launch failed (tests did not run): "
+                f"{gut_tail.strip()[:200]}",
+                run_error=True)
+    return None
 
-        # 读取命中：优先项目根（兼容非 user:// 环境），其次 user:// sink。
-        hits_raw: list[int] = []
-        for sink in (os.path.join(project_root, sink_name), user_sink):
-            if sink and os.path.isfile(sink):
-                with open(sink, "r", encoding="utf-8") as f:
-                    for ln in f:
-                        ln = ln.strip()
-                        if ln.isdigit():
-                            hits_raw.append(int(ln))
-                break
 
-        probes_fired = len(hits_raw)
-        # 哨兵：GUT 正常退出但探针从未点火 ≠ 真实 0% 覆盖——数据不可信。
-        if probes_fired == 0:
-            return {
-                "tool": "coverage",
-                "ok": False,
-                "summary": {"file": str(path), "total_lines": total_lines,
-                            "covered_lines": 0, "coverage_percent": 0.0,
-                            "min_percent": min_percent,
-                            "probes_fired": 0,
-                            "run_error": True,
-                            "error": "no coverage probe fired — sink missing/empty"},
-                "failures": [{"reason": (
-                    "coverage probe never fired (hits sink missing or empty) — "
-                    "instrumentation or sink transport failed; data untrustworthy"
-                )}],
-            }
+def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[set[int], int]:
+    """读取命中：优先项目根（兼容非 user:// 环境），其次 user:// sink。
 
-        # ID-keyed 数据面：probe_id → manifest 行号；重复 id 幂等去重。
-        valid_ids = {i for i in range(len(manifest))}
-        for pid in hits_raw:
-            if pid in valid_ids:
-                hits.add(manifest[pid])
+    返回 (命中行号集, probes_fired)。ID-keyed 数据面：probe_id → manifest 行号；
+    重复 id 幂等去重，越界 id 忽略。
+    """
+    user_sink = _resolve_user_sink(project_root, sink_name)
+    hits_raw: list[int] = []
+    for sink in (os.path.join(project_root, sink_name), user_sink):
+        if sink and os.path.isfile(sink):
+            with open(sink, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if ln.isdigit():
+                        hits_raw.append(int(ln))
+            break
 
-    path.write_text(backup, encoding="utf-8")
+    valid_ids = set(range(len(manifest)))
+    hits = {manifest[pid] for pid in hits_raw if pid in valid_ids}
+    return hits, len(hits_raw)
 
+
+def _coverage_report(file: str, original_src: str, executable_lines, hits: set[int],
+                     probes_fired: int, min_percent: float) -> dict:
+    total_lines = len(executable_lines)
     covered = len(hits)
     pct = round(100.0 * covered / total_lines, 2) if total_lines else 100.0
     ok = pct >= min_percent
 
-    uncovered_lines = sorted({l.line for l in executable_lines} - hits)
-
     failures = []
     if not ok:
+        uncovered_lines = sorted({l.line for l in executable_lines} - hits)
         failures.append({
             "reason": f"coverage {pct}% below threshold {min_percent}%",
             "covered": covered,
@@ -368,9 +410,8 @@ def run_coverage(
 
     # 分支覆盖 v1 推导层（observational——不进 ok 判定）。
     branches = _derive_branches(original_src)
-    branch_hit_lines = hits
     branches_covered = sum(
-        1 for b in branches.items if b.line is not None and b.line in branch_hit_lines
+        1 for b in branches.items if b.line is not None and b.line in hits
     )
     branch_pct = (
         round(100.0 * branches_covered / branches.total, 2) if branches.total else 100.0
@@ -380,7 +421,7 @@ def run_coverage(
         "tool": "coverage",
         "ok": ok,
         "summary": {
-            "file": str(path),
+            "file": file,
             "total_lines": total_lines,
             "covered_lines": covered,
             "coverage_percent": pct,

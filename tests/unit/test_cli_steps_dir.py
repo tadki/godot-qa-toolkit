@@ -47,6 +47,34 @@ def _write_steps(dir_path: Path, name: str, body: str) -> None:
 
 
 class TestDirectorySteps:
+    def test_module_with_dataclass_execs(self, tmp_path):
+        # SEE-1309: dataclass creation reads sys.modules[cls.__module__]; an
+        # exec'd-but-unregistered module made that None and blew up with
+        # AttributeError. Trigger needs `from __future__ import annotations`
+        # (stringified annotations send dataclasses into the _is_type lookup) —
+        # the real KOL probe library has it, plain fixtures do not.
+        steps = tmp_path / "kol"
+        steps.mkdir()
+        _write_steps(
+            steps,
+            "steps_probe.py",
+            "from __future__ import annotations\n"
+            "from dataclasses import dataclass, field\n"
+            "@dataclass\n"
+            "class Outcome:\n"
+            "    ok: bool\n"
+            "    meta: dict = field(default_factory=dict)\n"
+            "def register(registry):\n"
+            "    @registry.step('a domain step', keyword='Given')\n"
+            "    def _s(ctx):\n"
+            "        ctx['outcome'] = Outcome(ok=True).ok\n",
+        )
+        rc, out = _run_cli(
+            "gherkin", str(_write_feature(tmp_path)), "--steps", str(steps), cwd=REPO / "src"
+        )
+        assert rc == 0, out
+        assert out["ok"] is True
+
     def test_directory_aggregates_every_domain_module(self, tmp_path):
         steps = tmp_path / "kol"
         steps.mkdir()

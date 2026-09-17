@@ -35,6 +35,12 @@ def _load_steps_module(path: Path, registry: "Registry") -> None:
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot build import spec for {path}")
     module = importlib.util.module_from_spec(spec)
+    # dataclasses' KW_ONLY sniff reads sys.modules[cls.__module__] during class
+    # creation — an exec'd-but-unregistered module makes that lookup None and
+    # any @dataclass in the steps file (e.g. a probe result DTO) dies with
+    # AttributeError. Register before exec; del afterwards keeps the namespace
+    # clean (SEE-1309: real KOL library hits this, toy fixtures do not).
+    sys.modules[spec.name] = module
     # spec_from_file_location does not put the module's directory on sys.path;
     # a steps library that imports sibling helpers needs it there for the
     # duration of the exec.
@@ -46,6 +52,7 @@ def _load_steps_module(path: Path, registry: "Registry") -> None:
         spec.loader.exec_module(module)
         module.register(registry)
     finally:
+        sys.modules.pop(spec.name, None)
         if added:
             sys.path.remove(steps_dir)
 

@@ -56,7 +56,7 @@ class TestRunCoverage:
         # Simulate: hits file gets every executable line
         monkeypatch.setattr(
             "godot_qa_toolkit.coverage.runner.subprocess.run",
-            self._fake_run_writing_hits(proj, {3, 4, 7, 8, 9}),
+            self._fake_run_writing_hits(proj, {0, 1, 2, 3}),
         )
         result = run_coverage(str(target), str(proj), min_percent=80.0)
         assert result["ok"] is True
@@ -66,7 +66,7 @@ class TestRunCoverage:
         proj, target = self._write_project(tmp_path)
         monkeypatch.setattr(
             "godot_qa_toolkit.coverage.runner.subprocess.run",
-            self._fake_run_writing_hits(proj, {4}),
+            self._fake_run_writing_hits(proj, {0}),
         )
         result = run_coverage(str(target), str(proj), min_percent=80.0)
         assert result["ok"] is False
@@ -131,12 +131,14 @@ class TestRunCoverage:
         from godot_qa_toolkit.coverage import runner as c
         assert c.GUT_SCRIPT_RES_PATH == "res://addons/gut/gut_cmdln.gd"
 
-    def _fake_run_writing_hits(self, proj, lines):
+    def _fake_run_writing_hits(self, proj, ids):
+        # SEE-1312: sink 为 ID-keyed 数据面 + run 唯一（pid 后缀）——
+        # fake 写 probe_id 而非行号
+        hits_file = os.path.join(proj, f"qa-coverage-hits-{os.getpid()}.txt")
         def fake(*args, **kwargs):
-            hits_file = os.path.join(proj, "qa-coverage-hits.txt")
             with open(hits_file, "w") as f:
-                for ln in sorted(lines):
-                    f.write(f"{ln}\n")
+                for pid in sorted(ids):
+                    f.write(f"{pid}\n")
             class R:
                 returncode = 0
                 stdout = ""

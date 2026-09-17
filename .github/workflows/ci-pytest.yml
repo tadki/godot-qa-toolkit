@@ -41,3 +41,8 @@ jobs:
 
       - name: Run unit tests
         run: python -m pytest tests/ -q
+
+      # Complexity gate（SEE-1309 SPEC-006）：gqt 消费自家工具作质量门。
+      # 判据：tests/fixtures/complex.gd（max cc=6）在 --warn 10 --max 15 下 exit 0。
+      - name: Complexity gate (self-consumed)
+        run: gqt complexity tests/fixtures/complex.gd --warn 10 --max 15

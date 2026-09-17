@@ -21,4 +21,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# SEE-1308 §SPEC-003: importlib mode (with the tests/__init__.py package
+# already present) makes pytest resolve imports by module path instead of
+# honouring a stale `__editable__` egg-link that may root at a *different*
+# worktree on a multi-workdir box, which would make pytest spuriously fail.
+# Belt #2 is the PYTHONPATH convention documented in README.
+addopts = "-q --import-mode=importlib"

@@ -67,3 +67,34 @@ gqt complexity src/systems --warn 8 --max 12
 pip install -e .
 pytest
 ```
+
+### PYTHONPATH convention (multi-workdir safety, SEE-1308 §SPEC-003)
+
+When several KOL worktrees live on the same machine and share one Python
+site-packages, a `pip install -e .` from an older checkout leaves an
+`__editable__.godot_qa_toolkit-0.1.0.pth` egg-link that points at that old
+tree. pytest then resolves `import godot_qa_toolkit` against the stale
+source and can fail spuriously even though the current tree is fine.
+
+Two belts guard against this:
+
+1. **`--import-mode=importlib`** — already set in `pyproject.toml` under
+   `[tool.pytest.ini_options].addopts`. It makes pytest resolve the package by
+   module path rather than trusting the egg-link, so a wrong-root egg-link
+   cannot break the suite's own import.
+2. **Explicit `PYTHONPATH`** — when you must run against a specific tree, pin
+   it instead of relying on the editable install:
+
+   ```bash
+   cd <this-worktree>/.dev/qa-toolkit
+   PYTHONPATH="$PWD/src" python -m pytest tests/ -q
+   ```
+
+   Re-point a drifting editable install from the *current* tree:
+
+   ```bash
+   cd <this-worktree>/.dev/qa-toolkit && pip install -e .
+   ```
+
+The rule: never rely on an editable install whose egg-link you did not just
+create from the tree you are testing.

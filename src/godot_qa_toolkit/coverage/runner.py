@@ -1,26 +1,15 @@
-"""Coverage runner: GDScript 行覆盖自研简单版（SEE-1268 M2）.
+"""Coverage runner: GDScript 行覆盖 + 分支覆盖推导（SEE-1268 M2 / SEE-1312 增强）.
 
-GUT 无 coverage 支持，coverage.py 只覆盖 Python——不适用于 GDScript。按
-SEE-1256 自研简单版：对目标 .gd 插桩，在每个可执行行首插入一个探针标记
-行 `__qa_cov_probe(<line>)`，跑 GUT 后收集命中行集 → 行覆盖%。探针函数
-本身需要预先存在——通过复用一个全局 AutoLoad 化的 `_coverage_probe` 服务
-（通过 `get_node` 或直接定义在同一文件）实现。
-
-实际实现路径（更简单且不破红线）：
-  1. 用 gdtoolkit lark 找目标文件里每个可执行语句的行号集合 L_total
-  2. 对目标 .gd 做一次临时副本：在行尾加 `# __qa_cov_<line>` 标记（不改语义）
-  3. 但真正的"命中"来自运行——用 GUT 的 `--log` 输出中的行号跟踪？也不行
-  4. 真正可行方案：Godot 4.x 的 `GDScript Language Server` 没有覆盖 API
-
-最简一步到位的工程路径（选这个）：**行级插桩**——目标文件每个可执行语句前
-加一行 `__cov_hit_<line>()` 调用，探针函数写入同一文件的临时尾部（运行时
-把行号写入临时文件）。跑 GUT → 读取临时文件行号集 L_hit → 行覆盖% =
-|L_hit ∩ L_total| / |L_total|。
-
-探针函数的安全边界：只写入 .dev/coverage-hits-<pid>.txt（gitignored），从不
-修改测试代码/被测代码，GUT 结束后原文件恢复。
+自研插桩方案（GUT 无 coverage API）。SEE-1312 增强：
+- 插桩改为 AST 语句节点级（gather_metadata 行段），跨行分组表达式不再 parse error；
+- 生成期 re-parse 预检：插桩产物不合法 → run_error 拒绝落盘（不再静默跑假数据）；
+- 探针通道健壮化：ID-keyed 数据面（探针写整数 probe_id，路径移出数据面）+ run 唯一
+  sink + user:// 优先（win64@WSL 下绕开 9p/UNC 路径脆弱性）+ 追加写语义；
+- 哨兵：probes_fired / vacuous——探针未点火或无可执行行显式化，静默 0% 根除；
+- 分支覆盖 v1 = 纯推导层（行探针命中 + AST 分支结构），零新探针，observational。
 
 P0' 判定原则落点：机器行覆盖百分比 + 阈值 gate；exit 0=达标 1=未达标。
+kill rate 与覆盖率均不进验收证据（owner-order L5 条文）。
 """
 
 from __future__ import annotations
@@ -30,7 +19,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from gdtoolkit.parser import parser as gdtoolkit_parser
@@ -50,11 +40,14 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
     low = output.lower()
     return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
 
-# 探针前缀：运行时函数 + 标记（避免与生产函数名冲突）。
-_PROBE_PREFIX = "__qa_cov_probe_"
-_HITS_FILE_PATTERN = "qa-coverage-hits.txt"
+# user:// 优先：win64@WSL 下项目 res:// 走 UNC 映射（//wsl.localhost/...），
+# FileAccess 对该路径的写入可见性/时序脆弱。user:// 是 Godot 管理的应用数据
+# 目录，两侧 OS 均为本地可靠文件系统。runner 侧按 user:// 目录约定读取。
+_SINK_DIR_MARKER = "user://"
 
-# 可执行语句的规则/树形节点名（插桩目标）——覆盖常见语句，不深挖表达式。
+_PROBE_PREFIX = "__qa_cov_probe_"
+
+# 可执行语句的规则/树形节点名（插桩目标）——语句级，不深挖表达式。
 _EXECUTABLE_NODE_NAMES = {
     "if_branch",
     "elif_branch",
@@ -71,11 +64,25 @@ _EXECUTABLE_NODE_NAMES = {
     "pass_stmt",
 }
 
+# 分支覆盖 v1 推导用节点（if_stmt 含 elif/else 子分支；match_stmt 含各 case）。
+_BRANCH_GROUP_NODES = {"if_stmt", "match_stmt"}
+
 
 @dataclass(frozen=True)
 class ExecutableLine:
     line: int
     node: str  # node.data（行所属结构，便于诊断）
+
+
+@dataclass(frozen=True)
+class BranchItem:
+    line: int | None  # 分支体首条可执行语句行（映射到行探针 id）
+
+
+@dataclass(frozen=True)
+class BranchSet:
+    total: int
+    items: tuple[BranchItem, ...] = field(default_factory=tuple)
 
 
 def _tree_depth_walk(node, callback, depth=0):
@@ -85,29 +92,23 @@ def _tree_depth_walk(node, callback, depth=0):
 
 
 def _collect_executable_lines(src: str) -> list[ExecutableLine]:
-    """用 gdtoolkit lark 找出所有可执行语句行（插桩目标行）。"""
-    tree = gdtoolkit_parser.parse(src)
+    """用 gdtoolkit lark（gather_metadata）找出所有可执行语句的【起始行】。
+
+    语句跨多行时只取节点起始行——探针插在语句前，绝不落进表达式内部
+    （SEE-1308 实测：探针插进跨行分组表达式内部 → Parse Error）。
+    """
+    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
     lines: list[ExecutableLine] = []
 
     def visit(node, depth=0):
         if not hasattr(node, "data"):
             return
         if node.data in _EXECUTABLE_NODE_NAMES:
-            # lark Tree 无 line；取该节点下第一个 Token 的行。
-            def first_token_line(n):
-                for c in getattr(n, "children", []):
-                    if hasattr(c, "line") and c.line:
-                        return c.line
-                    rec = first_token_line(c)
-                    if rec:
-                        return rec
-                return 0
-            ln = first_token_line(node)
-            if ln > 0:
-                lines.append(ExecutableLine(line=ln, node=node.data))
+            meta = getattr(node, "meta", None)
+            if meta is not None and not meta.empty and meta.line > 0:
+                lines.append(ExecutableLine(line=meta.line, node=node.data))
 
     _tree_depth_walk(tree, visit)
-    # 去重 + 排序
     seen = set()
     unique = []
     for l in lines:
@@ -118,23 +119,86 @@ def _collect_executable_lines(src: str) -> list[ExecutableLine]:
     return unique
 
 
-def _instrument(src: str) -> tuple[str, str]:
-    """把目标源码插桩成带探针的版本；返回 (插桩源码, 探针函数名).
+def _derive_branches(src: str) -> BranchSet:
+    """SPEC-007：分支覆盖 v1 纯推导——行探针命中 + AST 分支结构，零新探针。
 
-    探针函数写入同一文件尾部——用 marker 命名 `__qa_cov_probe_<line>`（不
-    会是生产代码）。该函数做一件事：把 <line> 追加到 hits 文件。
-
-    探针函数实现（GDScript）：
-      func __qa_cov_probe(line):
-        var f = FileAccess.open(_hits_path(), FileAccess.WRITE)
-        f.store_line(str(line))
-        f.close()
-
-    其中 `_hits_path()` 用一个全局 env var 或临时文件路径——但 Godot 脚本
-    无 env 读取；所以探针把 hits 写入固定相对路径（.dev/qa-coverage-hits.txt，
-    运行时由 runner 监控该文件）。
+    if_stmt 的每个子分支（if/elif/else）与 match_stmt 的每个 match_branch
+    各计 1 分支；分支体首条语句行命中对应探针即视为分支覆盖。
+    observational：不参与 ok 判定（探针只证明「执行过」，不证明「被断言守护」）。
     """
-    return src, _PROBE_PREFIX
+    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
+    items: list[BranchItem] = []
+
+    def first_stmt_line(node) -> int | None:
+        meta = getattr(node, "meta", None)
+        if meta is not None and not meta.empty:
+            return meta.line
+        return None
+
+    def visit(node, depth=0):
+        if not hasattr(node, "data"):
+            return
+        if node.data == "if_stmt":
+            for child in node.children:
+                if hasattr(child, "data") and child.data in (
+                    "if_branch", "elif_branch", "else_branch",
+                ):
+                    items.append(BranchItem(line=first_stmt_line(child)))
+        elif node.data == "match_stmt":
+            for child in node.children:
+                if hasattr(child, "data") and child.data == "match_branch":
+                    items.append(BranchItem(line=first_stmt_line(child)))
+        # 子节点遍历由 _tree_depth_walk 统一处理——visit 内不再手动递归
+        # （否则 if_stmt 会被双重遍历，分支重复计数）。
+
+    _tree_depth_walk(tree, visit)
+    return BranchSet(total=len(items), items=tuple(items))
+
+
+def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
+    """probe_id（列表下标）→ 源文件行号。ID-keyed 数据面的 runner 侧映射表。"""
+    return [l.line for l in executable_lines]
+
+
+def _instrument(src: str, sink_name: str) -> tuple[str, list[int]]:
+    """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
+    文件尾追加探针函数。返回 (插桩源码, probe_id→行号 manifest)。
+
+    探针函数用 user:// 唯一 sink 追加写（JSON 行：每次命中一行 probe_id）。
+    GDScript 侧无环境读取——sink 名与 user:// 前缀在生成期以字面量嵌入。
+    """
+    executable_lines = _collect_executable_lines(src)
+    manifest = _build_manifest(executable_lines)
+    line_to_id = {line: i for i, line in enumerate(manifest)}
+
+    out_lines = []
+    for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
+        if idx in line_to_id:
+            indent = re.match(r"^(\s*)", line_text).group(1)
+            out_lines.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
+        out_lines.append(line_text)
+
+    # 追加写语义：READ_WRITE + seek_end——裸 WRITE 每次命中重开会截断此前
+    # 全部命中（SEE-1312 代码走查实测缺陷）。
+    probe_func = (
+        f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
+        f"func {_PROBE_PREFIX}wrapper(probe_id):\n"
+        f"\tvar f = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.READ_WRITE)\n"
+        f"\tif f == null:\n"
+        f"\t\tf = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.WRITE)\n"
+        f"\telse:\n"
+        f"\t\tf.seek_end()\n"
+        f"\tif f:\n"
+        f"\t\tf.store_line(str(probe_id))\n"
+        f"\t\tf.close()\n\n"
+    )
+    for i in range(len(manifest)):
+        probe_func += (
+            f"func {_PROBE_PREFIX}{i}():\n"
+            f"\t{_PROBE_PREFIX}wrapper({i})\n"
+        )
+    instrumented = "".join(out_lines) + probe_func
+    return instrumented, manifest
 
 
 def run_coverage(
@@ -165,51 +229,53 @@ def run_coverage(
             "ok": True,
             "summary": {"file": str(path), "total_lines": 0, "covered_lines": 0,
                         "coverage_percent": 100.0, "min_percent": min_percent,
+                        "vacuous": True,
                         "note": "no executable lines"},
             "failures": [],
         }
 
-    hits_file = os.path.join(project_root, _HITS_FILE_PATTERN)
+    # run 唯一 sink：跨 run 不残留、并发 run 不互踩（SEE-1152 并发覆写同款教训）。
+    sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
+    instrumented, manifest = _instrument(original_src, sink_name)
+
+    # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug → 显式 run_error，
+    # 拒绝落盘跑假数据（把 parse error 从静默假 0% 变成生成期失败）。
+    try:
+        gdtoolkit_parser.parse(instrumented)
+    except Exception as e:
+        return {
+            "tool": "coverage",
+            "ok": False,
+            "summary": {"file": str(path), "total_lines": total_lines,
+                        "covered_lines": 0, "coverage_percent": 0.0,
+                        "min_percent": min_percent,
+                        "run_error": True,
+                        "error": f"instrumented source failed to parse: {e}"},
+            "failures": [{"reason": (
+                f"instrumentation produced unparseable source "
+                f"(instrumenter bug, no GUT run attempted): {e}"
+            )}],
+        }
+
     hits: set[int] = set()
+    probes_fired = 0
 
     with tempfile.TemporaryDirectory() as workdir:
         backup_path = os.path.join(workdir, "original.gd")
         shutil.copy2(str(path), backup_path)
 
-        # 插桩版本：每个可执行语句前加一行 __qa_cov_probe(<line>)
-        instrumented_lines = []
-        line_map = {l.line: l for l in executable_lines}
-        for idx, line_text in enumerate(original_src.splitlines(keepends=True), start=1):
-            if idx in line_map:
-                indent = re.match(r"^(\s*)", line_text).group(1)
-                instrumented_lines.append(f"{indent}{_PROBE_PREFIX}({idx})\n")
-            instrumented_lines.append(line_text)
+        # user:// sink 读取路径：Linux/macOS 为 ~/.local/share/godot/app_userdata/
+        # <project_name>/；win64 为 %APPDATA%\Godot\app_userdata\<project_name>/。
+        # project_name 取自 project.godot（无则回退项目目录名）。
+        user_sink = _resolve_user_sink(project_root, sink_name)
 
-        # 探针函数追加到文件尾部（同名不冲突——前缀专用）
-        probe_func = (
-            f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
-            f"func {_PROBE_PREFIX}(line):\n"
-            f"\tvar f = FileAccess.open(\"{_HITS_FILE_PATTERN}\", FileAccess.WRITE)\n"
-            f"\tif f:\n"
-            f"\t\tf.store_line(str(line))\n"
-            f"\t\tf.close()\n"
-        )
-        instrumented = "".join(instrumented_lines) + probe_func
-
-        # 清空旧的 hits 文件（幂等——多轮运行不累加）
-        if os.path.isfile(hits_file):
-            os.remove(hits_file)
-
-        # 插桩文件替换目标，跑 GUT，恢复
         path.write_text(instrumented, encoding="utf-8")
+        gut_tail = ""
         try:
             gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
             if not os.path.isfile(gut_fs):
                 raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
             try:
-                # -s 必须用 res:// 形式：绝对路径会让 godot 拒绝加载（Revy QA
-                # FAIL 实证），退出码 1 且无任何命中——与"真实 0% 覆盖"不同，
-                # 必须区分，否则数据失真。
                 r = subprocess.run(
                     ["godot", "--headless", "--path", project_root,
                      "-s", GUT_SCRIPT_RES_PATH, "-gdir=res://tests/", "-gexit"],
@@ -233,8 +299,6 @@ def run_coverage(
             path.write_text(backup, encoding="utf-8")
             raise
 
-        # godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖——数据不可信，显式报
-        # run_error 而非产出误导性的 0.0%（Revy QA FAIL 同根因）。
         if r.returncode != 0 and _looks_like_godot_launch_failure(gut_tail):
             return {
                 "tool": "coverage",
@@ -250,19 +314,41 @@ def run_coverage(
                 )}],
             }
 
-        # 收集命中行（只统计属于 executable_lines 的行——hits 文件里可能混入
-        # 运行时多写入的无关行号；越界命中按无效忽略，不允许覆盖率超 100%）
-        valid_line_set = {l.line for l in executable_lines}
-        if os.path.isfile(hits_file):
-            with open(hits_file, "r", encoding="utf-8") as f:
-                for ln in f:
-                    ln = ln.strip()
-                    if ln.isdigit():
-                        n = int(ln)
-                        if n in valid_line_set:
-                            hits.add(n)
+        # 读取命中：优先项目根（兼容非 user:// 环境），其次 user:// sink。
+        hits_raw: list[int] = []
+        for sink in (os.path.join(project_root, sink_name), user_sink):
+            if sink and os.path.isfile(sink):
+                with open(sink, "r", encoding="utf-8") as f:
+                    for ln in f:
+                        ln = ln.strip()
+                        if ln.isdigit():
+                            hits_raw.append(int(ln))
+                break
 
-    # 恢复原始文件（保险）
+        probes_fired = len(hits_raw)
+        # 哨兵：GUT 正常退出但探针从未点火 ≠ 真实 0% 覆盖——数据不可信。
+        if probes_fired == 0:
+            return {
+                "tool": "coverage",
+                "ok": False,
+                "summary": {"file": str(path), "total_lines": total_lines,
+                            "covered_lines": 0, "coverage_percent": 0.0,
+                            "min_percent": min_percent,
+                            "probes_fired": 0,
+                            "run_error": True,
+                            "error": "no coverage probe fired — sink missing/empty"},
+                "failures": [{"reason": (
+                    "coverage probe never fired (hits sink missing or empty) — "
+                    "instrumentation or sink transport failed; data untrustworthy"
+                )}],
+            }
+
+        # ID-keyed 数据面：probe_id → manifest 行号；重复 id 幂等去重。
+        valid_ids = {i for i in range(len(manifest))}
+        for pid in hits_raw:
+            if pid in valid_ids:
+                hits.add(manifest[pid])
+
     path.write_text(backup, encoding="utf-8")
 
     covered = len(hits)
@@ -280,6 +366,16 @@ def run_coverage(
             "uncovered_lines": uncovered_lines[:20],  # 截断展示
         })
 
+    # 分支覆盖 v1 推导层（observational——不进 ok 判定）。
+    branches = _derive_branches(original_src)
+    branch_hit_lines = hits
+    branches_covered = sum(
+        1 for b in branches.items if b.line is not None and b.line in branch_hit_lines
+    )
+    branch_pct = (
+        round(100.0 * branches_covered / branches.total, 2) if branches.total else 100.0
+    )
+
     return {
         "tool": "coverage",
         "ok": ok,
@@ -289,6 +385,36 @@ def run_coverage(
             "covered_lines": covered,
             "coverage_percent": pct,
             "min_percent": min_percent,
+            "probes_fired": probes_fired,
+            "branch_total": branches.total,
+            "branch_covered": branches_covered,
+            "branch_coverage_percent": branch_pct,
         },
         "failures": failures,
     }
+
+
+def _resolve_user_sink(project_root: str, sink_name: str) -> str | None:
+    """定位 user:// sink 的 OS 路径（win64/Linux 两侧均可靠）。
+
+    project 名取自 project.godot 的 config/name（缺省回退目录名）。
+    找不到 app_userdata 目录时返回 None（读取端回退项目根 sink）。
+    """
+    project_name = None
+    pg = Path(project_root) / "project.godot"
+    if pg.is_file():
+        m = re.search(r'config/name\s*=\s*"([^"]+)"', pg.read_text(encoding="utf-8"))
+        if m:
+            project_name = m.group(1)
+    if not project_name:
+        project_name = Path(project_root).resolve().name
+
+    candidates = [
+        os.path.expanduser(f"~/.local/share/godot/app_userdata/{project_name}"),
+        os.path.expanduser(f"~/Library/Application Support/Godot/app_userdata/{project_name}"),
+        os.path.join(os.environ.get("APPDATA", ""), "Godot", "app_userdata", project_name),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(os.path.join(c, sink_name)):
+            return os.path.join(c, sink_name)
+    return None

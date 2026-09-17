@@ -79,11 +79,14 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - `ok = 无 violation 且无 unparseable`。
 - 输出：`summary: {functions, max_seen, violations, warnings, unparseable}`；`failures` = violations（含 file/name/line/complexity/threshold）+ unparseable；`warnings` 同构独立数组。
 
-### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60]`
+### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run]`
 
 - 前置：`<root>/addons/gut/gut_cmdln.gd` 必须存在；`godot` 可执行文件必须在 PATH。缺失任一 → 统一 JSON failure（exit 1，`failures[0].reason` 含 `not found`）。
 - 执行：baseline GUT（原文件）→ 逐 mutant 改写目标文件跑 GUT（每次后恢复原文件，最终态与原状一致）。
 - **kill 判定 = 失败测试名集合相对 baseline 的差集**，不看 exit code——被测项目基线在无头环境可能自带 pre-existing failures，按 rc 判定会全部误杀。
+- 可选 flag（SEE-1312，向后兼容——省略即旧行为）：
+  - `--tests <res://glob>`：受影响测试子集（如 `res://tests/save/`），传给 GUT 的 `-gdir` 替代全量 `res://tests/`。
+  - `--dry-run`：只清点变异点不跑 GUT；`ok=true`，`summary: {file, mutants, dry_run: true, kinds: {<kind>: N}}`，无 `killed` 等键。
 - 中止契约（baseline 本身不可信时，mutant 数据不产出）：
 
 ```json
@@ -92,17 +95,26 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
  "failures":[{"reason":"baseline GUT timed out after Ns ..."}]}
 ```
   注意：该形态下 `summary` 无 `killed` 等键（消费方不要按默认 0 读取）。
-- 正常输出：`summary: {file, mutants, killed, survived, timeout, run_errors, kill_rate, budget}`；`failures` = 非 killed 的 mutant 明细（verdict ∈ survived/timeout/run_error）。
-- `ok = survived==0 且 timeout==0 且 run_errors==0`。
+- 正常输出：`summary: {file, mutants, killed, survived, timeout, run_errors, kill_rate, budget}` + SEE-1312 新增 `{suspect, invalid_mutants, adaptive_timeout_s}`；`failures` = 非 killed 的 mutant 明细（verdict ∈ survived/timeout/run_error/suspect/invalid_mutant）。
+- **validity 契约**（SEE-1312）：`invalid_mutant` = 变异产物语法预检失败（算子 bug，提前剔除，不跑 GUT）；`suspect` = baseline 已有失败 ∧ mutant run 失败集合差集为空——无法区分「测试没抓住」与「测试没跑到」，保守标记，不计 killed 也不计 survived。
+- `ok = survived==0 且 timeout==0 且 run_errors==0`（suspect/invalid_mutant 不参与 ok 判定——它们是分类信号，不是失败判定）。
+- 变异点 `kind` 枚举（**开放集合，按前缀归类**——消费方过滤 kind 时须容忍未知值）：`AOR` / `ROR` / `UOI` / `boundary` / `TERNARY`（cond_not + arm_swap）/ `GUARD_NOT`（守卫取反；守卫表达式内含可变异算子时去重跳过）/ `LOGICAL`（and⇄or）/ `MEMBERSHIP`（in→not in；`not in` 因 AST 无位置信息暂只支持单向）/ `IS_NOT`（is 取反）。
 
 ### 4.4 `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout 120]`
 
 - 前置与 mutation 相同（GUT + PATH 上的 godot）。
-- 执行：目标 .gd 行级插桩（每可执行语句前插探针调用 + 文件尾部探针函数）→ headless GUT → 读 `<root>/qa-coverage-hits.txt` 命中行 → 行覆盖%。原文件运行后恢复。
-- 副作用边界：探针只写 `<project-root>/qa-coverage-hits.txt`（gitignored，幂等覆盖），不修改测试代码/其他被测代码。
+- 执行：目标 .gd **AST 语句级插桩**（每可执行语句前插探针调用 + 文件尾部探针函数；语句跨多行时探针只落起始行——SEE-1312 修复跨行分组表达式 parse error）→ 生成期 re-parse 预检 → headless GUT → 读 sink 命中 → 行覆盖%。原文件运行后恢复。
+- **capability 契约**（SEE-1312）：
+  - 插桩产物不合法 → 生成期即 `run_error`（拒绝落盘跑假数据），`failures[0].reason` 含 `instrumentation produced unparseable source`。
+  - 探针数据面为 **ID-keyed**（整数 probe_id → runner 侧 manifest 行号映射）；sink 路径移出数据面。
+  - sink：`user://qa-coverage-hits-<pid>.txt`（run 唯一，追加写语义）。runner 按平台标准 user 目录读取（Linux `~/.local/share/godot/app_userdata/<project name>/`，win64 `%APPDATA%\Godot\app_userdata\<project name>\`），并兼容项目根同名文件回退。
+- 哨兵（SEE-1312）：
+  - GUT 正常退出但探针未点火（sink 缺失/空）→ `ok=false` + `summary.run_error: true` + `probes_fired: 0`——「探针从未点火」与「真实 0% 覆盖」必须可区分。
+  - 零可执行行 → `ok=true` + `summary.vacuous: true`（空集覆盖不是满分证据）。
+- **comparability 契约**（SEE-1312 分支覆盖 v1 = 纯推导层，observational 不进 ok 判定）：`summary` 新增 `branch_total / branch_covered / branch_coverage_percent`（行探针命中 + AST 分支结构推导；if/elif/else/match case 各计 1 分支）。语义只回答「分支是否被执行」，不回答「是否被断言守护」。
 - godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖 → `summary.run_error: true`，与 mutation 同款中止契约。
-- 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent}`；未达标时 `failures[0]` 附 `covered/total/uncovered_lines`（截断 20 行）。
-- `ok = coverage_percent >= min_percent`。
+- 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent}` + SEE-1312 新增 `{probes_fired, branch_total, branch_covered, branch_coverage_percent}`；未达标时 `failures[0]` 附 `covered/total/uncovered_lines`（截断 20 行）。
+- `ok = coverage_percent >= min_percent`（probes_fired=0 与 run_error 时强制 ok=false）。
 
 ## 5. exit code 语义
 
@@ -117,6 +129,17 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 ## 6. `--project-root` 边界约定
 
 - 必填于 `mutation` / `coverage`；必须指向含 `addons/gut/gut_cmdln.gd` 的 Godot 项目根。
-- 工具在该 root 下运行 `godot --headless --path <root> -s res://addons/gut/gut_cmdln.gd -gdir=res://tests/ -gexit`（`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
-- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）与 `<root>/qa-coverage-hits.txt`（coverage 探针）。除此之外零写入。
-- timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。
+- 工具在该 root 下运行 `godot --headless --path <root> -s res://addons/gut/gut_cmdln.gd [-gdir=<tests_glob>] -gexit`（`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
+- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）与 coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件）。除此之外零写入。
+- timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = baseline 实测耗时 × 2（只放大不收紧，`summary.adaptive_timeout_s` 可查）。
+
+## 7. 契约增量分类（SEE-1312 plan-debate 定案：四类归并）
+
+本 issue 的全部契约变更按四类归并，**均为加法、向后兼容**（消费方只解析已声明字段则零破坏）：
+
+| 类别 | 内容 |
+|---|---|
+| **validity**（有效性） | mutation `invalid_mutant` verdict（语法预检）；coverage 生成期 re-parse 预检 run_error；`suspect` 标签（baseline 脏 ∧ 差集空） |
+| **classification**（分类） | mutant `kind` 开放枚举扩展（TERNARY/GUARD_NOT/LOGICAL/MEMBERSHIP/IS_NOT）；`summary.suspect` / `summary.invalid_mutants` 计数 |
+| **capability**（能力） | coverage AST 语句级插桩 + ID-keyed 数据面 + user:// run 唯一 sink；`probes_fired` / `vacuous` 哨兵；mutation `--dry-run` / `--tests` / 自适应 timeout（`adaptive_timeout_s`） |
+| **comparability**（可比性） | coverage `branch_total` / `branch_covered` / `branch_coverage_percent`（v1 推导层，observational——不进 ok 判定；语义=「分支被执行」非「被断言守护」） |

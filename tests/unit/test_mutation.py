@@ -264,3 +264,52 @@ class TestRunMutation:
         s = result["summary"]
         assert s["killed"] == s["mutants"]
         assert s["survived"] == 0
+
+
+class TestRunMutationInterruptRecovery:
+    """SEE-1319 缺陷1：外层 run_mutation 在任何异常/中断路径均须恢复原文件。
+
+    per-mutant 的 finally 已恢复；但 SIGTERM/SIGINT/未知异常发生在循环外层
+    （baseline 或 record 拼装阶段）时，工作树会遗留活跃变异体——外部
+    TaskStop 实证 count+=1 → count+=0 遗留进 git diff。
+    """
+
+    def _write_project(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        target = proj / "calc.gd"
+        target.write_text("func add(a, b):\n\treturn a + b\n")
+        return proj, target
+
+    def test_run_mutation_restores_on_exception(self, tmp_path, monkeypatch):
+        proj, target = self._write_project(tmp_path)
+        before = target.read_text()
+
+        def crash_run(root, timeout_s=60, tests_glob=None):
+            raise RuntimeError("simulated SIGTERM mid-loop")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", crash_run
+        )
+        with pytest.raises(RuntimeError):
+            run_mutation(str(target), str(proj), budget=2)
+        assert target.read_text() == before, (
+            "外层异常路径必须恢复原文件，不得遗留变异体"
+        )
+
+    def test_run_mutation_restores_on_sigterm(self, tmp_path, monkeypatch):
+        # KeyboardInterrupt（SIGINT 的 Python 映射）也必须走兜底恢复。
+        proj, target = self._write_project(tmp_path)
+        before = target.read_text()
+
+        def crash_run(root, timeout_s=60, tests_glob=None):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", crash_run
+        )
+        with pytest.raises(KeyboardInterrupt):
+            run_mutation(str(target), str(proj), budget=2)
+        assert target.read_text() == before

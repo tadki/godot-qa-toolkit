@@ -22,7 +22,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -261,15 +263,22 @@ def _token_mutants_for(src: str, offs: list[int], node, data: str) -> list[Mutan
             pos = _token_pos(offs, first)
             mk("not", "not", "", "UOI", first.line, first.column, pos, pos + len("not"))
 
-    # 常量 Token 级精确匹配：NUMBER/关键字 NAME Token 值全等才产变异点
+    out.extend(_constant_token_mutants(src, offs, node))
+    return out
+
+
+def _constant_token_mutants(src: str, offs: list[int], node) -> list[Mutant]:
+    """常量 Token 级精确匹配：NUMBER/关键字 NAME Token 值全等才产变异点。"""
+    out: list[Mutant] = []
     for child in getattr(node, "children", []):
         val = getattr(child, "value", None)
         if (val in _CONSTANT_MUTATIONS
                 and getattr(child, "type", "") in ("NUMBER", "NAME")):
             pos = _token_pos(offs, child)
             for m in _CONSTANT_MUTATIONS[val]:
-                mk(val, val, m, "boundary", child.line, child.column,
-                   pos, pos + len(val))
+                out.append(Mutant(file="", line=child.line, column=child.column,
+                                  operator=val, original=val, mutated=m, kind="boundary",
+                                  start_pos=pos, end_pos=pos + len(val)))
     return out
 
 
@@ -535,15 +544,72 @@ def run_mutation(
         return _no_sites_result(str(path))
     results, invalid_count = _record_invalid_mutants(original_src, mutants)
 
-    outcome = _run_mutant_loop_with_aborts(
-        path, project_root, original_src, backup, mutants, tests_glob, timeout_s, results)
+    # 缺陷1 兜底恢复守卫：per-mutant finally 覆盖不到 SIGTERM/SIGINT 硬杀与
+    # 循环外未知异常（Revy QA TaskStop 实证遗留变异体进 git diff）。
+    # SIGTERM/SIGHUP 走 handler 主动恢复（硬杀不保证 finally），其余异常走
+    # finally 兜底——两路合一后原样上抛，不吞中断语义。
+    with _interrupt_guard(path, backup):
+        outcome = _run_mutant_loop_with_aborts(
+            path, project_root, original_src, backup, mutants, tests_glob, timeout_s, results)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
-    # 恢复原始文件（保险——最终态必须与原状一致）。
-    path.write_text(backup, encoding="utf-8")
-
     return _mutation_report(str(path), *outcome, invalid_count, budget, results)
+
+
+def make_sigterm_restore_handler(file_path: str, backup: str):
+    """SIGTERM/SIGHUP 硬杀不保证执行 finally——handler 内先恢复再终止。
+
+    exit code 128+sign（POSIX shell 约定），用 os._exit 跳过任何可能再次
+    抛异常的清理路径，保证恢复写盘是最后动作。
+    """
+    def _handler(signum, frame):
+        try:
+            Path(file_path).write_text(backup, encoding="utf-8")
+        except OSError as e:
+            # 恢复失败必须显式暴露——静默吞掉会把变异体遗留进共享分支
+            print(f"mutation SIGTERM restore failed for {file_path}: {e}",
+                  file=sys.stderr)
+        os._exit(128 + signum)
+    return _handler
+
+
+class _interrupt_guard:
+    """缺陷1 兜底恢复守卫：任何异常/硬杀路径均恢复原文件。
+
+    per-mutant finally 覆盖不到 SIGTERM/SIGINT 硬杀与循环外未知异常（Revy QA
+    TaskStop 实证遗留变异体进 git diff）。SIGTERM/SIGHUP 走 handler 主动恢复
+    （硬杀不保证 finally），其余异常走 context manager finally 兜底——两路合
+    一后原样上抛，不吞中断语义。信号安装失败（非主线程/受限环境）降级为仅
+    finally 兜底。
+    """
+
+    def __init__(self, path: Path, backup: str):
+        self._path = path
+        self._backup = backup
+        self._handlers: dict = {}
+
+    def __enter__(self):
+        restore_handler = make_sigterm_restore_handler(str(self._path), self._backup)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                self._handlers[sig] = signal.signal(sig, restore_handler)
+            except (ValueError, OSError):
+                pass  # 非主线程/受限环境：守卫降级为 finally 兜底
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for sig, prev in self._handlers.items():
+            try:
+                signal.signal(sig, prev)
+            except (ValueError, OSError):
+                pass
+        # 幂等恢复——正常路径与 per-mutant finally 重复写同内容无副作用。
+        try:
+            self._path.write_text(self._backup, encoding="utf-8")
+        except OSError as e:
+            print(f"mutation restore failed for {self._path}: {e}", file=sys.stderr)
+        return False
 
 
 def _setup_error_result(file: str, err) -> dict:

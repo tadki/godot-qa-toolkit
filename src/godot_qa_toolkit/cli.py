@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .complexity.gate import GateConfig, run_gate
 from .coverage.runner import run_coverage
+from .doctor import cmd_doctor
 from .gherkin.parser import GherkinSyntaxError, parse
 from .gherkin.runner import Registry, run_feature
 from .mutation.runner import run_mutation
@@ -195,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--min-percent", type=float, default=80.0, help="min coverage % (default 80)")
     v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
     v.set_defaults(func=cmd_coverage)
+
+    d = sub.add_parser("doctor", help="self-check editable install vs current worktree gitlink")
+    d.set_defaults(func=cmd_doctor)
 
     return parser
 

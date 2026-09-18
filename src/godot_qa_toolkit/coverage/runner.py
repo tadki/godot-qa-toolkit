@@ -249,12 +249,18 @@ def _probe_calls(src: str, line_to_id: dict[int, int]) -> list[str]:
 
 def _probe_func(sink_name: str, count: int) -> str:
     """文件尾探针函数：wrapper 用 user:// 唯一 sink 追加写（GDScript 侧无环境
-    读取——sink 名与 user:// 前缀在生成期以字面量嵌入）。"""
+    读取——sink 名与 user:// 前缀在生成期以字面量嵌入）。
+
+    探针一律声明为 static：被插桩文件的 static 函数体内不允许调用实例方法
+    （GDScript 4 Parse Error "Cannot call non-static function"，SEE-1316
+    NumberCompactFormat 全 static util 实测——探针非 static 时整个脚本
+    解析失败，probes_fired 恒 0）。static 探针在实例/静态两种语境下均合法。
+    """
     # 追加写语义：READ_WRITE + seek_end——裸 WRITE 每次命中重开会截断此前
     # 全部命中（SEE-1312 代码走查实测缺陷）。
     code = (
         f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
-        f"func {_PROBE_PREFIX}wrapper(probe_id):\n"
+        f"static func {_PROBE_PREFIX}wrapper(probe_id):\n"
         f"\tvar f = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.READ_WRITE)\n"
         f"\tif f == null:\n"
         f"\t\tf = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.WRITE)\n"
@@ -266,7 +272,7 @@ def _probe_func(sink_name: str, count: int) -> str:
     )
     for i in range(count):
         code += (
-            f"func {_PROBE_PREFIX}{i}():\n"
+            f"static func {_PROBE_PREFIX}{i}():\n"
             f"\t{_PROBE_PREFIX}wrapper({i})\n"
         )
     return code

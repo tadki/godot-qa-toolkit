@@ -6,6 +6,8 @@ doctor 比对 editable 安装位置与当前工作树 .dev/qa-toolkit 的 gitlin
 """
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -115,3 +117,140 @@ class TestDoctorCli:
         from godot_qa_toolkit.cli import build_parser
         args = build_parser().parse_args(["doctor"])
         assert args.func is not None
+
+
+class TestDoctorHardening:
+    """SEE-1319 hardener：doctor 边界对抗补强（默认 doctor 是错的）。"""
+
+    def test_gitlink_head_read_failure_degrades_to_none_not_crash(self, tmp_path, monkeypatch):
+        # 非 git 目录 / git 命令失败 → gitlink_head=None，不抛异常。
+        from godot_qa_toolkit import doctor
+        assert doctor._gitlink_head(tmp_path) is None
+
+    def test_gitlink_head_timeout_returns_none(self, tmp_path, monkeypatch):
+        import subprocess
+        from godot_qa_toolkit import doctor
+
+        def boom(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=10)
+
+        monkeypatch.setattr(doctor.subprocess, "run", boom)
+        assert doctor._gitlink_head(tmp_path) is None
+
+    def test_mismatch_detail_carries_both_locations(self, tmp_path, monkeypatch):
+        # 错配详情必须同时暴露 editable 与 toolkit_root——修复指引的机器判据。
+        from godot_qa_toolkit import doctor
+        root = tmp_path / "wt" / ".dev" / "qa-toolkit"
+        root.mkdir(parents=True)
+        stale = tmp_path / "old" / "qa-toolkit"
+        stale.mkdir(parents=True)
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(stale))
+        monkeypatch.setattr(doctor, "_gitlink_head", lambda r: "deadbeef")
+        ok, detail = doctor.check_install(cwd=root / "src")
+        assert ok is False
+        assert detail["editable_location"] == str(stale)
+        assert detail["toolkit_root"] == str(root)
+        assert detail["gitlink_head"] == "deadbeef"
+
+    def test_editable_missing_but_toolkit_present_is_not_installed(self, tmp_path, monkeypatch):
+        # 有工作树、无 editable 安装 → not_installed（非 skipped——用户须装）。
+        from godot_qa_toolkit import doctor
+        root = tmp_path / "wt" / ".dev" / "qa-toolkit"
+        root.mkdir(parents=True)
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: None)
+        ok, detail = doctor.check_install(cwd=root / "src")
+        assert ok is False
+        assert detail["status"] == "not_installed"
+
+    def test_editable_present_without_toolkit_root_is_skipped(self, tmp_path, monkeypatch):
+        # 有安装但 cwd 不在任何工具树内（如主仓外裸跑 gqt）→ 无法判定目标树，跳过。
+        from godot_qa_toolkit import doctor
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(tmp_path))
+        ok, detail = doctor.check_install(cwd=tmp_path)
+        assert ok is True
+        assert detail["status"] == "skipped"
+
+    def test_pip_show_stderr_noise_does_not_break_parsing(self, tmp_path, monkeypatch):
+        # pip 输出夹带 warning 行仍能解析 Editable project location。
+        from godot_qa_toolkit import doctor
+
+        def noisy_show():
+            return ("WARNING: pip is old\n"
+                    "Name: godot-qa-toolkit\n"
+                    "Editable project location: /some/path\n"
+                    "Location: /home/jerry/.local/lib/python3.12/site-packages\n")
+
+        monkeypatch.setattr(doctor, "_pip_show", noisy_show)
+        assert doctor.resolve_editable_location() == "/some/path"
+
+    def test_pip_show_empty_editable_location_yields_none(self, monkeypatch):
+        # 'Editable project location:' 值为空（非 editable 装法）→ None。
+        from godot_qa_toolkit import doctor
+
+        def show():
+            return "Name: godot-qa-toolkit\nEditable project location: \n"
+
+        monkeypatch.setattr(doctor, "_pip_show", show)
+        assert doctor.resolve_editable_location() is None
+
+    def test_relative_vs_absolute_same_root_matches(self, tmp_path, monkeypatch):
+        # editable 是绝对路径、toolkit_root 解析自 walk-up——resolve() 比对必须
+        # 消掉 symlink/../ 差异；用同一真实路径两种表达验证不误报。
+        from godot_qa_toolkit import doctor
+        root = tmp_path / "wt" / ".dev" / "qa-toolkit"
+        root.mkdir(parents=True)
+        monkeypatch.setattr(doctor, "resolve_editable_location",
+                            lambda: str(root))  # 无尾斜杠、无 ../——最简形态
+        monkeypatch.setattr(doctor, "_gitlink_head", lambda r: "abc")
+        ok, detail = doctor.check_install(cwd=root / "src" / "godot_qa_toolkit")
+        assert ok is True
+        assert detail["status"] == "ok"
+
+
+class TestInstallShContract:
+    """scripts/install.sh 契约（pytest 内 stub 验证，不真装 pip）。"""
+
+    REPO = Path(__file__).parent.parent.parent
+    SCRIPT = REPO / "scripts" / "install.sh"
+
+    def test_script_exists_executable_and_syntax_ok(self):
+        import subprocess
+        assert self.SCRIPT.is_file()
+        assert self.SCRIPT.stat().st_mode & 0o111, "install.sh 必须可执行"
+        r = subprocess.run(["bash", "-n", str(self.SCRIPT)], capture_output=True)
+        assert r.returncode == 0, r.stderr.decode()
+
+    def test_script_refuses_non_toolkit_location(self, tmp_path):
+        # 把脚本拷到非工具树位置执行 → 必须报错退出（自检哨兵）。
+        import subprocess
+        fake = tmp_path / "not-a-toolkit"
+        fake.mkdir()
+        (fake / "scripts").mkdir()
+        (fake / "scripts" / "install.sh").write_text(self.SCRIPT.read_text())
+        r = subprocess.run(["bash", str(fake / "scripts" / "install.sh")],
+                           capture_output=True, text=True)
+        assert r.returncode != 0
+        assert "not a godot-qa-toolkit checkout" in r.stderr
+
+    def test_script_reentrant_run_in_real_tooltree(self, tmp_path):
+        # 真实工具树拷贝 + stub python3/pip（绕开真实安装）→ 全流程可重入成功。
+        import subprocess
+        stub_dir = tmp_path / "stubbin"
+        stub_dir.mkdir()
+        (stub_dir / "python3").write_text(
+            "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = '-c' ]; then eval \"$2\"; exit 0; fi\n"
+            "if [ \"$2\" = '-e' ]; then exit 0; fi\n"  # pip install -e stub
+            "exit 0\n")
+        (stub_dir / "python3").chmod(0o755)
+        tree = tmp_path / "wt" / ".dev" / "qa-toolkit"
+        (tree / "src" / "godot_qa_toolkit").mkdir(parents=True)
+        (tree / "scripts").mkdir()
+        (tree / "pyproject.toml").write_text("[project]\n")
+        (tree / "src" / "godot_qa_toolkit" / "__init__.py").write_text("")
+        shutil.copy2(self.SCRIPT, tree / "scripts" / "install.sh")
+        env = {"PATH": f"{stub_dir}:{os.environ['PATH']}", "HOME": str(tmp_path)}
+        r = subprocess.run(["bash", str(tree / "scripts" / "install.sh")],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        assert "done" in r.stdout

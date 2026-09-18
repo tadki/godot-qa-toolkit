@@ -544,10 +544,7 @@ def run_mutation(
         return _no_sites_result(str(path))
     results, invalid_count = _record_invalid_mutants(original_src, mutants)
 
-    # 缺陷1 兜底恢复守卫：per-mutant finally 覆盖不到 SIGTERM/SIGINT 硬杀与
-    # 循环外未知异常（Revy QA TaskStop 实证遗留变异体进 git diff）。
-    # SIGTERM/SIGHUP 走 handler 主动恢复（硬杀不保证 finally），其余异常走
-    # finally 兜底——两路合一后原样上抛，不吞中断语义。
+    # 缺陷1 兜底恢复守卫：详见 _interrupt_guard docstring。
     with _interrupt_guard(path, backup):
         outcome = _run_mutant_loop_with_aborts(
             path, project_root, original_src, backup, mutants, tests_glob, timeout_s, results)

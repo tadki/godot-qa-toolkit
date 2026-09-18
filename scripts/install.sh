@@ -8,6 +8,11 @@
 # 使 editable 安装重新指向新工作树。`gqt doctor` 会在错配时提示本脚本。
 #
 # 重入安全：pip install -e 幂等，可重复执行。
+#
+# 首装等效命令（未装过 gqt / 无本脚本时手动执行，SEE-1319 D2）：
+#   python3 -m pip install -e <本目录> [--break-system-packages]
+# （PEP 668 externally-managed 环境——Ubuntu 23.04+/Debian 12+/WSL Python 3.12
+#   系统解释器——必须带 --break-system-packages，pip 否则拒绝安装。）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +26,13 @@ if [ ! -f "$TOOLKIT_ROOT/pyproject.toml" ] || [ ! -d "$TOOLKIT_ROOT/src/godot_qa
     exit 1
 fi
 
-python3 -m pip install -e "$TOOLKIT_ROOT"
+# PEP 668 降级（SEE-1319 D1）：externally-managed 环境直接 install 被 pip 拒绝
+# exit 1——先试常规安装，命中 PEP 668 拒绝时自动带 --break-system-packages 重试
+# （重试仍失败则报错退出，不静默吞）。
+if ! python3 -m pip install -e "$TOOLKIT_ROOT"; then
+    echo "[install.sh] plain pip install failed — retrying with --break-system-packages (PEP 668 externally-managed environment)" >&2
+    python3 -m pip install --break-system-packages -e "$TOOLKIT_ROOT"
+fi
 
 echo "[install.sh] verifying..."
 python3 -c "import godot_qa_toolkit, os; p=os.path.dirname(godot_qa_toolkit.__file__); print(f'import resolves to: {p}'); assert p.startswith('$TOOLKIT_ROOT/src'), 'import does NOT resolve to this worktree'"

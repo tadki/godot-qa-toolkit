@@ -254,3 +254,86 @@ class TestInstallShContract:
                            capture_output=True, text=True, env=env)
         assert r.returncode == 0, r.stderr
         assert "done" in r.stdout
+
+
+class TestInstallShPep668:
+    """SEE-1319 D1：install.sh PEP 668 降级路径（stub pip 首拒 + 重试成功）。"""
+
+    REPO = Path(__file__).parent.parent.parent
+    SCRIPT = REPO / "scripts" / "install.sh"
+
+    def _make_tree(self, tmp_path):
+        stub_dir = tmp_path / "stubbin"
+        stub_dir.mkdir()
+        tree = tmp_path / "wt" / ".dev" / "qa-toolkit"
+        (tree / "src" / "godot_qa_toolkit").mkdir(parents=True)
+        (tree / "scripts").mkdir()
+        (tree / "pyproject.toml").write_text("[project]\n")
+        (tree / "src" / "godot_qa_toolkit" / "__init__.py").write_text("")
+        shutil.copy2(self.SCRIPT, tree / "scripts" / "install.sh")
+        return stub_dir, tree
+
+    def _write_stub_pip(self, stub_dir, script_body):
+        stub = stub_dir / "python3"
+        stub.write_text(script_body)
+        stub.chmod(0o755)
+
+    def test_pep668_rejection_triggers_flagged_retry(self, tmp_path):
+        # stub pip：首次（无 flag）拒绝 externally-managed；重试必须带 flag 且成功。
+        stub_dir, tree = self._make_tree(tmp_path)
+        self._write_stub_pip(stub_dir, '''#!/usr/bin/env bash
+if [ "$3" = "install" ]; then
+  for a in "$@"; do
+    if [ "$a" = "--break-system-packages" ]; then echo "installed with flag"; exit 0; fi
+  done
+  echo "error: externally-managed-environment" >&2
+  exit 1
+fi
+if [ "$1" = "-c" ]; then eval "$2"; exit 0; fi
+exit 0
+''')
+        env = {"PATH": f"{stub_dir}:{os.environ['PATH']}", "HOME": str(tmp_path)}
+        r = subprocess.run(["bash", str(tree / "scripts" / "install.sh")],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        assert "--break-system-packages" in r.stderr, "降级重试必须在 stderr 显式提示"
+        assert "installed with flag" in r.stdout
+
+    def test_flagged_retry_failure_fails_loudly(self, tmp_path):
+        # 两次都失败（stub 恒拒绝）→ 脚本非零退出，不静默吞。
+        stub_dir, tree = self._make_tree(tmp_path)
+        self._write_stub_pip(stub_dir, '''#!/usr/bin/env bash
+if [ "$3" = "install" ]; then
+  echo "error: externally-managed-environment" >&2
+  exit 1
+fi
+if [ "$1" = "-c" ]; then eval "$2"; exit 0; fi
+exit 0
+''')
+        env = {"PATH": f"{stub_dir}:{os.environ['PATH']}", "HOME": str(tmp_path)}
+        r = subprocess.run(["bash", str(tree / "scripts" / "install.sh")],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode != 0
+        assert "externally-managed" in r.stderr
+
+    def test_plain_success_never_adds_flag(self, tmp_path):
+        # 常规环境 pip 首次成功 → 不得出现 --break-system-packages（最小干预）。
+        stub_dir, tree = self._make_tree(tmp_path)
+        self._write_stub_pip(stub_dir, '''#!/usr/bin/env bash
+if [ "$3" = "install" ]; then echo "plain ok"; exit 0; fi
+if [ "$1" = "-c" ]; then eval "$2"; exit 0; fi
+exit 0
+''')
+        env = {"PATH": f"{stub_dir}:{os.environ['PATH']}", "HOME": str(tmp_path)}
+        r = subprocess.run(["bash", str(tree / "scripts" / "install.sh")],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        assert "--break-system-packages" not in r.stderr
+        assert "plain ok" in r.stdout
+
+    def test_firstinstall_equivalent_command_documented(self):
+        # D2：脚本头注释必须文档化首装等效命令（含 PEP 668 flag），消除自举盲区。
+        text = self.SCRIPT.read_text()
+        assert "pip install -e" in text
+        assert "--break-system-packages" in text
+        assert "externally-managed" in text

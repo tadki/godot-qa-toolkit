@@ -393,9 +393,21 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     if not os.path.isfile(gut_fs):
         raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
     gdir = tests_glob if tests_glob else "res://tests/"
+    # -gtest 接受的是「脚本完整路径列表」，但会在装满所有收集脚本后仍全量跑
+    # （GUT 9.6 实测：单脚本 -gtest 展开 251 scripts/2718 tests）——不能作
+    # 文件级子集。文件路径改走 -gselect=脚本名（GUT 按 -select_script 子集
+    # 过滤收集结果，实测精确 1 script），目录仍走 -gdir（SEE-1316 实测）。
+    if gdir.endswith(".gd"):
+        script_stem = Path(gdir).stem
+        extra = [
+            "-gdir=res://tests/",
+            f"-gselect={script_stem}",
+        ]
+    else:
+        extra = [f"-gdir={gdir}"]
     r = subprocess.run(
         ["godot", "--headless", "--path", _godot_project_path(project_root),
-         "-s", GUT_SCRIPT_RES_PATH, f"-gdir={gdir}", "-gexit"],
+         "-s", GUT_SCRIPT_RES_PATH, *extra, "-gexit"],
         capture_output=True,
         text=True,
         timeout=timeout_s,

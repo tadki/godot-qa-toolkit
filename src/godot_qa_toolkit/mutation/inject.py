@@ -192,8 +192,10 @@ def mutant_env(target_res: str, mutated_src: str, project_root: str,
     env["GQT_MUTATION_CFG"] = _win_path(cfg_fs)
     # win64 godot（WSL interop 启动）不继承 WSL 自定义 env——必须经
     # WSLENV 显式放行（/w = 仅 Windows 侧可见；Linux godot 下 WSLENV 是
-    # 无副作用的普通变量）
-    env["WSLENV"] = "GQT_MUTATION_CFG/w:XDG_DATA_HOME/w:APPDATA/w"
+    # 无副作用的普通变量）。调用方已有 WSLENV 时追加不覆写（LOW-4）。
+    existing_wslenv = os.environ.get("WSLENV", "").rstrip(":")
+    ours = "GQT_MUTATION_CFG/w:XDG_DATA_HOME/w:APPDATA/w"
+    env["WSLENV"] = f"{existing_wslenv}:{ours}" if existing_wslenv else ours
     return env, cfg_fs
 
 

@@ -13,8 +13,6 @@ from pathlib import Path
 # res:// 引用字面量：preload("x") / load("x") 两函数形态（与 class_name
 # 标识符引用合计 SPEC-001 三形态）
 _RES_REF_PATTERN = re.compile(r'\b(?:preload|load)\s*\(\s*"([^"]+)"\s*\)')
-# class_name 标识符引用：按 .gd 文件名 stem 全词匹配（SaveManager ↔ save_manager.gd）
-_STEM_TOKEN_PATTERN = re.compile(r"\w+")
 
 # 判定“测试目录”的候选 glob 起点——扫描只在这棵树内做，误扫到 src/ 会命中自身
 _TESTS_DIR_NAME = "tests"
@@ -49,6 +47,9 @@ def scan_test_refs(target_res_path: str, tests_dir: Path) -> list[str]:
 def scan_test_ref_counts(target_res_path: str, tests_dir: Path) -> dict[str, int]:
     """每命中文件 → 命中引用次数（res:// 字面量 + class_name 标识符各计 1）。"""
     target_stem = Path(target_res_path).stem.casefold()
+    # 全词匹配——子串计数会把 mock_save_manager.gd 内容误配进 save_manager
+    # 的命中集（LOW-3 审查实证）
+    stem_word = re.compile(r"\b" + re.escape(target_stem) + r"\b")
     counts: dict[str, int] = {}
     for gd in sorted(tests_dir.rglob("*.gd")):
         text = gd.read_text(encoding="utf-8", errors="replace")
@@ -56,7 +57,7 @@ def scan_test_ref_counts(target_res_path: str, tests_dir: Path) -> dict[str, int
         score = sum(
             1 for r in _RES_REF_PATTERN.findall(text)
             if _ref_hits_target(r, target_res_path)
-        ) + text_cf.count(target_stem)
+        ) + len(stem_word.findall(text_cf))
         if score:
             counts[str(gd.absolute()).replace("\\", "/")] = score
     return counts

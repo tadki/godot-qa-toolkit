@@ -147,7 +147,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         result = {
             "tool": "mutation",
             "ok": False,
-            "summary": {"file": files[0], "error": str(e)},
+            # 多文件场景报全部输入（仅报 files[0] 会误导为只缺第一个——LOW-6）
+            "summary": {"files": files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
     return _emit(result)

@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from concurrent.futures import ProcessPoolExecutor
 
 from .ops import _collect_mutations
 from .runner import run_mutation
-from .testscan import derive_tests_glob
 
 # 进程池工厂（可注入替身做单测）
 _worker_pool = ProcessPoolExecutor
@@ -47,15 +47,23 @@ def prewarm_import(project_root: str) -> None:
     """并发路径预热：导入幂等，消除 worker 首轮 .godot 缓存竞争。
 
     非 Godot 项目目录（无 project.godot，如单测 toy fixture）跳过——
-    godot --import 会退化为全盘资源扫描挂住。
+    godot --import 会退化为全盘资源扫描挂住。预热失败（含超时）降级为
+    告警继续——预热是优化项，其失败不得打破统一 JSON 契约（LOW-5）。
     """
     if not os.path.isfile(os.path.join(project_root, "project.godot")):
         return
-    subprocess.run(
-        ["godot", "--headless", "--import", "--path", project_root],
-        capture_output=True, text=True, timeout=_PREWARM_TIMEOUT_S,
-        cwd=project_root,
-    )
+    try:
+        subprocess.run(
+            ["godot", "--headless", "--import", "--path", project_root],
+            capture_output=True, text=True, timeout=_PREWARM_TIMEOUT_S,
+            cwd=project_root,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"prewarm import timed out after {_PREWARM_TIMEOUT_S}s for "
+              f"{project_root} — continuing without prewarm", file=sys.stderr)
+    except OSError as e:
+        print(f"prewarm import failed for {project_root}: {e} — continuing "
+              f"without prewarm", file=sys.stderr)
 
 
 def run_mutation_files(
@@ -72,6 +80,8 @@ def run_mutation_files(
     dry_run（SPEC-009）：只清点不跑 GUT——预热、baseline、worker mutant 轮
     全部短路（Refacty 移交缺陷：此前 dry_run 不进 worker 与父层路径会
     真实跑 GUT，违反零 GUT 调用契约；硬化组 test_dry_run_* 实证据）。
+    报告完备性（SPEC-016）：收集异常文件以 error 契约进 results、零变异
+    文件逐文件出 no_sites 记录——任何输入文件都不得从报告中消失。
     """
     files = _group_by_file(files)
     if len(files) == 1 and (jobs is None or jobs <= 1):
@@ -96,20 +106,49 @@ def run_mutation_files(
 
     jobs = default_jobs(jobs)
     prewarm_import(project_root)
-    chunks = _build_chunks(files, project_root, budget, timeout_s,
-                           tests_glob, dry_run, jobs)
-    # 零 chunk（全部目标文件零变异点）→ 直接出空契约
-    if not chunks:
-        file = files[0]
-        return {"tool": "mutation", "ok": True, "jobs": jobs,
-                "results": [{"tool": "mutation",
-                             "ok": True,
-                             "summary": {"file": file, "mutants": 0,
-                                         "scoped": bool(tests_glob)},
-                             "failures": []}]}
-    with _worker_pool(max_workers=jobs) as pool:
-        chunk_results = list(pool.map(_chunk_worker, chunks))
-    return _merge_results(chunks, chunk_results, jobs)
+    chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
+                                    tests_glob, jobs)
+    chunk_results = []
+    if chunks:
+        with _worker_pool(max_workers=jobs) as pool:
+            chunk_results = list(pool.map(_chunk_worker, chunks))
+    merged = _merge_results(chunks, chunk_results, jobs)
+    # settled（异常/零变异文件）按输入顺序并入 results——任何输入文件都留痕
+    results = _order_results(files, merged.pop("results"), settled)
+    return {**merged, "ok": all(r["ok"] for r in results),
+            "results": results}
+
+
+def _order_results(files: list[str], merged: list[dict],
+                   settled: list[dict]) -> list[dict]:
+    """按输入文件顺序重排（merged 已按 chunk 序，settled 按收集序）。"""
+    by_file: dict[str, dict] = {}
+    for r in merged + settled:
+        by_file[r["summary"]["file"]] = r
+    return [by_file[f] for f in files if f in by_file]
+
+
+def _settled_error(file: str, err) -> dict:
+    """收集异常（如不可解析 GDScript）的定终态 error 契约——
+    与 runner._setup_error_result 同构（单文件路径的既定形态）。"""
+    return {
+        "tool": "mutation",
+        "ok": False,
+        "summary": {"file": file, "mutants": 0, "error": str(err)},
+        "failures": [{"reason": f"mutation setup failed: {err}"}],
+    }
+
+
+def _settled_no_sites(file: str, scoped: bool) -> dict:
+    """零变异文件的定终态 no_sites 契约——与 runner._no_sites_result 同构。"""
+    return {
+        "tool": "mutation",
+        "ok": True,
+        "summary": {"file": file, "mutants": 0, "killed": 0, "survived": 0,
+                    "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
+                    "scoped": bool(scoped)},
+        "failures": [],
+    }
 
 
 def _chunk_worker(payload: dict) -> dict:
@@ -185,21 +224,29 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
 
 
 def _build_chunks(files: list[str], project_root: str, budget: int,
-                  timeout_s: int, tests_glob: str | None, dry_run: bool,
-                  jobs: int) -> list[dict]:
-    """父层：per-file 收集 mutant 总数 → 分片；同样 glob 共享一份 baseline。"""
+                  timeout_s: int, tests_glob: str | None,
+                  jobs: int) -> tuple[list[dict], list[dict]]:
+    """父层：per-file 收集 mutant 总数 → 分片；同样 glob 共享一份 baseline。
+
+    返回 (chunks, settled)：settled 是收集异常（error 契约）与零变异
+    （no_sites 契约）的定终态文件——SPEC-016：任何输入文件都不得从报告
+    消失（此前 except 静默丢弃 + 零 chunk 早退只报 files[0] 是报告失真）。
+    """
     baselines = _precompute_baselines(files, project_root, timeout_s,
                                       tests_glob)
     chunks: list[dict] = []
+    settled: list[dict] = []
     for f in files:
         try:
             src = open(f, encoding="utf-8").read()
             total = min(len(_collect_mutations(src, f)), budget)
-        except Exception:
-            total = 0
-        if total == 0:
+        except Exception as e:
+            settled.append(_settled_error(f, e))
             continue
         glob = tests_glob or _auto_scan_tests_glob(f, project_root)
+        if total == 0:
+            settled.append(_settled_no_sites(f, bool(glob)))
+            continue
         baseline = baselines.get(glob)
         if baseline is None:
             # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
@@ -221,12 +268,11 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                 "budget": budget,
                 "timeout_s": timeout_s,
                 "tests_glob": glob,
-                "dry_run": dry_run,
                 "start": start,
                 "stop": stop,
                 "baseline": baselines.get(glob),
             })
-    return chunks
+    return chunks, settled
 
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob):

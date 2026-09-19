@@ -582,11 +582,12 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     finally:
         _ACTIVE_ENV = None
         _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
+        # impl 磁盘文件正常轮由 Godot 自删；兜底补删覆盖子进程写盘后被中断 /
+        # 编译失败未自删的窗口（登记表仍持有 → SIGTERM/atexit 也能清）。
+        # 路径解析必须在 cfg unlink 之前（cfg 先删则恒读不到——LOW-1 死代码修复）
+        impl_fs = _impl_fs_path(project_root, cfg_path)
         Path(cfg_path).unlink(missing_ok=True)
         forget_temp(cfg_path)
-        # impl 磁盘文件正常轮由 Godot 自删；兜底补删覆盖子进程写盘后被中断 /
-        # 编译失败未自删的窗口（登记表仍持有 → SIGTERM/atexit 也能清）
-        impl_fs = _impl_fs_path(project_root, cfg_path)
         if impl_fs is not None:
             Path(impl_fs).unlink(missing_ok=True)
             forget_temp(impl_fs)

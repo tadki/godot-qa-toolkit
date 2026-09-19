@@ -100,10 +100,12 @@ class TestIntraFileJobs:
             [files[0]], proj, budget=3, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=4)
         # CI 无 godot 且 gdtoolkit 版本随环境——mutant 收集数不做绝对断言；
-        # 分片数 = min(jobs, budget 截断后的收集数)，契约合计 = 收集数
+        # 分片数与生产同口径：jobs 先经 default_jobs 钳制（CI 2 核 cap=2）
+        # 再与收集数取 min——测试不得自行假设钳制结果
+        expected_jobs = executor.default_jobs(4)
         collected = min(3, len(_collect_mutations(
             Path(files[0]).read_text(encoding="utf-8"), files[0])))
-        assert d["jobs"] == min(4, collected)
+        assert d["jobs"] == min(expected_jobs, collected)
         assert sum(c["summary"]["mutants"] for c in d["results"]) == collected
         assert all(c["summary"]["baseline_reused"] for c in d["results"])
 

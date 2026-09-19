@@ -540,6 +540,21 @@ def _run_mutant_loop(
              tally["run_error"], tally["suspect"]), baseline_reused)
 
 
+def _impl_fs_path(project_root: str, cfg_path: Path) -> str | None:
+    """从 cfg JSON 读 impl_res 换算磁盘路径；cfg 不可读返回 None（不吞异常）。"""
+    try:
+        import json
+        payload = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+        rel = payload["impl_res"].removeprefix("res://")
+        return str((Path(project_root) / rel).absolute())
+    except (OSError, ValueError, KeyError) as e:
+        # cfg 已被中断前删除属正常轮次序——静默返回；其余异常显式暴露
+        if not Path(cfg_path).exists():
+            return None
+        print(f"impl path resolution failed for {cfg_path}: {e}", file=sys.stderr)
+        return None
+
+
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
                        baseline_failures: set[str], baseline_dirty: bool) -> dict:
@@ -569,6 +584,12 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
         _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
         Path(cfg_path).unlink(missing_ok=True)
         forget_temp(cfg_path)
+        # impl 磁盘文件正常轮由 Godot 自删；兜底补删覆盖子进程写盘后被中断 /
+        # 编译失败未自删的窗口（登记表仍持有 → SIGTERM/atexit 也能清）
+        impl_fs = _impl_fs_path(project_root, cfg_path)
+        if impl_fs is not None:
+            Path(impl_fs).unlink(missing_ok=True)
+            forget_temp(impl_fs)
     return verdict
 
 

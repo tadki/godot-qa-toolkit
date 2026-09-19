@@ -42,6 +42,22 @@ def _write_project(tmp_path):
 
 
 class TestTempRegistryCleanup:
+    def test_impl_file_registered_and_cleaned(self, tmp_path):
+        """修复轮 2：impl 磁盘文件（.gqt_mutation_impl_<pid>_<seq>_<stem>.gd）
+        必须入 per-process 登记表——SIGTERM 兜底覆盖第三类临时文件
+        （QA 复验 FAIL 实证 impl 残留 3 个）。"""
+        proj, _target = _write_project(tmp_path)
+        from godot_qa_toolkit.mutation.inject import mutant_env
+        _, cfg_fs = mutant_env("res://autoload/save_manager.gd", "src", proj, 0)
+        impl_fs = Path(proj) / f".gqt_mutation_impl_{os.getpid()}_0_save_manager.gd"
+        # 登记在 dispatch 时即发生（即使 Godot 侧尚未写盘）
+        assert str(impl_fs) in inject_mod._TEMP_FILES
+        # 模拟 Godot 写盘后进程被中断（文件在场、无自删机会）
+        impl_fs.write_text("mutant")
+        cleanup_temp_files()
+        assert not impl_fs.exists()
+        assert not Path(cfg_fs).exists()
+
     def test_cleanup_removes_registered_files(self, tmp_path):
         f1 = tmp_path / ".gqt_mutation_host_999.gd"
         f2 = tmp_path / ".gqt_mutation_cfg_999_0.json"
@@ -104,7 +120,8 @@ class TestSigtermHandlerCleans:
 class TestSigtermIntegration:
     def test_sigterm_midrun_leaves_no_temp_files(self, tmp_path):
         """QA 场景复现（密闭，无 godot 依赖）：子进程 run_mutation 在 mutant
-        轮被 SIGTERM 中断 → 项目目录内 `.gqt_mutation_*` 临时文件必须清零。"""
+        轮被 SIGTERM 中断 → 项目目录内 cfg/host/impl 三类 `.gqt_mutation_*`
+        临时文件必须全部清零（QA 复验 impl 残留回归锚）。"""
         proj, target = _write_project(tmp_path)
         src_root = Path(__file__).parent.parent.parent / "src"
         child_script = textwrap.dedent(f"""

@@ -170,6 +170,11 @@ def mutant_env(target_res: str, mutated_src: str, project_root: str,
     """
     stem = Path(target_res).stem
     impl_res = f"res://.gqt_mutation_impl_{os.getpid()}_{seq}_{stem}.gd"
+    # impl 磁盘文件虽由 Godot 子进程写、多数轮次正常自删，但 SIGTERM 命中
+    # 写盘窗口时会残留（QA 复验 FAIL 实证 3 个）——dispatch 前即登记进
+    # per-process 清理表，与 cfg/host 同一兜底路径
+    impl_fs = str((Path(project_root) / impl_res.removeprefix("res://")).absolute())
+    register_temp(impl_fs)
     cfg_path = Path(project_root) / f".gqt_mutation_cfg_{os.getpid()}_{seq}.json"
     payload = {"target_res": target_res, "mutated_source": mutated_src,
                "impl_res": impl_res}

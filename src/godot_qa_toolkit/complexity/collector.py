@@ -32,6 +32,8 @@ def collect_file(path: str | Path) -> tuple[list[FunctionComplexity], str | None
         src = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         return [], f"unreadable: {e}"
+    if str(path).endswith(".py"):
+        return _collect_python_source(src, file_name=str(path))
     try:
         return _collect_source(src, file_name=str(path)), None
     except (LarkError, SyntaxError) as e:
@@ -44,7 +46,7 @@ def collect_file(path: str | Path) -> tuple[list[FunctionComplexity], str | None
 
 
 def collect_paths(paths: list[str | Path]) -> tuple[list[FunctionComplexity], list[dict]]:
-    """Collect complexity for every .gd file under the given paths.
+    """Collect complexity for every .gd/.py file under the given paths.
 
     Returns (functions, unparseable) where unparseable lists files that could
     not be measured — a real signal (gate counts them as failures), but never
@@ -54,7 +56,7 @@ def collect_paths(paths: list[str | Path]) -> tuple[list[FunctionComplexity], li
     unparseable: list[dict] = []
     for root in paths:
         p = Path(root)
-        files = sorted(p.rglob("*.gd")) if p.is_dir() else [p]
+        files = sorted(p.rglob("*.gd")) + sorted(p.rglob("*.py")) if p.is_dir() else [p]
         for f in files:
             funcs, error = collect_file(f)
             if error is not None:
@@ -75,3 +77,22 @@ def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
         )
         for b in blocks
     ]
+
+
+def _collect_python_source(src: str, file_name: str) -> tuple[list[FunctionComplexity], str | None]:
+    """LOW-2 文件类型分流：.py 直接走 radon Python AST（gd2py 对 Python 源码恒报错）。
+    radon cc_visit 对含顶层 block 的源码要求末尾换行，否则抛 TypeError——
+    视为结构性失败而非 crash，与 .gd 的 unparseable 语义对齐。"""
+    try:
+        blocks = cc_visit(src)
+    except (SyntaxError, TypeError) as e:
+        return [], f"python ast conversion failed: {type(e).__name__}: {e}"
+    return [
+        FunctionComplexity(
+            file=file_name,
+            name=b.name,
+            complexity=int(b.complexity),
+            line=int(b.lineno),
+        )
+        for b in blocks
+    ], None

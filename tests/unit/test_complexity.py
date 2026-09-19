@@ -1,5 +1,8 @@
 """Unit tests for the complexity collector + gate (SEE-1268 M1, TDD)."""
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -7,6 +10,7 @@ import pytest
 from godot_qa_toolkit.complexity.collector import collect_file
 from godot_qa_toolkit.complexity.gate import GateConfig, run_gate
 
+REPO = Path(__file__).parent.parent.parent
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "complex.gd"
 
 
@@ -59,3 +63,60 @@ class TestGate:
         result = run_gate([str(FIXTURE)])
         assert set(result) >= {"tool", "ok", "summary", "failures"}
         assert result["tool"] == "complexity"
+
+
+class TestComplexityPythonFiles:
+    """SEE-1319 LOW-2：gqt complexity 对 .py 文件分流（不再恒 unparseable）。"""
+
+    def _run_cli(self, *argv):
+        proc = subprocess.run(
+            [sys.executable, "-m", "godot_qa_toolkit.cli", *argv],
+            capture_output=True, text=True, cwd=str(REPO / "src"),
+        )
+        start = proc.stdout.index("{")
+        return proc.returncode, json.loads(proc.stdout[start:])
+
+    def test_py_file_parses_not_unparseable(self, tmp_path):
+        f = tmp_path / "mod.py"
+        f.write_text("def simple(a):\n    return a\n")
+        rc, out = self._run_cli("complexity", str(f))
+        assert out["summary"]["unparseable"] == 0, "Python 文件不应恒报 unparseable"
+        assert out["summary"]["functions"] == 1
+
+    def test_py_file_complexity_measured(self, tmp_path):
+        f = tmp_path / "deep.py"
+        f.write_text(
+            "def deep(x):\n"
+            "    if x > 0:\n        if x > 1:\n            if x > 2:\n"
+            "                if x > 3:\n                    if x > 4:\n"
+            "                        if x > 5:\n                            if x > 6:\n"
+            "                                if x > 7:\n                                    if x > 8:\n"
+            "                                        if x > 9:\n                                            if x > 10:\n"
+            "                                                if x > 11:\n                                                    if x > 12:\n"
+            "                                                        return 1\n"
+            "    return 0\n"
+        )
+        rc, out = self._run_cli("complexity", "--warn", "5", "--max", "8", str(f))
+        assert rc == 1, "超阈值 .py 文件必须命中 violations"
+        assert out["summary"]["violations"] >= 1
+        assert out["failures"][0]["complexity"] > 8
+
+    def test_gd_file_behavior_unchanged(self):
+        rc, out = self._run_cli("complexity", "--warn", "7", "--max", "10",
+                                str(REPO / "tests" / "fixtures" / "complex.gd"))
+        assert out["summary"]["unparseable"] == 0
+        assert out["summary"]["functions"] == 2
+
+    def test_py_syntax_error_reports_unparseable_not_crash(self, tmp_path):
+        f = tmp_path / "broken.py"
+        f.write_text("def broken(\n")
+        rc, out = self._run_cli("complexity", str(f))
+        assert out["summary"]["unparseable"] == 1
+        assert "python ast" in out["failures"][0]["reason"] or "SyntaxError" in out["failures"][0]["reason"]
+
+    def test_directory_mixed_gd_and_py_collected(self, tmp_path):
+        (tmp_path / "a.gd").write_text("extends Node\nfunc f():\n\tpass\n")
+        (tmp_path / "b.py").write_text("def g():\n    pass\n")
+        rc, out = self._run_cli("complexity", str(tmp_path))
+        assert out["summary"]["functions"] >= 2
+        assert out["summary"]["unparseable"] == 0

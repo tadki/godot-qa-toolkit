@@ -12,6 +12,7 @@ win64 godot 读不到 /tmp 绝对路径（WSL 路径无法作为 FileAccess 打�
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import subprocess
@@ -116,6 +117,39 @@ def _win_path(p: str) -> str:
     return wslpath_win(p) or p
 
 
+# 本进程创建的临时文件登记表（SPEC-015）：SIGTERM handler 内 os._exit 跳过
+# finally 与 atexit——handler 必须在此处显式调 cleanup_temp_files；atexit 兜底
+# 覆盖 SIGINT/未知退出路径。registry 是 per-process 的（每个 worker 管自己
+# PID 命名的文件），不跨进程共享。
+_TEMP_FILES: set[str] = set()
+_atexit_registered = False
+
+
+def register_temp(path: str | os.PathLike) -> None:
+    """登记临时文件；首次登记挂 atexit 兜底（SIGINT/finally 未覆盖的路径）。"""
+    _TEMP_FILES.add(str(path))
+    global _atexit_registered
+    if not _atexit_registered:
+        atexit.register(cleanup_temp_files)
+        _atexit_registered = True
+
+
+def forget_temp(path: str | os.PathLike) -> None:
+    """正常路径 finally unlink 后从登记表摘除（避免 atexit 空重复）。"""
+    _TEMP_FILES.discard(str(path))
+
+
+def cleanup_temp_files() -> None:
+    """清理本进程登记的全部临时文件；单文件失败不中断其余清理（显式暴露）。"""
+    for p in list(_TEMP_FILES):
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError as e:
+            print(f"mutation temp cleanup failed for {p}: {e}", file=sys.stderr)
+        finally:
+            _TEMP_FILES.discard(p)
+
+
 def make_user_dir() -> str | None:
     """per-process user:// 根（XDG_DATA_HOME 需绝对路径）；失败返回 None 兜底。"""
     try:
@@ -141,6 +175,7 @@ def mutant_env(target_res: str, mutated_src: str, project_root: str,
                "impl_res": impl_res}
     cfg_path.write_text(json.dumps(payload), encoding="utf-8")
     cfg_fs = str(cfg_path.absolute())
+    register_temp(cfg_fs)
     env: dict[str, str] = {}
     user_dir = make_user_dir()
     if user_dir:
@@ -162,6 +197,7 @@ def seed_host_script(project_root: str) -> Path:
     host = Path(project_root) / _host_gd_name()
     # 多进程写入同一 cwd 的同 pid 前缀不可能冲突；覆盖写以幂等
     host.write_text(HOST_GD_TEMPLATE, encoding="utf-8")
+    register_temp(host)
     return host
 
 

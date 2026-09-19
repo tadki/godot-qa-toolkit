@@ -50,7 +50,7 @@ from .ops import (  # noqa: F401
     mk_guard_not,
 )
 
-from .inject import host_script_res, mutant_env, seed_host_script, wslpath_win
+from .inject import cleanup_temp_files, forget_temp, host_script_res, mutant_env, seed_host_script, wslpath_win
 
 
 # GUT 的命令行入口必须以 res:// 形式传给 `godot -s`：Godot 对绝对路径的 -s
@@ -300,6 +300,10 @@ def make_sigterm_restore_handler(file_path: str, backup: str):
             # 恢复失败必须显式暴露——静默吞掉会把变异体遗留进共享分支
             print(f"mutation SIGTERM restore failed for {file_path}: {e}",
                   file=sys.stderr)
+        # SPEC-015：os._exit 跳过 finally 与 atexit——临时文件（cfg JSON +
+        # 宿主 .gd）必须在此显式清理，否则中断后工作树残留（QA MEDIUM 实测
+        # 12 个 untracked 文件）。
+        cleanup_temp_files()
         os._exit(128 + signum)
     return _handler
 
@@ -526,6 +530,7 @@ def _run_mutant_loop(
                 results.append(verdict)
         finally:
             host.unlink(missing_ok=True)
+            forget_temp(host)
 
     tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0, "suspect": 0}
     for r in results:
@@ -563,6 +568,7 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
         _ACTIVE_ENV = None
         _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
         Path(cfg_path).unlink(missing_ok=True)
+        forget_temp(cfg_path)
     return verdict
 
 

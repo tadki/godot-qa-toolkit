@@ -196,10 +196,20 @@ def _valid_mutants(src: str, mutants: list[Mutant]) -> list[Mutant]:
     return _split_invalid_mutants(src, mutants)[0]
 
 
-def _record_invalid_mutants(src: str, mutants: list[Mutant]) -> tuple[list[dict], int]:
-    """预检并记录 invalid_mutant 明细；返回 (results, invalid_count)。"""
+def _record_invalid_mutants(src: str, mutants: list[Mutant],
+                            mutant_slice: tuple[int, int] | None = None
+                            ) -> tuple[list[dict], int]:
+    """预检并记录 invalid_mutant 明细；返回 (results, invalid_count)。
+
+    mutant_slice 时只预检分片区间（per-mutant 并发 worker 各管各片区，
+    合并层求和不得重复计数）。
+    """
     results: list[dict] = []
-    _, invalid = _split_invalid_mutants(src, mutants)
+    scoped = mutants
+    if mutant_slice is not None:
+        start, stop = mutant_slice
+        scoped = mutants[start:stop]
+    _, invalid = _split_invalid_mutants(src, scoped)
     for m in invalid:
         results.append(_mutant_record(m, "invalid_mutant",
                                       f"mutated source fails to parse (operator bug): "
@@ -215,6 +225,7 @@ def run_mutation(
     dry_run: bool = False,
     tests_glob: str | None = None,
     precomputed_baseline: dict | None = None,
+    mutant_slice: tuple[int, int] | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -225,12 +236,21 @@ def run_mutation(
     tests_glob（SPEC-009）：受影响测试子集，passed to _run_gut_on_project。
     precomputed_baseline（SEE-1321 SPEC-008）：同次运行内共享的 baseline
     快照 {rc, tail, elapsed}——单进程冷启动产物，自适应 timeout 锚点。
+    mutant_slice（SEE-1321 SPEC-003 修订）：per-mutant 并发 worker 的分片，
+    只跑 [start, stop) 的 mutants；必须携带共享 baseline（worker 各自跑
+    baseline 会 N 倍放大启动税且并发期耗时污染 timeout 锚）。
     返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
     所有 mutant 均被测试杀死。
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"mutation target not found: {file_path}")
+
+    if mutant_slice is not None and precomputed_baseline is None:
+        raise ValueError(
+            "mutant_slice workers require a precomputed baseline snapshot — "
+            "each worker running its own baseline would multiply the startup "
+            f"tax N-fold and pollute the adaptive timeout anchor: {mutant_slice}")
 
     if tests_glob is None:
         tests_glob = _auto_scan_tests_glob(str(path), project_root)
@@ -255,14 +275,15 @@ def run_mutation(
     # baseline GUT（硬ener 反例实证：白付一轮 108s baseline）。
     if not mutants:
         return _no_sites_result(str(path), scoped)
-    results, invalid_count = _record_invalid_mutants(original_src, mutants)
+    results, invalid_count = _record_invalid_mutants(original_src, mutants,
+                                                     mutant_slice)
 
     # 缺陷1 兜底恢复守卫（SEE-1319 与 SEE-1321 内存注入共存）：内存注入路径
     # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。
     with _interrupt_guard(path, backup):
         outcome = _run_mutant_loop_with_aborts(
             path, project_root, original_src, backup, mutants, tests_glob,
-            timeout_s, results, precomputed_baseline)
+            timeout_s, results, precomputed_baseline, mutant_slice)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
@@ -369,13 +390,14 @@ def _no_sites_result(file: str, scoped: bool | None = None) -> dict:
 
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  mutants, tests_glob, timeout_s, results,
-                                 precomputed_baseline=None):
+                                 precomputed_baseline=None,
+                                 mutant_slice=None):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回计数。"""
     try:
         return _run_mutant_loop(
             path, project_root, original_src, backup,
             _valid_mutants(original_src, mutants), tests_glob, timeout_s,
-            results, precomputed_baseline,
+            results, precomputed_baseline, mutant_slice,
         )
     except subprocess.TimeoutExpired:
         return _run_error_result(
@@ -454,8 +476,14 @@ def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
     results: list[dict], precomputed_baseline: dict | None = None,
+    mutant_slice: tuple[int, int] | None = None,
 ) -> tuple[tuple[int, int, int, int, int], bool]:
-    """逐 mutant 跑 GUT 并分类判定；返回 ((killed, survived, timeout, run_error, suspect), baseline_reused)。"""
+    """逐 mutant 跑 GUT 并分类判定；返回 ((killed, survived, timeout, run_error, suspect), baseline_reused)。
+
+    mutant_slice（SPEC-003 修订）：per-mutant 并发 worker 分片，只跑
+    [start, stop) 区间（下界含、上界不含）；分片工作线程复用共享 baseline，
+    不自跑 baseline。
+    """
     global _adaptive_timeout
     killed = survived = timeout_count = run_error_count = suspect_count = 0
 
@@ -492,7 +520,11 @@ def _run_mutant_loop(
 
         host = seed_host_script(str(Path(project_root)))
         try:
+            start, stop = (mutant_slice if mutant_slice is not None
+                           else (0, len(mutants)))
             for seq, m in enumerate(mutants):
+                if not start <= seq < stop:
+                    continue
                 verdict = _run_single_mutant(m, path, project_root, original_src,
                                              backup, tests_glob, seq,
                                              baseline_failures, baseline_dirty)

@@ -168,12 +168,6 @@ class TestSpec003Jobs:
         # mock seam（真 worker 是独立进程、丢失 monkeypatch）
         with monkeypatch.context() as mp:
             mp.setattr(executor, "_worker_pool", _SerialPool)
-            mp.setattr(executor, "_file_worker",
-                       lambda payload: run_mutation(
-                           payload["file"], payload["project_root"],
-                           budget=payload["budget"], timeout_s=payload["timeout_s"],
-                           tests_glob=payload["tests_glob"],
-                           precomputed_baseline=payload["baseline"]))
             mp.setattr(runner_mod, "_run_gut_on_project",
                        lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
             result = executor.run_mutation_files(

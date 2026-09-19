@@ -126,8 +126,9 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 def cmd_mutation(args: argparse.Namespace) -> int:
     files = args.files
+    multi_concurrency = len(files) > 1 or args.jobs is not None
     try:
-        if len(files) == 1:
+        if not multi_concurrency:
             result = run_mutation(
                 file_path=files[0],
                 project_root=args.project_root,

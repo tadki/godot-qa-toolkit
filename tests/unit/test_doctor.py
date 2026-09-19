@@ -337,3 +337,54 @@ exit 0
         assert "pip install -e" in text
         assert "--break-system-packages" in text
         assert "externally-managed" in text
+
+
+class TestInstallShPathInjection:
+    """SEE-1319 LOW-1：TOOLKIT_ROOT 含单引号/空格时验证行不得语法断裂。"""
+
+    REPO = Path(__file__).parent.parent.parent
+    SCRIPT = REPO / "scripts" / "install.sh"
+
+    def test_single_quote_in_path_verify_still_passes(self, tmp_path):
+        # 工具树路径含单引号——验证行必须经 env 传参，不能拼进 python 源码。
+        quoted = tmp_path / "it's-a-worktree"
+        tree = quoted / ".dev" / "qa-toolkit"
+        (tree / "src" / "godot_qa_toolkit").mkdir(parents=True)
+        (tree / "scripts").mkdir()
+        (tree / "pyproject.toml").write_text("[project]\n")
+        (tree / "src" / "godot_qa_toolkit" / "__init__.py").write_text("")
+        shutil.copy2(self.SCRIPT, tree / "scripts" / "install.sh")
+
+        stub_dir = tmp_path / "stubbin2"
+        stub_dir.mkdir()
+        stub = stub_dir / "python3"
+        # stub pip：安装成功；verify 段 python3 -c 用 stub 的 godot_qa_toolkit
+        # 替身模块（放在 stubbin2 下模拟 import 解析到本工作树 src）。
+        stub.write_text('''#!/usr/bin/env bash
+if [ "$3" = "install" ]; then exit 0; fi
+if [ "$1" = "-c" ]; then
+  # 用绝对路径调真实 python3——递归调 python3 会命中本 stub 造成 fork 炸弹。
+  PYTHONPATH="$GQT_STUB_SRC" /usr/bin/python3 -c "$2"
+  exit $?
+fi
+exit 0
+''')
+        stub.chmod(0o755)
+        fake_pkg = tree / "src" / "godot_qa_toolkit"
+        # stub 的真实 python3 不在 PATH 首位时用系统 python3 执行 -c 段，
+        # 通过 PYTHONPATH 指向本工作树 src 让 import 解析成立。
+        env = {"PATH": f"{stub_dir}:{os.environ['PATH']}",
+               "HOME": str(tmp_path),
+               "GQT_STUB_SRC": str(tree / "src"),
+               "PYTHONPATH": str(tree / "src")}
+        r = subprocess.run(["bash", str(tree / "scripts" / "install.sh")],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, f"verify failed on single-quote path: {r.stderr}"
+        assert "done" in r.stdout
+
+    def test_verify_line_uses_env_var_not_string_interp(self):
+        # 契约：脚本验证段不得再把 $TOOLKIT_ROOT 直接插进 python -c 单引号表达式。
+        text = self.SCRIPT.read_text()
+        assert "GQT_TOOLKIT_ROOT" in text
+        # 拼插反模式必须消除（单引号 python 表达式内的 $ 展开）
+        assert "'$TOOLKIT_ROOT/src'" not in text

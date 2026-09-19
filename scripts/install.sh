@@ -35,6 +35,14 @@ if ! python3 -m pip install -e "$TOOLKIT_ROOT"; then
 fi
 
 echo "[install.sh] verifying..."
-python3 -c "import godot_qa_toolkit, os; p=os.path.dirname(godot_qa_toolkit.__file__); print(f'import resolves to: {p}'); assert p.startswith('$TOOLKIT_ROOT/src'), 'import does NOT resolve to this worktree'"
+# 路径经环境变量传入——不经字符串拼接进 Python 源码（LOW-1：$TOOLKIT_ROOT
+# 含单引号时旧写法拼断单引号字符串导致 SyntaxError 伪失败）。
+GQT_TOOLKIT_ROOT="$TOOLKIT_ROOT" python3 -c "
+import os
+p = os.path.dirname(__import__('godot_qa_toolkit').__file__)
+print(f'import resolves to: {p}')
+root = os.environ['GQT_TOOLKIT_ROOT'] + '/src'
+assert p.startswith(root), 'import does NOT resolve to this worktree'
+"
 
 echo "[install.sh] done. Run 'gqt doctor' to confirm ok status."

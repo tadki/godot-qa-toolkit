@@ -27,327 +27,30 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
-from gdtoolkit.parser import parser as gdtoolkit_parser
+# 变异算子机制在 ops.py（runner <800 行约束拆分）；re-export 保持既有
+# import / monkeypatch 名称空间稳定。
+from .ops import (  # noqa: F401
+    Mutant,
+    _apply_arm_swap,
+    _apply_mutation,
+    _apply_mutation_fallback,
+    _collect_mutations,
+    _cond_span,
+    _line_offsets,
+    _span_mutants_for,
+    _span_token_ops,
+    _subtree_has_mutable_node,
+    _ternary_mutants,
+    _token_mutants_for,
+    _split_invalid_mutants,
+    _token_pos,
+    _tree_depth_walk,
+    mk_guard_not,
+)
 
-# ---------------------------------------------------------------------------
-# 变异算子表
-# ---------------------------------------------------------------------------
-
-# AOR: 算术运算符互换（两两排列足够——加法/减法/乘法/除法）
-_ARITHMETIC_MUTATIONS = {
-    "+": ["-", "*", "/"],
-    "-": ["+", "*", "/"],
-    "*": ["+", "-", "/"],
-    "/": ["+", "-", "*"],
-}
-
-# ROR: 关系运算符互换（保语义对称性——等价类中最常见的陷阱是边界）
-_COMPARISON_MUTATIONS = {
-    "==": ["!=", "<=", ">="],
-    "!=": ["==", "<", ">"],
-    "<": ["<=", "==", ">="],
-    "<=": ["<", "==", ">"],
-    ">": [">=", "==", "<="],
-    ">=": [">", "==", "<"],
-}
-
-# 第二梯队：逻辑/成员/类型（SEE-1312 短板实测：裸条件守卫判别力无机器判据）
-_LOGICAL_MUTATIONS = {"and": ["or"], "or": ["and"]}
-# 'not in' 的 not_in_op 节点无子 Token（无位置信息）——只支持 in→not in 方向
-_MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
-
-# 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
-_CONSTANT_MUTATIONS = {
-    "0": ["1", "-1"],
-    "1": ["0", "-1"],
-    "true": ["false"],
-    "false": ["true"],
-}
-
-# 守卫取反去重：条件子树含这些节点（自带可变异算子）时，守卫取反冗余——跳过。
-_MUTABLE_COND_NODES = {
-    "arith_expr", "comparison", "asless_comparison",
-    "and_test", "asless_and_test", "or_test", "asless_or_test",
-    "content_test", "type_test", "asless_actual_not_test",
-    "test_expr", "unary_expr",
-}
-
-
-@dataclass(frozen=True)
-class Mutant:
-    file: str
-    line: int
-    column: int
-    operator: str
-    original: str
-    mutated: str
-    kind: str  # "AOR" | "ROR" | "UOI" | "boundary" | "TERNARY" | "GUARD_NOT" | "LOGICAL" | "MEMBERSHIP" | "IS_NOT"
-    start_pos: int = -1  # span 替换起点（gather_metadata 偏移）；-1 = 退回 line/column
-    end_pos: int = -1    # span 替换终点（不含）
-
-
-def _tree_depth_walk(node, callback, depth=0):
-    """Breadth/depth-neutral walk over a lark Tree."""
-    callback(node, depth)
-    for child in getattr(node, "children", []):
-        _tree_depth_walk(child, callback, depth + 1)
-
-
-def _line_offsets(src: str) -> list[int]:
-    offs = [0]
-    for line in src.splitlines(keepends=True):
-        offs.append(offs[-1] + len(line))
-    return offs
-
-
-def _token_pos(offs: list[int], token) -> int:
-    return offs[token.line - 1] + token.column - 1
-
-
-def _subtree_has_mutable_node(node) -> bool:
-    """守卫取反去重：条件子树是否含自带可变异算子的节点。"""
-    if hasattr(node, "data") and node.data in _MUTABLE_COND_NODES:
-        return True
-    return any(_subtree_has_mutable_node(c) for c in getattr(node, "children", []))
-
-
-def _cond_span(src: str, offs: list[int], cond, if_tok, else_pos: int) -> tuple[int, int]:
-    """三元条件 span：cond 可能是 Token（简单名，无 meta）——此时取 if/else 之间。"""
-    meta = getattr(cond, "meta", None)
-    if meta is not None and not meta.empty:
-        return meta.start_pos, meta.end_pos
-    return _token_pos(offs, if_tok) + len("if"), else_pos
-
-
-def _span_token_ops(src: str, offs: list[int], node, table: dict, kind: str) -> list[Mutant]:
-    """对 node 的直接子 Token 做表驱动替换（LOGICAL/MEMBERSHIP 共用形态）。"""
-    mutants = []
-    for child in node.children:
-        tok = getattr(child, "value", None)
-        if tok not in table:
-            continue
-        pos = _token_pos(offs, child)
-        for m in table[tok]:
-            mutants.append(Mutant(
-                file="", line=child.line, column=child.column, operator=tok,
-                original=tok, mutated=m, kind=kind, start_pos=pos, end_pos=pos + len(tok),
-            ))
-    return mutants
-
-
-def _collect_mutations(src: str, file_path: str) -> list[Mutant]:
-    """从 gdtoolkit lark AST（gather_metadata）收集全部变异点。
-
-    span 定位：Tree.meta 提供 start_pos/end_pos（元数据模式），Token 用
-    line/column 换算偏移。每 mutant 携带 span，_apply_mutation 做精确替换。
-    """
-    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
-    offs = _line_offsets(src)
-    mutants: list[Mutant] = []
-
-    def visit(node, depth=0):
-        if not hasattr(node, "data"):
-            return
-        data = node.data
-        mutants.extend(_span_mutants_for(src, offs, node, data))
-        mutants.extend(_token_mutants_for(src, offs, node, data))
-
-    _tree_depth_walk(tree, visit)
-    # 填充 file 字段（_span/_token_mutants_for 无法感知 file_path）
-    return [
-        Mutant(file=file_path, line=m.line, column=m.column, operator=m.operator,
-               original=m.original, mutated=m.mutated, kind=m.kind,
-               start_pos=m.start_pos, end_pos=m.end_pos)
-        for m in mutants
-    ]
-
-
-def _span_mutants_for(src: str, offs: list[int], node, data: str) -> list[Mutant]:
-    """span 系变异点（依赖 Tree.meta 的 start/end_pos）。"""
-    meta = getattr(node, "meta", None)
-    if meta is None or meta.empty:
-        return []
-    s, e = meta.start_pos, meta.end_pos
-    line, col = meta.line, meta.column
-    out: list[Mutant] = []
-
-    def mk(operator, original, mutated, kind, ln, cl, sp, ep):
-        out.append(Mutant(file="", line=ln, column=cl, operator=operator,
-                          original=original, mutated=mutated, kind=kind,
-                          start_pos=sp, end_pos=ep))
-
-    if data == "test_expr":
-        out.extend(_ternary_mutants(src, offs, node, mk))
-    elif data in ("if_branch", "elif_branch") and node.children:
-        mk_guard_not(mk, node.children[0], "if", "if not")
-    elif data == "while_stmt" and node.children:
-        cond = node.children[0]
-        if hasattr(cond, "data"):
-            mk_guard_not(mk, cond, "while", "while not")
-    elif data == "type_test":
-        # is 取反：not (x is T) 包裹整个 type_test span
-        mk("is_negate", "is", "not (is)", "IS_NOT", line, col, s, e)
-    elif data in ("and_test", "asless_and_test", "or_test", "asless_or_test"):
-        out.extend(_span_token_ops(src, offs, node, _LOGICAL_MUTATIONS, "LOGICAL"))
-    elif data == "content_test":
-        # 成员测试：'in' 是直接子 Token（not in 的 not_in_op 无位置，跳过）
-        out.extend(_span_token_ops(src, offs, node, _MEMBERSHIP_MUTATIONS, "MEMBERSHIP"))
-
-    return out
-
-
-def _ternary_mutants(src: str, offs: list[int], node, mk) -> list[Mutant]:
-    """三元表达式（children = [arm1, 'if', cond, 'else', arm2]）：cond 取反 + 两臂交换。"""
-    out: list[Mutant] = []
-    children = node.children
-    if len(children) != 5:
-        return out
-    if_tok, else_tok = children[1], children[3]
-    cond = children[2]
-    meta = node.meta
-    s, e = meta.start_pos, meta.end_pos
-    if_pos = _token_pos(offs, if_tok)
-    else_pos = _token_pos(offs, else_tok)
-    cond_s, cond_e = _cond_span(src, offs, cond, if_tok, else_pos)
-    if cond_s < cond_e:
-        mk("cond_not", "if", "if not", "TERNARY", if_tok.line, if_tok.column,
-           cond_s, cond_e)
-    # 两臂交换：span = 整个三元；arm 边界由 collect 端 AST 锚点算出并以
-    # 'arm1|arm2' 形式编码进 original（apply 端零猜测——arm 含 ' if '/' else '
-    # 字符串字面量时 regex 会误切，硬ener 反例实证）。
-    a1 = src[s:if_pos].strip()
-    a2 = src[else_pos + len("else"):e].strip()
-    if a1 and a2:
-        mk("arm_swap", f"{a1}\x00{a2}", f"{a2}\x00{a1}", "TERNARY",
-           meta.line, meta.column, s, e)
-    return out
-
-
-def mk_guard_not(mk, cond, original: str, mutated: str) -> None:
-    """守卫取反：cond 不含自带可变异算子时产 mutant（含则冗余跳过）。"""
-    if not (hasattr(cond, "meta") and not getattr(cond.meta, "empty", True)):
-        return
-    if _subtree_has_mutable_node(cond):
-        return
-    mk("guard_not", original, mutated, "GUARD_NOT",
-       cond.meta.line, cond.meta.column, cond.meta.start_pos, cond.meta.end_pos)
-
-
-def _token_mutants_for(src: str, offs: list[int], node, data: str) -> list[Mutant]:
-    """token 系变异点（算术/比较/常量/UOI——直接子 Token 值匹配）。"""
-    out: list[Mutant] = []
-
-    def mk(operator, original, mutated, kind, ln, cl, sp, ep):
-        out.append(Mutant(file="", line=ln, column=cl, operator=operator,
-                          original=original, mutated=mutated, kind=kind,
-                          start_pos=sp, end_pos=ep))
-
-    if data in ("arith_expr", "comparison", "asless_comparison"):
-        table = (_ARITHMETIC_MUTATIONS if "arith" in data else _COMPARISON_MUTATIONS)
-        kind = "AOR" if "arith" in data else "ROR"
-        for child in node.children:
-            tok = getattr(child, "value", None)
-            if tok not in table:
-                continue
-            pos = _token_pos(offs, child)
-            for m in table[tok]:
-                mk(tok, tok, m, kind, child.line, child.column, pos, pos + len(tok))
-    elif data == "asless_actual_not_test" and node.children:
-        # UOI 经典删 not：第一个子 Token 是 'not'（值匹配确保不是 not in——
-        # 'not in' 走 content_test/not_in_op 路径，不会到这）
-        first = node.children[0]
-        if getattr(first, "value", None) == "not":
-            pos = _token_pos(offs, first)
-            mk("not", "not", "", "UOI", first.line, first.column, pos, pos + len("not"))
-
-    out.extend(_constant_token_mutants(src, offs, node))
-    return out
-
-
-def _constant_token_mutants(src: str, offs: list[int], node) -> list[Mutant]:
-    """常量 Token 级精确匹配：NUMBER/关键字 NAME Token 值全等才产变异点。"""
-    out: list[Mutant] = []
-    for child in getattr(node, "children", []):
-        val = getattr(child, "value", None)
-        if (val in _CONSTANT_MUTATIONS
-                and getattr(child, "type", "") in ("NUMBER", "NAME")):
-            pos = _token_pos(offs, child)
-            for m in _CONSTANT_MUTATIONS[val]:
-                out.append(Mutant(file="", line=child.line, column=child.column,
-                                  operator=val, original=val, mutated=m, kind="boundary",
-                                  start_pos=pos, end_pos=pos + len(val)))
-    return out
-
-
-# wrap-not（not包裹类 mutant 的 apply 形态）：cond_not / guard_not / is_negate 同构
-_WRAP_NOT_OPERATORS = ("cond_not", "guard_not", "is_negate")
-
-
-def _wrap_not_span(src: str, mutant: Mutant) -> str:
-    return (
-        src[:mutant.start_pos]
-        + "not (" + src[mutant.start_pos:mutant.end_pos] + ")"
-        + src[mutant.end_pos:]
-    )
-
-
-def _apply_mutation(src: str, mutant: Mutant) -> str:
-    """应用 mutant：优先 span 精确替换（SEE-1312），退化 line/column 单点替换。"""
-    if mutant.start_pos >= 0 and mutant.end_pos >= mutant.start_pos:
-        if mutant.operator in _WRAP_NOT_OPERATORS:
-            # 在 span 前插 'not ('，span 后补 ')'——span 为 cond/type_test 全文
-            return _wrap_not_span(src, mutant)
-        if mutant.operator == "arm_swap":
-            return _apply_arm_swap(src, mutant)
-        # 通用 token 替换（AOR/ROR/LOGICAL/MEMBERSHIP/UOI/boundary）
-        return src[:mutant.start_pos] + mutant.mutated + src[mutant.end_pos:]
-
-    return _apply_mutation_fallback(src, mutant)
-
-
-def _apply_arm_swap(src: str, mutant: Mutant) -> str:
-    # span = 整个三元；arm 边界已由 collect 端以 '\x00' 编码在 original 中
-    # （arm 文本可能含 ' if '/' else ' 字面量——regex 切分会误伤，改精确拼接）。
-    # cond 文本从 span 内两锚点之间截取：cond 恒在 arm1 与 'else' 之间，用
-    # 'if' 关键字在 span 内【最后】出现位置之后到 'else' 关键字【最后】出现
-    # 位置之前——但字面量同样可含关键字，故 cond 一并编码：original 为
-    # 'arm1\x00arm2'，cond 由 span 文本去掉两臂后剩余段恢复。
-    arm1, arm2 = mutant.original.split("\x00", 1)
-    text = src[mutant.start_pos:mutant.end_pos]
-    a1 = text.find(arm1)
-    a2 = text.rfind(arm2)
-    if a1 < 0 or a2 < 0:
-        raise ValueError(f"ternary arm_swap anchors missing in span: {text[:80]!r}")
-    cond = text[a1 + len(arm1):a2].strip()
-    # 去 cond 与两臂之间的 'if'/'else' 关键字（collect 端 anchor 含它们）
-    for kw in ("if", "else"):
-        if cond.startswith(kw):
-            cond = cond[len(kw):].strip()
-        if cond.endswith(kw):
-            cond = cond[:-len(kw)].strip()
-    return src[:mutant.start_pos] + f"{arm2} if {cond} else {arm1}" + src[mutant.end_pos:]
-
-
-def _apply_mutation_fallback(src: str, mutant: Mutant) -> str:
-    """退化路径（无 span 的 Mutant——外部构造的测试用例）：line/column 定位。"""
-    lines = src.splitlines(keepends=True)
-    if mutant.line <= 0 or mutant.line > len(lines):
-        raise ValueError(f"mutant line out of range: {mutant.line}")
-    target_line = lines[mutant.line - 1]
-    col = mutant.column
-    original = mutant.original
-    if not target_line[col - 1:col - 1 + len(original)] == original:
-        idx = target_line.find(original)
-        if idx < 0:
-            raise ValueError(f"cannot locate '{original}' at {mutant.file}:{mutant.line}")
-        col = idx + 1
-    lines[mutant.line - 1] = (
-        target_line[:col - 1] + mutant.mutated + target_line[col - 1 + len(original):]
-    )
-    return "".join(lines)
+from .inject import host_script_res, mutant_env, seed_host_script
 
 
 # GUT 的命令行入口必须以 res:// 形式传给 `godot -s`：Godot 对绝对路径的 -s
@@ -397,6 +100,9 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     校验（文件系统检查），加载失败由 _looks_like_godot_launch_failure 识别。
     tests_glob（SPEC-009）：受影响测试子集（如 res://tests/save/），替代全量
     -gdir=res://tests/ 以压缩单轮成本。
+    SEE-1321 SPEC-006/007：子进程 env 注入（XDG_DATA_HOME / GQT_MUTATION_CFG）
+    与入口脚本切换经模块级 _ACTIVE_ENV/_ACTIVE_SCRIPT 传递——保持函数签名
+    向后兼容（既有令牌测试以 3 参 fake 替换本函数）。
     """
     gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
     if not os.path.isfile(gut_fs):
@@ -414,16 +120,28 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
         ]
     else:
         extra = [f"-gdir={gdir}"]
+    env = dict(os.environ)
+    if _ACTIVE_ENV:
+        env.update(_ACTIVE_ENV)
     r = subprocess.run(
         ["godot", "--headless", "--path", _godot_project_path(project_root),
-         "-s", GUT_SCRIPT_RES_PATH, *extra, "-gexit"],
+         "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],
         capture_output=True,
         text=True,
         timeout=timeout_s,
         cwd=project_root,
+        env=env,
     )
-    tail = r.stdout[-2000:] if r.stdout else r.stderr[-1000:]
+    # 失败测试名解析需要完整运行流（'-*', '* test_x'、[Failed] 行）——2000
+    # 字符的窗口在长断言输出下会把失败行挤出窗外导致 kill 判定失真（
+    # SEE-1321 实测 pricing_resolver or→and 29 项新失败被吞成 survived）。
+    tail = r.stdout[-200000:] if r.stdout else r.stderr[-10000:]
     return r.returncode, tail
+
+
+# 子进程环境/入口脚本的活动状态（mutant 循环内动态切换，见 _run_single_mutant）
+_ACTIVE_ENV: dict | None = None
+_ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
 
 
 def _parse_failing_tests(gut_output: str) -> set[str]:
@@ -474,18 +192,6 @@ def _run_error_result(file: str, error: str, failure_reason: str) -> dict:
     }
 
 
-def _split_invalid_mutants(src: str, mutants: list[Mutant]) -> tuple[list[Mutant], list[Mutant]]:
-    """SPEC-010：invalid_mutant 语法预检——变异产物不合法 = 算子 bug，提前剔除。"""
-    valid, invalid = [], []
-    for m in mutants:
-        try:
-            gdtoolkit_parser.parse(_apply_mutation(src, m))
-            valid.append(m)
-        except Exception:
-            invalid.append(m)
-    return valid, invalid
-
-
 def _valid_mutants(src: str, mutants: list[Mutant]) -> list[Mutant]:
     return _split_invalid_mutants(src, mutants)[0]
 
@@ -508,6 +214,7 @@ def run_mutation(
     timeout_s: int = 60,
     dry_run: bool = False,
     tests_glob: str | None = None,
+    precomputed_baseline: dict | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -516,12 +223,18 @@ def run_mutation(
     而非 exit code——pre-existing failure 不算 killed。
     dry_run（SPEC-009）：只清点变异点不跑 GUT——CI 快闸与成本评估入口。
     tests_glob（SPEC-009）：受影响测试子集，passed to _run_gut_on_project。
+    precomputed_baseline（SEE-1321 SPEC-008）：同次运行内共享的 baseline
+    快照 {rc, tail, elapsed}——单进程冷启动产物，自适应 timeout 锚点。
     返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
     所有 mutant 均被测试杀死。
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"mutation target not found: {file_path}")
+
+    if tests_glob is None:
+        tests_glob = _auto_scan_tests_glob(str(path), project_root)
+    scoped = tests_glob is not None
 
     original_src = path.read_text(encoding="utf-8")
     backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
@@ -532,26 +245,31 @@ def run_mutation(
         return _setup_error_result(str(path), e)
 
     if dry_run:
-        return _dry_run_result(str(path), mutants, budget)
+        return _dry_run_result(str(path), mutants, budget, scoped)
 
     if not mutants:
-        return _no_sites_result(str(path))
+        return _no_sites_result(str(path), scoped)
 
     mutants = mutants[:budget]
     # budget 截断后可能为空（budget=0 / 极小预算）——零 mutant 不得触发
     # baseline GUT（硬ener 反例实证：白付一轮 108s baseline）。
     if not mutants:
-        return _no_sites_result(str(path))
+        return _no_sites_result(str(path), scoped)
     results, invalid_count = _record_invalid_mutants(original_src, mutants)
 
-    # 缺陷1 兜底恢复守卫：详见 _interrupt_guard docstring。
+    # 缺陷1 兜底恢复守卫（SEE-1319 与 SEE-1321 内存注入共存）：内存注入路径
+    # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。
     with _interrupt_guard(path, backup):
         outcome = _run_mutant_loop_with_aborts(
-            path, project_root, original_src, backup, mutants, tests_glob, timeout_s, results)
+            path, project_root, original_src, backup, mutants, tests_glob,
+            timeout_s, results, precomputed_baseline)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
-    return _mutation_report(str(path), *outcome, invalid_count, budget, results)
+    counts, baseline_reused = outcome
+
+    return _mutation_report(str(path), *counts, invalid_count, budget,
+                            results, scoped, baseline_reused)
 
 
 def make_sigterm_restore_handler(file_path: str, backup: str):
@@ -609,6 +327,26 @@ class _interrupt_guard:
         return False
 
 
+def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
+    """SPEC-001：目标 → 扫描 tests/ 引用子集；零命中退回全量（scoped=False）。"""
+    try:
+        from .testscan import derive_tests_glob
+        return derive_tests_glob(_res_path_of(file_path, project_root),
+                                 Path(project_root) / "tests")
+    except Exception as e:
+        print(f"auto scan failed, falling back to full suite: {e}",
+              file=sys.stderr)
+        return None
+
+
+def _res_path_of(file_path: str, project_root: str) -> str:
+    real = Path(file_path).resolve().as_posix()
+    root = Path(project_root).resolve().as_posix()
+    rel = real[len(root):].lstrip("/") if real.startswith(root) \
+        else Path(file_path).name
+    return "res://" + rel
+
+
 def _setup_error_result(file: str, err) -> dict:
     return {
         "tool": "mutation",
@@ -618,23 +356,26 @@ def _setup_error_result(file: str, err) -> dict:
     }
 
 
-def _no_sites_result(file: str) -> dict:
+def _no_sites_result(file: str, scoped: bool | None = None) -> dict:
     return {
         "tool": "mutation",
         "ok": True,
         "summary": {"file": file, "mutants": 0, "killed": 0, "survived": 0,
-                    "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites"},
+                    "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
+                    "scoped": bool(scoped)},
         "failures": [],
     }
 
 
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
-                                 mutants, tests_glob, timeout_s, results):
-    """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回五元计数。"""
+                                 mutants, tests_glob, timeout_s, results,
+                                 precomputed_baseline=None):
+    """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回计数。"""
     try:
         return _run_mutant_loop(
             path, project_root, original_src, backup,
-            _valid_mutants(original_src, mutants), tests_glob, timeout_s, results,
+            _valid_mutants(original_src, mutants), tests_glob, timeout_s,
+            results, precomputed_baseline,
         )
     except subprocess.TimeoutExpired:
         return _run_error_result(
@@ -653,7 +394,8 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
 
 def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      run_error_count: int, suspect_count: int, invalid_count: int,
-                     budget: int, results: list[dict]) -> dict:
+                     budget: int, results: list[dict], scoped: bool = False,
+                     baseline_reused: bool = False) -> dict:
     total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
@@ -675,6 +417,8 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
             "kill_rate": round(kill_rate, 4),
             "budget": budget,
             "adaptive_timeout_s": _adaptive_timeout,
+            "scoped": scoped,
+            "baseline_reused": baseline_reused,
         },
         "failures": failures,
     }
@@ -684,7 +428,8 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
 _adaptive_timeout = 0
 
 
-def _dry_run_result(file: str, mutants: list[Mutant], budget: int) -> dict:
+def _dry_run_result(file: str, mutants: list[Mutant], budget: int,
+                    scoped: bool | None = None) -> dict:
     """SPEC-009：清点模式——零 GUT 调用，mutant 清单即产出。"""
     kinds: dict[str, int] = {}
     for m in mutants[:budget]:
@@ -693,7 +438,7 @@ def _dry_run_result(file: str, mutants: list[Mutant], budget: int) -> dict:
         "tool": "mutation",
         "ok": True,
         "summary": {"file": file, "mutants": len(mutants[:budget]),
-                    "dry_run": True, "kinds": kinds},
+                    "dry_run": True, "kinds": kinds, "scoped": bool(scoped)},
         "failures": [],
     }
 
@@ -708,9 +453,9 @@ def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int) -> 
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
-    results: list[dict],
-) -> tuple[int, int, int, int, int]:
-    """逐 mutant 跑 GUT 并分类判定；返回 (killed, survived, timeout, run_error, suspect) 计数。"""
+    results: list[dict], precomputed_baseline: dict | None = None,
+) -> tuple[tuple[int, int, int, int, int], bool]:
+    """逐 mutant 跑 GUT 并分类判定；返回 ((killed, survived, timeout, run_error, suspect), baseline_reused)。"""
     global _adaptive_timeout
     killed = survived = timeout_count = run_error_count = suspect_count = 0
 
@@ -720,11 +465,21 @@ def _run_mutant_loop(
 
         # Baseline：原文件的 GUT 结果（失败测试名集合）。pre-existing 失败
         # 不属于任何 mutant——kill 判定只看相对 baseline 的【新增】失败。
-        # Revy QA retest 实证：baseline 必然花最久（实测项目 ~108s），默认
-        # --timeout 60 下 TimeoutExpired 漏网成原始 traceback（无统一 JSON）——
-        # 与 per-mutant 循环的 timeout 同款处理：归 run_error JSON 契约。
-        baseline_rc, baseline_tail, baseline_elapsed = _run_baseline(
-            project_root, tests_glob, timeout_s)
+        # SEE-1321 SPEC-008：同次运行内可复用上游单进程冷启动产出的 baseline
+        # 快照（同一份代码状态）；无快照时亲自跑。快照 elapsed 也是自适应
+        # timeout 锚（SPEC-005：并发前锚定，worker 不采并发期耗时）。
+        if precomputed_baseline is not None:
+            baseline_rc = int(precomputed_baseline["rc"])
+            baseline_tail = str(precomputed_baseline["tail"])
+            baseline_elapsed = float(precomputed_baseline["elapsed"])
+            baseline_reused = True
+        else:
+            # Revy QA retest 实证：baseline 必然花最久（实测项目 ~108s），默认
+            # --timeout 60 下 TimeoutExpired 漏网成原始 traceback（无统一 JSON）——
+            # 与 per-mutant 循环的 timeout 同款处理：归 run_error JSON 契约。
+            baseline_rc, baseline_tail, baseline_elapsed = _run_baseline(
+                project_root, tests_glob, timeout_s)
+            baseline_reused = False
         # SPEC-009 自适应 timeout：per-mutant 上限 = baseline 耗时 × k（不降
         # 低于调用方显式 timeout——只放大，不收紧）。
         _adaptive_timeout = max(timeout_s, int(baseline_elapsed * _TIMEOUT_SCALE) + 1)
@@ -735,35 +490,52 @@ def _run_mutant_loop(
         baseline_failures = _parse_failing_tests(baseline_tail)
         baseline_dirty = bool(baseline_failures)
 
-        for m in mutants:
-            verdict = _run_single_mutant(m, path, project_root, original_src, backup,
-                                         tests_glob, baseline_failures, baseline_dirty)
-            results.append(verdict)
+        host = seed_host_script(str(Path(project_root)))
+        try:
+            for seq, m in enumerate(mutants):
+                verdict = _run_single_mutant(m, path, project_root, original_src,
+                                             backup, tests_glob, seq,
+                                             baseline_failures, baseline_dirty)
+                results.append(verdict)
+        finally:
+            host.unlink(missing_ok=True)
 
     tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0, "suspect": 0}
     for r in results:
         if r["verdict"] in tally:
             tally[r["verdict"]] += 1
-    return (tally["killed"], tally["survived"], tally["timeout"],
-            tally["run_error"], tally["suspect"])
+    return ((tally["killed"], tally["survived"], tally["timeout"],
+             tally["run_error"], tally["suspect"]), baseline_reused)
 
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
-                       backup: str, tests_glob: str | None,
+                       backup: str, tests_glob: str | None, seq: int,
                        baseline_failures: set[str], baseline_dirty: bool) -> dict:
-    """变异 → 跑 GUT → 分类 → 恢复原文件；返回该 mutant 的明细记录。"""
+    """内存变异注入 → 跑 GUT → 分类；磁盘目标文件全程保持原始内容（SPEC-007）。"""
+    global _ACTIVE_ENV, _ACTIVE_SCRIPT
     mutated_src = _apply_mutation(original_src, m)
-    path.write_text(mutated_src, encoding="utf-8")
+    env_extra, cfg_path = mutant_env(_res_path_of(str(path), str(Path(project_root))),
+                                     mutated_src, str(Path(project_root)), seq)
+    _ACTIVE_ENV = env_extra
+    _ACTIVE_SCRIPT = host_script_res()
     try:
-        rc, tail = _run_gut_on_project(
-            project_root, timeout_s=_adaptive_timeout, tests_glob=tests_glob)
-        verdict = _classify_mutant_run(m, rc, tail, baseline_failures, baseline_dirty)
-    except subprocess.TimeoutExpired:
-        verdict = _mutant_record(m, "timeout",
-                                 f"GUT timed out after {m.kind} {m.original}→{m.mutated}")
+        try:
+            rc, tail = _run_gut_on_project(
+                project_root, timeout_s=_adaptive_timeout, tests_glob=tests_glob)
+            if rc == 3 and "GQT_INJECT_FAIL" in tail:
+                # 注入失败绝不能当 kill/survive——宿主没把变异送进引擎，
+                # 跑的是原代码，任何判定都是假证据。
+                return _mutant_record(m, "run_error",
+                                      f"memory injection failed: {tail.strip()[:200]}")
+            verdict = _classify_mutant_run(m, rc, tail, baseline_failures,
+                                           baseline_dirty)
+        except subprocess.TimeoutExpired:
+            verdict = _mutant_record(m, "timeout",
+                                     f"GUT timed out after {m.kind} {m.original}→{m.mutated}")
     finally:
-        # 立即恢复，保证下一个是基于原始代码变异。
-        path.write_text(backup, encoding="utf-8")
+        _ACTIVE_ENV = None
+        _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
+        Path(cfg_path).unlink(missing_ok=True)
     return verdict
 
 

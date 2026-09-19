@@ -84,6 +84,10 @@ class TestSpec006XdgIsolation:
 
     def test_no_env_leakage_after_loop(self, tmp_path, monkeypatch):
         proj, files = _write_project(tmp_path)
+        # CI 密闭：无 godot——patch GUT 调用 seam，行为断言只看模块态复位
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
         run_mutation(files[0], proj, budget=1)
         assert runner_mod._ACTIVE_ENV is None
         assert runner_mod._ACTIVE_SCRIPT == runner_mod.GUT_SCRIPT_RES_PATH
@@ -178,6 +182,10 @@ class TestSpec003Jobs:
 
     def test_no_prewarm_for_serial(self, tmp_path, monkeypatch):
         proj, files = _write_project(tmp_path)
+        # CI 密闭：串行单文件路径内部 run_mutation 的 GUT 调用同样必须遮蔽
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
         calls = {"n": 0}
         monkeypatch.setattr(
             executor, "prewarm_import", lambda root: calls.__setitem__("n", calls["n"] + 1))

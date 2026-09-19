@@ -67,7 +67,12 @@ def run_mutation_files(
     tests_glob: str | None = None,
     jobs: int | None = None,
 ) -> dict:
-    """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。"""
+    """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
+
+    dry_run（SPEC-009）：只清点不跑 GUT——预热、baseline、worker mutant 轮
+    全部短路（Refacty 移交缺陷：此前 dry_run 不进 worker 与父层路径会
+    真实跑 GUT，违反零 GUT 调用契约；硬化组 test_dry_run_* 实证据）。
+    """
     files = _group_by_file(files)
     if len(files) == 1 and (jobs is None or jobs <= 1):
         r = run_mutation(files[0], project_root, budget=budget,
@@ -76,6 +81,18 @@ def run_mutation_files(
         r["summary"].setdefault("jobs", 1)
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
+
+    if dry_run:
+        results = [
+            run_mutation(f, project_root, budget=budget,
+                         timeout_s=timeout_s, dry_run=True,
+                         tests_glob=tests_glob)
+            for f in files
+        ]
+        return {"tool": "mutation",
+                "ok": all(r["ok"] for r in results),
+                "jobs": 1,
+                "results": results}
 
     jobs = default_jobs(jobs)
     prewarm_import(project_root)

@@ -205,15 +205,21 @@ class _SerialPool:
 class TestSpec008BaselineReuse:
     def test_baseline_shared_across_files_same_glob(self, tmp_path, monkeypatch):
         proj, files = _write_project(tmp_path, files=("calc.gd", "other.gd"))
+        # SPEC-014 密闭化：替换 _worker_pool 避免真实 ProcessPoolExecutor 起
+        # 子进程（编排环境无 godot / 启动停滞 → pytest 挂起的第一疑因）
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
         monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
         calls = {"baseline": 0}
 
-        def fake(root, timeout_s=60, tests_glob=None):
-            if runner_mod._ACTIVE_ENV is None:
-                calls["baseline"] += 1
-            return (0, "pass")
+        def counting_snapshot(root, g, t):
+            calls["baseline"] += 1
+            return {"rc": 0, "tail": "", "elapsed": 5.0}
 
-        monkeypatch.setattr(runner_mod, "_run_gut_on_project", fake)
+        monkeypatch.setattr(
+            executor, "_run_baseline_snapshot", counting_snapshot)
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
         result = executor.run_mutation_files(
             files, proj, budget=1, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=1)

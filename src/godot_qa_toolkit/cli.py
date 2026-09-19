@@ -125,20 +125,30 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:
+    files = args.files
+    multi_concurrency = len(files) > 1 or args.jobs is not None
     try:
-        result = run_mutation(
-            file_path=args.file,
-            project_root=args.project_root,
-            budget=args.budget,
-            timeout_s=args.timeout,
-            dry_run=args.dry_run,
-            tests_glob=args.tests,
-        )
+        if not multi_concurrency:
+            result = run_mutation(
+                file_path=files[0],
+                project_root=args.project_root,
+                budget=args.budget,
+                timeout_s=args.timeout,
+                dry_run=args.dry_run,
+                tests_glob=args.tests,
+            )
+        else:
+            from .mutation.executor import run_mutation_files
+            result = run_mutation_files(
+                files, args.project_root, budget=args.budget,
+                timeout_s=args.timeout, dry_run=args.dry_run,
+                tests_glob=args.tests, jobs=args.jobs)
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",
             "ok": False,
-            "summary": {"file": args.file, "error": str(e)},
+            # 多文件场景报全部输入（仅报 files[0] 会误导为只缺第一个——LOW-6）
+            "summary": {"files": files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
     return _emit(result)
@@ -179,15 +189,19 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--max", type=int, default=15, help="fail threshold (default 15)")
     c.set_defaults(func=cmd_complexity)
 
-    m = sub.add_parser("mutation", help="mutation test a single .gd file")
-    m.add_argument("file", help="the .gd file to mutate")
+    m = sub.add_parser("mutation", help="mutation test one or more .gd files")
+    m.add_argument("files", nargs="+", help="the .gd file(s) to mutate")
     m.add_argument("--project-root", required=True, help="project root containing addons/gut/")
     m.add_argument("--budget", type=int, default=50, help="max mutants (default 50)")
     m.add_argument("--timeout", type=int, default=60, help="GUT timeout seconds (default 60)")
     m.add_argument("--dry-run", action="store_true",
                    help="list mutation sites without running GUT (SPEC-009)")
     m.add_argument("--tests", default=None,
-                   help="scoped GUT dir for affected-test subset, e.g. res://tests/save/ (SPEC-009)")
+                   help="scoped GUT dir for affected-test subset, e.g. res://tests/save/ (SPEC-009); "
+                        "omitted = auto-scan tests/ references, zero hits falls back to full suite "
+                        "(SEE-1321 SPEC-001/002)")
+    m.add_argument("--jobs", type=int, default=None,
+                   help="concurrent per-file workers, clamped to max(2, cpu//2) (SEE-1321 SPEC-003)")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

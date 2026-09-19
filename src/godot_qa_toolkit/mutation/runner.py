@@ -41,16 +41,16 @@ from .ops import (  # noqa: F401
     _line_offsets,
     _span_mutants_for,
     _span_token_ops,
+    _split_invalid_mutants,
     _subtree_has_mutable_node,
     _ternary_mutants,
     _token_mutants_for,
-    _split_invalid_mutants,
     _token_pos,
     _tree_depth_walk,
     mk_guard_not,
 )
 
-from .inject import host_script_res, mutant_env, seed_host_script
+from .inject import host_script_res, mutant_env, seed_host_script, wslpath_win
 
 
 # GUT 的命令行入口必须以 res:// 形式传给 `godot -s`：Godot 对绝对路径的 -s
@@ -81,13 +81,7 @@ def _godot_project_path(project_root: str) -> str:
     """
     if os.path.isabs(project_root):
         if project_root.startswith("/mnt/"):
-            try:
-                r = subprocess.run(["wslpath", "-w", project_root],
-                                   capture_output=True, text=True, timeout=10)
-                if r.returncode == 0 and r.stdout.strip():
-                    return r.stdout.strip()
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            return wslpath_win(project_root) or project_root
         return project_root
     return project_root
 
@@ -465,7 +459,8 @@ def _dry_run_result(file: str, mutants: list[Mutant], budget: int,
     }
 
 
-def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int) -> tuple[int, str, float]:
+def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
+                  ) -> tuple[int, str, float]:
     """跑 baseline 并计时；TimeoutExpired 由调用方按中止契约处理。"""
     t0 = time.monotonic()
     rc, tail = _run_gut_on_project(project_root, timeout_s=timeout_s, tests_glob=tests_glob)

@@ -28,7 +28,7 @@ _PREWARM_TIMEOUT_S = 300
 
 
 def default_jobs(jobs: int | None) -> int:
-    """jobs 钳制：显式 >0 取 min(jobs, 上限)；非法/缺省给上限。"""
+    """jobs 钳制：缺省给上限；显式值取 min(jobs, 上限) 且不低于 2。"""
     cap = max(2, (os.cpu_count() or 2) // 2)
     if jobs is None:
         return cap
@@ -182,7 +182,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             total = 0
         if total == 0:
             continue
-        glob = tests_glob or _auto_scan_glob(f, project_root)
+        glob = tests_glob or _auto_scan_tests_glob(f, project_root)
         baseline = baselines.get(glob)
         if baseline is None:
             # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
@@ -210,11 +210,6 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                 "baseline": baselines.get(glob),
             })
     return chunks
-
-
-def _auto_scan_glob(file_path: str, project_root: str) -> str | None:
-    """未显式 --tests 的文件在父层推导 scoped glob（与 worker 同口径）。"""
-    return _auto_scan_tests_glob(file_path, project_root)
 
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob):

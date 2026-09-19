@@ -10,7 +10,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-# res:// 引用字面量：preload("x") / load("x") / load("x") 三函数形态
+# res:// 引用字面量：preload("x") / load("x") 两函数形态（与 class_name
+# 标识符引用合计 SPEC-001 三形态）
 _RES_REF_PATTERN = re.compile(r'\b(?:preload|load)\s*\(\s*"([^"]+)"\s*\)')
 # class_name 标识符引用：按 .gd 文件名 stem 全词匹配（SaveManager ↔ save_manager.gd）
 _STEM_TOKEN_PATTERN = re.compile(r"\w+")
@@ -66,12 +67,6 @@ def _ref_hits_target(ref: str, target_res_path: str) -> bool:
     target_cf = target_res_path.casefold().strip()
     # 精确或后缀匹配；“路径+尾巴 .bak” 这类串改别的文件的字面量不算
     return ref_cf == target_cf or ref_cf.endswith("/" + target_cf.rsplit("res://", 1)[-1])
-
-
-def _res_suffix_match(res_refs: set[str], target_res_path: str) -> bool:
-    """res:// 引用按后缀匹配：preload 相对引用（autoload 场景）与绝对引用统一。"""
-    canon = _res_canonical(target_res_path)
-    return any(ref.endswith(canon) or canon.endswith(ref) for ref in res_refs)
 
 
 def derive_tests_glob(target_res_path: str, tests_dir: Path) -> str | None:

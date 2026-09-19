@@ -64,7 +64,9 @@ class Mutant:
     operator: str
     original: str
     mutated: str
-    kind: str  # "AOR" | "ROR" | "UOI" | "boundary" | "TERNARY" | "GUARD_NOT" | "LOGICAL" | "MEMBERSHIP" | "IS_NOT"
+    # kind 取值："AOR" | "ROR" | "UOI" | "boundary" | "TERNARY" | "GUARD_NOT"
+    #          | "LOGICAL" | "MEMBERSHIP" | "IS_NOT"
+    kind: str
     start_pos: int = -1  # span 替换起点（gather_metadata 偏移）；-1 = 退回 line/column
     end_pos: int = -1    # span 替换终点（不含）
 
@@ -323,8 +325,8 @@ def _apply_mutation_fallback(src: str, mutant: Mutant) -> str:
     return "".join(lines)
 
 
-
-def _split_invalid_mutants(src: str, mutants: list["Mutant"]) -> tuple[list["Mutant"], list["Mutant"]]:
+def _split_invalid_mutants(src: str, mutants: list["Mutant"]
+                           ) -> tuple[list["Mutant"], list["Mutant"]]:
     """SPEC-010：invalid_mutant 语法预检——变异产物不合法 = 算子 bug，提前剔除。"""
     valid: list[Mutant] = []
     invalid: list[Mutant] = []

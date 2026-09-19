@@ -93,10 +93,12 @@ func _init() -> void:
 """
 
 
-def _win_path(p: str) -> str:
-    """WSL 绝对路径转 win64 godot 可读形式；不可转换时原样返回。"""
-    if not p.startswith("/"):
-        return p
+def wslpath_win(p: str) -> str | None:
+    """WSL 绝对路径转 win64 形式（wslpath -w）；不可转换返回 None（调用方兜底）。
+
+    runner._godot_project_path 与本模块 _win_path 共用此原语（转换子进程
+    行为逐字段一致，勿分叉）。
+    """
     try:
         r = subprocess.run(["wslpath", "-w", p], capture_output=True,
                            text=True, timeout=10)
@@ -104,7 +106,14 @@ def _win_path(p: str) -> str:
             return r.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         pass
-    return p
+    return None
+
+
+def _win_path(p: str) -> str:
+    """WSL 绝对路径转 win64 godot 可读形式；不可转换时原样返回。"""
+    if not p.startswith("/"):
+        return p
+    return wslpath_win(p) or p
 
 
 def make_user_dir() -> str | None:

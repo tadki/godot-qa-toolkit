@@ -313,3 +313,113 @@ class TestRunMutationInterruptRecovery:
         with pytest.raises(KeyboardInterrupt):
             run_mutation(str(target), str(proj), budget=2)
         assert target.read_text() == before
+
+
+class TestSpec017InjectionFailureVisibility:
+    """§SPEC-017：注入失败不得吞成 survived。
+
+    实证（SEE-1348 §SPEC-016，godot-mcp tests/gd fixture）：注入宿主的
+    printerr 全落 stderr，而旧 _run_gut_on_project 在 stdout 非空时丢弃
+    stderr——rc==3 注入失败时 stdout 只有 73 字节引擎 banner，
+    "GQT_INJECT_FAIL in tail" 守卫永不命中，7 个变异（l82/l90/l97）被吞成
+    "only pre-existing failures" 的假 survived。修复两半：
+      1. tail = stdout 运行流 + stderr 尾部拼接（两类输出都进判定窗口）；
+      2. 注入失败细分：Parse Error → invalid_mutant（操作符 bug 类），
+         其余 → run_error（基础设施类）——两者都不是 survived。
+    """
+
+    def _write_project(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        target = proj / "calc.gd"
+        target.write_text("func add(a, b):\n\treturn a + b\n")
+        return proj, target
+
+    def test_inject_fail_with_parse_error_is_invalid_mutant_not_survived(self, tmp_path, monkeypatch):
+        # rc=3 + GQT_INJECT_FAIL + Parse Error（stderr 拼接进 tail）→
+        # invalid_mutant。旧路径：tail 只有 stdout banner → 守卫不命中 →
+        # "tests passed"/"only pre-existing failures" 假 survived。
+        proj, target = self._write_project(tmp_path)
+
+        def fake_run(root, timeout_s=60, tests_glob=None):
+            stdout = "Godot Engine v4.6.2.stable.official.71f334935\n\n"
+            stderr = ('SCRIPT ERROR: Parse Error: Invalid operands "String" and '
+                      '"String" for "-" operator.\n'
+                      "GQT_INJECT_FAIL: mutant failed to compile via impl file")
+            return (3, stdout + "\n--- gqt: stderr ---\n" + stderr)
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        result = run_mutation(str(target), str(proj), budget=1)
+        s = result["summary"]
+        assert s["survived"] == 0, f"injection failure must not be survived: {s}"
+        assert s["invalid_mutants"] >= 1, "parse-rejected mutant must be invalid_mutant"
+        # invalid_mutant 走静态预检同档（操作符 bug，不进 gate）——但绝不是
+        # survived；failures 留逐条明细。
+        verdicts = [r["verdict"] for r in result["failures"]]
+        assert "invalid_mutant" in verdicts
+        assert "survived" not in verdicts
+
+    def test_inject_fail_without_parse_error_is_run_error_not_survived(self, tmp_path, monkeypatch):
+        # rc=3 + GQT_INJECT_FAIL（cfg 缺失类，无 Parse Error）→ run_error。
+        proj, target = self._write_project(tmp_path)
+
+        def fake_run(root, timeout_s=60, tests_glob=None):
+            stdout = "Godot Engine v4.6.2.stable.official.71f334935\n\n"
+            stderr = "GQT_INJECT_FAIL: GQT_MUTATION_CFG env missing"
+            return (3, stdout + "\n--- gqt: stderr ---\n" + stderr)
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        result = run_mutation(str(target), str(proj), budget=1)
+        s = result["summary"]
+        assert s["survived"] == 0, f"injection failure must not be survived: {s}"
+        assert s["run_errors"] >= 1
+        assert result["ok"] is False
+
+    def test_tail_merges_stdout_runflow_and_stderr(self, tmp_path, monkeypatch):
+        # 修复核心：tail 必须同时携带 stdout 运行流与 stderr（拼接，非二选一）
+        # ——注入失败与 GUT 运行流互斥出现，拼接不会互相挤出。
+        proj, target = self._write_project(tmp_path)
+        captured = {}
+
+        def fake_run(root, timeout_s=60, tests_glob=None):
+            stdout = "* test_running\n    [Passed]\n"
+            stderr = "GQT_INJECT_FAIL: cannot write impl res://x.gd"
+            merged = stdout + "\n--- gqt: stderr ---\n" + stderr
+            captured["tail"] = merged
+            return (3, merged)
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        run_mutation(str(target), str(proj), budget=1)
+        assert "test_running" in captured["tail"]
+        assert "GQT_INJECT_FAIL" in captured["tail"]
+
+    def test_runtime_invalid_mutant_counts_into_invalid_mutants(self, tmp_path, monkeypatch):
+        # runtime invalid 与静态预检 invalid 同档合并计数——summary 的
+        # invalid_mutants 必须反映两类之和，failures 留逐条明细。
+        proj, target = self._write_project(tmp_path)
+        # 用一个静态可解析但引擎解析拒绝的源（预检放行 → 走 GUT → rc=3 路径）
+        target.write_text("func add(a, b):\n\tvar s := a + b\n\treturn s\n")
+
+        def fake_run(root, timeout_s=60, tests_glob=None):
+            stdout = "Godot Engine v4.6.2.stable.official.71f334935\n\n"
+            stderr = ('SCRIPT ERROR: Parse Error: Invalid operands "String" and '
+                      '"String" for "-" operator.\n'
+                      "GQT_INJECT_FAIL: mutant failed to compile via impl file")
+            return (3, stdout + "\n--- gqt: stderr ---\n" + stderr)
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
+        )
+        result = run_mutation(str(target), str(proj), budget=5)
+        s = result["summary"]
+        # 多个 mutant 全部注入失败 → 全部归 invalid_mutant，无 survived
+        assert s["survived"] == 0
+        assert s["invalid_mutants"] >= 2

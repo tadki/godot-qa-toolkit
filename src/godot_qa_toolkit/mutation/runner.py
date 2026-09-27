@@ -129,7 +129,13 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     # 失败测试名解析需要完整运行流（'-*', '* test_x'、[Failed] 行）——2000
     # 字符的窗口在长断言输出下会把失败行挤出窗外导致 kill 判定失真（
     # SEE-1321 实测 pricing_resolver or→and 29 项新失败被吞成 survived）。
-    tail = r.stdout[-200000:] if r.stdout else r.stderr[-10000:]
+    # SPEC-017（§SPEC-016 实证）：注入宿主的 printerr 全落 stderr——GUT 运行
+    # 流落 stdout，而 GQT_INJECT_FAIL 只落 stderr。旧逻辑 stdout 非空时丢弃
+    # stderr，rc==3 注入失败在 stdout 里只有 73 字节引擎 banner，
+    # "GQT_INJECT_FAIL in tail" 守卫永不命中 → 注入失败被吞成 survived
+    # （12/17 假 survived）。修复：tail = 运行流 + stderr 尾部拼接，两者都
+    # 进判定窗口；注入失败与 GUT 运行流互斥出现，拼接不会互相挤出。
+    tail = (r.stdout[-200000:] if r.stdout else "") + "\n--- gqt: stderr ---\n" + r.stderr[-10000:]
     return r.returncode, tail
 
 
@@ -419,6 +425,9 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
+    # SPEC-017：runtime invalid_mutant（impl 编译被拒）与静态预检 invalid 合并
+    # 计数——同档同语义，failures 里已留明细。
+    invalid_count += sum(1 for r in results if r["verdict"] == "invalid_mutant")
     return {
         "tool": "mutation",
         # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok
@@ -532,7 +541,11 @@ def _run_mutant_loop(
             host.unlink(missing_ok=True)
             forget_temp(host)
 
-    tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0, "suspect": 0}
+    # SPEC-017：runtime 层 invalid_mutant（impl 编译被引擎解析器拒绝）计入
+    # 同一 invalid 档——与静态预检同口径（failures 列表 + invalid 计数），不
+    # 静默消失。
+    tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0,
+             "suspect": 0}
     for r in results:
         if r["verdict"] in tally:
             tally[r["verdict"]] += 1
@@ -572,6 +585,21 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
             if rc == 3 and "GQT_INJECT_FAIL" in tail:
                 # 注入失败绝不能当 kill/survive——宿主没把变异送进引擎，
                 # 跑的是原代码，任何判定都是假证据。
+                # SPEC-017：注入失败细分两类——
+                #   (a) impl 解析失败（"Parse Error" + "Invalid operands" 等
+                #       编译错误）：变异体本身产不出可编译脚本 = 操作符 bug
+                #       类 invalid_mutant（与 _split_invalid_mutants 的静态
+                #       预检同类，但解析器拒绝的形态只有引擎能判）；
+                #   (b) 其余注入失败（cfg 丢失/env 缺失/写入失败）：run_error
+                #       ——基础设施问题，数据不可信。
+                # 两者都非 survived——旧路径（stdout-only tail）看不见
+                # GQT_INJECT_FAIL，把这类全部吞成 "only pre-existing failures"
+                # 的假 survived（§SPEC-016 实证 7 个受累变异）。
+                if "Parse Error" in tail or "Failed to load script" in tail:
+                    return _mutant_record(
+                        m, "invalid_mutant",
+                        f"mutated source fails to compile in-project (parser "
+                        f"rejection): {m.kind} {m.original}→{m.mutated}")
                 return _mutant_record(m, "run_error",
                                       f"memory injection failed: {tail.strip()[:200]}")
             verdict = _classify_mutant_run(m, rc, tail, baseline_failures,

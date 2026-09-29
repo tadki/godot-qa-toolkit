@@ -51,7 +51,7 @@ from .ops import (  # noqa: F401
 )
 
 from .inject import cleanup_temp_files, forget_temp, host_script_res, mutant_env, seed_host_script, wslpath_win
-from ..timing import BUDGET_CAP_S, resolve_budget, suggested_action
+from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
 
 
 # GUT 的命令行入口必须以 res:// 形式传给 `godot -s`：Godot 对绝对路径的 -s
@@ -292,8 +292,7 @@ def run_mutation(
     # SEE-1356 L1 (§SPEC-L1-01)：预算协商。缓存只喂预算锚——baseline 永远
     # 实测（判定语义）；worker 分片（precomputed_baseline 携带者）跳过
     # store 读写（executor 单进程拥有协商与采样）。
-    timing_meta = {"timing_source": "explicit", "samples_n": 0,
-                   "baseline_p90": None}
+    timing_meta = explicit_timing_meta()
     effective_timeout = timeout_s
     if timing_store is not None and precomputed_baseline is None:
         hist = timing_store.read()
@@ -482,8 +481,7 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     }
     # SEE-1356 L1 (§SPEC-L1-03)：报告字段 timing_source/samples_n/baseline_p90
     # ——timing store 未接入时缺省 explicit（显式 timeout 即最终预算）。
-    summary.update(timing_meta or {"timing_source": "explicit",
-                                   "samples_n": 0, "baseline_p90": None})
+    summary.update(timing_meta or explicit_timing_meta())
     return {
         "tool": "mutation",
         # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok

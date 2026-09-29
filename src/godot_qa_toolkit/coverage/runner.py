@@ -25,7 +25,7 @@ from pathlib import Path
 
 from gdtoolkit.parser import parser as gdtoolkit_parser
 
-from ..timing import BUDGET_CAP_S, resolve_budget, suggested_action
+from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
 
 # 与 mutation runner 同一套判定：godot 进程级失败（-s 脚本没加载起来）≠
 # 测试结果。res:// 是唯一可靠的 -s 形式（Revy QA FAIL 实证）。
@@ -318,8 +318,7 @@ def run_coverage(
 
     # SEE-1356 L1：coverage 同 timing store 接入——缓存只喂预算锚，GUT 永远
     # 实测；实测耗时回写采样。
-    timing_meta = {"timing_source": "explicit", "samples_n": 0,
-                   "baseline_p90": None}
+    timing_meta = explicit_timing_meta()
     effective_timeout = timeout_s
     if timing_store is not None:
         hist = timing_store.read()
@@ -526,8 +525,7 @@ def _coverage_report(file: str, original_src: str, executable_lines, hits: set[i
         round(100.0 * branches_covered / branches.total, 2) if branches.total else 100.0
     )
 
-    summary_extra = timing_meta or {"timing_source": "explicit",
-                                    "samples_n": 0, "baseline_p90": None}
+    summary_extra = timing_meta or explicit_timing_meta()
     return {
         "tool": "coverage",
         "ok": ok,

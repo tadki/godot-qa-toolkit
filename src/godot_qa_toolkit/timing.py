@@ -80,11 +80,15 @@ def resolve_budget(
     derived = int(anchor * k) + 1
     if explicit is not None and int(explicit) > derived:
         return int(explicit), "explicit"
-    if last_elapsed is not None:
-        return max(int(explicit), derived) if explicit is not None \
-            else min(BUDGET_CAP_S, derived), "store"
-    return max(int(explicit), derived) if explicit is not None \
-        else min(BUDGET_CAP_S, derived), "bootstrap"
+    source = "store" if last_elapsed is not None else "bootstrap"
+    if explicit is not None:
+        return max(int(explicit), derived), source
+    return min(BUDGET_CAP_S, derived), source
+
+
+def explicit_timing_meta() -> dict:
+    """timing store 未接入时的报告缺省：显式 timeout 即最终预算。"""
+    return {"timing_source": "explicit", "samples_n": 0, "baseline_p90": None}
 
 
 def suggested_action(timeout_s: int) -> str:

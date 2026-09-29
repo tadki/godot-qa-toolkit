@@ -19,10 +19,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from gdtoolkit.parser import parser as gdtoolkit_parser
+
+from ..timing import BUDGET_CAP_S, resolve_budget, suggested_action
 
 # 与 mutation runner 同一套判定：godot 进程级失败（-s 脚本没加载起来）≠
 # 测试结果。res:// 是唯一可靠的 -s 形式（Revy QA FAIL 实证）。
@@ -292,6 +295,7 @@ def run_coverage(
     project_root: str,
     min_percent: float = 80.0,
     timeout_s: int = 120,
+    timing_store=None,
 ) -> dict:
     """对单个 .gd 文件算行覆盖（跑 GUT 后统计命中行）并出统一 JSON 契约。
 
@@ -312,6 +316,18 @@ def run_coverage(
     if total_lines == 0:
         return _vacuous_result(str(path), min_percent)
 
+    # SEE-1356 L1：coverage 同 timing store 接入——缓存只喂预算锚，GUT 永远
+    # 实测；实测耗时回写采样。
+    timing_meta = {"timing_source": "explicit", "samples_n": 0,
+                   "baseline_p90": None}
+    effective_timeout = timeout_s
+    if timing_store is not None:
+        hist = timing_store.read()
+        effective_timeout, timing_meta["timing_source"] = resolve_budget(
+            timeout_s, hist["last"] if hist else None)
+        timing_meta["samples_n"] = hist["samples_n"] if hist else 0
+        timing_meta["baseline_p90"] = hist["p90"] if hist else None
+
     # run 唯一 sink：跨 run 不残留、并发 run 不互踩（SEE-1152 并发覆写同款教训）。
     sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
     instrumented, manifest = _instrument(original_src, sink_name)
@@ -323,10 +339,14 @@ def run_coverage(
     except Exception as e:
         return _reparse_error_result(str(path), total_lines, min_percent, e)
 
+    t0 = time.monotonic()
     gut_outcome = _run_gut_for_coverage(path, project_root, backup, instrumented,
-                                        total_lines, min_percent, timeout_s)
+                                        total_lines, min_percent, effective_timeout)
+    gut_elapsed = time.monotonic() - t0
     if gut_outcome is not None:
         return gut_outcome
+    if timing_store is not None:
+        timing_store.record(gut_elapsed)
 
     hits, probes_fired = _read_hits(project_root, sink_name, manifest)
 
@@ -335,7 +355,7 @@ def run_coverage(
         return _no_probe_result(str(path), total_lines, min_percent)
 
     return _coverage_report(str(path), original_src, executable_lines, hits,
-                            probes_fired, min_percent)
+                            probes_fired, min_percent, timing_meta)
 
 
 def _vacuous_result(file: str, min_percent: float) -> dict:
@@ -386,15 +406,19 @@ def _reparse_error_result(file: str, total_lines: int, min_percent: float, err) 
 
 
 def _gut_abort_result(path, total_lines: int, min_percent: float,
-                      error: str, reason: str, run_error: bool = False) -> dict:
+                      error: str, reason: str, run_error: bool = False,
+                      hint: str | None = None) -> dict:
+    err_summary = {"file": str(path), "total_lines": total_lines,
+                   "covered_lines": 0, "coverage_percent": 0.0,
+                   "min_percent": min_percent,
+                   "run_error": True,
+                   "error": error}
+    if hint:
+        err_summary["suggested_action"] = hint
     return {
         "tool": "coverage",
         "ok": False,
-        "summary": {"file": str(path), "total_lines": total_lines,
-                    "covered_lines": 0, "coverage_percent": 0.0,
-                    "min_percent": min_percent,
-                    "run_error": True,
-                    "error": error} if run_error else {
+        "summary": err_summary if run_error else {
                    "file": str(path), "total_lines": total_lines,
                    "covered_lines": 0, "coverage_percent": 0.0,
                    "min_percent": min_percent, "error": error},
@@ -427,9 +451,12 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
                 )
                 gut_tail = (r.stdout + r.stderr)[-1500:]
             except subprocess.TimeoutExpired:
+                # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行补救指令。
                 return _gut_abort_result(
                     path, total_lines, min_percent, "GUT timed out",
-                    f"GUT timed out after {timeout_s}s")
+                    f"GUT timed out after {timeout_s}s",
+                    run_error=True,
+                    hint=suggested_action(BUDGET_CAP_S))
             finally:
                 path.write_text(backup, encoding="utf-8")
         except Exception:
@@ -473,7 +500,8 @@ def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[
 
 
 def _coverage_report(file: str, original_src: str, executable_lines, hits: set[int],
-                     probes_fired: int, min_percent: float) -> dict:
+                     probes_fired: int, min_percent: float,
+                     timing_meta: dict | None = None) -> dict:
     total_lines = len(executable_lines)
     covered = len(hits)
     pct = round(100.0 * covered / total_lines, 2) if total_lines else 100.0
@@ -498,6 +526,8 @@ def _coverage_report(file: str, original_src: str, executable_lines, hits: set[i
         round(100.0 * branches_covered / branches.total, 2) if branches.total else 100.0
     )
 
+    summary_extra = timing_meta or {"timing_source": "explicit",
+                                    "samples_n": 0, "baseline_p90": None}
     return {
         "tool": "coverage",
         "ok": ok,
@@ -511,6 +541,7 @@ def _coverage_report(file: str, original_src: str, executable_lines, hits: set[i
             "branch_total": branches.total,
             "branch_covered": branches_covered,
             "branch_coverage_percent": branch_pct,
+            **summary_extra,
         },
         "failures": failures,
     }

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .complexity.gate import GateConfig, run_gate
 from .coverage.runner import run_coverage
+from .timing import TimingStore
 from .doctor import cmd_doctor
 from .gherkin.parser import GherkinSyntaxError, parse
 from .gherkin.runner import Registry, run_feature
@@ -129,6 +130,11 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     multi_concurrency = len(files) > 1 or args.jobs is not None
     try:
         if not multi_concurrency:
+            # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
+            timing_store = None
+            if not args.dry_run:
+                timing_store = TimingStore(args.project_root, files[0],
+                                           "mutation", args.tests)
             result = run_mutation(
                 file_path=files[0],
                 project_root=args.project_root,
@@ -136,6 +142,7 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 dry_run=args.dry_run,
                 tests_glob=args.tests,
+                timing_store=timing_store,
             )
         else:
             from .mutation.executor import run_mutation_files
@@ -161,6 +168,8 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             project_root=args.project_root,
             min_percent=args.min_percent,
             timeout_s=args.timeout,
+            timing_store=TimingStore(args.project_root, args.file,
+                                     "coverage", None),
         )
     except FileNotFoundError as e:
         result = {
@@ -207,7 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
     v.add_argument("file", help="the .gd file to measure")
     v.add_argument("--project-root", required=True, help="project root containing addons/gut/")
-    v.add_argument("--min-percent", type=float, default=80.0, help="min coverage % (default 80)")
+    v.add_argument("--min-percent", type=float, default=80.0,
+                   help="min coverage percent (default 80)")
     v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
     v.set_defaults(func=cmd_coverage)
 

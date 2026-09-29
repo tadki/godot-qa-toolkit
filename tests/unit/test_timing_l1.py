@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
 from godot_qa_toolkit.timing import (
     BUDGET_CAP_S,
     BOOTSTRAP_TIMEOUT_S,
+    TTL_DAYS,
     TimingStore,
     resolve_budget,
     store_key,
@@ -255,3 +257,144 @@ def test_baseline_timeout_run_error_carries_suggested_action(project, monkeypatc
                               tests_glob="res://tests/")
     assert result["summary"]["run_error"] is True
     assert result["summary"]["suggested_action"] == "rerun with --timeout 600"
+
+
+# ---- SEE-1356 hardener: 分支边界补缺（每条注明所杀变异类别） ------------------
+
+def test_git_rev_probe_failure_is_no_history(project, monkeypatch):
+    # kills: `_git_rev` 的 except (OSError, SubprocessError) 分支删除——
+    # git 探测失败必须降级 rev=None，而不是把预算锚变成崩溃源。
+    import subprocess
+
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+
+    def boom(*a, **kw):
+        raise OSError("git binary vanished")
+
+    monkeypatch.setattr("godot_qa_toolkit.timing.subprocess.run", boom)
+    store = TimingStore(str(project), str(target), "mutation", None, now=time.time())
+    assert store.record(42.0) is True
+    doc = json.loads(store.entry_path.read_text(encoding="utf-8"))
+    assert doc["git_rev"] is None
+    assert store.read()["last"] == 42.0  # rev None == None → 有效
+
+
+def test_store_empty_or_nonnumeric_samples_is_no_history(project, monkeypatch):
+    # kills: `if not samples: return None` 分支删除（空 samples 会把
+    # samples[-1] 变 IndexError）与非数值元素过滤删除（字符串样本会炸 float）。
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+    store = TimingStore(str(project), str(target), "mutation", None, now=time.time())
+    store.store_dir.mkdir(parents=True, exist_ok=True)
+    store.entry_path.write_text(json.dumps({"updated_at": time.time(), "git_rev": None, "samples": []}), encoding="utf-8")
+    assert store.read() is None  # 空 samples = 无历史
+    store.entry_path.write_text(json.dumps({"updated_at": time.time(), "git_rev": None, "samples": ["x", 7, True]}), encoding="utf-8")
+    hist = store.read()
+    assert hist["samples"] == [7.0, 1.0]  # 非数值剔除（True 被 int 接受）
+    assert hist["last"] == 1.0
+
+
+def test_store_unreadable_entry_is_no_history(project, monkeypatch):
+    # kills: `read()` 的 OSError 捕获分支（损坏文件已在别例覆盖 ValueError；
+    # 权限拒绝走 OSError —— 读失败必须诚实降级为无历史）。
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+    store = TimingStore(str(project), str(target), "mutation", None, now=time.time())
+    store.store_dir.mkdir(parents=True, exist_ok=True)
+    store.entry_path.write_text("{}", encoding="utf-8")
+    store.entry_path.chmod(0o000)
+    try:
+        assert store.read() is None
+    finally:
+        store.entry_path.chmod(0o644)
+
+
+def test_record_write_failure_returns_false(project, monkeypatch):
+    # kills: `record()` 的 except OSError → False 分支删除——写失败必须
+    # 静默返回 False（预算锚是增强，不是契约），不能炸掉 mutation 轮。
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+    store = TimingStore(str(project), str(target), "mutation", None, now=time.time())
+    cache_dir = Path(store.project_root) / ".qa-cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "gqt-timing").write_text("not a dir", encoding="utf-8")
+    assert store.record(1.0) is False
+
+
+def test_p90_empty_is_zero():
+    # kills: `_p90([])` 早退分支删除（空样本集会 min/max 出 IndexError）。
+    from godot_qa_toolkit.timing import _p90
+
+    assert _p90([]) == 0.0
+    assert _p90([5.0]) == 5.0  # 单样本：nearest-rank 收敛到自身
+
+
+def test_ttl_boundary_exact_is_valid_plus_one_is_expired(project, monkeypatch):
+    # kills: `age_s > TTL_DAYS * 86400` 严格性变异（>= 会在整 7 天边界
+    # 误杀有效历史；<= 会在边界保留过期历史）。
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+    now = time.time()
+    store = TimingStore(str(project), str(target), "mutation", None, now=now)
+    store.record(100.0)
+    exact = TimingStore(str(project), str(target), "mutation", None, now=now + TTL_DAYS * 86400)
+    assert exact.read() is not None  # age == TTL → 仍有效
+    expired = TimingStore(str(project), str(target), "mutation", None, now=now + TTL_DAYS * 86400 + 1)
+    assert expired.read() is None  # age == TTL + 1s → 失效
+
+
+def test_explicit_equal_to_derived_ties_to_anchor_source():
+    # kills: `explicit > derived` 严格性变异（>= 会把相等情形错误归因
+    # "explicit"——归因给"最终决定预算的那一方"的契约被破坏）。
+    budget, source = resolve_budget(101, 50.0)  # derived = 50*2+1 = 101 == explicit
+    assert (budget, source) == (101, "store")
+
+
+def test_env_scale_and_bootstrap_boundary_values(monkeypatch):
+    # kills: 双 env 的 `v > 0` 边界（0 与负值必须回退默认）与
+    # int(float()) 转换分支（浮点字符串向下取整）。
+    monkeypatch.setenv("GQT_TIMEOUT_SCALE", "0")
+    monkeypatch.setenv("GQT_BOOTSTRAP_TIMEOUT_S", "0")
+    assert timeout_scale() == 2.0
+    assert bootstrap_timeout_s() == BOOTSTRAP_TIMEOUT_S
+    monkeypatch.setenv("GQT_TIMEOUT_SCALE", "-3")
+    monkeypatch.setenv("GQT_BOOTSTRAP_TIMEOUT_S", "3.7")
+    assert timeout_scale() == 2.0
+    assert bootstrap_timeout_s() == 3  # int(float("3.7")) 向下取整
+
+
+def test_concurrent_record_keeps_entry_parseable(project, monkeypatch):
+    # 并发写（生产形态 = 跨进程）：pid-suffixed tmp + os.replace 原子发布。
+    # kills: tmp 后缀删除（跨进程并发写互相踩踏产生撕裂文件）与
+    # replace→直接 write 变异——并发下每次读取都必须是完整合法 JSON。
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+
+    real_src = _Path(__file__).resolve().parents[2] / "src"
+
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+    store = TimingStore(str(project), str(target), "mutation", None, now=time.time())
+    assert (real_src / "godot_qa_toolkit" / "timing.py").exists()
+    env = {**os.environ, "PYTHONPATH": str(real_src)}
+    worker = (
+        "import sys;from godot_qa_toolkit.timing import TimingStore;"
+        f"TimingStore({str(project)!r}, {str(target)!r}, 'mutation', None, now={time.time()!r})"
+        ".record(float(sys.argv[1]))"
+    )
+    procs = [subprocess.Popen([sys.executable, "-c", worker, str(i)], env=env) for i in range(8)]
+    for p_ in procs:
+        assert p_.wait(timeout=30) == 0
+    hist = store.read()
+    assert hist is not None  # 撕裂文件会让 read() 直接 None
+    assert 1 <= hist["samples_n"] <= 10
+    assert hist["last"] in hist["samples"]

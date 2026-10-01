@@ -118,6 +118,21 @@ class TimingStore:
         self.key = store_key(file_path, suite_kind, tests_glob)
         self._now = time.time() if now is None else now
 
+    def ensure_store_dir(self) -> None:
+        """Create the store dir + self-ignoring .gitignore once per call site.
+
+        LOW2 (Final Review): the .gitignore write used to ride every
+        record() — a hot-path rewrite of a file that only needs to exist.
+        Self-ignoring is an idempotent directory-initialization semantic:
+        write it only when missing (never a per-record touch, never a
+        second-guess of the existing file).
+        """
+        self.store_dir.mkdir(parents=True, exist_ok=True)
+        gitignore = self.store_dir / ".gitignore"
+        if not gitignore.exists():
+            # 自含 ignore：缓存目录对目标项目 git 不可见（不改目标 .gitignore）。
+            gitignore.write_text("*\n", encoding="utf-8")
+
     @property
     def store_dir(self) -> Path:
         return Path(self.project_root) / ".qa-cache" / "gqt-timing"
@@ -164,7 +179,7 @@ class TimingStore:
         best-effort：写失败静默返回 False（预算锚是增强，不是契约）。
         """
         try:
-            self.store_dir.mkdir(parents=True, exist_ok=True)
+            self.ensure_store_dir()
             samples: list[float] = []
             try:
                 old = json.loads(self.entry_path.read_text(encoding="utf-8"))
@@ -187,8 +202,6 @@ class TimingStore:
             tmp = self.entry_path.with_suffix(f".tmp.{os.getpid()}")
             tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, self.entry_path)
-            # 自含 ignore：缓存目录对目标项目 git 不可见（不改目标 .gitignore）。
-            (self.store_dir / ".gitignore").write_text("*\n", encoding="utf-8")
             return True
         except OSError:
             return False

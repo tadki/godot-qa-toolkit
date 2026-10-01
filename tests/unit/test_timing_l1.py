@@ -170,6 +170,27 @@ def test_store_self_ignoring(project, monkeypatch):
     assert (store.store_dir / ".gitignore").read_text(encoding="utf-8").strip() == "*"
 
 
+def test_gitignore_written_once_not_on_every_record(project, monkeypatch):
+    # LOW2 (Final Review): the self-ignoring .gitignore is a one-time
+    # directory-initialization action — record() must NOT rewrite it on the
+    # hot path (mtime stays fixed across repeated records).
+    target = project / "src.gd"
+    target.write_text("func a():\n\treturn 1\n")
+    monkeypatch.chdir(project)
+    store = TimingStore(str(project), str(target), "mutation", None, now=time.time())
+    store.record(1.0)
+    gi = store.store_dir / ".gitignore"
+    mtime_1 = gi.stat().st_mtime_ns
+    for i in range(2, 6):
+        store.record(float(i))
+    assert gi.read_text(encoding="utf-8").strip() == "*"  # semantics unchanged
+    assert gi.stat().st_mtime_ns == mtime_1  # untouched by hot path
+    # A pre-existing .gitignore is never second-guessed or overwritten.
+    gi.write_text("# operator-managed\n", encoding="utf-8")
+    store.record(6.0)
+    assert gi.read_text(encoding="utf-8").strip() == "# operator-managed"
+
+
 # ---- §SPEC-L1-02 判据场景：缓存命中喂锚，baseline 仍实测 ----------------------
 
 def _mutation_fixture(project, monkeypatch):

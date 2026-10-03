@@ -36,6 +36,8 @@ def collect_file(path: str | Path) -> tuple[list[FunctionComplexity], str | None
         return _collect_python_source(src, file_name=str(path))
     try:
         return _collect_source(src, file_name=str(path)), None
+    except RadonVisitError as e:
+        return [], f"radon visit failed: {e}"
     except (LarkError, SyntaxError) as e:
         # gd2py first parses via a lark grammar (Python-keyword identifiers like
         # `var def` → UnexpectedToken/UnexpectedCharacters, both LarkError),
@@ -67,7 +69,20 @@ def collect_paths(paths: list[str | Path]) -> tuple[list[FunctionComplexity], li
 
 def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
     python_code = convert_code(src)
-    blocks = cc_visit(python_code)
+    # Attribution matters for diagnosis: convert_code failures mean the GDScript
+    # itself could not be transpiled; cc_visit failures mean conversion succeeded
+    # but the emitted Python is invalid for radon (e.g. a Python-keyword
+    # identifier like `var def` that gd2py emits verbatim as `def = 1`). Both
+    # surface as SyntaxError at the caller, so the phase must be captured here —
+    # a shared "gd2py conversion failed" label sent us chasing a nonexistent
+    # transpiler bug (SEE-1367 §SPEC-017).
+    try:
+        blocks = cc_visit(python_code)
+    except SyntaxError as e:
+        raise RadonVisitError(
+            f"radon cc_visit failed on converted source (likely Python-keyword "
+            f"identifier, e.g. `var def`): {e}"
+        ) from e
     return [
         FunctionComplexity(
             file=file_name,
@@ -77,6 +92,10 @@ def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
         )
         for b in blocks
     ]
+
+
+class RadonVisitError(ValueError):
+    """Converted GDScript could not be processed by radon's cc_visit."""
 
 
 def _collect_python_source(src: str, file_name: str) -> tuple[list[FunctionComplexity], str | None]:

@@ -13,13 +13,14 @@ import json
 import sys
 from pathlib import Path
 
-from .complexity.gate import GateConfig, run_gate
-from .coverage.runner import run_coverage
-from .timing import TimingStore
 from .doctor import cmd_doctor
 from .gherkin.parser import GherkinSyntaxError, parse
 from .gherkin.runner import Registry, run_feature
-from .mutation.runner import run_mutation
+
+# complexity/coverage/mutation are imported lazily inside their cmd_* handlers:
+# they pull in gdtoolkit, so a gdtoolkit-less environment (e.g. a minimal CI
+# runner that only needs `gqt gherkin`) must still start the CLI (§SPEC-114,
+# SEE-1367).
 
 
 def _emit(result: dict) -> int:
@@ -118,6 +119,8 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
 
 
 def cmd_complexity(args: argparse.Namespace) -> int:
+    from .complexity.gate import GateConfig, run_gate
+
     # When --max is lowered below --warn, warn collapses with it: an explicit
     # strict max means "everything above max fails", nothing merely warns.
     warn = min(args.warn, args.max)
@@ -126,6 +129,9 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:
+    from .mutation.runner import run_mutation
+    from .timing import TimingStore
+
     files = args.files
     multi_concurrency = len(files) > 1 or args.jobs is not None
     try:
@@ -162,6 +168,9 @@ def cmd_mutation(args: argparse.Namespace) -> int:
 
 
 def cmd_coverage(args: argparse.Namespace) -> int:
+    from .coverage.runner import run_coverage
+    from .timing import TimingStore
+
     try:
         result = run_coverage(
             file_path=args.file,

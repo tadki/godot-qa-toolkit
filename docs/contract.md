@@ -100,10 +100,11 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - `ok = survived==0 且 timeout==0 且 run_errors==0 且 suspect==0`——suspect>0 时 ok=false（suspect = 「无法证明被杀死」，与 survived 同挡 gate）；`invalid_mutant` 不参与 ok 判定（语法预检剔除的算子 bug，属工具质量信号而非测试失败判定）。
 - 变异点 `kind` 枚举（**开放集合，按前缀归类**——消费方过滤 kind 时须容忍未知值）：`AOR` / `ROR` / `UOI` / `boundary` / `TERNARY`（cond_not + arm_swap）/ `GUARD_NOT`（守卫取反；守卫表达式内含可变异算子时去重跳过）/ `LOGICAL`（and⇄or）/ `MEMBERSHIP`（in→not in；`not in` 因 AST 无位置信息暂只支持单向）/ `IS_NOT`（is 取反）。
 
-### 4.4 `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout 120]`
+### 4.4 `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout 120] [--tests <res://dir-or-.gd>]`
 
 - 前置与 mutation 相同（GUT + PATH 上的 godot）。
-- 执行：目标 .gd **AST 语句级插桩**（每可执行语句前插探针调用 + 文件尾部探针函数；语句跨多行时探针只落起始行——SEE-1312 修复跨行分组表达式 parse error）→ 生成期 re-parse 预检 → headless GUT → 读 sink 命中 → 行覆盖%。原文件运行后恢复。
+- `--tests`（SEE-1367 §SPEC-017）：受影响测试子集（目录如 `res://tests/unit/time/`，或单脚本路径——走 `-gselect`，GUT 9.6 实测 `-gtest` 会全量展开），替代全量 `-gdir=res://tests/` 以支持逐套件归因度量；省略 = 全量（行为不变）。与 mutation `--tests` 同语义。
+- 执行：目标 .gd **AST 语句级插桩**（每可执行语句前插探针调用 + 文件尾部探针函数；语句跨多行时探针只落起始行——SEE-1312 修复跨行分组表达式 parse error；**内部类 class_def 整体不插桩**——探针函数在外层类作用域，内部类方法的 self 无法解析，插进去 = 目标文件整体拒载，SEE-1367 硬ener 反例实证）→ 生成期 re-parse 预检 → headless GUT → 读 sink 命中 → 行覆盖%。原文件运行后恢复。
 - **capability 契约**（SEE-1312）：
   - 插桩产物不合法 → 生成期即 `run_error`（拒绝落盘跑假数据），`failures[0].reason` 含 `instrumentation produced unparseable source`。
   - 探针数据面为 **ID-keyed**（整数 probe_id → runner 侧 manifest 行号映射）；sink 路径移出数据面。

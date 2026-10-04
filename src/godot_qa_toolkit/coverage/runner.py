@@ -108,10 +108,12 @@ class BranchSet:
     items: tuple[BranchItem, ...] = field(default_factory=tuple)
 
 
-def _tree_depth_walk(node, callback, depth=0):
+def _tree_depth_walk(node, callback, depth=0, prune=None):
     callback(node, depth)
+    if prune is not None and prune(node):
+        return
     for child in getattr(node, "children", []):
-        _tree_depth_walk(child, callback, depth + 1)
+        _tree_depth_walk(child, callback, depth + 1, prune)
 
 
 def _node_line(node) -> int | None:
@@ -175,7 +177,12 @@ def _collect_executable_lines(src: str) -> list[ExecutableLine]:
             # 括号内部行（depths>0）不是语句起始位置——即使 AST 报告该行为
             # 语句行（如跨行分组表达式 / lambda 实参行），也绝不插桩。
 
-    _tree_depth_walk(tree, visit)
+    # 内部类（class_def）整体不插桩（SEE-1367 §SPEC-017 硬ener 反例实证）：
+    # 探针函数追加在外层类作用域，内部类方法的 self 看不到它们——
+    # Godot Parse Error "Function __qa_cov_probe_N() not found in base self"，
+    # 目标文件整体拒载（GUT 侧表现为 "does not extend GutTest"），零探针假象。
+    # 代价：内部类体（通常为测试桩）不计量——在套件自测量场景可接受。
+    _tree_depth_walk(tree, visit, prune=lambda n: getattr(n, "data", None) == "class_def")
     return _dedupe_sorted(lines)
 
 
@@ -230,7 +237,9 @@ def _derive_branches(src: str) -> BranchSet:
         # 子节点遍历由 _tree_depth_walk 统一处理——visit 内不再手动递归
         # （否则 if_stmt 会被双重遍历，分支重复计数）。
 
-    _tree_depth_walk(tree, visit)
+    # 同款 class_def 剪枝：内部类分支体行不在探针面内，计入 branch_total 会
+    # 制造结构性永假分支（与探针面不一致）。
+    _tree_depth_walk(tree, visit, prune=lambda n: getattr(n, "data", None) == "class_def")
     return BranchSet(total=len(items), items=tuple(items))
 
 
@@ -296,6 +305,7 @@ def run_coverage(
     min_percent: float = 80.0,
     timeout_s: int = 120,
     timing_store=None,
+    tests_glob: str | None = None,
 ) -> dict:
     """对单个 .gd 文件算行覆盖（跑 GUT 后统计命中行）并出统一 JSON 契约。
 
@@ -340,7 +350,8 @@ def run_coverage(
 
     t0 = time.monotonic()
     gut_outcome = _run_gut_for_coverage(path, project_root, backup, instrumented,
-                                        total_lines, min_percent, effective_timeout)
+                                        total_lines, min_percent, effective_timeout,
+                                        tests_glob=tests_glob)
     gut_elapsed = time.monotonic() - t0
     if gut_outcome is not None:
         return gut_outcome
@@ -425,8 +436,19 @@ def _gut_abort_result(path, total_lines: int, min_percent: float,
     }
 
 
+def _gut_selection_args(tests_glob: str | None) -> list[str]:
+    """tests_glob（SEE-1367 §SPEC-017）：受影响测试子集，替代全量 -gdir 以支持
+    逐套件归因度量。目录走 -gdir；.gd 文件走 -gselect（GUT 9.6 实测 -gtest
+    会全量展开，只有 -gselect 能精确过滤到单脚本，SEE-1316 同款结论）。"""
+    gdir = tests_glob if tests_glob else "res://tests/"
+    if gdir.endswith(".gd"):
+        return ["-gdir=res://tests/", f"-gselect={Path(gdir).stem}"]
+    return [f"-gdir={gdir}"]
+
+
 def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: str,
-                          total_lines: int, min_percent: float, timeout_s: int) -> dict | None:
+                          total_lines: int, min_percent: float, timeout_s: int,
+                          tests_glob: str | None = None) -> dict | None:
     """落盘插桩文件 → headless GUT → 恢复原文件。返回 None 表示可继续统计命中；
     否则返回已完成的中止契约（timeout / 启动失败 / GUT runner 缺失）。"""
     with tempfile.TemporaryDirectory() as workdir:
@@ -442,7 +464,7 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
             try:
                 r = subprocess.run(
                     ["godot", "--headless", "--path", _godot_project_path(project_root),
-                     "-s", GUT_SCRIPT_RES_PATH, "-gdir=res://tests/", "-gexit"],
+                     "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
                     capture_output=True,
                     text=True,
                     timeout=timeout_s,

@@ -179,6 +179,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             timeout_s=args.timeout,
             timing_store=TimingStore(args.project_root, args.file,
                                      "coverage", None),
+            tests_glob=args.tests,
         )
     except FileNotFoundError as e:
         result = {
@@ -228,6 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--min-percent", type=float, default=80.0,
                    help="min coverage percent (default 80)")
     v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
+    v.add_argument("--tests", default=None,
+                   help="scoped GUT dir or single .gd path for per-suite attribution, "
+                        "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
     v.set_defaults(func=cmd_coverage)
 
     d = sub.add_parser("doctor", help="self-check editable install vs current worktree gitlink")

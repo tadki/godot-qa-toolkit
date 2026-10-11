@@ -85,7 +85,7 @@ V4-A11 归因 **drift（预登记）**：该文件为 claude 运行时重写的�
 |---|---|---|
 | daemon status | `status=running`、`device_name=DESKTOP-INVD2QR`、`daemon_id=019ed3f5-07e8-7b3f-bd23-d6f69cdef9af`（==SEE-1392 注册值）、pid 13522、uptime 1h25m10s、failed_terminal_report_count=0 | 0 |
 | 收侧：本 run 真实收到 | `multica issue runs` 含 **本 run `01a12b34-929d-7314-86fd-837ac738ee96`，status=running，agent=2660961d…（Revy），trigger_comment_id=01a12b34-928f-7592-bb4a-a49b21237ee6**（即本次派单评论） | 0 |
-| 发侧：评论回执 | S4 汇报评论经 `multica issue comment add --parent 01a12b34-928f-… --content-file ./reply.md` 发出，exit 0；回执 ID 见 issue thread（后以补记 commit 回填至本报告） | 0 |
+| 发侧：评论回执 | S4 汇报评论经 `multica issue comment add --parent 01a12b34-928f-… --content-file ./reply.md` 发出，exit 0，回执评论 ID **`01a12b47-06db-70c6-8777-b01c107ef954`**（2026-10-11，source_task_id=本 run `01a12b34-929d-…`，补记） | 0 |
 
 未做任何 stop/restart；daemon 判 running 以 JSON 字段为准（非名义进程）。
 

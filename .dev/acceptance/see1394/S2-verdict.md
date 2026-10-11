@@ -53,7 +53,7 @@ dispatched_at: 2026-10-11T13:21:02Z
 
 ### 6.3 发侧：汇报评论回执
 
-本报告的同 thread 回复通过 `multica issue comment add --parent 01a12b1f-ba9a-74de-a4d7-c2a18d299543 --content-file ./reply.md` 发出，exit=0，评论 ID 见 issue thread 回执（发侧闭环成立后回填此行：评论 ID `01a12b2X-...`，以 thread 实际回执为准）。
+本报告的同 thread 回复通过 `multica issue comment add --parent 01a12b1f-ba9a-74de-a4d7-c2a18d299543 --content-file ./reply.md` 发出，exit=0，评论回执 ID `01a12b25-3903-704c-a9db-d08d55fd4041`（2026-10-11T13:27:02Z，source_task_id=本 run `01a12b1f-baab-7cb2-8fe5-b2140df42947`）。
 
 ### 6.4 收发闭环结论
 

@@ -105,8 +105,34 @@ $ jq '[.mcpServers|keys[]|select(test("searx"))]|length' ~/.claude.json → 0（
 | **O-011**（新） | 平台侧 agent mcp-config 仍含 `searxng→47322/sse` 死条目（`claude mcp list` 显示 ✘ Failed to connect——该 server 客户端连接失败不影响其他 server） | Owner/平台侧择机删除；无功能损失 |
 | 附注 | `ollama pull` 第 1 次 registry EOF 瞬断，第 2 次成功——无遗留 | 无 |
 
+## 六、追加修复：searxng 接入 OpenClash 代理组（Owner 15:22Z 追加指令）
+
+**Recall 取证**：Owner 提示「当时 searxng 要接路由器 OpenClash 特定代理组」。本人 bank 无相关记忆 → 按 Owner 指示以 `hindsight memory reflect claude_code` 两路召回确认：① 现役架构为 SearXNG-US / SearXNG-Home（+ 2026-09-02 后增补 SearXNG-Google 粘性）三个 socks5 listener 按引擎分流；② listener 在路由器全局 `authentication:` 下带凭据，用户名 ejhome。随后经 210→router(192.168.1.1) 只读核验 live 配置：`/etc/openclash/config/AllServers.yaml` 存在 `socks5-searxng(57896→SearXNG-US)`、`socks5-searxng-home(57897→SearXNG-Home)`、`socks5-searxng-google(57898→SearXNG-Google)` 三条 listener 与全局 `authentication:` 条目（凭据与 recall 值一致，报告中不落明文）。
+
+**初版缺漏说明**：本报告第二节部署的是官方镜像默认出站（裸直连），虽能工作但与原架构不符——更正：原架构 searxng 出站必须走 OpenClash 代理组（export 出口 IP 信誉是 CAPTCHA 关键，早年 WARP 直连曾因出口 IP 被 Google 302/CAPTCHA）。
+
+**落地（210，同一容器，settings.yml 更新 + docker restart）**：
+
+```yaml
+outgoing:
+  proxies:
+    all: socks5h://ejhome:<REDACTED>@192.168.1.1:57896        # 默认出口 → SearXNG-US 专线 LB 组
+  networks:
+    searxng_google: { proxies: socks5h://ejhome:<REDACTED>@192.168.1.1:57898 }  # google → 粘性专线
+    searxng_home:   { proxies: socks5h://ejhome:<REDACTED>@192.168.1.1:57897 }  # karmasearch → 住宅
+engines:
+  - { name: google, network: searxng_google }
+  - { name: karmasearch, network: searxng_home }
+  - { name: duckduckgo, disabled: true }    # 与原配置一致（TLS 指纹被封）
+  - { name: startpage, disabled: true }
+```
+
+- 首次写入 list 形态 `proxies: - [url]` 报 `ValueError: proxies type has to be str, dict or None`（容器 CrashLoop），更正为 str 形态后 `docker restart` → `health http=200`。settings.yml 权限收紧为 600。
+- 引擎侧验证：`curl localhost:47321/search?q=godot+engine&format=json` → **20 条真实结果**（google cse × godotengine.org 等）。
+- **105 端到端复测**：`web_search`「Godot 4.6 release notes performance」→ 4 条真实结果（google cse，含 godotengine.org/releases/4.6 等）——经 OpenClash 出口链路完整可用。
+
 ## 合规自证
 
-- 改动面：仅授权三处（ollama 模型库 / searxng 容器与 settings / ~/.claude.json 条目）；未动三仓 HEAD 与工作树、未改 sshd/known_hosts/凭据文件、未改网关与 LiteLLM 配置。
-- 阴性对照：ollama /api/show 未知模型 → 404；诊断期死端口 47999 → 000（沿用）。
+- 改动面：仅授权三处 + 本次追加的 settings.yml 出站代理接入（Owner 15:22Z 追加指令直接覆盖）；未动三仓 HEAD 与工作树、未改 sshd/known_hosts/凭据文件、未改网关与 LiteLLM 配置。路由器侧全程只读（grep/awk 读取，未写配置）。
+- 阴性对照：ollama /api/show 未知模型 → 404；诊断期死端口 47999 → 000；searxng 错误的 list 形态 proxies → CrashLoop 判死可见（判据敏感）。
 - 全部端到端判定为真实工具调用返回，非自报。

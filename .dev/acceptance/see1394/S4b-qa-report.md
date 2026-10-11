@@ -46,6 +46,7 @@ $ curl 210:47999/（阴性对照） → http=000（探针真实网络行为）
   - `?engines=duckduckgo` → **10 条结果**（duckduckgo 引擎独立返回真实结果）
   - `?engines=google cse` → 20 条
   - 即 O-012 所述「brave/wikidata 未响应」不影响 duckduckgo——聚合可用性比 repair 报告呈现的更好。
+- **时点线补充（S4b 后段复探）**：上述初探发生在 Bachi 追加修复（4c3aa69，15:35Z，searxng 出站接入 OpenClash socks5 代理组 57896/57897/57898+auth，按引擎分流还原原架构）**落地前**。落地后 S4b 复探：引擎 47321 仍 200；默认聚合 21 条（google cse + wikipedia）；`engines=duckduckgo` → 0（**新配置按原架构显式禁用 duckduckgo**，原配置即如此——TLS 指纹被封）；brave/wikidata → 0；MCP 层 `web_search` 3 条真实结果（google cse）。全程搜索端到端真实可用不受影响，引擎覆盖面以 Owner/维护者的引擎配置决策为准（见 §5 O-012 终稿）。
 - 网关：`210:4892/web_search` → **200**（网关健康）；阴性对照 210:47999 → 000。
 - 引擎去重：47321 引擎健康 200（105 侧直探）；searxng 容器数经 repair 报告 =1（我侧无 SSH 通道不做 210 docker 查询，以网关+引擎双端健康佐证单实例在服务——见 §5 O-012 处置精化）。
 
@@ -129,7 +130,7 @@ firelog 独立重计（全局 `~/.claude/hook-fire.log`，17954 行，2026-10-11
 | **O-007** | 维持 | 插件侧 hindsight-memory session_end.py 一次性 Hook cancelled（S2b 受控会话取证）；settings.json 侧 SessionEnd 正常（104 次） | 非阻塞（观察项） | Owner 决定是否排查插件 headless 取消路径 |
 | **O-010** | 维持（vendored 红线） | §3.3：agent-ports.json 直读证实 6 legacy 名无 Harti；静态表本身已标 deprecated（SEE-1148），新 run 走动态池 | 非阻塞（待定夺） | 平台侧动态路径已可用；闭合（补名/显式端口）触 vendored 只读红线，Owner/维护者定夺 |
 | **O-011** | 维持 | 平台侧 agent mcp-config 的 searxng→47322/sse 死条目（`claude mcp list` ✘）——本 run `claude mcp list` 未复跑（不修改配置面，该死条目不阻塞其他 server），以 repair 证据 + 本 run web_search 走 4892 正常佐证 | 非阻塞 | 平台侧择机删除，无功能损失 |
-| **O-012** | **维持 + 处置精化** | §1.2 直探证明 duckduckgo/wikipedia 实际响应（聚合 26 条三引擎）——「未响应引擎」面比 repair 报告窄；brave/wikidata/google裸名 确实 0 结果（google cse 需用全名 `google cse`） | 非阻塞（观察项） | 现状已满足「搜索真实可用」；如需完整引擎覆盖（brave/wikidata），Owner 决定是否重建旧反 captcha 补丁集成或调引擎配置 |
+| **O-012** | **维持 + 终稿精化（含时点线）** | §1.2 双时点独立直探：追加修复（4c3aa69）前——官方镜像直连出站下 duckduckgo/wikipedia/google cse 三引擎真实聚合（26 条）；追加修复后（OpenClash 代理组还原原架构）——聚合 21 条（google cse + wikipedia），duckduckgo 按原配置显式禁用（TLS 指纹被封，与原环境一致），brave/wikidata 维持 0 结果；MCP 层 web_search 端到端两个时点均真实可用 | 非阻塞（观察项） | duckduckgo 禁用与原架构一致、非缺陷；brave/wikidata 覆盖是否补齐由 Owner/维护者按引擎配置决策（涉及出口 IP 信誉/CAPTCHA，与 google.py 反 captcha 补丁历史同源） |
 | **F-002** | 维持 | 105→150 本 run 复探 exit 255（host-key 层拒） | 非阻塞 | 凭据写入需 Owner 批准 |
 | **新增** | **无** | 全部判据独立执行未发现上游未登记缺陷 | — | — |
 

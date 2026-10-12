@@ -39,6 +39,10 @@ _LOGICAL_MUTATIONS = {"and": ["or"], "or": ["and"]}
 # 'not in' 的 not_in_op 节点无子 Token（无位置信息）——只支持 in→not in 方向
 _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 
+# resume store 指纹成分（SEE-1400）：算子表/定位机制/变异点产出顺序的任何
+# 变化都必须 bump——旧 verdict 跨版本复用 = 脏合并。
+OPS_VERSION = "see1400/1"
+
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {
     "0": ["1", "-1"],
@@ -199,7 +203,7 @@ def _ternary_mutants(src: str, offs: list[int], node, mk) -> list[Mutant]:
            cond_s, cond_e)
     # 两臂交换：span = 整个三元；arm 边界由 collect 端 AST 锚点算出并以
     # 'arm1|arm2' 形式编码进 original（apply 端零猜测——arm 含 ' if '/' else '
-    # 字符串字面量时 regex 会误切，硬ener 反例实证）。
+    # 字符串字面量时 regex 会误切，硬化 反例实证）。
     a1 = src[s:if_pos].strip()
     a2 = src[else_pos + len("else"):e].strip()
     if a1 and a2:

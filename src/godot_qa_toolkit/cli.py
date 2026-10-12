@@ -149,13 +149,14 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
                 tests_glob=args.tests,
                 timing_store=timing_store,
+                resume=args.resume,
             )
         else:
             from .mutation.executor import run_mutation_files
             result = run_mutation_files(
                 files, args.project_root, budget=args.budget,
                 timeout_s=args.timeout, dry_run=args.dry_run,
-                tests_glob=args.tests, jobs=args.jobs)
+                tests_glob=args.tests, jobs=args.jobs, resume=args.resume)
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",
@@ -221,6 +222,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "(SEE-1321 SPEC-001/002)")
     m.add_argument("--jobs", type=int, default=None,
                    help="concurrent per-file workers, clamped to max(2, cpu//2) (SEE-1321 SPEC-003)")
+    m.add_argument("--resume", action="store_true",
+                   help="skip mutants whose verdicts are already in the resume store "
+                        "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
+                        "re-runs them — every run persists verdicts, resume just "
+                        "turns on the skip")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

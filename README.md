@@ -61,6 +61,42 @@ signal, never a silent skip.
 gqt complexity src/systems --warn 8 --max 12
 ```
 
+## Mutation: concurrency & resume (SEE-1400)
+
+**Prefer one gqt process over many files.** `gqt mutation a.gd b.gd` splits
+mutants across both files inside one process (the `--jobs` worker pool
+balances per-file and per-mutant slices), so a single command is the fastest
+correct shape:
+
+```bash
+gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . \
+    --tests res://tests/unit/ui/ --jobs 8
+```
+
+- `--jobs N` — per-process worker pool, clamped to `max(2, cpu//2)`.
+- `GQT_GLOBAL_GODOT_SLOTS` — **cross-process** cap on live godot subprocesses
+  (default `max(2, cpu//2)`). Every GUT run (baseline + per-mutant, and
+  coverage) takes a flock slot under `.qa-cache/gqt-godot-slots/`; slots are
+  released automatically when a process dies. Running two gqt processes in
+  parallel? Lower this (or `--jobs`) so the total never exceeds your cores —
+  two un-capped processes at 8 workers each = 16 godot instances fighting
+  over 16 cores. On platforms without `fcntl` the gate warns once and steps
+  aside (never blocks).
+- `--resume` — every run already writes each mutant's verdict to
+  `.qa-cache/gqt-mutation-resume/<fingerprint>/` as it lands. If a run is
+  cancelled, rerun the same command with `--resume`: completed mutants are
+  skipped and the merged report is identical in shape to a full run
+  (`summary.resumed` counts the skips). The fingerprint is
+  `sha1(target realpath + source sha1 + effective tests_glob + budget + ops
+  version)` — change any component and the stale verdicts are ignored
+  (re-run, never dirty-merged). A corrupt or unreadable store degrades
+  honestly to "no history". `--dry-run` stays zero-IO.
+
+Auto-scan note (SEE-1400 §SPEC-005): when a mutation target is referenced by
+exactly one test file, the scanner now scopes to that file (GUT `-gselect`)
+instead of its directory — same conservative direction (narrower can only
+over-report survivors, never fake kills), cheaper per round.
+
 ## Development
 
 ```bash

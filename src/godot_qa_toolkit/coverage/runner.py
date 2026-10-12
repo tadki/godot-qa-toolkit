@@ -71,7 +71,7 @@ _PROBE_PREFIX = "__qa_cov_probe_"
 # 可执行语句的规则/树形节点名（插桩目标）——语句级，不深挖表达式。
 # 注意：else_branch/elif_branch 不在此列——它们的头行是 if 结构的一部分
 # （`else:` / `elif cond:` 不是独立语句），在其前插同缩进探针会产出语法非法
-# 的插桩文件（硬ener 反例实证：含 else 的文件 coverage 全体 run_error）。
+# 的插桩文件（硬化 反例实证：含 else 的文件 coverage 全体 run_error）。
 # 分支执行语义由 _derive_branches 的体首语句行锚定承担。
 _EXECUTABLE_NODE_NAMES = {
     "if_branch",
@@ -139,7 +139,7 @@ def _paren_depths(src: str) -> list[int]:
     """每行开始时的括号深度（()[]{}，字符串字面量已屏蔽）。
 
     探针只允许插在【深度==0】的行——深度>0 意味着该行处于括号/参数列表内部，
-    在其前插探针会破坏语法（硬ener 实机实证：save_manager.gd 的跨行分组
+    在其前插探针会破坏语法（硬化 实机实证：save_manager.gd 的跨行分组
     `(
         result
         . append(...)  ← 该行插探针 → Parse Error
@@ -177,7 +177,7 @@ def _collect_executable_lines(src: str) -> list[ExecutableLine]:
             # 括号内部行（depths>0）不是语句起始位置——即使 AST 报告该行为
             # 语句行（如跨行分组表达式 / lambda 实参行），也绝不插桩。
 
-    # 内部类（class_def）整体不插桩（SEE-1367 §SPEC-017 硬ener 反例实证）：
+    # 内部类（class_def）整体不插桩（SEE-1367 §SPEC-017 硬化 反例实证）：
     # 探针函数追加在外层类作用域，内部类方法的 self 看不到它们——
     # Godot Parse Error "Function __qa_cov_probe_N() not found in base self"，
     # 目标文件整体拒载（GUT 侧表现为 "does not extend GutTest"），零探针假象。
@@ -190,7 +190,7 @@ def _derive_branches(src: str) -> BranchSet:
     """SPEC-007：分支覆盖 v1 纯推导——行探针命中 + AST 分支结构，零新探针。
 
     if_stmt 的每个子分支（if/elif/else）与 match_stmt 的每个 match_branch
-    各计 1 分支；分支判定锚定【分支体首条可执行语句行】（硬ener 反例实证：
+    各计 1 分支；分支判定锚定【分支体首条可执行语句行】（硬化 反例实证：
     分支头行探针在条件求值时即点火，false 路径下 if 分支会被误判 covered）。
     分支体无语句（pass/空）时回退分支头行。
     observational：不参与 ok 判定（探针只证明「执行过」，不证明「被断言守护」）。
@@ -213,7 +213,7 @@ def _derive_branches(src: str) -> BranchSet:
         # 分支头行污染层：if_branch/elif_branch 的 children[0] 是条件表达式、
         # match_branch 的 children[0] 是 pattern——meta.line 均等于分支头行。
         # 不跳过会把「条件求值/模式匹配行」当分支体首行（false 路径下 if 分支
-        # 被误判 covered，硬ener 反例实证）。
+        # 被误判 covered，硬化 反例实证）。
         # else_branch 无该层，全收。
         skip_first = branch_node.data in ("if_branch", "elif_branch", "match_branch")
         body = children[1:] if skip_first else children
@@ -462,14 +462,17 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
             if not os.path.isfile(gut_fs):
                 raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
             try:
-                r = subprocess.run(
-                    ["godot", "--headless", "--path", _godot_project_path(project_root),
-                     "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_s,
-                    cwd=project_root,
-                )
+                # SEE-1400 §SPEC-003：coverage 与 mutation 同受跨进程槽位闸。
+                from ..mutation.godot_gate import GlobalGodotGate
+                with GlobalGodotGate(project_root):
+                    r = subprocess.run(
+                        ["godot", "--headless", "--path", _godot_project_path(project_root),
+                         "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_s,
+                        cwd=project_root,
+                    )
                 gut_tail = (r.stdout + r.stderr)[-1500:]
             except subprocess.TimeoutExpired:
                 # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行补救指令。
@@ -498,7 +501,7 @@ def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[
     """读取命中：user:// sink 优先（探针实际写入侧），项目根仅作非 user:// 环境回退。
 
     顺序不可反——win64@WSL 下项目根在 9p/UNC 上，且 pid 复用时残留的陈旧项目根
-    sink 会遮蔽新鲜 user:// 数据（硬ener 反例实证：probes_fired 哨兵被陈旧计数骗过）。
+    sink 会遮蔽新鲜 user:// 数据（硬化 反例实证：probes_fired 哨兵被陈旧计数骗过）。
 
     返回 (命中行号集, probes_fired)。ID-keyed 数据面：probe_id → manifest 行号；
     重复 id 幂等去重，越界 id 忽略且【不计入 probes_fired】——越界 id 是传输错误
@@ -608,7 +611,7 @@ def _resolve_user_sink(project_root: str, sink_name: str) -> str | None:
     ]
     # win64 godot 跑在 WSL 侧：探针写进 Windows APPDATA（/mnt/c/Users/<user>/...），
     # Linux 侧 runner 必须跨过去读——否则 sink 永远"不存在"，探针点火被误判为 0
-    # （硬ener 实机实证：sink 写满 23940 行命中却读不到）。
+    # （硬化 实机实证：sink 写满 23940 行命中却读不到）。
     appdata_win = _windows_appdata_from_wsl()
     if appdata_win:
         candidates.append(os.path.join(

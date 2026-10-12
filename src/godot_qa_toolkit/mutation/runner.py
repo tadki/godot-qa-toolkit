@@ -51,6 +51,8 @@ from .ops import (  # noqa: F401
 )
 
 from .inject import cleanup_temp_files, forget_temp, host_script_res, mutant_env, seed_host_script, wslpath_win
+from .godot_gate import GlobalGodotGate
+from .resume import ResumeStore
 from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
 
 
@@ -75,7 +77,7 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
 
 def _godot_project_path(project_root: str) -> str:
     """win64 godot 的 --path 语义：/mnt/... 形式的 WSL 绝对路径会被拒
-    （'Invalid project path'，硬ener 实机实证——0.1s 静默 rc≠0、零测试执行）。
+    （'Invalid project path'，硬化 实机实证——0.1s 静默 rc≠0、零测试执行）。
 
     相对路径由 godot 自行解析（CWD 契约：调用方必须已 cd 到项目根）；
     绝对路径走 wslpath 转 Windows 形式（不可用时原样返回）。
@@ -118,15 +120,18 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     env = dict(os.environ)
     if _ACTIVE_ENV:
         env.update(_ACTIVE_ENV)
-    r = subprocess.run(
-        ["godot", "--headless", "--path", _godot_project_path(project_root),
-         "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-        cwd=project_root,
-        env=env,
-    )
+    # SEE-1400 §SPEC-003：跨进程槽位闸包裹真实 godot 子进程（等槽时间不计
+    # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
+    with GlobalGodotGate(project_root):
+        r = subprocess.run(
+            ["godot", "--headless", "--path", _godot_project_path(project_root),
+             "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=project_root,
+            env=env,
+        )
     # 失败测试名解析需要完整运行流（'-*', '* test_x'、[Failed] 行）——2000
     # 字符的窗口在长断言输出下会把失败行挤出窗外导致 kill 判定失真（
     # SEE-1321 实测 pricing_resolver or→and 29 项新失败被吞成 survived）。
@@ -148,7 +153,7 @@ _ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
 def _parse_failing_tests(gut_output: str) -> set[str]:
     """从 GUT 输出解析失败测试名集合。
 
-    双格式兼容（硬ener 实机实证）：
+    双格式兼容（硬化 实机实证）：
     - 运行流：'* test_xxx' 开启一个测试，其后 [Failed] 行归属它；
     - Run Summary 段（GUT 4.6 win64 实测）：'- test_xxx' 后跟 [Failed] 行，
       但输出被 stdout[-2000:] 截断后往往只剩该段——单靠运行流正则会漏掉
@@ -236,6 +241,8 @@ def run_mutation(
     precomputed_baseline: dict | None = None,
     mutant_slice: tuple[int, int] | None = None,
     timing_store=None,
+    resume: bool = False,
+    resume_store=None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -249,6 +256,9 @@ def run_mutation(
     mutant_slice（SEE-1321 SPEC-003 修订）：per-mutant 并发 worker 的分片，
     只跑 [start, stop) 的 mutants；必须携带共享 baseline（worker 各自跑
     baseline 会 N 倍放大启动税且并发期耗时污染 timeout 锚）。
+    resume（SEE-1400 §SPEC-002）：跳过 resume store 中已完成的变异只跑剩余；
+    resume_store 显式注入时优先（测试替身），否则按生效 tests_glob 自建。
+    常规 run 同样落盘（中断后即可续跑），--resume 只打开跳过语义。
     返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
     所有 mutant 均被测试杀死。
     """
@@ -283,47 +293,68 @@ def run_mutation(
 
     mutants = mutants[:budget]
     # budget 截断后可能为空（budget=0 / 极小预算）——零 mutant 不得触发
-    # baseline GUT（硬ener 反例实证：白付一轮 108s baseline）。
+    # baseline GUT（硬化 反例实证：白付一轮 108s baseline）。
     if not mutants:
         return _no_sites_result(str(path), scoped)
     results, invalid_count = _record_invalid_mutants(original_src, mutants,
                                                      mutant_slice)
+    # SEE-1400 §SPEC-001：每个 verdict 增量落盘——常规 run 也写（中断即可
+    # 续跑），--resume 才打开跳过语义。dry-run 已在上方短路（零 IO）。
+    if resume_store is None:
+        resume_store = ResumeStore(project_root, str(path), tests_glob, budget)
 
-    # SEE-1356 L1 (§SPEC-L1-01)：预算协商。缓存只喂预算锚——baseline 永远
-    # 实测（判定语义）；worker 分片（precomputed_baseline 携带者）跳过
-    # store 读写（executor 单进程拥有协商与采样）。
-    timing_meta = explicit_timing_meta()
-    effective_timeout = timeout_s
-    if timing_store is not None and precomputed_baseline is None:
-        hist = timing_store.read()
-        anchor = hist["last"] if hist else None
-        effective_timeout, timing_meta["timing_source"] = resolve_budget(
-            timeout_s, anchor)
-        timing_meta["samples_n"] = hist["samples_n"] if hist else 0
-        timing_meta["baseline_p90"] = hist["p90"] if hist else None
+    effective_timeout, timing_meta = _negotiate_budget(
+        timing_store, timeout_s, precomputed_baseline)
 
     # 缺陷1 兜底恢复守卫（SEE-1319 与 SEE-1321 内存注入共存）：内存注入路径
     # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。
     with _interrupt_guard(path, backup):
         outcome = _run_mutant_loop_with_aborts(
             path, project_root, original_src, backup, mutants, tests_glob,
-            effective_timeout, results, precomputed_baseline, mutant_slice)
+            effective_timeout, results, precomputed_baseline, mutant_slice,
+            resume_store, resume)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
-    counts, baseline_reused, baseline_elapsed = outcome
+    counts, baseline_reused, baseline_elapsed, resumed_count = outcome
 
-    # baseline 永远实测——只有亲自跑过 baseline 才采样（worker 不重复计数）。
-    # 报告字段反映本轮采样后的 store 状态（samples_n/baseline_p90 为观察字段）。
-    if timing_store is not None and not baseline_reused:
-        timing_store.record(baseline_elapsed)
-        fresh = timing_store.read()
-        if fresh:
-            timing_meta["samples_n"] = fresh["samples_n"]
-            timing_meta["baseline_p90"] = fresh["p90"]
+    _record_timing_sample(timing_store, baseline_reused, baseline_elapsed,
+                          timing_meta)
 
     return _mutation_report(str(path), *counts, invalid_count, budget,
-                            results, scoped, baseline_reused, timing_meta)
+                            results, scoped, baseline_reused, timing_meta,
+                            resumed_count if resume else None)
+
+
+def _negotiate_budget(timing_store, timeout_s: int,
+                      precomputed_baseline: dict | None
+                      ) -> tuple[int, dict]:
+    """SEE-1356 L1 (§SPEC-L1-01)：预算协商。缓存只喂预算锚——baseline 永远
+    实测（判定语义）；worker 分片（precomputed_baseline 携带者）跳过
+    store 读写（executor 单进程拥有协商与采样）。"""
+    timing_meta = explicit_timing_meta()
+    if timing_store is None or precomputed_baseline is not None:
+        return timeout_s, timing_meta
+    hist = timing_store.read()
+    anchor = hist["last"] if hist else None
+    effective_timeout, timing_meta["timing_source"] = resolve_budget(
+        timeout_s, anchor)
+    timing_meta["samples_n"] = hist["samples_n"] if hist else 0
+    timing_meta["baseline_p90"] = hist["p90"] if hist else None
+    return effective_timeout, timing_meta
+
+
+def _record_timing_sample(timing_store, baseline_reused: bool,
+                          baseline_elapsed: float, timing_meta: dict) -> None:
+    """baseline 永远实测——只有亲自跑过 baseline 才采样（worker 不重复计数）。
+    报告字段反映本轮采样后的 store 状态（samples_n/baseline_p90 为观察字段）。"""
+    if timing_store is None or baseline_reused:
+        return
+    timing_store.record(baseline_elapsed)
+    fresh = timing_store.read()
+    if fresh:
+        timing_meta["samples_n"] = fresh["samples_n"]
+        timing_meta["baseline_p90"] = fresh["p90"]
 
 
 def make_sigterm_restore_handler(file_path: str, backup: str):
@@ -428,13 +459,15 @@ def _no_sites_result(file: str, scoped: bool | None = None) -> dict:
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  mutants, tests_glob, timeout_s, results,
                                  precomputed_baseline=None,
-                                 mutant_slice=None):
+                                 mutant_slice=None,
+                                 resume_store=None, resume=False):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回计数。"""
     try:
         return _run_mutant_loop(
             path, project_root, original_src, backup,
             _valid_mutants(original_src, mutants), tests_glob, timeout_s,
             results, precomputed_baseline, mutant_slice,
+            resume_store, resume,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -457,7 +490,8 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      run_error_count: int, suspect_count: int, invalid_count: int,
                      budget: int, results: list[dict], scoped: bool = False,
                      baseline_reused: bool = False,
-                     timing_meta: dict | None = None) -> dict:
+                     timing_meta: dict | None = None,
+                     resumed: int | None = None) -> dict:
     total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
@@ -479,13 +513,17 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
         "scoped": scoped,
         "baseline_reused": baseline_reused,
     }
+    # SEE-1400 §SPEC-002：仅在 resume 跳过语义在场的 run 报 skipped 数——
+    # 常规 run 的 summary 与升级前逐字节同构（既有消费方零感知）。
+    if resumed is not None:
+        summary["resumed"] = resumed
     # SEE-1356 L1 (§SPEC-L1-03)：报告字段 timing_source/samples_n/baseline_p90
     # ——timing store 未接入时缺省 explicit（显式 timeout 即最终预算）。
     summary.update(timing_meta or explicit_timing_meta())
     return {
         "tool": "mutation",
         # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok
-        # （硬ener 反例实证：suspect>0 时 ok=True 是自欺）。
+        # （硬化 反例实证：suspect>0 时 ok=True 是自欺）。
         "ok": survived == 0 and timeout_count == 0 and run_error_count == 0
               and suspect_count == 0,
         "summary": summary,
@@ -525,16 +563,19 @@ def _run_mutant_loop(
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
     results: list[dict], precomputed_baseline: dict | None = None,
     mutant_slice: tuple[int, int] | None = None,
-) -> tuple[tuple[int, int, int, int, int], bool, float]:
-    """逐 mutant 跑 GUT 并分类判定；返回 (counts, baseline_reused, baseline_elapsed)。
+    resume_store=None, resume: bool = False,
+) -> tuple[tuple[int, int, int, int, int], bool, float, int]:
+    """逐 mutant 跑 GUT 并分类判定；返回 (counts, baseline_reused, baseline_elapsed, resumed)。
 
     mutant_slice（SPEC-003 修订）：per-mutant 并发 worker 分片，只跑
     [start, stop) 区间（下界含、上界不含）；分片工作线程复用共享 baseline，
     不自跑 baseline。baseline_elapsed（SEE-1356 L1）供 timing store 采样
     ——baseline 永远实测，快照 elapsed 只喂预算锚。
+    resumed（SEE-1400）：从 resume store 复用的已完成 verdict 数。
     """
     global _adaptive_timeout
     killed = survived = timeout_count = run_error_count = suspect_count = 0
+    resumed_count = 0
 
     with tempfile.TemporaryDirectory() as workdir:
         backup_path = os.path.join(workdir, "original.gd")
@@ -573,13 +614,29 @@ def _run_mutant_loop(
         try:
             start, stop = (mutant_slice if mutant_slice is not None
                            else (0, len(mutants)))
+            # SEE-1400 §SPEC-002：指纹已由 store key 保证；条目再与当前
+            # mutant 逐一核对身份后复用。复用条目按 _mutant_record 字段面
+            # 重建再 append——store 信封字段（schema/key/seq/recorded_at）
+            # 绝不能进报告，否则 failures 明细与全量跑 7 字段形态不等
+            #（Revy QA 实机 FAIL 实证，§SPEC-002 同构按明细全签名口径）。
+            completed: dict[int, dict] = {}
+            if resume_store is not None and resume:
+                completed = resume_store.load_completed(mutants, start, stop)
+                resumed_count = len(completed)
             for seq, m in enumerate(mutants):
                 if not start <= seq < stop:
+                    continue
+                if seq in completed:
+                    c = completed[seq]
+                    results.append(_mutant_record(
+                        m, c["verdict"], c["reason"]))
                     continue
                 verdict = _run_single_mutant(m, path, project_root, original_src,
                                              backup, tests_glob, seq,
                                              baseline_failures, baseline_dirty)
                 results.append(verdict)
+                if resume_store is not None:
+                    resume_store.record(seq, verdict)
         finally:
             host.unlink(missing_ok=True)
             forget_temp(host)
@@ -594,7 +651,7 @@ def _run_mutant_loop(
             tally[r["verdict"]] += 1
     return ((tally["killed"], tally["survived"], tally["timeout"],
              tally["run_error"], tally["suspect"]), baseline_reused,
-            baseline_elapsed)
+            baseline_elapsed, resumed_count)
 
 
 def _impl_fs_path(project_root: str, cfg_path: Path) -> str | None:

@@ -61,12 +61,18 @@ class TestScanTestRefs:
 
 
 class TestDeriveTestsGlob:
-    def test_youngest_common_directory(self, tests_tree):
+    def test_single_hit_converges_to_file_glob(self, tests_tree):
+        # SEE-1400 §SPEC-005：单命中收敛到文件级（-gselect 通道）
         assert derive_tests_glob("res://scripts/vendor.gd", tests_tree) == \
-            "res://tests/unit/vendor/"
+            "res://tests/unit/vendor/test_vendor.gd"
 
     def test_no_hits_returns_none(self, tests_tree):
         assert derive_tests_glob("res://scripts/unknown.gd", tests_tree) is None
+
+    def test_multiple_files_stay_directory_level(self, tests_tree):
+        # 多命中维持目录级现状（test_save.gd + test_misc.gd 两文件）
+        assert derive_tests_glob("res://scripts/save_manager.gd",
+                                 tests_tree) == "res://tests/unit/save/"
 
     def test_multiple_dirs_scored(self, tests_tree):
         tests = tests_tree
@@ -84,4 +90,22 @@ class TestDeriveTestsGlob:
         (d / "t.gd").write_text('preload("RES://SCRIPTS/Save_Manager.GD")\n')
         # Windows 文件系统大小写不敏感；res:// 路径按 casefold 比对
         assert derive_tests_glob("res://scripts/save_manager.gd", tests) == \
-            "res://tests/unit/save/"
+            "res://tests/unit/save/t.gd"
+
+    def test_single_hit_at_tests_root_gives_file_path(self, tmp_path):
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "test_root.gd").write_text(
+            'preload("res://scripts/target.gd")\n')
+        assert derive_tests_glob("res://scripts/target.gd", tests) == \
+            "res://tests/test_root.gd"
+
+    def test_single_hit_multi_reference_still_file_level(self, tmp_path):
+        # 同一文件 preload + class_name 双形态命中仍属"恰好 1 个文件"
+        tests = tmp_path / "tests" / "unit"
+        tests.mkdir(parents=True)
+        (tests / "test_both.gd").write_text(
+            'const C = preload("res://scripts/target.gd")\n'
+            'var target = null\n')
+        assert derive_tests_glob("res://scripts/target.gd", tmp_path / "tests") \
+            == "res://tests/unit/test_both.gd"

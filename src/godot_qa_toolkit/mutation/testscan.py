@@ -73,6 +73,10 @@ def _ref_hits_target(ref: str, target_res_path: str) -> bool:
 def derive_tests_glob(target_res_path: str, tests_dir: Path) -> str | None:
     """目标 → 最小命中测试目录的 res:// glob（SPEC-001 主判据）。
 
+    SEE-1400 §SPEC-005：命中恰好 1 个测试文件 → 返回该文件 res:// 路径
+    （.gd 结尾，走 _run_gut_on_project 的 -gselect 单文件通道）——单轮成本
+    从目录级收敛到文件级。多命中维持目录级现状。映射保守方向不变：
+    过窄只会假存活，不虚报质量。
     命中分布跨多个目录时取命中文件数第一个的最深目录（从浅到深按命中数
     与路径深度加权）——扫描误差方向保守：过窄只会少报 killed（生存假阳），
     不会虚报质量。
@@ -81,6 +85,11 @@ def derive_tests_glob(target_res_path: str, tests_dir: Path) -> str | None:
     if not counts:
         return None
     tests_abs = str(tests_dir.absolute()).replace("\\", "/")
+    if len(counts) == 1:
+        only = next(iter(counts))
+        rel = only[len(tests_abs):].strip("/")
+        # 单文件在 tests/ 根直接命中（rel 无目录成分）→ res://tests/<name>.gd
+        return "res://tests/" + rel
     dir_counts: dict[str, int] = {}
     for path, n in counts.items():
         parent = path.rsplit("/", 1)[0]

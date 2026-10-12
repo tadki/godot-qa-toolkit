@@ -388,3 +388,58 @@ exit 0
         assert "GQT_TOOLKIT_ROOT" in text
         # 拼插反模式必须消除（单引号 python 表达式内的 $ 展开）
         assert "'$TOOLKIT_ROOT/src'" not in text
+
+
+class TestStandaloneInstallMode:
+    """SEE-1396：gqt 独立安装模式——doctor 不隐式依赖 KOL 路径约定。"""
+
+    def test_no_env_no_walkup_root_is_skipped_not_false_positive(self, tmp_path, monkeypatch):
+        # cwd 不在任何工具树内 + 无 env → standalone skipped（exit 0 语义）。
+        from godot_qa_toolkit import doctor
+        monkeypatch.delenv("GQT_TOOLKIT_ROOT", raising=False)
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(tmp_path))
+        ok, detail = doctor.check_install(cwd=tmp_path / "anywhere")
+        assert ok is True
+        assert detail["status"] == "skipped"
+
+    def test_env_override_points_doctor_at_standalone_checkout(self, tmp_path, monkeypatch):
+        from godot_qa_toolkit import doctor
+        checkout = tmp_path / "tools" / "godot-qa-toolkit"
+        checkout.mkdir(parents=True)
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(checkout))
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(checkout))
+        ok, detail = doctor.check_install(cwd=tmp_path)
+        assert ok is True
+        assert detail["status"] == "ok"
+        assert detail["toolkit_root"] == str(checkout)
+
+    def test_env_override_with_mismatched_editable_reports_mismatch(self, tmp_path, monkeypatch):
+        from godot_qa_toolkit import doctor
+        checkout = tmp_path / "tools" / "godot-qa-toolkit"
+        checkout.mkdir(parents=True)
+        stale = tmp_path / "old-worktree" / "qa-toolkit"
+        stale.mkdir(parents=True)
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(checkout))
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(stale))
+        ok, detail = doctor.check_install(cwd=tmp_path)
+        assert ok is False
+        assert detail["status"] == "mismatch"
+        assert detail["toolkit_root"] == str(checkout)
+
+    def test_env_override_missing_path_degrades_to_skipped_not_crash(self, tmp_path, monkeypatch):
+        # env 指向不存在的路径 → 无从比对，降级 skipped（绝不误报 exit 2）。
+        from godot_qa_toolkit import doctor
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(tmp_path / "not-a-checkout"))
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(tmp_path))
+        ok, detail = doctor.check_install(cwd=tmp_path)
+        assert ok is True
+        assert detail["status"] == "skipped"
+
+    def test_locate_toolkit_root_env_takes_precedence_over_walkup(self, tmp_path, monkeypatch):
+        from godot_qa_toolkit import doctor
+        walkup_root = tmp_path / "wt" / "KingOfLikes-Godot" / ".dev" / "qa-toolkit"
+        walkup_root.mkdir(parents=True)
+        env_root = tmp_path / "tools" / "gqt"
+        env_root.mkdir(parents=True)
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(env_root))
+        assert doctor.locate_toolkit_root(walkup_root / "src") == env_root

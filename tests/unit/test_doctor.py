@@ -443,3 +443,102 @@ class TestStandaloneInstallMode:
         env_root.mkdir(parents=True)
         monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(env_root))
         assert doctor.locate_toolkit_root(walkup_root / "src") == env_root
+
+
+class TestStandaloneInstallModeHardening:
+    """SEE-1396 hardener：独立安装模式边界对抗（默认 doctor 是错的）。
+
+    覆盖面：GQT_TOOLKIT_ROOT 非目录/空串边界、editable 冗余路径形态、
+    cmd_doctor 退出码映射、CLI 端到端 standalone skipped 契约。
+    """
+
+    def test_env_root_pointing_at_file_degrades_to_skipped(self, tmp_path, monkeypatch):
+        # env 指向已存在的普通文件（非目录）→ is_dir 判定必须拒绝，
+        # 降级 skipped（mutation: is_dir→exists 会被此用例杀死）。
+        from godot_qa_toolkit import doctor
+        env_file = tmp_path / "a-file-not-dir"
+        env_file.write_text("not a checkout")
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(env_file))
+        assert doctor.locate_toolkit_root(tmp_path / "src") is None
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(tmp_path))
+        ok, detail = doctor.check_install(cwd=tmp_path / "anywhere")
+        assert ok is True
+        assert detail["status"] == "skipped"
+
+    def test_env_root_empty_string_falls_back_to_walkup(self, tmp_path, monkeypatch):
+        # env 置空串 ≡ 未设置：必须继续走 walk-up（mutation: if env_root:
+        # → if env_root is not None: 会让 Path("")=cwd 被当成工具根）。
+        from godot_qa_toolkit import doctor
+        walkup_root = tmp_path / "wt" / "KingOfLikes-Godot" / ".dev" / "qa-toolkit"
+        walkup_root.mkdir(parents=True)
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", "")
+        assert doctor.locate_toolkit_root(walkup_root / "src") == walkup_root
+
+    def test_editable_redundant_path_forms_still_match(self, tmp_path, monkeypatch):
+        # editable 带尾斜杠 / 内嵌 .. 时 resolve() 比对必须消掉差异
+        # （mutation: resolve()→absolute() 或 ==→字符串比较会被杀死）。
+        from godot_qa_toolkit import doctor
+        root = tmp_path / "wt" / "tools" / "godot-qa-toolkit"
+        root.mkdir(parents=True)
+        for odd_form in (f"{root}/", f"{root}/src/.."):
+            monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(root))
+            monkeypatch.setattr(doctor, "resolve_editable_location",
+                                lambda odd=odd_form: odd)
+            monkeypatch.setattr(doctor, "_gitlink_head", lambda r: "abc")
+            ok, detail = doctor.check_install(cwd=tmp_path / "anywhere")
+            assert ok is True, f"editable={odd_form} 不应误报"
+            assert detail["status"] == "ok"
+
+    def test_env_mismatch_detail_carries_both_locations(self, tmp_path, monkeypatch):
+        # env 模式 mismatch 详情必须同时带 editable_location 与 toolkit_root
+        # （修复指引的机器判据；仅断言 status/toolkit_root 不够）。
+        from godot_qa_toolkit import doctor
+        checkout = tmp_path / "tools" / "godot-qa-toolkit"
+        checkout.mkdir(parents=True)
+        stale = tmp_path / "old-worktree" / "qa-toolkit"
+        stale.mkdir(parents=True)
+        monkeypatch.setenv("GQT_TOOLKIT_ROOT", str(checkout))
+        monkeypatch.setattr(doctor, "resolve_editable_location", lambda: str(stale))
+        monkeypatch.setattr(doctor, "_gitlink_head", lambda r: "deadbeef")
+        ok, detail = doctor.check_install(cwd=tmp_path)
+        assert ok is False
+        assert detail["status"] == "mismatch"
+        assert detail["editable_location"] == str(stale)
+        assert detail["toolkit_root"] == str(checkout)
+        assert "install.sh" in detail["fix_hint"]
+
+    def test_cmd_doctor_exit_mapping_ok_zero_mismatch_two(self, tmp_path, monkeypatch, capsys):
+        # cmd_doctor 退出码映射：ok→0、mismatch→2（mutation: 反转/恒 0 会被杀死）。
+        from godot_qa_toolkit import doctor
+        monkeypatch.setattr(doctor, "check_install",
+                            lambda: (True, {"status": "skipped"}))
+        assert doctor.cmd_doctor(None) == 0
+        monkeypatch.setattr(doctor, "check_install",
+                            lambda: (False, {"status": "mismatch", "fix_hint": "x"}))
+        assert doctor.cmd_doctor(None) == 2
+
+    def test_cmd_doctor_json_goes_to_stderr_not_stdout(self, tmp_path, monkeypatch, capsys):
+        # 诊断 JSON 只进 stderr，stdout 保持干净（CLI JSON 管道契约）。
+        from godot_qa_toolkit import doctor
+        monkeypatch.setattr(doctor, "check_install",
+                            lambda: (True, {"status": "skipped"}))
+        doctor.cmd_doctor(None)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert json.loads(captured.err)["status"] == "skipped"
+
+    def test_cli_doctor_standalone_exit_zero_outside_any_tooltree(self, tmp_path):
+        # CLI 端到端（§SPEC-005 契约）：任意非工具目录跑 `gqt doctor`
+        # 必须 exit 0 + stderr JSON status=skipped + stdout 干净。
+        # env 剥离 GQT_TOOLKIT_ROOT；PYTHONPATH 固定本树（README §PYTHONPATH）。
+        import subprocess
+        env = {k: v for k, v in os.environ.items() if k != "GQT_TOOLKIT_ROOT"}
+        env["PYTHONPATH"] = str(REPO / "src")
+        proc = subprocess.run(
+            [sys.executable, "-m", "godot_qa_toolkit.cli", "doctor"],
+            capture_output=True, text=True, cwd=str(tmp_path), env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == ""
+        payload = json.loads(proc.stderr)
+        assert payload["status"] == "skipped"

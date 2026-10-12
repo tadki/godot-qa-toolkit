@@ -119,6 +119,10 @@ class ResumeStore:
             return None
         if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
             return None
+        # 条目信封核对（hardener SEE-1400）：key/seq 与自身路径不符 = 条目
+        # 被拷贝/换位过——按无历史处理，绝不复用身份漂移的 verdict。
+        if raw.get("key") != self.key or raw.get("seq") != int(seq):
+            return None
         if raw.get("verdict") not in FINAL_VERDICTS:
             return None
         return raw
@@ -156,5 +160,13 @@ class ResumeStore:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
-        return (isinstance(raw, dict) and raw.get("schema") == SCHEMA
-                and raw.get("verdict") in FINAL_VERDICTS)
+        if not (isinstance(raw, dict) and raw.get("schema") == SCHEMA
+                and raw.get("verdict") in FINAL_VERDICTS):
+            return False
+        # 与 _read_entry 同一信封核对（hardener SEE-1400）：key/seq 漂移的
+        # 条目不计入完成数（forensic 计数与可复用集合口径一致）。
+        try:
+            seq = int(path.stem)
+        except ValueError:
+            return False
+        return raw.get("key") == self.key and raw.get("seq") == seq

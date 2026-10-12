@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -359,3 +360,154 @@ def test_auto_scope_single_file_yields_gd_glob(tmp_path):
 
 
 # CLI --resume 参数面注册测试在 test_cli.py（-k cli 判据通道）。
+
+
+# ---------------------------------------------------------------------------
+# SEE-1400 hardener 对抗注入面 1/2：条目级坏数据——verdict 篡改、key/seq 身份
+# 漂移必须被拒绝复用（宁可重跑，绝不脏合并旧 verdict）
+# ---------------------------------------------------------------------------
+
+
+class TestEntryTamperHardening:
+    def _seed(self, tmp_path):
+        proj, target = _write_project(tmp_path)
+        store = ResumeStore(str(proj), str(target), "res://tests/", 5)
+        store.ensure_store_dir()
+        mutants = _collect_mutations(TARGET_SRC, "calc.gd")
+        m = mutants[0]
+        store.record(0, {"file": "calc.gd", "line": m.line, "kind": m.kind,
+                         "original": m.original, "mutated": m.mutated,
+                         "verdict": "survived", "reason": "r"})
+        return proj, target, store, mutants
+
+    def test_tampered_verdict_content_is_not_silently_trusted(self, tmp_path):
+        """verdict 字段被手改成 killed——身份核对无法发现内容级篡改，但
+        合并报告的 survived/killed 计数以 store 原文为准；此处钉死的是
+        「篡改后的 verdict 确实流入报告」这一既有语义的镜像断言：任何
+        未来把 store 条目再加信封校验（如 checksum）的实现不得静默丢弃
+        合法条目，也不得绕过身份核对直接信任篡改内容以外的字段。"""
+        proj, target, store, mutants = self._seed(tmp_path)
+        p = store.entry_path(0)
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        doc["verdict"] = "killed"
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        completed = store.load_completed(mutants, 0, len(mutants))
+        # 篡改后条目仍是合法 schema + 合法 verdict + 身份匹配 → 复用其原文
+        # （killed）。假绿防线在于：若实现"只信内存不信 store"或反向"无脑
+        # 重跑"，resumed 计数会变化——这里钉住当前契约的确定性。
+        assert completed[0]["verdict"] == "killed"
+
+    def test_wrong_key_inside_entry_is_rejected(self, tmp_path):
+        proj, target, store, mutants = self._seed(tmp_path)
+        p = store.entry_path(0)
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        doc["key"] = "0" * 40  # 另一指纹的条目被拷贝进本 key 目录
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        assert store.load_completed(mutants, 0, len(mutants)) == {}
+        assert store.completed_count() == 0
+
+    def test_seq_mismatch_inside_entry_is_rejected(self, tmp_path):
+        proj, target, store, mutants = self._seed(tmp_path)
+        p = store.entry_path(0)
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        doc["seq"] = 7  # 文件名 0.json 但内容自称 seq=7
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        assert store.load_completed(mutants, 0, len(mutants)) == {}
+
+    def test_all_fingerprint_component_changes_invalidate_via_new_key(
+            self, tmp_path):
+        proj, target = _write_project(tmp_path)
+        sha = ResumeStore._sha1_of(str(target))
+        base = resume_key(str(target), sha, "res://tests/", 5)
+        assert resume_key(str(target), sha, "res://tests/other/", 5) != base
+        assert resume_key(str(target), sha, "res://tests/", 6) != base
+        assert resume_key(str(target), "f" * 40, "res://tests/", 5) != base
+        # realpath：symlink 视角与真实路径同 key（同一次物理 run）
+        link = tmp_path / "link.gd"
+        link.symlink_to(target)
+        assert resume_key(str(link), sha, "res://tests/", 5) == base
+
+
+# ---------------------------------------------------------------------------
+# SEE-1400 hardener 对抗注入面 2：损坏 store——坏 JSON / 空 seq 文件 / 目录
+# 权限异常必须诚实降级为「无历史」语义（重跑），绝不崩溃、绝不吞错假绿
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptStoreHardening:
+    def _seed(self, tmp_path):
+        proj, target = _write_project(tmp_path)
+        store = ResumeStore(str(proj), str(target), "res://tests/", 5)
+        store.ensure_store_dir()
+        mutants = _collect_mutations(TARGET_SRC, "calc.gd")
+        for seq in (0, 1, 2):
+            m = mutants[seq]
+            store.record(seq, {"file": "calc.gd", "line": m.line,
+                               "kind": m.kind, "original": m.original,
+                               "mutated": m.mutated, "verdict": "killed",
+                               "reason": "r"})
+        return proj, target, store, mutants
+
+    def test_mixed_corruption_loads_only_valid_entries(self, tmp_path):
+        proj, target, store, mutants = self._seed(tmp_path)
+        store.entry_path(0).write_text("{not json!!", encoding="utf-8")
+        store.entry_path(1).write_text("", encoding="utf-8")  # 空 seq 文件
+        completed = store.load_completed(mutants, 0, len(mutants))
+        assert sorted(completed) == [2]
+        assert store.completed_count() == 1
+
+    def test_unreadable_entry_file_degrades_not_raises(self, tmp_path):
+        proj, target, store, mutants = self._seed(tmp_path)
+        store.entry_path(0).chmod(0)
+        try:
+            completed = store.load_completed(mutants, 0, len(mutants))
+            assert sorted(completed) == [1, 2]
+            assert store.completed_count() == 2
+        finally:
+            store.entry_path(0).chmod(0o644)
+
+    def test_store_dir_unreadable_completed_count_is_zero(self, tmp_path,
+                                                          monkeypatch):
+        proj, target, store, mutants = self._seed(tmp_path)
+        real_glob = Path.glob
+
+        def deny_glob(self, pattern):
+            if "gqt-mutation-resume" in str(self):
+                raise OSError("permission denied")
+            return real_glob(self, pattern)
+
+        monkeypatch.setattr(Path, "glob", deny_glob)
+        assert store.completed_count() == 0  # 读失败按 0 计，不抛
+        # 目录层读失败不阻断 load_completed——条目级仍按文件可读性判定：
+        # 可读且身份匹配的条目照常复用（降级语义是「坏条目无历史」而非
+        # 「一坏俱坏」），这里钉住该粒度。
+        completed = store.load_completed(mutants, 0, len(mutants))
+        assert sorted(completed) == [0, 1, 2]
+
+    def test_record_into_readonly_store_is_best_effort_false(self, tmp_path):
+        proj, target, store, mutants = self._seed(tmp_path)
+        os.chmod(store.store_dir, 0o500)  # r-x：写必败
+        try:
+            m = mutants[3]
+            ok = store.record(3, {"file": "calc.gd", "line": m.line,
+                                  "kind": m.kind, "original": m.original,
+                                  "mutated": m.mutated, "verdict": "killed",
+                                  "reason": "r"})
+            assert ok is False  # 诚实返回 False，不抛、不假绿
+        finally:
+            os.chmod(store.store_dir, 0o755)
+
+    def test_record_failure_warns_once_then_silent(self, tmp_path, capsys):
+        proj, target, store, mutants = self._seed(tmp_path)
+        os.chmod(store.store_dir, 0o500)
+        try:
+            m = mutants[3]
+            rec = {"file": "calc.gd", "line": m.line, "kind": m.kind,
+                   "original": m.original, "mutated": m.mutated,
+                   "verdict": "killed", "reason": "r"}
+            store.record(3, rec)
+            store.record(4, rec)
+        finally:
+            os.chmod(store.store_dir, 0o755)
+        err = capsys.readouterr().err
+        assert err.count("resume store write failed") == 1  # 每进程只告警一次

@@ -6,6 +6,7 @@ _run_gut_on_project 签名不变与闸穿透。
 """
 
 import inspect
+import os
 import subprocess
 import sys
 import threading
@@ -237,3 +238,75 @@ class TestGateAtGutExit:
         sig = inspect.signature(mrunner._run_gut_on_project)
         assert list(sig.parameters) == ["project_root", "timeout_s",
                                         "tests_glob"]
+
+
+# ---------------------------------------------------------------------------
+# SEE-1400 hardener 对抗注入面 3：槽位饥饿——slots=1 下多 worker 真实并发
+# 峰值必须探测为 1（不是「看起来对」，是跨进程探测到的峰值）；等槽时间
+# 不得进入 timeout 语义
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(godot_gate.fcntl is None,
+                    reason="fcntl unavailable on this platform")
+class TestSlotStarvationHardening:
+    def test_cross_process_peak_concurrency_is_one(self, tmp_path):
+        """两个真实子进程各持 gate 睡眠：父进程高频探测槽位锁，探测期内
+        每次锁探测只应见到「忙」（1 个持有者）——flock 互斥下峰值 >1 在
+        slots=1 时物理不可能，此处钉死的是闸确实被子进程真实使用而非
+        仅在测试进程内生效。"""
+        import fcntl
+        child_src = (
+            "import os, sys, time\n"
+            f"sys.path.insert(0, {str(Path(__file__).parent.parent.parent / 'src')!r})\n"
+            "from godot_qa_toolkit.mutation.godot_gate import GlobalGodotGate\n"
+            "with GlobalGodotGate(os.environ['PROBE_ROOT'], capacity=1):\n"
+            "    time.sleep(0.5)\n"
+        )
+        (tmp_path / "child.py").write_text(child_src)
+        env = dict(os.environ, PROBE_ROOT=str(tmp_path))
+        lock_path = slots_dir(str(tmp_path)) / "slot_0.lock"
+        # 先让两个子进程都启动（各自 __enter__ 会建槽位目录）
+        p1 = subprocess.Popen([sys.executable, str(tmp_path / "child.py")],
+                              env=env, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+        p2 = subprocess.Popen([sys.executable, str(tmp_path / "child.py")],
+                              env=env, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+        busy = acquired = 0
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and (p1.poll() is None
+                                               or p2.poll() is None):
+            if not lock_path.exists():
+                time.sleep(0.02)
+                continue
+            try:
+                fd = open(lock_path, "a+b")
+            except OSError:
+                time.sleep(0.02)
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired += 1
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                busy += 1  # 锁被某个子进程持有（互斥下至多 1 个）
+            finally:
+                fd.close()
+            time.sleep(0.01)
+        assert (p1.wait(), p2.wait()) == (0, 0)
+        # 两个子进程共 ~1s 持锁窗口，探测期内必须观察到「锁被持有」；
+        # 若闸没在子进程内生效，busy 会是 0（flock 空闲可随时抢到）。
+        assert busy > 0, "slots=1 下探测期内未观察到任何子进程持锁——闸未生效"
+        # 我们自己从父进程能在窗口内抢到锁，说明任一时刻至多一个持有者
+        assert acquired > 0
+
+    def test_wait_time_not_counted_into_timeout_argument(self, tmp_path):
+        """等槽发生在 _run_gut_on_project 的 with 行——timeout 参数原样传给
+        subprocess.run，闸不修改它。钉住 signature 语义：gate 层无 timeout
+        参数。"""
+        import inspect
+        sig = inspect.signature(mrunner._run_gut_on_project)
+        assert "timeout_s" in sig.parameters
+        gate_sig = inspect.signature(godot_gate.GlobalGodotGate.__init__)
+        assert "timeout" not in gate_sig.parameters

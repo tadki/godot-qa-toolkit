@@ -86,15 +86,28 @@ Two belts guard against this:
    it instead of relying on the editable install:
 
    ```bash
-   cd <this-worktree>/.dev/qa-toolkit
+   cd <gqt-checkout-root>
    PYTHONPATH="$PWD/src" python -m pytest tests/ -q
    ```
 
    Re-point a drifting editable install from the *current* tree:
 
    ```bash
-   cd <this-worktree>/.dev/qa-toolkit && pip install -e .
+   cd <gqt-checkout-root> && pip install -e .
    ```
+
+### Standalone install mode (SEE-1396)
+
+gqt no longer lives under a KOL `.dev/qa-toolkit` submodule — it is an
+independent CLI installed from a standalone checkout (e.g. a persistent
+`~/tools/godot-qa-toolkit` on WSL). `gqt doctor` works out of the box in
+standalone mode (skips the root comparison when it cannot resolve a target
+tree — exit 0, never a false report). To have doctor compare the editable
+install against a specific tree, point it there:
+
+```bash
+GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
+```
 
 The rule: never rely on an editable install whose egg-link you did not just
 create from the tree you are testing.

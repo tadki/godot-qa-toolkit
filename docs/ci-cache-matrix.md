@@ -51,6 +51,8 @@
 
 本表对账基准（2026-09-12 实读；②c 落地后回改状态）：
 
+**gqt 消费口径（SEE-1396 独立拆分）**：gqt 不再作为 KOL submodule 分发——KOL CI 改为从本库 `git+https://github.com/tadki/godot-qa-toolkit.git` 直接 pip 安装（**unpinned master tip**，与 WSL 规范检出 pull 即生效的 Owner 决策动机同源；如后续需供应链审计可再议 pin），WSL 生产环境由独立规范检出（任务工作树之外的可持久路径）editable 安装提供全局 `gqt` CLI。`gqt doctor` 支持独立安装模式（`GQT_TOOLKIT_ROOT` 环境变量指定工具库根；standalone 使用不误报）。
+
 - godot-mcp：`gh workflow list` 6 条（CI / Claude Code / Docs live / Launch CI fast / Launch Special / Release）；fast tier 4m39s、special 43s 实测 run 全绿（SEE-1291）；②c drift 收敛 -2（ws4/t16 毕业，launch-ci.yml +2 项 / launch-special.yml -2 项），快层 run 34689443552 @ 872bb9f 全绿。
 - KOL：`.github/workflows/` 3 条；ci-gut-tests ②c 前最近 run 39s success（push master，run 34665814505）；②c 缓存落地见 `ci-gut-tests.yml` Godot 段，缓存证据 run 34688009654（cache not found，写入）→ 34688072659（cache hit，`Cache restored from key: godot-Linux-4.6.2-stable`）双 run success。
 - qa-toolkit：②b 新增 `ci-pytest.yml` 1 条（pip 缓存 run 34685325408 冷 22s / 34685485739 命中 19s）。

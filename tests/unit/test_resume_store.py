@@ -327,6 +327,38 @@ class TestRunMutationResume:
         assert r["summary"]["resumed"] == 0
         assert calls["n"] == 4  # baseline + 3，无跳过
 
+    def test_resume_failures_signature_isomorphic_to_full_run(
+            self, tmp_path, monkeypatch):
+        """Revy QA 回踢（SEE-1400 缺陷 #1）防回归判据：合并报告 failures
+        明细与全量跑**逐字段全签名**相等——7 字段（file/line/kind/original/
+        mutated/verdict/reason）逐一相等，store 信封字段（schema/key/seq/
+        recorded_at）不得出现在报告里。"""
+        RECORD_KEYS = {"file", "line", "kind", "original", "mutated",
+                       "verdict", "reason"}
+        proj, target = _write_project(tmp_path)
+        calls_full = {"n": 0}
+        monkeypatch.setattr(mrunner, "_run_gut_on_project",
+                            _fake_gut(calls_full))
+        full = mrunner.run_mutation(str(target), str(proj), budget=4,
+                                    tests_glob=self.GLOB)
+        # 造"全部 4 个已完成"的 store，让续跑 100% 走 skip 分支——最严形态
+        store = ResumeStore(str(proj), str(target), self.GLOB, 4)
+        assert len(_records_with_verdicts(store)) == 4
+        calls_res = {"n": 0}
+        monkeypatch.setattr(mrunner, "_run_gut_on_project",
+                            _fake_gut(calls_res))
+        resumed = mrunner.run_mutation(str(target), str(proj), budget=4,
+                                       tests_glob=self.GLOB, resume=True)
+        assert resumed["summary"]["resumed"] == 4
+        assert calls_res["n"] == 1  # 只跑 baseline
+        f_full = sorted(full["failures"], key=lambda f: f["kind"])
+        f_res = sorted(resumed["failures"], key=lambda f: f["kind"])
+        assert len(f_full) == len(f_res) > 0  # 有可对照的非 killed 明细
+        for a, b in zip(f_full, f_res):
+            assert set(b) == RECORD_KEYS, f"store envelope leaked: {sorted(b)}"
+            for k in RECORD_KEYS:
+                assert a[k] == b[k], (k, a[k], b[k])
+
     def test_resume_after_source_change_reruns_all(self, tmp_path,
                                                    monkeypatch):
         proj, target = _write_project(tmp_path)

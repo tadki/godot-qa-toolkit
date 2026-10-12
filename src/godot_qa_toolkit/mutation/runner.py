@@ -615,8 +615,10 @@ def _run_mutant_loop(
             start, stop = (mutant_slice if mutant_slice is not None
                            else (0, len(mutants)))
             # SEE-1400 §SPEC-002：指纹已由 store key 保证；条目再与当前
-            # mutant 逐一核对身份后复用——skip 的 verdict 即 store 原文，
-            # 合并报告与全量跑同构。
+            # mutant 逐一核对身份后复用。复用条目按 _mutant_record 字段面
+            # 重建再 append——store 信封字段（schema/key/seq/recorded_at）
+            # 绝不能进报告，否则 failures 明细与全量跑 7 字段形态不等
+            #（Revy QA 实机 FAIL 实证，§SPEC-002 同构按明细全签名口径）。
             completed: dict[int, dict] = {}
             if resume_store is not None and resume:
                 completed = resume_store.load_completed(mutants, start, stop)
@@ -625,7 +627,9 @@ def _run_mutant_loop(
                 if not start <= seq < stop:
                     continue
                 if seq in completed:
-                    results.append(completed[seq])
+                    c = completed[seq]
+                    results.append(_mutant_record(
+                        m, c["verdict"], c["reason"]))
                     continue
                 verdict = _run_single_mutant(m, path, project_root, original_src,
                                              backup, tests_glob, seq,

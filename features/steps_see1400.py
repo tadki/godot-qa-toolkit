@@ -167,6 +167,25 @@ def register(registry: Registry) -> None:
             _fail("failures identity mismatch",
                   detail=f"resumed={_fail_keys(resumed)} full={_fail_keys(full)}")
 
+    @registry.step("a resume store holding every mutant verdict for a 4-mutant target")
+    def given_store_full(_p):
+        given_store_with_n(_p, "4")
+        # store_with_n 的 fake 会在第 6 次调用（baseline+4 后）才死——全量落盘
+        # 已在 setup 完成，这里换成不死 fake 以便续跑完整走 skip 分支。
+        state["fake_fn"] = _alternating_fake(state["calls"])
+
+    @registry.step("every reported failure detail holds exactly the seven verdict fields")
+    def then_no_envelope(_p):
+        SEVEN = {"file", "line", "kind", "original", "mutated", "verdict",
+                 "reason"}
+        failures = state["result"]["failures"]
+        if not failures:
+            _fail("no failure details reported — scenario is void")
+        for f in failures:
+            if set(f) != SEVEN:
+                _fail("failure detail carries envelope or missing fields",
+                      detail=f"got {sorted(f)}, expected {sorted(SEVEN)}")
+
     @registry.step("the target source is touched and the run reruns with resume enabled")
     def when_touched_resume(_p):
         state["target"].write_text(TARGET_SRC + "\n# touched\n",

@@ -10,6 +10,11 @@ Feature: SEE-1400 mutation resume store and --resume (§SPEC-001/§SPEC-002)
     Then exactly 2 mutants are skipped
     And the merged report is isomorphic to a full run
 
+  Scenario: reused failure details carry no store envelope fields
+    Given a resume store holding every mutant verdict for a 4-mutant target
+    When the mutation run reruns with resume enabled
+    Then every reported failure detail holds exactly the seven verdict fields
+
   Scenario: fingerprint mismatch re-runs every mutant
     Given a resume store holding 2 completed verdicts for a 4-mutant target
     When the target source is touched and the run reruns with resume enabled

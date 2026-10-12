@@ -257,7 +257,8 @@ class TestSpec001AutoScan:
     def test_auto_scan_scopes_when_refs_found(self, tmp_path, monkeypatch, fake_gut):
         proj, files = _write_project(tmp_path)
         run_mutation(files[0], proj, budget=1)
-        assert fake_gut["globs"][0] == "res://tests/unit/save/"
+        # SEE-1400 §SPEC-005：单命中收敛到文件级 -gselect 通道
+        assert fake_gut["globs"][0] == "res://tests/unit/save/test_save.gd"
 
     def test_zero_hits_falls_back_to_full(self, tmp_path, monkeypatch):
         proj, files = _write_project(tmp_path)

@@ -39,6 +39,10 @@ _LOGICAL_MUTATIONS = {"and": ["or"], "or": ["and"]}
 # 'not in' 的 not_in_op 节点无子 Token（无位置信息）——只支持 in→not in 方向
 _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 
+# resume store 指纹成分（SEE-1400）：算子表/定位机制/变异点产出顺序的任何
+# 变化都必须 bump——旧 verdict 跨版本复用 = 脏合并。
+OPS_VERSION = "see1400/1"
+
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {
     "0": ["1", "-1"],

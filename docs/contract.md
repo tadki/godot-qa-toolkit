@@ -79,14 +79,15 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - `ok = 无 violation 且无 unparseable`。
 - 输出：`summary: {functions, max_seen, violations, warnings, unparseable}`；`failures` = violations（含 file/name/line/complexity/threshold）+ unparseable；`warnings` 同构独立数组。
 
-### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run]`
+### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run] [--resume]`
 
 - 前置：`<root>/addons/gut/gut_cmdln.gd` 必须存在；`godot` 可执行文件必须在 PATH。缺失任一 → 统一 JSON failure（exit 1，`failures[0].reason` 含 `not found`）。
 - 执行：baseline GUT（原文件）→ 逐 mutant 改写目标文件跑 GUT（每次后恢复原文件，最终态与原状一致）。
 - **kill 判定 = 失败测试名集合相对 baseline 的差集**，不看 exit code——被测项目基线在无头环境可能自带 pre-existing failures，按 rc 判定会全部误杀。
 - 可选 flag（SEE-1312，向后兼容——省略即旧行为）：
-  - `--tests <res://glob>`：受影响测试子集（如 `res://tests/save/`），传给 GUT 的 `-gdir` 替代全量 `res://tests/`。
+  - `--tests <res://glob>`：受影响测试子集（如 `res://tests/save/`），传给 GUT 的 `-gdir` 替代全量 `res://tests/`。SEE-1400 §SPEC-005 起：省略时的 auto-scan 在恰好命中 1 个测试文件时收敛到该 `.gd` 路径（走 `-gselect` 单文件通道），多命中维持目录级——精度方向保守（过窄只假存活，不虚报质量）。
   - `--dry-run`：只清点变异点不跑 GUT；`ok=true`，`summary: {file, mutants, dry_run: true, kinds: {<kind>: N}}`，无 `killed` 等键。
+  - `--resume`（SEE-1400 §SPEC-001/002）：断点续跑。每次（非 dry-run）run 都把每个 mutant verdict 增量原子落盘到 `<root>/.qa-cache/gqt-mutation-resume/<key>/<seq>.json`；`--resume` 打开「跳过已完成」语义。key = sha1(目标 realpath + 源码 sha1 + 生效 tests_glob + budget + ops 版本)——任一成分变化 = 指纹不匹配 = 旧条目作废重跑（防脏合并）。store 损坏/读失败诚实降级为无历史。合并报告与全量跑同构，resume 在场的 run 仅增量新增 `summary.resumed`（跳过数）；常规 run 的 summary 字段语义零变化。
 - 中止契约（baseline 本身不可信时，mutant 数据不产出）：
 
 ```json
@@ -131,8 +132,8 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 
 - 必填于 `mutation` / `coverage`；必须指向含 `addons/gut/gut_cmdln.gd` 的 Godot 项目根。
 - 工具在该 root 下运行 `godot --headless --path <root> -s res://addons/gut/gut_cmdln.gd [-gdir=<tests_glob>] -gexit`（`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
-- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）与 coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件）。除此之外零写入。
-- timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = baseline 实测耗时 × 2（只放大不收紧，`summary.adaptive_timeout_s` 可查）。
+- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）、coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume 断点续跑、gqt-godot-slots 并发闸锁文件——均自含 .gitignore）。除此之外零写入。
+- timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = baseline 实测耗时 × 2（只放大不收紧，`summary.adaptive_timeout_s` 可查）。SEE-1400 起全部 godot 子进程（mutation baseline/per-mutant 与 coverage）经跨进程 flock 槽位闸（容量 env `GQT_GLOBAL_GODOT_SLOTS`，缺省 max(2,cpu//2)；等槽时间不计入 timeout；fcntl 缺失平台告警一次后放行不阻塞）。
 
 ## 7. 契约增量分类（SEE-1312 plan-debate 定案：四类归并）
 

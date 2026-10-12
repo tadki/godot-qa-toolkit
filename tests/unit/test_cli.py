@@ -53,3 +53,20 @@ class TestGherkinCli:
         rc, out = _run_cli("gherkin", str(bad))
         assert rc == 1
         assert ":1:" in out["failures"][0]["reason"]
+
+
+class TestMutationCliSurface:
+    """SEE-1400 §SPEC-004：mutation 参数面注册 --resume（向后兼容：缺省 False）。"""
+
+    def test_resume_flag_registered(self):
+        sys.path.insert(0, str(REPO / "src"))
+        try:
+            from godot_qa_toolkit.cli import build_parser
+            args = build_parser().parse_args(
+                ["mutation", "a.gd", "--project-root", ".", "--resume"])
+            assert args.resume is True
+            args2 = build_parser().parse_args(
+                ["mutation", "a.gd", "--project-root", "."])
+            assert args2.resume is False
+        finally:
+            sys.path.remove(str(REPO / "src"))

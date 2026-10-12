@@ -462,14 +462,17 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
             if not os.path.isfile(gut_fs):
                 raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
             try:
-                r = subprocess.run(
-                    ["godot", "--headless", "--path", _godot_project_path(project_root),
-                     "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_s,
-                    cwd=project_root,
-                )
+                # SEE-1400 §SPEC-003：coverage 与 mutation 同受跨进程槽位闸。
+                from ..mutation.godot_gate import GlobalGodotGate
+                with GlobalGodotGate(project_root):
+                    r = subprocess.run(
+                        ["godot", "--headless", "--path", _godot_project_path(project_root),
+                         "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_s,
+                        cwd=project_root,
+                    )
                 gut_tail = (r.stdout + r.stderr)[-1500:]
             except subprocess.TimeoutExpired:
                 # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行补救指令。

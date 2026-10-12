@@ -77,7 +77,7 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
 
 def _godot_project_path(project_root: str) -> str:
     """win64 godot 的 --path 语义：/mnt/... 形式的 WSL 绝对路径会被拒
-    （'Invalid project path'，硬ener 实机实证——0.1s 静默 rc≠0、零测试执行）。
+    （'Invalid project path'，硬化 实机实证——0.1s 静默 rc≠0、零测试执行）。
 
     相对路径由 godot 自行解析（CWD 契约：调用方必须已 cd 到项目根）；
     绝对路径走 wslpath 转 Windows 形式（不可用时原样返回）。
@@ -153,7 +153,7 @@ _ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
 def _parse_failing_tests(gut_output: str) -> set[str]:
     """从 GUT 输出解析失败测试名集合。
 
-    双格式兼容（硬ener 实机实证）：
+    双格式兼容（硬化 实机实证）：
     - 运行流：'* test_xxx' 开启一个测试，其后 [Failed] 行归属它；
     - Run Summary 段（GUT 4.6 win64 实测）：'- test_xxx' 后跟 [Failed] 行，
       但输出被 stdout[-2000:] 截断后往往只剩该段——单靠运行流正则会漏掉
@@ -293,7 +293,7 @@ def run_mutation(
 
     mutants = mutants[:budget]
     # budget 截断后可能为空（budget=0 / 极小预算）——零 mutant 不得触发
-    # baseline GUT（硬ener 反例实证：白付一轮 108s baseline）。
+    # baseline GUT（硬化 反例实证：白付一轮 108s baseline）。
     if not mutants:
         return _no_sites_result(str(path), scoped)
     results, invalid_count = _record_invalid_mutants(original_src, mutants,
@@ -523,7 +523,7 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     return {
         "tool": "mutation",
         # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok
-        # （硬ener 反例实证：suspect>0 时 ok=True 是自欺）。
+        # （硬化 反例实证：suspect>0 时 ok=True 是自欺）。
         "ok": survived == 0 and timeout_count == 0 and run_error_count == 0
               and suspect_count == 0,
         "summary": summary,

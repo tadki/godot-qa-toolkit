@@ -203,7 +203,7 @@ def _ternary_mutants(src: str, offs: list[int], node, mk) -> list[Mutant]:
            cond_s, cond_e)
     # 两臂交换：span = 整个三元；arm 边界由 collect 端 AST 锚点算出并以
     # 'arm1|arm2' 形式编码进 original（apply 端零猜测——arm 含 ' if '/' else '
-    # 字符串字面量时 regex 会误切，硬ener 反例实证）。
+    # 字符串字面量时 regex 会误切，硬化 反例实证）。
     a1 = src[s:if_pos].strip()
     a2 = src[else_pos + len("else"):e].strip()
     if a1 and a2:

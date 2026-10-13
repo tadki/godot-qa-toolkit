@@ -256,12 +256,17 @@ class TestSlotStarvationHardening:
         slots=1 时物理不可能，此处钉死的是闸确实被子进程真实使用而非
         仅在测试进程内生效。"""
         import fcntl
+        ready = tmp_path / "probe_ready.flag"
+        # 启动栅栏（CI 时序缺陷修复）：子进程抢到锁后写 ready 标记——父进程
+        # 见标记才开始探测窗口，冷启动（CI 首跑解释器/imports 慢 ~1s）不再
+        # 错过持锁窗口。持锁窗 2s，探测对齐后必然落在窗口内。
         child_src = (
             "import os, sys, time\n"
             f"sys.path.insert(0, {str(Path(__file__).parent.parent.parent / 'src')!r})\n"
             "from godot_qa_toolkit.mutation.godot_gate import GlobalGodotGate\n"
             "with GlobalGodotGate(os.environ['PROBE_ROOT'], capacity=1):\n"
-            "    time.sleep(0.5)\n"
+            f"    open({str(ready)!r}, 'a').close()\n"
+            "    time.sleep(2.0)\n"
         )
         (tmp_path / "child.py").write_text(child_src)
         env = dict(os.environ, PROBE_ROOT=str(tmp_path))
@@ -273,33 +278,54 @@ class TestSlotStarvationHardening:
         p2 = subprocess.Popen([sys.executable, str(tmp_path / "child.py")],
                               env=env, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL)
-        busy = acquired = 0
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and (p1.poll() is None
-                                               or p2.poll() is None):
-            if not lock_path.exists():
+        try:
+            # 栅栏：等任一子进程真实持锁（ready 标记出现），才开探测窗。
+            # 超时上限远大于冷启动开销；等待期子进程锁已持有，不算探测样本。
+            fence_deadline = time.monotonic() + 15.0
+            while time.monotonic() < fence_deadline:
+                if ready.exists():
+                    break
+                if p1.poll() is not None and p2.poll() is not None:
+                    break  # 双双早退（异常）——交由下方 rc 断言显式暴露
                 time.sleep(0.02)
-                continue
-            try:
-                fd = open(lock_path, "a+b")
-            except OSError:
-                time.sleep(0.02)
-                continue
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired += 1
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                busy += 1  # 锁被某个子进程持有（互斥下至多 1 个）
-            finally:
-                fd.close()
-            time.sleep(0.01)
-        assert (p1.wait(), p2.wait()) == (0, 0)
-        # 两个子进程共 ~1s 持锁窗口，探测期内必须观察到「锁被持有」；
-        # 若闸没在子进程内生效，busy 会是 0（flock 空闲可随时抢到）。
-        assert busy > 0, "slots=1 下探测期内未观察到任何子进程持锁——闸未生效"
-        # 我们自己从父进程能在窗口内抢到锁，说明任一时刻至多一个持有者
-        assert acquired > 0
+            else:
+                raise AssertionError(
+                    "probe fence timeout: no child acquired the gate within "
+                    "15s (startup barrier never saw the ready flag)")
+            busy = acquired = 0
+            # 探测窗覆盖栅栏后剩余持锁时间（2s）；窗口开始时锁必然被持有
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline and (p1.poll() is None
+                                                   or p2.poll() is None):
+                if not lock_path.exists():
+                    time.sleep(0.02)
+                    continue
+                try:
+                    fd = open(lock_path, "a+b")
+                except OSError:
+                    time.sleep(0.02)
+                    continue
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired += 1
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    busy += 1  # 锁被某个子进程持有（互斥下至多 1 个）
+                finally:
+                    fd.close()
+                time.sleep(0.01)
+            assert (p1.wait(), p2.wait()) == (0, 0)
+            # 栅栏保证探测窗起于持锁中：busy 必然 > 0（若闸没在子进程内
+            # 生效，ready 永不出现，栅栏断言已先失败——本断言是冗余保险）
+            assert busy > 0, "探测期内未观察到任何子进程持锁——闸未生效"
+            # 我们自己从父进程能在窗口内抢到锁，说明任一时刻至多一个持有者
+            assert acquired > 0
+        finally:
+            for p in (p1, p2):
+                if p.poll() is None:
+                    p.kill()
+            for p in (p1, p2):
+                p.wait()
 
     def test_wait_time_not_counted_into_timeout_argument(self, tmp_path):
         """等槽发生在 _run_gut_on_project 的 with 行——timeout 参数原样传给

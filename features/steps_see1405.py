@@ -23,10 +23,11 @@ def register(registry: Registry) -> None:
 
     def _mk_checkout(base: Path, name: str, sub: str = "") -> Path:
         root = base / name
-        target = root / sub if sub else root
-        target.mkdir(parents=True, exist_ok=True)
-        (root / "calc.gd").write_text("func add(a, b):\n\treturn a + b\n",
-                                      encoding="utf-8")
+        root.mkdir(parents=True, exist_ok=True)
+        target_dir = root / sub if sub else root
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "calc.gd").write_text("func add(a, b):\n\treturn a + b\n",
+                                            encoding="utf-8")
         return root
 
     # ---- §SPEC-001 -------------------------------------------------------
@@ -66,8 +67,10 @@ def register(registry: Registry) -> None:
     @registry.step("the resume keys of both checkouts differ")
     def _then_resume_ne(_p: dict[str, str]) -> None:
         ra, rb = state["root_a"], state["root_b"]
+        file_b = rb / "nested/calc.gd" if (rb / "nested").is_dir() \
+            else rb / "calc.gd"
         ka = ResumeStore(str(ra), str(ra / "calc.gd"), None, 50).key
-        kb = ResumeStore(str(rb), str(rb / "calc.gd"), None, 50).key
+        kb = ResumeStore(str(rb), str(file_b), None, 50).key
         if ka == kb:
             _fail("different relative layouts produced the same key", ka)
 

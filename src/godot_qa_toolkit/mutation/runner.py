@@ -69,10 +69,27 @@ _GODOT_LAUNCH_ERROR_MARKERS = (
     "error: failed to load script",
 )
 
+# GUT 测试流证据：运行流 `* test_x` 行 / Run Summary 段 `- test_x` 行 / 逐测试
+# 结果标记 [passed]/[Failed]/[Pending]/[Risky]。与 _parse_failing_tests 同族
+# token——kill 判定能看到的流，本守卫必须承认"测试确实跑了"。
+_GUT_RUN_EVIDENCE = re.compile(
+    r"(?mi)^[*-]\s+test_\S+|\[(?:passed|failed|pending|risky)\]")
+
 
 def _looks_like_godot_launch_failure(output: str) -> bool:
+    """true 仅当：启动失败特征在场 ∧ 输出中无任何 GUT 测试流证据。
+
+    SEE-1400 §SPEC-012（Revy 实测 CRITICAL）：整段输出子串匹配会被项目
+    既有资源加载告警污染——KOL 的 item_container_visual.tscn 在无头环境
+    恒报 `Failed loading resource`（干净 baseline rc=0 也在报），变异轮
+    rc=1 且失败差集真实存在时被错杀成 run_error（item.gd 默认子集口径
+    15/15 全灭）。判定不得对 stdout/stderr 截断窗口形态敏感：测试流证据
+    在场时，告警字样一律按背景噪声处理，继续走 kill/survive 分类。
+    """
     low = output.lower()
-    return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
+    if not any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS):
+        return False
+    return _GUT_RUN_EVIDENCE.search(output) is None
 
 
 def _godot_project_path(project_root: str) -> str:

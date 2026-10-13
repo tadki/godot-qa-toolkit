@@ -423,3 +423,103 @@ class TestSpec017InjectionFailureVisibility:
         # 多个 mutant 全部注入失败 → 全部归 invalid_mutant，无 survived
         assert s["survived"] == 0
         assert s["invalid_mutants"] >= 2
+
+
+class TestLaunchFailureGuard:
+    """§SPEC-012（Revy KOL 实测 CRITICAL）：启动失败守卫不得被项目既有
+    资源加载告警污染——含无关 ERROR 告警但 GUT 真实跑完的轮继续走
+    kill/survive 分类；真启动失败仍被捕获（SEE-1268 守卫语义不回退）。"""
+
+    # KOL 无头环境既有告警形态（item_container_visual.tscn，干净 baseline 也在报）
+    NOISE = ("ERROR: Failed loading resource: "
+             "res://scenes/ui/container/item_container_visual.tscn\n")
+    # SEE-1268 实证的真启动失败形态（-s 脚本没加载起来，输出仅此一行）
+    LAUNCH_FAIL = ("ERROR: Attempt to open script "
+                   "'res://addons/gut/gut_cmdln.gd' resulted in error "
+                   "'File not found'")
+
+    def _write_project(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        target = proj / "calc.gd"
+        target.write_text("func add(a, b):\n\treturn a + b\n")
+        return proj, target
+
+    def test_guard_matrix(self):
+        """守卫单元矩阵：标记 × 测试流证据四象限。"""
+        from godot_qa_toolkit.mutation.runner import (
+            _looks_like_godot_launch_failure as guard)
+        # 真启动失败：标记在场、零测试流证据 → True
+        assert guard(self.LAUNCH_FAIL) is True
+        assert guard("ERROR: Failed loading resource: res://x.tscn\n"
+                     "SCRIPT ERROR: boom") is True
+        # 噪声形态：标记在场但测试流证据在场 → False（KOL 误判形态）
+        assert guard(self.NOISE + "* test_kill\n  [Failed] x\n") is False
+        assert guard(self.NOISE + "---- Run Summary ----\n- test_kill\n"
+                     "  [Failed] x\n") is False
+        assert guard(self.NOISE + "[passed]\n") is False
+        # 无标记 → False
+        assert guard("* test_x\n  [Failed] boom\n") is False
+        assert guard("all green") is False
+
+    def test_noisy_round_is_not_a_launch_failure(
+            self, tmp_path, monkeypatch):
+        """形态①（判据钉死）：输出含无关 failed-loading-resource 告警，
+        GUT 正常跑完且 rc=1、失败差集真实 → killed（非 run_error）。"""
+        proj, target = self._write_project(tmp_path)
+        calls = {"n": 0}
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 干净 baseline 同样携带既有告警（rc=0）
+                return (0, self.NOISE + "* test_x\n  [passed]\n")
+            return (1, self.NOISE + "* test_new\n  [Failed] boom\n"
+                    "---- Run Summary ----\n- test_new\n  [Failed] boom\n")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
+        result = run_mutation(str(target), str(proj), budget=3)
+        s = result["summary"]
+        assert s["run_errors"] == 0, "含无关告警的正常轮不得被吞成 run_error"
+        assert s["killed"] == s["mutants"] > 0
+        assert result["ok"] is True
+
+    def test_true_launch_failure_still_run_error(self, tmp_path, monkeypatch):
+        """形态②（判据钉死）：真启动失败（无 GUT banner/测试流）→ 仍 run_error。"""
+        proj, target = self._write_project(tmp_path)
+        calls = {"n": 0}
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (0, "* test_x\n  [passed]\n")
+            return (1, self.LAUNCH_FAIL)
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
+        result = run_mutation(str(target), str(proj), budget=3)
+        s = result["summary"]
+        assert s["killed"] == 0, "启动失败绝不能计入 kill"
+        assert s["run_errors"] == s["mutants"] > 0
+        assert result["ok"] is False
+
+    def test_dirty_baseline_with_noise_proceeds_not_aborts(
+            self, tmp_path, monkeypatch):
+        """baseline 侧一致性：baseline rc=1（既有失败）+ 告警噪声 + 测试流
+        在场 → 不得中止（diff 分类路径照常，无法区分者落 suspect）。"""
+        proj, target = self._write_project(tmp_path)
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            return (1, self.NOISE + "* test_old\n  [Failed] pre-existing\n")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
+        result = run_mutation(str(target), str(proj), budget=3)
+        s = result["summary"]
+        assert s.get("run_error") is not True, "脏 baseline + 告警不得中止"
+        # 失败集合与 baseline 相同（差集空）→ 保守 suspect（不可证杀）
+        assert s["suspect"] == s["mutants"] > 0
+        assert s["run_errors"] == 0

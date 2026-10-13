@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 # 字面量捕获不锚右括号——插值形态 load("res://x/%s.gd" % id) 的引号后跟
@@ -118,13 +119,26 @@ def _scan_asset(raw: str) -> dict:
 _AUTOLOAD_ENTRY_RE = re.compile(r'^(\w+)="\*?res://(.+?)"\s*$', re.MULTILINE)
 
 
+def _autoload_section(text: str) -> str:
+    """截取 project.godot ``[autoload]`` 段（至下一个 section 头）。"""
+    lines: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        if line.strip().startswith("["):
+            in_section = line.strip() == "[autoload]"
+            continue
+        if in_section and "=" in line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def _parse_autoloads(pg_text: str) -> dict:
     """``[autoload]`` 段 → {node 名: res:// 路径(casefold)}。"""
     return {m.group(1): "res://" + m.group(2).casefold()
             for m in _AUTOLOAD_ENTRY_RE.finditer(_autoload_section(pg_text))}
 
 
-def _iter_project_sources(root: Path):
+def _iter_project_sources(root: Path) -> Iterator[tuple[Path, str]]:
     """产出 (path, rel_posix)：gd 与 .tscn/.tres 资产，跳过 .git/.qa-cache/.godot。"""
     for path in sorted(root.rglob("*")):
         if not path.is_file() or ".git" in path.parts:
@@ -170,19 +184,6 @@ def build_index(project_root: str) -> dict:
     return {"root": str(root), "files": files, "autoloads": autoloads,
             "uid_literals": uid_literals,
             "build_elapsed_s": time.perf_counter() - t0}
-
-
-def _autoload_section(text: str) -> str:
-    """截取 project.godot ``[autoload]`` 段（至下一个 section 头）。"""
-    lines: list[str] = []
-    in_section = False
-    for line in text.splitlines():
-        if line.strip().startswith("["):
-            in_section = line.strip() == "[autoload]"
-            continue
-        if in_section and "=" in line:
-            lines.append(line)
-    return "\n".join(lines)
 
 
 def _identities(index: dict, res_key: str) -> dict:
@@ -243,7 +244,8 @@ def _target_key_of(index: dict, target_res_path: str) -> str:
     return ("res://" + rel).casefold()
 
 
-def query_consumers(project_root: str, target_res_path: str, tests_dir,
+def query_consumers(project_root: str, target_res_path: str,
+                    tests_dir: Path,
                     max_depth: int = _DEFAULT_MAX_DEPTH,
                     hub_fanout: int = _DEFAULT_HUB_FANOUT,
                     index: dict | None = None) -> dict:

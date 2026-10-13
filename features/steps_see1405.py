@@ -11,7 +11,9 @@ import tempfile
 from pathlib import Path
 
 from godot_qa_toolkit.gherkin.runner import Registry, StepFailure
+from godot_qa_toolkit.mutation.gdself import query_consumers
 from godot_qa_toolkit.mutation.resume import ResumeStore
+from godot_qa_toolkit.mutation.testscan import derive_tests_glob
 from godot_qa_toolkit.timing import TimingStore
 
 
@@ -26,8 +28,8 @@ def register(registry: Registry) -> None:
         root.mkdir(parents=True, exist_ok=True)
         target_dir = root / sub if sub else root
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / "calc.gd").write_text("func add(a, b):\n\treturn a + b\n",
-                                            encoding="utf-8")
+        (target_dir / "calc.gd").write_text(
+            "func add(a, b):\n\treturn a + b\n", encoding="utf-8")
         return root
 
     # ---- §SPEC-001 -------------------------------------------------------
@@ -112,7 +114,6 @@ def register(registry: Registry) -> None:
             _fail("resumed verdict mismatch",
                   str(completed[0].get("verdict")))
 
-
     # ---- §SPEC-003 gdself -------------------------------------------------
 
     def _toy_gdself_project(base: Path, with_uid: bool = True) -> Path:
@@ -142,7 +143,7 @@ def register(registry: Registry) -> None:
             "class_name EventBus\nextends Node\n")
         for i in range(25):
             (root / "systems" / f"consumer_{i}.gd").write_text(
-                f"extends Node\nvar _b: EventBus\n")
+                "extends Node\nvar _b: EventBus\n")
         (root / "systems" / "orphan.gd").write_text(
             "class_name Orphan\nextends RefCounted\n")
         (tests / "test_factory.gd").write_text(
@@ -166,7 +167,6 @@ def register(registry: Registry) -> None:
 
     @registry.step("the indexed glob of the factory target is derived")
     def _when_factory(_p: dict[str, str]) -> None:
-        from godot_qa_toolkit.mutation.testscan import derive_tests_glob
         proj = state["proj"]
         state["glob"] = derive_tests_glob(
             "res://systems/factory.gd", proj / "tests",
@@ -187,7 +187,6 @@ def register(registry: Registry) -> None:
 
     @registry.step("the indexed glob of the script target is derived")
     def _when_script(_p: dict[str, str]) -> None:
-        from godot_qa_toolkit.mutation.testscan import derive_tests_glob
         proj = state["proj"]
         state["glob"] = derive_tests_glob(
             "res://systems/item_view.gd", proj / "tests",
@@ -209,7 +208,6 @@ def register(registry: Registry) -> None:
     @registry.step("the indexed consumers of the hub target are queried "
                    "with fanout 20")
     def _when_hub(_p: dict[str, str]) -> None:
-        from godot_qa_toolkit.mutation.gdself import query_consumers
         proj = state["proj"]
         state["hub_out"] = query_consumers(
             str(proj), "res://systems/event_bus.gd", proj / "tests",
@@ -236,7 +234,6 @@ def register(registry: Registry) -> None:
 
     @registry.step("the indexed consumers of the orphan target are queried")
     def _when_orphan(_p: dict[str, str]) -> None:
-        from godot_qa_toolkit.mutation.gdself import query_consumers
         proj = state["proj"]
         state["orphan_out"] = query_consumers(
             str(proj), "res://systems/orphan.gd", proj / "tests")

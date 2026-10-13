@@ -10,8 +10,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from godot_qa_toolkit.mutation.ops import OPS_VERSION
 from godot_qa_toolkit.mutation.resume import ResumeStore, resume_key
 from godot_qa_toolkit.timing import TimingStore, store_key

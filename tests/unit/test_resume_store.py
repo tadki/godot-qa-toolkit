@@ -451,9 +451,12 @@ class TestEntryTamperHardening:
         proj, target = _write_project(tmp_path)
         sha = ResumeStore._sha1_of(str(target))
         base = resume_key(str(proj), str(target), sha, "res://tests/", 5)
-        assert resume_key(str(proj), str(target), sha, "res://tests/other/", 5) != base
-        assert resume_key(str(proj), str(target), sha, "res://tests/", 6) != base
-        assert resume_key(str(proj), str(target), "f" * 40, "res://tests/", 5) != base
+        assert resume_key(str(proj), str(target), sha,
+                          "res://tests/other/", 5) != base
+        assert resume_key(str(proj), str(target), sha,
+                          "res://tests/", 6) != base
+        assert resume_key(str(proj), str(target), "f" * 40,
+                          "res://tests/", 5) != base
         # SEE-1405 §SPEC-001：key 用 resolve() 后的项目相对路径——项目内
         # symlink 解析回同一物理文件，与真实路径同 key（同一次物理 run）
         link = proj / "link.gd"

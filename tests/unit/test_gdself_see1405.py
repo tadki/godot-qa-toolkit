@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from godot_qa_toolkit.mutation.gdself import (
     build_index,
     query_consumers,

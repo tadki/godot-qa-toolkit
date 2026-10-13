@@ -179,19 +179,25 @@ def _chunk_worker(payload: dict) -> dict:
 
 def _merge_results(chunks: list[dict], chunk_results: list[dict],
                    jobs: int) -> dict:
-    """按文件合并分片契约：计数求和、failures 拼接、kill_rate 重算。"""
+    """按文件合并分片契约：计数求和、failures 拼接、kill_rate 重算。
+
+    resumed（§SPEC-010）：各 chunk 的 resumed 求和进聚合 summary——resume
+    语义下同文件多 chunk 各 skip 各的（分片不重叠），求和即该文件总跳过
+    数，与单文件扁平路径口径一致；无 resume 语义的 chunk 按缺省 0 计，
+    报告形态保持与单文件路径同构。
+    """
     per_file: dict[str, dict] = {}
     for chunk, cr in zip(chunks, chunk_results):
         file = chunk["file"]
         agg = per_file.setdefault(file, {
             "file": file, "mutants": 0, "killed": 0, "survived": 0,
             "suspect": 0, "timeout": 0, "run_errors": 0,
-            "invalid_mutants": 0, "failures": [], "scoped": None,
+            "invalid_mutants": 0, "resumed": 0, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
         })
         s = cr["summary"]
         for k in ("mutants", "killed", "survived", "suspect",
-                  "timeout", "run_errors", "invalid_mutants"):
+                  "timeout", "run_errors", "invalid_mutants", "resumed"):
             agg[k] += s.get(k, 0)
         agg["failures"].extend(cr.get("failures", []))
         agg["scoped"] = bool(s.get("scoped"))
@@ -219,6 +225,7 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
                 "budget": agg["budget"],
                 "scoped": agg["scoped"],
                 "baseline_reused": agg["baseline_reused"],
+                "resumed": agg["resumed"],
             },
             "failures": agg["failures"],
         })

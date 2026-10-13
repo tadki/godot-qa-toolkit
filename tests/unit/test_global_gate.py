@@ -255,28 +255,68 @@ class TestSlotStarvationHardening:
         每次锁探测只应见到「忙」（1 个持有者）——flock 互斥下峰值 >1 在
         slots=1 时物理不可能，此处钉死的是闸确实被子进程真实使用而非
         仅在测试进程内生效。"""
-        import fcntl
+        procs, ready = self._spawn_locked_children(tmp_path)
+        try:
+            self._wait_probe_fence(ready, procs)  # 栅栏后才开探测窗
+            busy, acquired = self._probe_lock_window(tmp_path, procs)
+            assert tuple(p.wait() for p in procs) == (0, 0)
+            # 栅栏保证探测窗起于持锁中：busy 必然 > 0（若闸没在子进程内
+            # 生效，ready 永不出现，栅栏断言已先失败——本断言是冗余保险）
+            assert busy > 0, "探测期内未观察到任何子进程持锁——闸未生效"
+            # 我们自己从父进程能在窗口内抢到锁，说明任一时刻至多一个持有者
+            assert acquired > 0
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+            for p in procs:
+                p.wait()
+
+    def _spawn_locked_children(self, tmp_path):
+        """启动两个真实子进程（各持 gate 睡 2s）；抢到锁后写 ready 标记。"""
+        ready = tmp_path / "probe_ready.flag"
         child_src = (
             "import os, sys, time\n"
             f"sys.path.insert(0, {str(Path(__file__).parent.parent.parent / 'src')!r})\n"
             "from godot_qa_toolkit.mutation.godot_gate import GlobalGodotGate\n"
             "with GlobalGodotGate(os.environ['PROBE_ROOT'], capacity=1):\n"
-            "    time.sleep(0.5)\n"
+            f"    open({str(ready)!r}, 'a').close()\n"
+            "    time.sleep(2.0)\n"
         )
         (tmp_path / "child.py").write_text(child_src)
         env = dict(os.environ, PROBE_ROOT=str(tmp_path))
-        lock_path = slots_dir(str(tmp_path)) / "slot_0.lock"
         # 先让两个子进程都启动（各自 __enter__ 会建槽位目录）
-        p1 = subprocess.Popen([sys.executable, str(tmp_path / "child.py")],
-                              env=env, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
-        p2 = subprocess.Popen([sys.executable, str(tmp_path / "child.py")],
-                              env=env, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
+        return [subprocess.Popen(
+                    [sys.executable, str(tmp_path / "child.py")], env=env,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(2)], ready
+
+    @staticmethod
+    def _wait_probe_fence(ready, procs):
+        """栅栏：等任一子进程真实持锁（ready 出现）才开探测窗——CI 冷启动
+        不再错过持锁窗口；等待期锁已持有，不算探测样本。双双早退（异常）
+        交由调用方 rc 断言显式暴露。"""
+        fence_deadline = time.monotonic() + 15.0
+        while time.monotonic() < fence_deadline:
+            if ready.exists():
+                return
+            if all(p.poll() is not None for p in procs):
+                return
+            time.sleep(0.02)
+        raise AssertionError(
+            "probe fence timeout: no child acquired the gate within "
+            "15s (startup barrier never saw the ready flag)")
+
+    @staticmethod
+    def _probe_lock_window(tmp_path, procs):
+        """2.5s 探测窗高频抢锁：窗口开始时锁必然被持有。返回 (busy, acquired)
+        ——busy=锁被某子进程持有次数，acquired=父进程抢到（窗口内空闲）次数。"""
+        import fcntl
+        lock_path = slots_dir(str(tmp_path)) / "slot_0.lock"
         busy = acquired = 0
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and (p1.poll() is None
-                                               or p2.poll() is None):
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline and any(
+                p.poll() is None for p in procs):
             if not lock_path.exists():
                 time.sleep(0.02)
                 continue
@@ -294,12 +334,7 @@ class TestSlotStarvationHardening:
             finally:
                 fd.close()
             time.sleep(0.01)
-        assert (p1.wait(), p2.wait()) == (0, 0)
-        # 两个子进程共 ~1s 持锁窗口，探测期内必须观察到「锁被持有」；
-        # 若闸没在子进程内生效，busy 会是 0（flock 空闲可随时抢到）。
-        assert busy > 0, "slots=1 下探测期内未观察到任何子进程持锁——闸未生效"
-        # 我们自己从父进程能在窗口内抢到锁，说明任一时刻至多一个持有者
-        assert acquired > 0
+        return busy, acquired
 
     def test_wait_time_not_counted_into_timeout_argument(self, tmp_path):
         """等槽发生在 _run_gut_on_project 的 with 行——timeout 参数原样传给

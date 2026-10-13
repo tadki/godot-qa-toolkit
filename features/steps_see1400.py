@@ -335,3 +335,63 @@ def register(registry: Registry) -> None:
         d = godot_gate.slots_dir(str(state["root"]))
         if d.exists() and any(d.glob("slot_*.lock")):
             _fail("degraded gate created slot files it should never touch")
+
+    # ------------------------------------------------------------------
+    # §SPEC-012 launch-failure 守卫收窄场景
+    # ------------------------------------------------------------------
+
+    @registry.step("a mutation target whose GUT rounds carry unrelated resource warnings")
+    def given_noisy_gut(_p):
+        # KOL 无头环境既有告警形态（干净 baseline 也在报）——守卫不得吞轮
+        noise = ("ERROR: Failed loading resource: "
+                 "res://scenes/ui/container/item_container_visual.tscn\n")
+        root, target = _mk_project()
+        calls = {"n": 0}
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (0, noise + "* test_x\n  [passed]\n")
+            return (1, noise + "* test_new\n  [Failed] boom\n"
+                    "---- Run Summary ----\n- test_new\n  [Failed] boom\n")
+
+        state.update(root=root, target=target, calls=calls, fake_fn=fake)
+
+    @registry.step("a mutation target whose GUT rounds fail to launch the runner script")
+    def given_launch_fail(_p):
+        root, target = _mk_project()
+        calls = {"n": 0}
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (0, "* test_x\n  [passed]\n")
+            return (1, "ERROR: Attempt to open script "
+                    "'res://addons/gut/gut_cmdln.gd' resulted in error "
+                    "'File not found'")
+
+        state.update(root=root, target=target, calls=calls, fake_fn=fake)
+
+    @registry.step("the mutation run executes")
+    def when_plain_run(_p):
+        state["result"] = _run(state, resume=False)
+
+    @registry.step("every mutant is killed and none is run_error")
+    def then_all_killed(_p):
+        s = state["result"]["summary"]
+        if s.get("run_errors", 0) != 0:
+            _fail("noisy rounds swallowed into run_error", detail=str(s))
+        if s["mutants"] == 0 or s["killed"] != s["mutants"]:
+            _fail("mutants not all killed", detail=str(s))
+        if state["result"]["ok"] is not True:
+            _fail("run not ok despite all killed", detail=str(s))
+
+    @registry.step("every mutant verdict is run_error and none is killed")
+    def then_all_run_error(_p):
+        s = state["result"]["summary"]
+        if s.get("killed", 0) != 0:
+            _fail("launch failure counted as kill", detail=str(s))
+        if s["mutants"] == 0 or s.get("run_errors", 0) != s["mutants"]:
+            _fail("launch failure not classified run_error", detail=str(s))
+        if state["result"]["ok"] is not False:
+            _fail("run_error verdict must gate ok=False", detail=str(s))

@@ -37,10 +37,19 @@ _GODOT_LAUNCH_ERROR_MARKERS = (
     "error: failed to load script",
 )
 
+# 与 mutation runner 同族 token（§SPEC-012）：GUT 测试流证据——运行流
+# `* test_x` / 汇总段 `- test_x` / 逐测试 [passed]/[Failed]/[Pending]/[Risky]。
+_GUT_RUN_EVIDENCE = re.compile(
+    r"(?mi)^[*-]\s+test_\S+|\[(?:passed|failed|pending|risky)\]")
+
 
 def _looks_like_godot_launch_failure(output: str) -> bool:
+    """与 mutation runner 同口径：true 仅当启动失败特征在场 ∧ 无 GUT
+    测试流证据（§SPEC-012——项目既有资源告警不得吞掉正常跑的轮）。"""
     low = output.lower()
-    return any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS)
+    if not any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS):
+        return False
+    return _GUT_RUN_EVIDENCE.search(output) is None
 
 
 def _godot_project_path(project_root: str) -> str:

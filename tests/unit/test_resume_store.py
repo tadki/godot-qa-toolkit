@@ -543,3 +543,97 @@ class TestCorruptStoreHardening:
             os.chmod(store.store_dir, 0o755)
         err = capsys.readouterr().err
         assert err.count("resume store write failed") == 1  # 每进程只告警一次
+
+
+class TestJobsMergeResumed:
+    """§SPEC-010：--jobs 多文件路径聚合报告保留 resumed 字段（与单文件路径
+    同口径）。Revy 合并后全功能重测实证缺口——单文件扁平路径 resumed 正常、
+    多文件 _merge_results 白名单丢失。"""
+
+    def test_merge_results_aggregates_resumed_per_file(self):
+        from godot_qa_toolkit.mutation.executor import _merge_results
+        chunks = [
+            {"file": "a.gd"}, {"file": "a.gd"},
+            {"file": "b.gd"},
+        ]
+        chunk_results = [
+            {"tool": "mutation", "ok": False, "failures": [],
+             "summary": {"file": "a.gd", "mutants": 2, "killed": 1,
+                         "survived": 1, "suspect": 0, "timeout": 0,
+                         "run_errors": 0, "invalid_mutants": 0,
+                         "kill_rate": 0.5, "budget": 3, "scoped": True,
+                         "baseline_reused": True, "resumed": 1}},
+            {"tool": "mutation", "ok": True, "failures": [],
+             "summary": {"file": "a.gd", "mutants": 1, "killed": 1,
+                         "survived": 0, "suspect": 0, "timeout": 0,
+                         "run_errors": 0, "invalid_mutants": 0,
+                         "kill_rate": 1.0, "budget": 3, "scoped": True,
+                         "baseline_reused": True, "resumed": 1}},
+            {"tool": "mutation", "ok": True, "failures": [],
+             "summary": {"file": "b.gd", "mutants": 1, "killed": 0,
+                         "survived": 1, "suspect": 0, "timeout": 0,
+                         "run_errors": 0, "invalid_mutants": 0,
+                         "kill_rate": 0.0, "budget": 3, "scoped": True,
+                         "baseline_reused": True}},
+        ]
+        merged = _merge_results(chunks, chunk_results, jobs=2)
+        by_file = {r["summary"]["file"]: r for r in merged["results"]}
+        assert by_file["a.gd"]["summary"]["resumed"] == 2  # 各 chunk 求和
+        assert by_file["b.gd"]["summary"]["resumed"] == 0  # 缺省按 0 计
+        # 计数层不因新字段漂移
+        assert by_file["a.gd"]["summary"]["mutants"] == 3
+        assert by_file["a.gd"]["summary"]["killed"] == 2
+
+    def test_jobs_resume_end_to_end_reports_resumed(self, tmp_path,
+                                                    monkeypatch):
+        """--jobs 多文件 + --resume 端到端：每个 results[].summary.resumed
+        等于该文件 store 内已完成数（与 §SPEC-002 单文件口径一致）。"""
+        from godot_qa_toolkit.mutation import executor
+
+        class _SerialPool:
+            def __init__(self, max_workers=None):
+                pass
+
+            def map(self, fn, iterable):
+                return [fn(x) for x in iterable]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        proj, _ = _write_project(tmp_path)
+        files = []
+        for name in ("calc.gd", "other.gd"):
+            p = proj / name
+            p.write_text(TARGET_SRC)
+            files.append(str(p))
+        calls = {"n": 0}
+        monkeypatch.setattr(mrunner, "_run_gut_on_project",
+                            _fake_gut(calls))
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+        monkeypatch.setattr(
+            executor, "_run_baseline_snapshot",
+            lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
+        # 先跑一轮（无 resume）落盘全部 verdict——resume 轮才有可跳过条目
+        executor.run_mutation_files(
+            files, proj, budget=4, timeout_s=60, dry_run=False,
+            tests_glob="res://tests/unit/save/", jobs=2)
+        for name in ("calc.gd", "other.gd"):
+            store = ResumeStore(str(proj), str(proj / name),
+                                "res://tests/unit/save/", 4)
+            assert store.completed_count() == 4
+        calls2 = {"n": 0}
+        monkeypatch.setattr(mrunner, "_run_gut_on_project",
+                            _fake_gut(calls2))
+        r = executor.run_mutation_files(
+            files, proj, budget=4, timeout_s=60, dry_run=False,
+            tests_glob="res://tests/unit/save/", jobs=2, resume=True)
+        for res in r["results"]:
+            name = Path(res["summary"]["file"]).name
+            store = ResumeStore(str(proj), str(proj / name),
+                                "res://tests/unit/save/", 4)
+            assert res["summary"]["resumed"] == store.completed_count() == 4
+        # 全跳过：resume 轮 baseline 走快照，chunk worker 全命中 → 零 GUT
+        assert calls2["n"] == 0

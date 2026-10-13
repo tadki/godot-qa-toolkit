@@ -28,6 +28,7 @@ import sys
 import time
 from pathlib import Path
 
+from ..timing import project_relative
 from .ops import OPS_VERSION
 
 SCHEMA = "see1400-resume/1"
@@ -38,10 +39,17 @@ FINAL_VERDICTS = frozenset({
 })
 
 
-def resume_key(file_path: str, source_sha1: str, tests_glob: str | None,
-               budget: int) -> str:
-    """指纹 key：realpath + 源码 sha1 + 生效 tests_glob + budget + ops 版本。"""
-    payload = (f"{str(Path(file_path).resolve())}|{source_sha1}|"
+def resume_key(project_root: str, file_path: str, source_sha1: str,
+               tests_glob: str | None, budget: int) -> str:
+    """指纹 key：项目内相对路径 + 源码 sha1 + tests_glob + budget + ops 版本。
+
+    SEE-1405 §SPEC-001 迁移注记：路径成分由绝对 realpath 改为项目相对
+    （timing.project_relative 同款原语）——投影/非投影、跨检出的同一份
+    源码产出同 key；旧 store 条目随本次 OPS_VERSION bump 一次性失效
+    （显式披露，不脏合并），与方案二 tests_glob 变化共享同一失效窗口。
+    """
+    rel = project_relative(project_root, file_path)
+    payload = (f"{rel}|{source_sha1}|"
                f"{tests_glob or ''}|{int(budget)}|{OPS_VERSION}")
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -57,8 +65,8 @@ class ResumeStore:
         self.tests_glob = tests_glob
         self.budget = int(budget)
         self.source_sha1 = self._sha1_of(file_path)
-        self.key = resume_key(file_path, self.source_sha1, tests_glob,
-                              self.budget)
+        self.key = resume_key(project_root, file_path, self.source_sha1,
+                              tests_glob, self.budget)
         self._now = time.time() if now is None else now
         self._warned_write = False
 

@@ -41,7 +41,9 @@ _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 
 # resume store 指纹成分（SEE-1400）：算子表/定位机制/变异点产出顺序的任何
 # 变化都必须 bump——旧 verdict 跨版本复用 = 脏合并。
-OPS_VERSION = "see1400/1"
+# see1405/2（SEE-1405 §SPEC-001）：resume key 路径成分归一为项目内相对路径
+# （跨检出/投影同 key）——旧 store 条目随本版本一次性失效（显式披露）。
+OPS_VERSION = "see1405/2"
 
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {

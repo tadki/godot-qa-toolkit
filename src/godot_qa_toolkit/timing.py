@@ -95,18 +95,36 @@ def suggested_action(timeout_s: int) -> str:
     return f"rerun with --timeout {timeout_s}"
 
 
-def store_key(file_path: str, suite_kind: str, tests_glob: str | None) -> str:
+def project_relative(project_root: str, file_path: str) -> str:
+    """SEE-1405 §SPEC-001：store key 路径成分归一为项目内相对路径。
+
+    绝对 realpath 让同一份源码在不同检出（投影/非投影、跨机器）下产出
+    不同 key——跨检出续跑与基线复用双双静默失效。项目外文件（异常输入）
+    退回绝对 realpath，保持确定性但不承诺跨检出稳定。
+    """
+    root = str(Path(project_root).resolve())
     real = str(Path(file_path).resolve())
-    payload = f"{real}|{suite_kind}|{tests_glob or ''}"
+    try:
+        return str(Path(real).relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return real
+
+
+def store_key(project_root: str, file_path: str, suite_kind: str,
+              tests_glob: str | None) -> str:
+    rel = project_relative(project_root, file_path)
+    payload = f"{rel}|{suite_kind}|{tests_glob or ''}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 class TimingStore:
     """``<project>/.qa-cache/gqt-timing/<key>.json`` — one sample per baseline run.
 
-    key = sha1(realpath(file_path) + suite_kind + tests_glob)。失效判据：
-    mtime 超 TTL 天，或记录的 git_rev ≠ 当前 rev。读失败/损坏 = 无历史
-    （诚实降级，绝不抛出）。
+    key = sha1(项目内相对路径 + suite_kind + tests_glob)。SEE-1405 §SPEC-001
+    迁移注记：路径成分由绝对 realpath 改为项目相对（跨检出/投影同 key），
+    旧 store 条目一次性失效（显式披露，不脏合并）。失效判据：mtime 超 TTL
+    天，或记录的 git_rev ≠ 当前 rev。读失败/损坏 = 无历史（诚实降级，
+    绝不抛出）。
     """
 
     def __init__(self, project_root: str, file_path: str, suite_kind: str,
@@ -115,7 +133,7 @@ class TimingStore:
         self.file_path = file_path
         self.suite_kind = suite_kind
         self.tests_glob = tests_glob
-        self.key = store_key(file_path, suite_kind, tests_glob)
+        self.key = store_key(project_root, file_path, suite_kind, tests_glob)
         self._now = time.time() if now is None else now
 
     def ensure_store_dir(self) -> None:

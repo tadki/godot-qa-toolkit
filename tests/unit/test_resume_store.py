@@ -74,39 +74,39 @@ def _records_with_verdicts(store):
 
 class TestResumeKey:
     def test_same_inputs_same_key(self, tmp_path):
-        _, target = _write_project(tmp_path)
+        proj, target = _write_project(tmp_path)
         sha = ResumeStore._sha1_of(str(target))
-        k1 = resume_key(str(target), sha, "res://tests/", 50)
-        k2 = resume_key(str(target), sha, "res://tests/", 50)
+        k1 = resume_key(str(proj), str(target), sha, "res://tests/", 50)
+        k2 = resume_key(str(proj), str(target), sha, "res://tests/", 50)
         assert k1 == k2
 
     def test_source_sha_change_invalidates(self, tmp_path):
-        _, target = _write_project(tmp_path)
+        proj, target = _write_project(tmp_path)
         sha1 = ResumeStore._sha1_of(str(target))
         target.write_text(TARGET_SRC + "# touched\n")
         sha2 = ResumeStore._sha1_of(str(target))
-        assert resume_key(str(target), sha1, None, 50) != \
-            resume_key(str(target), sha2, None, 50)
+        assert resume_key(str(proj), str(target), sha1, None, 50) != \
+            resume_key(str(proj), str(target), sha2, None, 50)
 
     def test_glob_change_invalidates(self, tmp_path):
-        _, target = _write_project(tmp_path)
+        proj, target = _write_project(tmp_path)
         sha = ResumeStore._sha1_of(str(target))
-        assert resume_key(str(target), sha, "res://tests/a/", 50) != \
-            resume_key(str(target), sha, "res://tests/b/", 50)
+        assert resume_key(str(proj), str(target), sha, "res://tests/a/", 50) != \
+            resume_key(str(proj), str(target), sha, "res://tests/b/", 50)
 
     def test_budget_change_invalidates(self, tmp_path):
-        _, target = _write_project(tmp_path)
+        proj, target = _write_project(tmp_path)
         sha = ResumeStore._sha1_of(str(target))
-        assert resume_key(str(target), sha, None, 10) != \
-            resume_key(str(target), sha, None, 20)
+        assert resume_key(str(proj), str(target), sha, None, 10) != \
+            resume_key(str(proj), str(target), sha, None, 20)
 
     def test_ops_version_change_invalidates(self, tmp_path, monkeypatch):
-        _, target = _write_project(tmp_path)
+        proj, target = _write_project(tmp_path)
         sha = ResumeStore._sha1_of(str(target))
-        k1 = resume_key(str(target), sha, None, 50)
+        k1 = resume_key(str(proj), str(target), sha, None, 50)
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.resume.OPS_VERSION", "see1400/2")
-        k2 = resume_key(str(target), sha, None, 50)
+        k2 = resume_key(str(proj), str(target), sha, None, 50)
         assert k1 != k2
         assert OPS_VERSION != "see1400/2"  # 常量本体未被污染
 
@@ -450,14 +450,15 @@ class TestEntryTamperHardening:
             self, tmp_path):
         proj, target = _write_project(tmp_path)
         sha = ResumeStore._sha1_of(str(target))
-        base = resume_key(str(target), sha, "res://tests/", 5)
-        assert resume_key(str(target), sha, "res://tests/other/", 5) != base
-        assert resume_key(str(target), sha, "res://tests/", 6) != base
-        assert resume_key(str(target), "f" * 40, "res://tests/", 5) != base
-        # realpath：symlink 视角与真实路径同 key（同一次物理 run）
-        link = tmp_path / "link.gd"
+        base = resume_key(str(proj), str(target), sha, "res://tests/", 5)
+        assert resume_key(str(proj), str(target), sha, "res://tests/other/", 5) != base
+        assert resume_key(str(proj), str(target), sha, "res://tests/", 6) != base
+        assert resume_key(str(proj), str(target), "f" * 40, "res://tests/", 5) != base
+        # SEE-1405 §SPEC-001：key 用 resolve() 后的项目相对路径——项目内
+        # symlink 解析回同一物理文件，与真实路径同 key（同一次物理 run）
+        link = proj / "link.gd"
         link.symlink_to(target)
-        assert resume_key(str(link), sha, "res://tests/", 5) == base
+        assert resume_key(str(proj), str(link), sha, "res://tests/", 5) == base
 
 
 # ---------------------------------------------------------------------------

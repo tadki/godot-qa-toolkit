@@ -88,14 +88,17 @@ def project(tmp_path):
     return root
 
 
-def test_store_key_binds_realpath_kind_glob(tmp_path):
-    target = tmp_path / "a.gd"
+def test_store_key_binds_relative_path_kind_glob(tmp_path):
+    # SEE-1405 §SPEC-001：路径成分 = 项目内相对路径（跨检出/投影同 key）
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "a.gd"
     target.write_text("func a():\n\treturn 1\n")
-    k1 = store_key(str(target), "mutation", "res://tests/x/")
-    k2 = store_key(str(target), "mutation", None)
-    k3 = store_key(str(target.resolve()), "mutation", "res://tests/x/")
+    k1 = store_key(str(root), str(target), "mutation", "res://tests/x/")
+    k2 = store_key(str(root), str(target), "mutation", None)
+    k3 = store_key(str(root), str(target.resolve()), "mutation", "res://tests/x/")
     assert k1 != k2
-    assert k1 == k3  # realpath 归一
+    assert k1 == k3  # resolve 归一（symlink 视角同 key）
     assert len(k1) == 40  # sha1
 
 

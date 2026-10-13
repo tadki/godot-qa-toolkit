@@ -111,3 +111,142 @@ def register(registry: Registry) -> None:
         if completed[0].get("verdict") != "killed":
             _fail("resumed verdict mismatch",
                   str(completed[0].get("verdict")))
+
+
+    # ---- §SPEC-003 gdself -------------------------------------------------
+
+    def _toy_gdself_project(base: Path, with_uid: bool = True) -> Path:
+        root = base / "proj"
+        (root / "systems").mkdir(parents=True)
+        (root / "scenes").mkdir()
+        tests = root / "tests"
+        tests.mkdir()
+        (root / "project.godot").write_text(
+            "[autoload]\n"
+            'EffectManager="*res://autoload/effect_manager.gd"\n',
+            encoding="utf-8")
+        (root / "autoload").mkdir()
+        (root / "autoload" / "effect_manager.gd").write_text("extends Node\n")
+        (root / "systems" / "item_data.gd").write_text(
+            "class_name ItemData\nextends RefCounted\n")
+        (root / "systems" / "factory.gd").write_text(
+            'const D = preload("res://systems/item_data.gd")\n'
+            "class_name ItemFactory\n")
+        (root / "systems" / "item_view.gd").write_text(
+            "class_name ItemView\nextends Node2D\n")
+        (root / "scenes" / "item_view.tscn").write_text(
+            '[gd_scene format=3]\n'
+            '[ext_resource type="Script" '
+            'path="res://systems/item_view.gd" id="1"]\n')
+        (root / "systems" / "event_bus.gd").write_text(
+            "class_name EventBus\nextends Node\n")
+        for i in range(25):
+            (root / "systems" / f"consumer_{i}.gd").write_text(
+                f"extends Node\nvar _b: EventBus\n")
+        (root / "systems" / "orphan.gd").write_text(
+            "class_name Orphan\nextends RefCounted\n")
+        (tests / "test_factory.gd").write_text(
+            'const F = preload("res://systems/factory.gd")\n'
+            "var d: ItemData\n"
+            'var em = get_node_or_null("EffectManager")\n')
+        (tests / "test_scene.gd").write_text(
+            'const S = preload("res://scenes/item_view.tscn")\n')
+        (tests / "test_bus.gd").write_text("var bus: EventBus\n")
+        if with_uid:
+            (tests / "test_uid.gd").write_text(
+                'var r = load("uid://abc123")\n')
+        return root
+
+    @registry.step("a toy project with class autoload scene literal and "
+                   "dynamic consumers")
+    def _given_toy(_p: dict[str, str]) -> None:
+        state["proj"] = _toy_gdself_project(
+            Path(tempfile.mkdtemp(prefix="see1405-gdself-")),
+            with_uid=False)
+
+    @registry.step("the indexed glob of the factory target is derived")
+    def _when_factory(_p: dict[str, str]) -> None:
+        from godot_qa_toolkit.mutation.testscan import derive_tests_glob
+        proj = state["proj"]
+        state["glob"] = derive_tests_glob(
+            "res://systems/factory.gd", proj / "tests",
+            project_root=str(proj))
+
+    @registry.step("the glob converges to the single direct test file")
+    def _then_single(_p: dict[str, str]) -> None:
+        if state["glob"] != "res://tests/test_factory.gd":
+            _fail("factory glob did not converge to single test file",
+                  str(state["glob"]))
+
+    @registry.step("a toy project with a scene-bound script consumed only "
+                   "via its scene")
+    def _given_scene(_p: dict[str, str]) -> None:
+        state["proj"] = _toy_gdself_project(
+            Path(tempfile.mkdtemp(prefix="see1405-gdself-")),
+            with_uid=False)
+
+    @registry.step("the indexed glob of the script target is derived")
+    def _when_script(_p: dict[str, str]) -> None:
+        from godot_qa_toolkit.mutation.testscan import derive_tests_glob
+        proj = state["proj"]
+        state["glob"] = derive_tests_glob(
+            "res://systems/item_view.gd", proj / "tests",
+            project_root=str(proj))
+
+    @registry.step("the glob converges to the scene consuming test file")
+    def _then_scene(_p: dict[str, str]) -> None:
+        if state["glob"] != "res://tests/test_scene.gd":
+            _fail("scene-bound script glob did not converge",
+                  str(state["glob"]))
+
+    @registry.step("a toy project with a hub class consumed by many "
+                   "production files")
+    def _given_hub(_p: dict[str, str]) -> None:
+        state["proj"] = _toy_gdself_project(
+            Path(tempfile.mkdtemp(prefix="see1405-gdself-")),
+            with_uid=False)
+
+    @registry.step("the indexed consumers of the hub target are queried "
+                   "with fanout 20")
+    def _when_hub(_p: dict[str, str]) -> None:
+        from godot_qa_toolkit.mutation.gdself import query_consumers
+        proj = state["proj"]
+        state["hub_out"] = query_consumers(
+            str(proj), "res://systems/event_bus.gd", proj / "tests",
+            hub_fanout=20)
+
+    @registry.step("the terminal test consumer is present and hub truncation "
+                   "is disclosed")
+    def _then_hub(_p: dict[str, str]) -> None:
+        out = state["hub_out"]
+        hits = {c["res"] for c in out["consumers"]}
+        if "res://tests/test_bus.gd" not in hits:
+            _fail("terminal test consumer lost under hub truncation",
+                  str(sorted(hits)))
+        if out["unresolved"]["hub_truncated"] < 1:
+            _fail("hub truncation not disclosed",
+                  str(out["unresolved"]))
+
+    @registry.step("a toy project with an unreferenced script and no uid "
+                   "literals")
+    def _given_orphan(_p: dict[str, str]) -> None:
+        state["proj"] = _toy_gdself_project(
+            Path(tempfile.mkdtemp(prefix="see1405-gdself-")),
+            with_uid=False)
+
+    @registry.step("the indexed consumers of the orphan target are queried")
+    def _when_orphan(_p: dict[str, str]) -> None:
+        from godot_qa_toolkit.mutation.gdself import query_consumers
+        proj = state["proj"]
+        state["orphan_out"] = query_consumers(
+            str(proj), "res://systems/orphan.gd", proj / "tests")
+
+    @registry.step("no consumer is returned and the reason is no_tests")
+    def _then_orphan(_p: dict[str, str]) -> None:
+        out = state["orphan_out"]
+        if out["consumers"]:
+            _fail("orphan target unexpectedly has consumers",
+                  str([c["res"] for c in out["consumers"]]))
+        if out["unresolved"]["reason"] != "no_tests":
+            _fail("orphan reason mismatch",
+                  str(out["unresolved"]["reason"]))

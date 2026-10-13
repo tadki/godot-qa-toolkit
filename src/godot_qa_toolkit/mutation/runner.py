@@ -434,11 +434,16 @@ class _interrupt_guard:
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
-    """SPEC-001：目标 → 扫描 tests/ 引用子集；零命中退回全量（scoped=False）。"""
+    """SPEC-001：目标 → 扫描 tests/ 引用子集；零命中退回全量（scoped=False）。
+
+    SEE-1405 §SPEC-004：project_root 显式传给 derive_tests_glob——内部
+    换源 gdself 正向索引（间接消费闭包可见）；扫描失败诚实退全量。
+    """
     try:
         from .testscan import derive_tests_glob
         return derive_tests_glob(_res_path_of(file_path, project_root),
-                                 Path(project_root) / "tests")
+                                 Path(project_root) / "tests",
+                                 project_root=project_root)
     except Exception as e:
         print(f"auto scan failed, falling back to full suite: {e}",
               file=sys.stderr)

@@ -9,9 +9,9 @@
 | `python3 .dev/repo-sync/repo_sync.py --config .dev/repo-sync/repo_sync_config.json [--dry-run] [--direction {bidirectional,push-only}]` | 单次同步：branch guard → fetch 重试 → 四态检测 → pull `--ff-only` / push / rebase→merge 降级 |
 | `nohup python3 .dev/repo-sync/repo_sync_daemon.py --config .dev/repo-sync/repo_sync_config.json >> .dev/logs/repo-sync-daemon.log 2>&1 &` | 轮询守护（5s 轮询、指数退避、连续失败熔断、multica 告警） |
 | `.dev/launch/godot-qa-toolkit-start.sh` | 一键启动脚本（后台 repo-sync + 前台 multica daemon） |
-| `.dev/systemd/godot-qa-toolkit-start.service` | systemd user unit（`ExecStart` 指向启动脚本） |
+| `.dev/systemd/godot-qa-toolkit-start.service` | systemd **system 级** unit（`WantedBy=multi-user.target` + `User=jerry`，`ExecStart` 指向启动脚本） |
 
-验收/本地验证一律 `--dry-run`：
+验收/本地验证一律 `--dry-run`——**零写入语义**：dry-run 只做观测（branch guard/fetch/四态检测照常执行），不向 repo_path 落任何文件（state 与日志文件均不写入；stdout 照常输出）：
 
 ```bash
 GQT_REPO_ROOT=~/tools/godot-qa-toolkit \

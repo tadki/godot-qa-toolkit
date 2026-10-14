@@ -100,7 +100,9 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def setup_logging(config: dict[str, Any], quiet: bool = False) -> logging.Logger:
+def setup_logging(
+    config: dict[str, Any], quiet: bool = False, file_log: bool = True
+) -> logging.Logger:
     logger = logging.getLogger("repo_sync")
     logger.setLevel(logging.DEBUG)
 
@@ -113,18 +115,26 @@ def setup_logging(config: dict[str, Any], quiet: bool = False) -> logging.Logger
         handler.setFormatter(logging.Formatter(LOG_FORMAT))
         logger.addHandler(handler)
 
-    # File log
-    log_dir = Path(config["log_dir"])
-    log_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(log_dir / "repo-sync.log", encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-    logger.addHandler(file_handler)
+    # File log writes into repo_path (log_dir) — skipped in dry-run mode
+    # (SPEC-012: observation must not write into the target checkout).
+    if file_log:
+        log_dir = Path(config["log_dir"])
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            log_dir / "repo-sync.log", encoding="utf-8"
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        logger.addHandler(file_handler)
 
     return logger
 
 
 def write_state(config: dict[str, Any], state: dict[str, Any]) -> None:
+    # dry-run 是纯观测语义（SPEC-012）：state 决断不得落盘进 repo_path，
+    # 否则对规范检出的验收会留下 .dev/logs/ 未跟踪残留。
+    if state.get("dry_run", False):
+        return
     state_path = Path(config["state_file"])
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2243,7 +2253,9 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    logger = setup_logging(config, quiet=args.quiet)
+    logger = setup_logging(
+        config, quiet=args.quiet, file_log=not args.dry_run
+    )
 
     lock_path = config.get("lock_file", "/tmp/godot-qa-toolkit-sync.lock")
     lock_fd = acquire_lock(lock_path, timeout=args.lock_timeout)

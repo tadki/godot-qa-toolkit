@@ -102,6 +102,28 @@ class TestIndexedPath:
                                  project_root=str(proj)) == expected
 
 
+class TestTestsRootFallback:
+    def test_multi_hit_at_tests_root_falls_back_to_full(self, tmp_path):
+        """≥2 命中全部落在 tests/ 根 → 目录级退化为 res://tests/（全量）。
+
+        两源（反查/索引）同判——tie-break 语义不漂移的根档位钉子。
+        """
+        proj = tmp_path / "proj"
+        tests = proj / "tests"
+        (proj / "systems").mkdir(parents=True)
+        tests.mkdir()
+        (proj / "systems" / "util.gd").write_text(
+            "class_name Util\n", encoding="utf-8")
+        (tests / "t1.gd").write_text(
+            'const U = preload("res://systems/util.gd")\n', encoding="utf-8")
+        (tests / "t2.gd").write_text(
+            'const U = preload("res://systems/util.gd")\n', encoding="utf-8")
+        assert derive_tests_glob("res://systems/util.gd", tests) == \
+            "res://tests/"
+        assert derive_tests_glob("res://systems/util.gd", tests,
+                                 project_root=str(proj)) == "res://tests/"
+
+
 class TestRunnerWiring:
     def test_auto_scan_passes_project_root(self, direct_hit_tree, monkeypatch):
         proj = direct_hit_tree

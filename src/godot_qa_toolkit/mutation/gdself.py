@@ -236,10 +236,13 @@ def _match_sources(finfo: dict, ident: dict) -> tuple[set, bool]:
 
 def _target_key_of(index: dict, target_res_path: str) -> str:
     """任意形态（fs 路径 / res://）→ 索引键（casefold res://）。"""
-    if str(target_res_path).startswith("res://"):
-        rel = target_res_path.removeprefix("res://")
+    s = str(target_res_path)
+    # 前缀判定 case-insensitive：大写 RES:// 是合法 res 形态（路径键
+    # casefold 轨），误走 fs 分支会在 relative_to 处 ValueError。
+    if s[:6].casefold() == "res://":
+        rel = s[6:]
     else:
-        rel = str(Path(target_res_path).resolve()
+        rel = str(Path(s).resolve()
                   .relative_to(Path(index["root"])))
     return ("res://" + rel).casefold()
 

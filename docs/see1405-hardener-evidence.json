@@ -1,0 +1,65 @@
+{
+  "issue": "SEE-1405",
+  "substep": "hardener",
+  "base_commit": "f54a107",
+  "date": "2026-10-14",
+  "pytest": {"baseline": 438, "after": 472, "added": 34, "exit_code": 0},
+  "gherkin": {
+    "see1405_keys": "3/3",
+    "see1405_gdself": "4/4",
+    "see1400_resume": "6/6",
+    "see1356_timing": "1/1"
+  },
+  "complexity_gate": {
+    "functions": 299,
+    "max_seen": 14,
+    "max_threshold": 15,
+    "warn_threshold": 10,
+    "violations": 0,
+    "warnings_same_set_as_baseline": 6
+  },
+  "coverage": {
+    "gdself.py": {"before_pct": 96, "after_pct": 100,
+                  "closed_gap_lines": [63, 64, 91, 148, 242, 327, 329]},
+    "gdself_stats.py": {"before_pct": 95, "after_pct": 100,
+                        "closed_gap_lines": [80, 107, 138]},
+    "resume.py": {"before_pct": 96, "after_pct": 100,
+                  "closed_gap_lines": [135, 173, 178, 179]},
+    "timing.py": {"before_pct": 100, "after_pct": 100},
+    "testscan.py": {"before_pct": 82, "after_pct": 84,
+                    "closed_gap_lines": [116],
+                    "remaining_lines": [22, 25, 26, 27, 28, 29, 30, 31, 32,
+                                        33, 34, 35, 36, 37, 38, 39],
+                    "remaining_reason": "_target_identities 死代码（全仓无调用点，公开 API 不可达）"}
+  },
+  "mutation_injection_verification": {
+    "method": "手工注入 8 个典型变异（gdself/ops/timing），跑对应用例验证转红后还原",
+    "killed": 8,
+    "total": 8,
+    "targets": [
+      "改截断常数 K=20→25",
+      "截断比较 > 改 >=",
+      "class_name 分轨改 casefold（破坏大小写分轨）",
+      "删 stem 身份键轨道",
+      "删 strip_noise 转义分支",
+      "大写 res:// 回退 fs 分支（原缺陷回归守卫）",
+      "OPS_VERSION bump 回退 see1400/1",
+      "key 路径成分回退绝对路径"
+    ]
+  },
+  "defect_fixed": {
+    "where": "gdself._target_key_of",
+    "what": "大写 RES:// 前缀误走 fs 分支 → Path.relative_to ValueError（违背路径键 casefold 轨语义，查询侧崩溃）",
+    "fix": "前缀判定 case-insensitive（s[:6].casefold() == 'res://'）",
+    "evidence_test": "test_gdself_adversarial_see1405.py::TestCaseSplitTracks::test_query_side_res_prefix_casefolded"
+  },
+  "findings": [
+    "testscan._target_identities（testscan.py 22/25-39）为死代码，src+tests 全仓 grep 无调用点——hardener 不删产品源码，移交后续裁决"
+  ],
+  "test_inventory": [
+    "tests/unit/test_gdself_adversarial_see1405.py (24)",
+    "tests/unit/test_gdself_stats_adversarial_see1405.py (3)",
+    "tests/unit/test_store_keys_adversarial_see1405.py (6)",
+    "tests/unit/test_gdself_testscan_see1405.py (+1: TestTestsRootFallback)"
+  ]
+}

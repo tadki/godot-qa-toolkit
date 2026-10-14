@@ -101,7 +101,8 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
 
 
 def setup_logging(
-    config: dict[str, Any], quiet: bool = False, file_log: bool = True
+    config: dict[str, Any], quiet: bool = False, dry_run: bool = False,
+    file_log: bool = True,
 ) -> logging.Logger:
     logger = logging.getLogger("repo_sync")
     logger.setLevel(logging.DEBUG)
@@ -115,9 +116,13 @@ def setup_logging(
         handler.setFormatter(logging.Formatter(LOG_FORMAT))
         logger.addHandler(handler)
 
-    # File log writes into repo_path (log_dir) — skipped in dry-run mode
-    # (SPEC-012: observation must not write into the target checkout).
-    if file_log:
+    # File log writes into the checkout (log_dir defaults relative to
+    # repo_path); dry-run (SPEC-012) skips it unless the caller explicitly
+    # placed log_dir outside repo_path (test harnesses).
+    if file_log and (
+        not dry_run
+        or not _path_inside_repo(config, config.get("log_dir", ""))
+    ):
         log_dir = Path(config["log_dir"])
         log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(
@@ -130,10 +135,31 @@ def setup_logging(
     return logger
 
 
+def _path_inside_repo(config: dict[str, Any], raw_path: str) -> bool:
+    """True when raw_path resolves inside repo_path (dry-run write boundary:
+    SPEC-012 requires zero writes into the target checkout, while state/log
+    paths explicitly placed outside (test harnesses) stay writable)."""
+    if not raw_path:
+        return False
+    repo_root = Path(os.path.expanduser(config["repo_path"])).resolve()
+    try:
+        candidate = Path(raw_path).resolve()
+    except OSError:
+        return True
+    try:
+        candidate.relative_to(repo_root)
+    except ValueError:
+        return False
+    return True
+
+
 def write_state(config: dict[str, Any], state: dict[str, Any]) -> None:
     # dry-run 是纯观测语义（SPEC-012）：state 决断不得落盘进 repo_path，
-    # 否则对规范检出的验收会留下 .dev/logs/ 未跟踪残留。
-    if state.get("dry_run", False):
+    # 否则对规范检出的验收会留下 .dev/logs/ 未跟踪残留；显式指到外部的
+    # state 路径（测试夹具）不在边界内，照写。
+    if state.get("dry_run", False) and _path_inside_repo(
+        config, config.get("state_file", "")
+    ):
         return
     state_path = Path(config["state_file"])
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2254,7 +2280,7 @@ def main() -> int:
 
     config = load_config(args.config)
     logger = setup_logging(
-        config, quiet=args.quiet, file_log=not args.dry_run
+        config, quiet=args.quiet, dry_run=args.dry_run
     )
 
     lock_path = config.get("lock_file", "/tmp/godot-qa-toolkit-sync.lock")

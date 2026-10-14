@@ -11,7 +11,7 @@
 | `.dev/launch/godot-qa-toolkit-start.sh` | 一键启动脚本（后台 repo-sync + 前台 multica daemon） |
 | `.dev/systemd/godot-qa-toolkit-start.service` | systemd **system 级** unit（`WantedBy=multi-user.target` + `User=jerry`，`ExecStart` 指向启动脚本） |
 
-验收/本地验证一律 `--dry-run`——**零写入语义**：dry-run 只做观测（branch guard/fetch/四态检测照常执行），不向 repo_path 落任何文件（state 与日志文件均不写入；stdout 照常输出）：
+验收/本地验证一律 `--dry-run`——**零写入语义**：dry-run 只做观测（branch guard/fetch/四态检测照常执行），不向 repo_path 落任何文件（state 与日志路径按判据配置均派生自 repo_path 内，故不写入；`state_file`/`log_dir` 显式配置到 repo_path 之外的调用方不受此边界约束；stdout 照常输出）：
 
 ```bash
 GQT_REPO_ROOT=~/tools/godot-qa-toolkit \

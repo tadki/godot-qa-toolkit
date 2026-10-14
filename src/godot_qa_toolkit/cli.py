@@ -129,14 +129,24 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:
-    from .mutation.inject import detect_binary_kind
+    from .mutation.inject import BinaryConfigError, detect_binary_kind
     from .mutation.runner import run_mutation
     from .timing import TimingStore
 
     # §SPEC-012（定案 C 项 a+b）：GQT_GODOT_BIN 覆写限 mutation 子命令——
     # dispatch 前钉死二进制类型（平台分支与 key 二进制成分共用判定）；
     # coverage/gherkin 子命令不触碰该 env，行为面冻结。
-    binary_kind = detect_binary_kind(refresh=True)
+    try:
+        binary_kind = detect_binary_kind(refresh=True)
+    except BinaryConfigError as e:
+        # LOW-1：显式配置错误统一 JSON 错误契约（ok:false + 明确 error），
+        # 不裸抛 traceback——与「目标文件不存在」一类响亮性/形态对齐。
+        return _emit({
+            "tool": "mutation",
+            "ok": False,
+            "summary": {"error": str(e)},
+            "failures": [{"reason": str(e)}],
+        })
 
     files = args.files
     multi_concurrency = len(files) > 1 or args.jobs is not None

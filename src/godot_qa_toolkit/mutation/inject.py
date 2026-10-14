@@ -126,10 +126,29 @@ ENV_GODOT_BIN = "GQT_GODOT_BIN"
 _BINARY_KIND_CACHE: str | None = None
 
 
+class BinaryConfigError(Exception):
+    """`GQT_GODOT_BIN` 显式路径不可用（不存在/不可读/不可执行）——统一错误
+    契约出口（§SPEC-006 JSON 契约 ok:false + error；cli 层转译）。消息含
+    探测操作与输入路径上下文。"""
+
+
 def _resolved_godot_path() -> str | None:
-    """目标二进制的解析路径：GQT_GODOT_BIN 显式优先，否则 PATH 首匹配。"""
+    """目标二进制的解析路径：GQT_GODOT_BIN 显式优先，否则 PATH 首匹配。
+
+    显式 env 指向不存在/不可读路径 → BinaryConfigError（LOW-1：显式配置
+    错误必须响亮且带契约形态，静默回退 win64 会把配置错误藏进 verdict）。
+    """
     explicit = os.environ.get(ENV_GODOT_BIN, "").strip()
     if explicit:
+        if not os.path.isfile(explicit):
+            raise BinaryConfigError(
+                f"{ENV_GODOT_BIN} path does not exist: {explicit}")
+        if not os.access(explicit, os.R_OK):
+            raise BinaryConfigError(
+                f"{ENV_GODOT_BIN} path is not readable: {explicit}")
+        if not os.access(explicit, os.X_OK):
+            raise BinaryConfigError(
+                f"{ENV_GODOT_BIN} path is not executable: {explicit}")
         return explicit
     for d in os.environ.get("PATH", "").split(os.pathsep):
         if not d:

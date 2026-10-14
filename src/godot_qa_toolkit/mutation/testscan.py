@@ -22,23 +22,6 @@ def _res_canonical(res_path: str) -> str:
     return res_path.strip().casefold()
 
 
-def _target_identities(path: Path) -> set[str]:
-    """目标文件的引用等价身份：res:// 绝对路径（canonical）+ stem。"""
-    stem = path.stem.casefold()
-    rel = str(path).replace("\\", "/")
-    # 绝对路径尽力归一为 res://（相对 KOL 项目根的调用形态不断变化，
-    # 接受 caller 传入的任何形式，casefold 后前后缀比对兜住）
-    identities = {stem}
-    if "res://" not in rel.casefold():
-        idx = rel.casefold().find("/tests/")
-        if idx >= 0:
-            identities.add("res://" + rel[idx + 1:].casefold())
-        identities.add(_res_canonical("res://" + path.name))
-    else:
-        identities.add(_res_canonical(rel))
-    return identities
-
-
 def scan_test_refs(target_res_path: str, tests_dir: Path) -> list[str]:
     """返回 tests/ 下引用目标文件的测试文件绝对路径列表（每文件一条，排序）。"""
     return sorted(scan_test_ref_counts(target_res_path, tests_dir))

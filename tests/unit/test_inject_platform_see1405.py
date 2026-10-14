@@ -21,6 +21,14 @@ import pytest
 from godot_qa_toolkit.mutation import inject
 
 
+def _fake_binary(tmp_path: Path, name: str, content: bytes) -> Path:
+    """可执行的真实文件（探测层存在性/可读性检查需要真实文件）。"""
+    fake = tmp_path / name
+    fake.write_bytes(content)
+    fake.chmod(0o755)
+    return fake
+
+
 @pytest.fixture(autouse=True)
 def _fresh_kind_cache():
     """per-process 判定缓存按用例清空——env 变更必须反映到 detect 结果。"""
@@ -45,9 +53,9 @@ class TestBinaryKindDetection:
         monkeypatch.setenv("GQT_GODOT_BIN", str(elf))
         assert inject.detect_binary_kind() == "linux"
 
-    def test_explicit_win64_exe_suffix(self, monkeypatch):
-        monkeypatch.setenv("GQT_GODOT_BIN",
-                           "/mnt/d/Godot/Godot_v4.6.2_win64.exe")
+    def test_explicit_win64_exe_suffix(self, monkeypatch, tmp_path):
+        exe = _fake_binary(tmp_path, "Godot_4.6.2_win64.exe", b"MZ\x90\x00")
+        monkeypatch.setenv("GQT_GODOT_BIN", str(exe))
         assert inject.detect_binary_kind() == "win64"
 
     def test_default_resolves_win64_wrapper_probe(self, monkeypatch, tmp_path):
@@ -75,9 +83,11 @@ class TestBinaryKindDetection:
 
 
 class TestMutantEnvWin64ChannelUnchanged:
-    def test_win64_kind_uses_win_paths_and_wslenv(self, toy, monkeypatch):
+    def test_win64_kind_uses_win_paths_and_wslenv(self, toy, monkeypatch,
+                                                  tmp_path):
         root, target = toy
-        monkeypatch.setenv("GQT_GODOT_BIN", "godot.exe")
+        exe = _fake_binary(tmp_path, "godot.exe", b"MZ\x90\x00")
+        monkeypatch.setenv("GQT_GODOT_BIN", str(exe))
         env, cfg_fs = inject.mutant_env("res://systems/calc.gd", "mutated",
                                         str(root), 0)
         assert env["GQT_MUTATION_CFG"].endswith(".json")
@@ -116,9 +126,11 @@ class TestMutantEnvLinuxChannel:
         assert "APPDATA" not in env
         assert "WSLENV" not in env
 
-    def test_linux_cfg_payload_intact_and_registered(self, toy, monkeypatch):
+    def test_linux_cfg_payload_intact_and_registered(self, toy, monkeypatch,
+                                                     tmp_path):
         root, target = toy
-        monkeypatch.setenv("GQT_GODOT_BIN", "/nonexistent-elf-godot")
+        monkeypatch.setenv("GQT_GODOT_BIN",
+                           str(_fake_binary(tmp_path, "g", b"\x7fELF")))
         monkeypatch.setattr(inject, "_kind_of_executable", lambda p: "linux")
         env, cfg_fs = inject.mutant_env("res://systems/calc.gd", "SRC",
                                         str(root), 3)
@@ -130,9 +142,11 @@ class TestMutantEnvLinuxChannel:
         assert cfg_fs in inject._TEMP_FILES
 
     def test_linux_user_dir_failure_degrades_without_crash(self, toy,
-                                                           monkeypatch):
+                                                           monkeypatch,
+                                                           tmp_path):
         root, target = toy
-        monkeypatch.setenv("GQT_GODOT_BIN", "/nonexistent-elf-godot")
+        monkeypatch.setenv("GQT_GODOT_BIN",
+                           str(_fake_binary(tmp_path, "g", b"\x7fELF")))
         monkeypatch.setattr(inject, "_kind_of_executable", lambda p: "linux")
         monkeypatch.setattr(inject, "make_user_dir", lambda: None)
         env, _ = inject.mutant_env("res://systems/calc.gd", "SRC",
@@ -143,10 +157,12 @@ class TestMutantEnvLinuxChannel:
 
 class TestKillListSemantics:
     def test_legacy_win64_env_values_still_wslpath_form(self, toy,
-                                                        monkeypatch):
+                                                        monkeypatch,
+                                                        tmp_path):
         """既有契约：win64 下 env 值经 wslpath -w（D:\ 或 UNC 形式）。"""
         root, _ = toy
-        monkeypatch.setenv("GQT_GODOT_BIN", "godot.exe")
+        exe = _fake_binary(tmp_path, "godot.exe", b"MZ\x90\x00")
+        monkeypatch.setenv("GQT_GODOT_BIN", str(exe))
         env, _ = inject.mutant_env("res://systems/calc.gd", "SRC",
                                    str(root), 0)
         v = env["GQT_MUTATION_CFG"]

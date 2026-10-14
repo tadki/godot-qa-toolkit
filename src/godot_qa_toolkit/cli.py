@@ -171,13 +171,14 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 resume=args.resume,
                 binary_kind=binary_kind,
             )
+            result["summary"].setdefault("jobs", 1)
         else:
             from .mutation.executor import run_mutation_files
             # SEE-1413：timing store 只喂退串行路径的 run_mutation（与原串行
             # 快路径同接线）；并发分片路径不接线（worker 分片跳过 store 读写
             # 是既有 SPEC-005/L1 契约，adaptive timeout 语义不静默丢失）。
             timing_store = None
-            if not args.dry_run and len(files) == 1 and args.jobs == 1:
+            if not args.dry_run and len(files) == 1:
                 timing_store = TimingStore(args.project_root, files[0],
                                            "mutation", args.tests,
                                            binary_kind=binary_kind)
@@ -186,6 +187,11 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout, dry_run=args.dry_run,
                 tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
                 binary_kind=binary_kind, timing_store=timing_store)
+            if len(files) == 1 and args.jobs is None:
+                # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
+                envelope = result
+                result = envelope["results"][0]
+                result["summary"].setdefault("jobs", envelope["jobs"])
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",

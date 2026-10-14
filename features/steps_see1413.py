@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from godot_qa_toolkit.gherkin.runner import Registry, StepFailure
@@ -57,6 +59,7 @@ def register(registry: Registry) -> None:
     def _given_target(_p: dict[str, str], count: str) -> None:
         source = GD_4_SITES if int(count) >= 4 else GD_2_SITES
         root, target = _write_project(source)
+        state["expected_mutants"] = int(count)
         executor._worker_pool = _SerialPool
         executor._run_baseline_snapshot = (  # type: ignore[method-assign]
             lambda r, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
@@ -71,9 +74,20 @@ def register(registry: Registry) -> None:
 
     @registry.step("gqt mutation runs the single file with jobs omitted")
     def _when_default(_p: dict[str, str]) -> None:
-        state["result"] = executor.run_mutation_files(
-            [state["target"]], state["root"], budget=50, timeout_s=60,
-            dry_run=False, tests_glob="res://tests/unit/save/", jobs=None)
+        from godot_qa_toolkit import cli as cli_mod
+        args = cli_mod.build_parser().parse_args([
+            "mutation", state["target"], "--project-root", state["root"],
+            "--tests", "res://tests/unit/save/",
+        ])
+        output = io.StringIO()
+        cpu_count = executor.os.cpu_count
+        executor.os.cpu_count = lambda: 16
+        try:
+            with redirect_stdout(output):
+                cli_mod.cmd_mutation(args)
+        finally:
+            executor.os.cpu_count = cpu_count
+        state["result"] = cli_mod.json.loads(output.getvalue())
 
     @registry.step("gqt mutation runs the single file with jobs {n}")
     def _when_jobs(_p: dict[str, str], n: str) -> None:
@@ -91,24 +105,34 @@ def register(registry: Registry) -> None:
     @registry.step("the report top-level shape is flat with jobs greater than {n}")
     def _then_flat(_p: dict[str, str], n: str) -> None:
         d = state["result"]
-        # 单文件统一契约顶层形态 flat（{"tool","ok","jobs","results"}）——
-        # 失败态才会出现 failures 键；消费方解析的既有键集零变化。
-        if not set(d) <= {"tool", "ok", "jobs", "failures", "results"}:
+        if set(d) != {"tool", "ok", "summary", "failures"}:
             raise StepFailure(f"top-level shape not flat: {sorted(d)}")
-        if not d["jobs"] > int(n):
-            raise StepFailure(f"jobs={d['jobs']} not > {n}")
+        jobs = d["summary"].get("jobs")
+        if jobs is None or not jobs > int(n):
+            raise StepFailure(f"summary.jobs={jobs} not > {n}")
 
-    @registry.step("each result summary keeps the existing key set")
+    @registry.step("the flat summary keeps existing keys and adds jobs")
     def _then_keys(_p: dict[str, str]) -> None:
-        r = state["result"]["results"][0]
-        if set(r) != {"tool", "ok", "summary", "failures"}:
-            raise StepFailure(f"result shape changed: {sorted(r)}")
+        summary = state["result"]["summary"]
+        expected = {
+            "file", "mutants", "killed", "survived", "suspect", "timeout",
+            "run_errors", "invalid_mutants", "kill_rate", "budget",
+            "adaptive_timeout_s", "scoped", "baseline_reused",
+            "timing_source", "samples_n", "baseline_p90", "jobs",
+        }
+        if set(summary) != expected:
+            raise StepFailure(f"summary keys changed: {sorted(set(summary))}")
+        if summary["mutants"] != state["expected_mutants"]:
+            raise StepFailure(
+                f"merged mutants={summary['mutants']} != {state['expected_mutants']}")
 
     @registry.step("the report falls back to serial with jobs {n}")
     def _then_serial(_p: dict[str, str], n: str) -> None:
         d = state["result"]
         if d["jobs"] != int(n):
             raise StepFailure(f"expected serial jobs={n}, got {d['jobs']}")
+        if d["results"][0]["summary"].get("jobs") != int(n):
+            raise StepFailure("serial result summary.jobs mismatch")
 
     @registry.step("zero prewarm imports were performed")
     def _then_no_prewarm(_p: dict[str, str]) -> None:
@@ -120,6 +144,10 @@ def register(registry: Registry) -> None:
         d = state["result"]
         if d["jobs"] != int(n) or len(d["results"]) != 1:
             raise StepFailure(f"jobs={d['jobs']} results={len(d['results'])}")
+        if d["results"][0]["summary"].get("jobs") != int(n):
+            raise StepFailure("jobs=1 result summary.jobs mismatch")
+        if state["prewarm"]["n"] != 0:
+            raise StepFailure("jobs=1 unexpectedly prewarmed")
 
     @registry.step("the text mentions per-file AND per-mutant slicing")
     def _then_text_levels(_p: dict[str, str]) -> None:

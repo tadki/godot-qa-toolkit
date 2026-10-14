@@ -112,6 +112,8 @@ def run_mutation_files(
                          tests_glob=tests_glob, binary_kind=binary_kind)
             for f in files
         ]
+        for result in results:
+            result["summary"].setdefault("jobs", 1)
         return {"tool": "mutation",
                 "ok": all(r["ok"] for r in results),
                 "jobs": 1,
@@ -172,7 +174,7 @@ def _settled_error(file: str, err) -> dict:
     return {
         "tool": "mutation",
         "ok": False,
-        "summary": {"file": file, "mutants": 0, "error": str(err)},
+        "summary": {"file": file, "mutants": 0, "jobs": 0, "error": str(err)},
         "failures": [{"reason": f"mutation setup failed: {err}"}],
     }
 
@@ -182,7 +184,8 @@ def _settled_no_sites(file: str, scoped: bool) -> dict:
     return {
         "tool": "mutation",
         "ok": True,
-        "summary": {"file": file, "mutants": 0, "killed": 0, "survived": 0,
+        "summary": {"file": file, "mutants": 0, "jobs": 0,
+                    "killed": 0, "survived": 0,
                     "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
                     "scoped": bool(scoped)},
         "failures": [],
@@ -213,6 +216,25 @@ def _chunk_worker(payload: dict) -> dict:
     )
 
 
+def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) -> None:
+    """把单个 chunk 累加进文件级聚合。"""
+    s = cr["summary"]
+    agg["jobs"] += 1
+    agg["ok"] = agg["ok"] and bool(cr.get("ok", True))
+    for k in passthrough_keys:
+        if k in s:
+            agg[k] = s[k]
+    for k in ("mutants", "killed", "survived", "suspect",
+              "timeout", "run_errors", "invalid_mutants", "resumed"):
+        agg[k] += s.get(k, 0)
+    agg["failures"].extend(cr.get("failures", []))
+    agg["scoped"] = bool(s.get("scoped"))
+    agg["budget"] = s.get("budget")
+    agg["baseline_reused"] = bool(s.get("baseline_reused"))
+    total = agg["mutants"]
+    agg["kill_rate"] = round(agg["killed"] / total, 4) if total else 0.0
+
+
 def _merge_results(chunks: list[dict], chunk_results: list[dict],
                    jobs: int) -> dict:
     """按文件合并分片契约：计数求和、failures 拼接、kill_rate 重算。
@@ -222,34 +244,32 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     数，与单文件扁平路径口径一致；无 resume 语义的 chunk 按缺省 0 计，
     报告形态保持与单文件路径同构。
     """
+    passthrough_keys = (
+        "adaptive_timeout_s", "timing_source", "samples_n", "baseline_p90",
+        "run_error", "error",
+    )
     per_file: dict[str, dict] = {}
+    resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
     for chunk, cr in zip(chunks, chunk_results):
         file = chunk["file"]
         agg = per_file.setdefault(file, {
             "file": file, "mutants": 0, "killed": 0, "survived": 0,
             "suspect": 0, "timeout": 0, "run_errors": 0,
-            "invalid_mutants": 0, "resumed": 0, "failures": [], "scoped": None,
+            "invalid_mutants": 0, "resumed": 0, "jobs": 0,
+            "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
         })
-        s = cr["summary"]
-        for k in ("mutants", "killed", "survived", "suspect",
-                  "timeout", "run_errors", "invalid_mutants", "resumed"):
-            agg[k] += s.get(k, 0)
-        agg["failures"].extend(cr.get("failures", []))
-        agg["scoped"] = bool(s.get("scoped"))
-        agg["budget"] = s.get("budget")
-        agg["baseline_reused"] = bool(s.get("baseline_reused"))
-        t = agg["mutants"]
-        agg["kill_rate"] = round(agg["killed"] / t, 4) if t else 0.0
+        _accumulate_chunk(agg, cr, passthrough_keys)
     results = []
     for agg in per_file.values():
-        ok = (agg["survived"] == 0 and agg["timeout"] == 0
+        ok = (agg["ok"] and agg["survived"] == 0 and agg["timeout"] == 0
               and agg["run_errors"] == 0 and agg["suspect"] == 0)
         results.append({
             "tool": "mutation",
             "ok": ok,
             "summary": {
                 "file": agg["file"],
+                "jobs": agg["jobs"],
                 "mutants": agg["mutants"],
                 "killed": agg["killed"],
                 "survived": agg["survived"],
@@ -261,7 +281,9 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
                 "budget": agg["budget"],
                 "scoped": agg["scoped"],
                 "baseline_reused": agg["baseline_reused"],
-                "resumed": agg["resumed"],
+                **{k: agg[k] for k in passthrough_keys if k in agg},
+                **({"resumed": agg["resumed"]}
+                   if resumed_present else {}),
             },
             "failures": agg["failures"],
         })
@@ -296,7 +318,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             settled.append(_settled_error(f, e))
             continue
         glob = tests_glob or _auto_scan_tests_glob(f, project_root)
-        if total == 0:
+        if total <= 0:
             settled.append(_settled_no_sites(f, bool(glob)))
             continue
         baseline = baselines.get(glob)

@@ -7,3 +7,4 @@ dist/
 .venv/
 .coverage*
 __pycache__/
+.grepai/

@@ -50,7 +50,8 @@ from .ops import (  # noqa: F401
     mk_guard_not,
 )
 
-from .inject import cleanup_temp_files, forget_temp, host_script_res, mutant_env, seed_host_script, wslpath_win
+from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
+                     mutant_env, seed_host_script, wslpath_win)
 from .godot_gate import GlobalGodotGate
 from .resume import ResumeStore
 from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
@@ -141,7 +142,8 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
     with GlobalGodotGate(project_root):
         r = subprocess.run(
-            ["godot", "--headless", "--path", _godot_project_path(project_root),
+            [godot_command(), "--headless", "--path",
+             _godot_project_path(project_root),
              "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],
             capture_output=True,
             text=True,
@@ -260,6 +262,7 @@ def run_mutation(
     timing_store=None,
     resume: bool = False,
     resume_store=None,
+    binary_kind: str | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -318,7 +321,8 @@ def run_mutation(
     # SEE-1400 §SPEC-001：每个 verdict 增量落盘——常规 run 也写（中断即可
     # 续跑），--resume 才打开跳过语义。dry-run 已在上方短路（零 IO）。
     if resume_store is None:
-        resume_store = ResumeStore(project_root, str(path), tests_glob, budget)
+        resume_store = ResumeStore(project_root, str(path), tests_glob,
+                                   budget, binary_kind=binary_kind)
 
     effective_timeout, timing_meta = _negotiate_budget(
         timing_store, timeout_s, precomputed_baseline)
@@ -434,11 +438,16 @@ class _interrupt_guard:
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
-    """SPEC-001：目标 → 扫描 tests/ 引用子集；零命中退回全量（scoped=False）。"""
+    """SPEC-001：目标 → 扫描 tests/ 引用子集；零命中退回全量（scoped=False）。
+
+    SEE-1405 §SPEC-004：project_root 显式传给 derive_tests_glob——内部
+    换源 gdself 正向索引（间接消费闭包可见）；扫描失败诚实退全量。
+    """
     try:
         from .testscan import derive_tests_glob
         return derive_tests_glob(_res_path_of(file_path, project_root),
-                                 Path(project_root) / "tests")
+                                 Path(project_root) / "tests",
+                                 project_root=project_root)
     except Exception as e:
         print(f"auto scan failed, falling back to full suite: {e}",
               file=sys.stderr)
@@ -652,7 +661,10 @@ def _run_mutant_loop(
                                              backup, tests_glob, seq,
                                              baseline_failures, baseline_dirty)
                 results.append(verdict)
-                if resume_store is not None:
+                # SEE-1405 发现三毒条目防护：启动失败类 run_error（注入 env
+                # 缺失 / godot 未拉起）说明引擎没执行该 mutant——verdict 对
+                # mutant 本身零信息量，落盘会让后续 --resume 误复用。
+                if resume_store is not None and not _is_launch_failure_record(verdict):
                     resume_store.record(seq, verdict)
         finally:
             host.unlink(missing_ok=True)
@@ -746,6 +758,21 @@ class _BaselineLaunchFailure(Exception):
     def __init__(self, tail: str):
         self.tail = tail
         super().__init__(tail[:200])
+
+
+# 启动失败类 run_error 的 reason 标记（与 _run_single_mutant /
+# _classify_mutant_run 的产出措辞同源；毒条目防护只认这两类）。
+_LAUNCH_FAILURE_REASON_MARKERS = (
+    "memory injection failed:",
+    "godot launch failed (tests did not run):",
+)
+
+
+def _is_launch_failure_record(verdict: dict) -> bool:
+    """run_error ∧ 启动失败类 → resume store 拒写（毒条目防护）。"""
+    return verdict.get("verdict") == "run_error" and any(
+        marker in verdict.get("reason", "")
+        for marker in _LAUNCH_FAILURE_REASON_MARKERS)
 
 
 def _classify_mutant_run(m: Mutant, rc: int, tail: str,

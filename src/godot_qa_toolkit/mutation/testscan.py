@@ -22,23 +22,6 @@ def _res_canonical(res_path: str) -> str:
     return res_path.strip().casefold()
 
 
-def _target_identities(path: Path) -> set[str]:
-    """目标文件的引用等价身份：res:// 绝对路径（canonical）+ stem。"""
-    stem = path.stem.casefold()
-    rel = str(path).replace("\\", "/")
-    # 绝对路径尽力归一为 res://（相对 KOL 项目根的调用形态不断变化，
-    # 接受 caller 传入的任何形式，casefold 后前后缀比对兜住）
-    identities = {stem}
-    if "res://" not in rel.casefold():
-        idx = rel.casefold().find("/tests/")
-        if idx >= 0:
-            identities.add("res://" + rel[idx + 1:].casefold())
-        identities.add(_res_canonical("res://" + path.name))
-    else:
-        identities.add(_res_canonical(rel))
-    return identities
-
-
 def scan_test_refs(target_res_path: str, tests_dir: Path) -> list[str]:
     """返回 tests/ 下引用目标文件的测试文件绝对路径列表（每文件一条，排序）。"""
     return sorted(scan_test_ref_counts(target_res_path, tests_dir))
@@ -70,7 +53,8 @@ def _ref_hits_target(ref: str, target_res_path: str) -> bool:
     return ref_cf == target_cf or ref_cf.endswith("/" + target_cf.rsplit("res://", 1)[-1])
 
 
-def derive_tests_glob(target_res_path: str, tests_dir: Path) -> str | None:
+def derive_tests_glob(target_res_path: str, tests_dir: Path,
+                      project_root: str | None = None) -> str | None:
     """目标 → 最小命中测试目录的 res:// glob（SPEC-001 主判据）。
 
     SEE-1400 §SPEC-005：命中恰好 1 个测试文件 → 返回该文件 res:// 路径
@@ -80,10 +64,23 @@ def derive_tests_glob(target_res_path: str, tests_dir: Path) -> str | None:
     命中分布跨多个目录时取命中文件数第一个的最深目录（从浅到深按命中数
     与路径深度加权）——扫描误差方向保守：过窄只会少报 killed（生存假阳），
     不会虚报质量。
+
+    SEE-1405 §SPEC-004 换源零耦合：project_root 显式传入时内部换源为
+    gdself 正向索引（间接消费闭包可见）；None 时维持 SEE-1400 反查语义
+    （既有调用方/判据零回归）。tie-break 两源共用同一实现，不漂移。
+    project_root 必须显式传，禁止 tests_dir.parent 隐推（定案条款）。
     """
-    counts = scan_test_ref_counts(target_res_path, tests_dir)
+    if project_root is not None:
+        counts = _index_ref_counts(project_root, target_res_path, tests_dir)
+    else:
+        counts = scan_test_ref_counts(target_res_path, tests_dir)
     if not counts:
         return None
+    return _glob_from_counts(counts, tests_dir)
+
+
+def _glob_from_counts(counts: dict[str, int], tests_dir: Path) -> str | None:
+    """命中文件计数 → glob；文件级/目录级/tie-break 语义唯一出处。"""
     tests_abs = str(tests_dir.absolute()).replace("\\", "/")
     if len(counts) == 1:
         only = next(iter(counts))
@@ -101,3 +98,23 @@ def derive_tests_glob(target_res_path: str, tests_dir: Path) -> str | None:
     if not best[0]:
         return "res://tests/"
     return "res://tests/" + best[0] + "/"
+
+
+def _index_ref_counts(project_root: str, target_res_path: str,
+                      tests_dir: Path) -> dict[str, int]:
+    """gdself 正向索引 → 每命中测试文件计数（keys 与反查同形：绝对路径）。
+
+    计数 = 该测试文件的命中源种类数（path/class/autoload/stem/dynamic），
+    与反查的「引用次数」同为强度代理，供同一 tie-break 消费。
+    """
+    from .gdself import query_consumers
+    out = query_consumers(project_root, target_res_path, tests_dir)
+    tests_abs = str(tests_dir.absolute()).replace("\\", "/")
+    counts: dict[str, int] = {}
+    for consumer in out["consumers"]:
+        if not consumer["res"].startswith("res://tests/"):
+            continue  # 生产/资产消费者只作闭包中转，不进 tests glob
+        fs_path = str(Path(project_root).resolve()
+                      / consumer["res"].removeprefix("res://"))
+        counts[fs_path] = counts.get(fs_path, 0) + len(consumer["sources"])
+    return counts

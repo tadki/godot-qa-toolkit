@@ -28,6 +28,7 @@ import sys
 import time
 from pathlib import Path
 
+from ..timing import binary_kind_tag, project_relative
 from .ops import OPS_VERSION
 
 SCHEMA = "see1400-resume/1"
@@ -38,11 +39,21 @@ FINAL_VERDICTS = frozenset({
 })
 
 
-def resume_key(file_path: str, source_sha1: str, tests_glob: str | None,
-               budget: int) -> str:
-    """指纹 key：realpath + 源码 sha1 + 生效 tests_glob + budget + ops 版本。"""
-    payload = (f"{str(Path(file_path).resolve())}|{source_sha1}|"
-               f"{tests_glob or ''}|{int(budget)}|{OPS_VERSION}")
+def resume_key(project_root: str, file_path: str, source_sha1: str,
+               tests_glob: str | None, budget: int,
+               binary_kind: str | None = None) -> str:
+    """指纹 key：项目内相对路径 + 源码 sha1 + tests_glob + budget + ops 版本
+    + 二进制类型（§SPEC-012 发现二：跨二进制 store 互写防护——win64/linux
+    的 verdict 与预算锚互不复用）。
+
+    SEE-1405 迁移注记：① §SPEC-001 路径成分由绝对 realpath 改项目相对；
+    ② 本次（see1405/3）key 增二进制标识成分——旧 store 条目再次一次性
+    失效（显式披露，不脏合并），与方案二 tests_glob 变化共享失效窗口。
+    """
+    kind = binary_kind if binary_kind is not None else binary_kind_tag(None)
+    rel = project_relative(project_root, file_path)
+    payload = (f"{rel}|{source_sha1}|"
+               f"{tests_glob or ''}|{int(budget)}|{OPS_VERSION}|{kind}")
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -51,14 +62,16 @@ class ResumeStore:
 
     def __init__(self, project_root: str, file_path: str,
                  tests_glob: str | None, budget: int,
-                 now: float | None = None):
+                 now: float | None = None, binary_kind: str | None = None):
         self.project_root = str(Path(project_root).resolve())
         self.file_path = file_path
         self.tests_glob = tests_glob
         self.budget = int(budget)
+        self.binary_kind = binary_kind_tag(binary_kind)
         self.source_sha1 = self._sha1_of(file_path)
-        self.key = resume_key(file_path, self.source_sha1, tests_glob,
-                              self.budget)
+        self.key = resume_key(project_root, file_path, self.source_sha1,
+                              tests_glob, self.budget,
+                              binary_kind=self.binary_kind)
         self._now = time.time() if now is None else now
         self._warned_write = False
 
@@ -111,13 +124,29 @@ class ResumeStore:
                       f"— continuing without resumable history", file=sys.stderr)
             return False
 
+    # 启动失败类 run_error 的 reason 标记——与 runner._LAUNCH_FAILURE_REASON_
+    # MARKERS 同源措辞（毒条目防护载入侧：断连期已落盘的存量条目同样拒收）。
+    _LAUNCH_FAILURE_MARKERS = (
+        "memory injection failed:",
+        "godot launch failed (tests did not run):",
+    )
+
     def _read_entry(self, seq: int) -> dict | None:
-        """读一个条目；schema/verdict 非法或读失败 = 无该条（诚实降级）。"""
+        """读一个条目；schema/verdict 非法或读失败 = 无该条（诚实降级）。
+
+        SEE-1405 发现三毒条目防护（载入侧）：启动失败类 run_error 对 mutant
+        零信息量——无论何时写入（含本修复前的断连期存量），一律按无历史
+        处理，宁重跑不脏合并。
+        """
         try:
             raw = json.loads(self.entry_path(seq).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+            return None
+        if (raw.get("verdict") == "run_error"
+                and any(m in raw.get("reason", "")
+                        for m in self._LAUNCH_FAILURE_MARKERS)):
             return None
         # 条目信封核对（hardener SEE-1400）：key/seq 与自身路径不符 = 条目
         # 被拷贝/换位过——按无历史处理，绝不复用身份漂移的 verdict。

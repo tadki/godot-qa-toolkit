@@ -50,7 +50,8 @@ from .ops import (  # noqa: F401
     mk_guard_not,
 )
 
-from .inject import cleanup_temp_files, forget_temp, host_script_res, mutant_env, seed_host_script, wslpath_win
+from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
+                     mutant_env, seed_host_script, wslpath_win)
 from .godot_gate import GlobalGodotGate
 from .resume import ResumeStore
 from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
@@ -141,7 +142,8 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
     with GlobalGodotGate(project_root):
         r = subprocess.run(
-            ["godot", "--headless", "--path", _godot_project_path(project_root),
+            [godot_command(), "--headless", "--path",
+             _godot_project_path(project_root),
              "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],
             capture_output=True,
             text=True,
@@ -659,7 +661,10 @@ def _run_mutant_loop(
                                              backup, tests_glob, seq,
                                              baseline_failures, baseline_dirty)
                 results.append(verdict)
-                if resume_store is not None:
+                # SEE-1405 发现三毒条目防护：启动失败类 run_error（注入 env
+                # 缺失 / godot 未拉起）说明引擎没执行该 mutant——verdict 对
+                # mutant 本身零信息量，落盘会让后续 --resume 误复用。
+                if resume_store is not None and not _is_launch_failure_record(verdict):
                     resume_store.record(seq, verdict)
         finally:
             host.unlink(missing_ok=True)
@@ -753,6 +758,21 @@ class _BaselineLaunchFailure(Exception):
     def __init__(self, tail: str):
         self.tail = tail
         super().__init__(tail[:200])
+
+
+# 启动失败类 run_error 的 reason 标记（与 _run_single_mutant /
+# _classify_mutant_run 的产出措辞同源；毒条目防护只认这两类）。
+_LAUNCH_FAILURE_REASON_MARKERS = (
+    "memory injection failed:",
+    "godot launch failed (tests did not run):",
+)
+
+
+def _is_launch_failure_record(verdict: dict) -> bool:
+    """run_error ∧ 启动失败类 → resume store 拒写（毒条目防护）。"""
+    return verdict.get("verdict") == "run_error" and any(
+        marker in verdict.get("reason", "")
+        for marker in _LAUNCH_FAILURE_REASON_MARKERS)
 
 
 def _classify_mutant_run(m: Mutant, rc: int, tail: str,

@@ -124,13 +124,29 @@ class ResumeStore:
                       f"— continuing without resumable history", file=sys.stderr)
             return False
 
+    # 启动失败类 run_error 的 reason 标记——与 runner._LAUNCH_FAILURE_REASON_
+    # MARKERS 同源措辞（毒条目防护载入侧：断连期已落盘的存量条目同样拒收）。
+    _LAUNCH_FAILURE_MARKERS = (
+        "memory injection failed:",
+        "godot launch failed (tests did not run):",
+    )
+
     def _read_entry(self, seq: int) -> dict | None:
-        """读一个条目；schema/verdict 非法或读失败 = 无该条（诚实降级）。"""
+        """读一个条目；schema/verdict 非法或读失败 = 无该条（诚实降级）。
+
+        SEE-1405 发现三毒条目防护（载入侧）：启动失败类 run_error 对 mutant
+        零信息量——无论何时写入（含本修复前的断连期存量），一律按无历史
+        处理，宁重跑不脏合并。
+        """
         try:
             raw = json.loads(self.entry_path(seq).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+            return None
+        if (raw.get("verdict") == "run_error"
+                and any(m in raw.get("reason", "")
+                        for m in self._LAUNCH_FAILURE_MARKERS)):
             return None
         # 条目信封核对（hardener SEE-1400）：key/seq 与自身路径不符 = 条目
         # 被拷贝/换位过——按无历史处理，绝不复用身份漂移的 verdict。

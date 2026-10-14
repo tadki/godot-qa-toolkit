@@ -178,6 +178,17 @@ def detect_binary_kind(*, refresh: bool = False) -> str:
     return kind
 
 
+def godot_command() -> str:
+    """启动 argv 首元：与 detect_binary_kind() 同一解析源（发现三修复）。
+
+    断连根因：判定吃 GQT_GODOT_BIN/PATH 解析、启动 argv 硬编码 "godot"
+    （PATH 首匹配）——显式 env 指向 Linux ELF 时实际拉起的仍是 win64
+    wrapper，env 通道与引擎类型错配。同源化后：显式 env → 该路径；PATH
+    → PATH 首匹配绝对路径；均无 → 字面量 "godot"（现网缺省不变）。
+    """
+    return _resolved_godot_path() or "godot"
+
+
 def reset_binary_kind_cache() -> None:
     """测试钩子：清空 per-process 判定缓存。"""
     global _BINARY_KIND_CACHE

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# SEE-1406: nudge the repo-sync daemon after a local commit (mirrors KOL post-commit hook).
+python3 "$(git rev-parse --show-toplevel)/.dev/repo-sync/repo_sync.py" --config "$(git rev-parse --show-toplevel)/.dev/repo-sync/repo_sync_config.json" --quiet >/dev/null 2>&1 || true

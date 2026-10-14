@@ -1,0 +1,34 @@
+# .dev/tests CI — repo-sync dev tool chain self-tests (SEE-1406).
+# Pure Python + temp git repos; no Godot dependency.
+name: ci-devtests
+
+concurrency:
+  group: ci-devtests-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-devtests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run .dev/tests (repo-sync unit + integration)
+        run: python -m pytest .dev/tests -q

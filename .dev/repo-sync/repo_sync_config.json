@@ -1,0 +1,22 @@
+{
+    "_comment": "repo_path uses the __GQT_REPO_ROOT__ sentinel, resolved from GQT_REPO_ROOT at load time (set via the Environment= line in .dev/systemd/godot-qa-toolkit-start.service, or exported by .dev/launch/godot-qa-toolkit-start.sh). All other paths are machine-neutral.",
+    "repo_path": "__GQT_REPO_ROOT__/",
+    "remote": "origin",
+    "branch": "master",
+    "lock_file": "/tmp/godot-qa-toolkit-sync.lock",
+    "pid_file": "/tmp/godot-qa-toolkit-sync-daemon.pid",
+    "log_dir": ".dev/logs",
+    "state_file": ".dev/logs/repo-sync-state.json",
+    "alert_issue_id": "a3181de2-539c-4624-9db8-30b1003ec6f9",
+    "daemon_poll_interval_seconds": 5,
+    "daemon_max_consecutive_failures": 10,
+    "daemon_backoff_max_seconds": 300,
+    "subprocess_timeout_seconds": 120,
+    "fetch_retry_count": 3,
+    "fetch_retry_delay_seconds": 2.0,
+    "stash_on_dirty": true,
+    "gitlink_forward_enabled": false,
+    "conflict_resolution_strategy": "rebase_first",
+    "ff_only": true,
+    "dry_run": false
+}

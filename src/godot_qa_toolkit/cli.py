@@ -149,7 +149,9 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         })
 
     files = args.files
-    multi_concurrency = len(files) > 1 or args.jobs is not None
+    # SEE-1413：--jobs 缺省时单文件同样走并发切片路径（默认并行）；显式
+    # --jobs 1 在 executor 内强制串行。串行快路径仅留给显式串行请求。
+    multi_concurrency = len(files) > 1 or args.jobs is None or args.jobs > 1
     try:
         if not multi_concurrency:
             # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
@@ -171,11 +173,19 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             )
         else:
             from .mutation.executor import run_mutation_files
+            # SEE-1413：timing store 只喂退串行路径的 run_mutation（与原串行
+            # 快路径同接线）；并发分片路径不接线（worker 分片跳过 store 读写
+            # 是既有 SPEC-005/L1 契约，adaptive timeout 语义不静默丢失）。
+            timing_store = None
+            if not args.dry_run and len(files) == 1 and args.jobs == 1:
+                timing_store = TimingStore(args.project_root, files[0],
+                                           "mutation", args.tests,
+                                           binary_kind=binary_kind)
             result = run_mutation_files(
                 files, args.project_root, budget=args.budget,
                 timeout_s=args.timeout, dry_run=args.dry_run,
                 tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
-                binary_kind=binary_kind)
+                binary_kind=binary_kind, timing_store=timing_store)
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",
@@ -240,7 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "omitted = auto-scan tests/ references, zero hits falls back to full suite "
                         "(SEE-1321 SPEC-001/002)")
     m.add_argument("--jobs", type=int, default=None,
-                   help="concurrent per-file workers, clamped to max(2, cpu//2) (SEE-1321 SPEC-003)")
+                   help="worker pool size for per-file AND per-mutant slicing "
+                        "(a single file is sliced per-mutant too); default = "
+                        "max(2, cpu//2); --jobs 1 forces serial (SEE-1413)")
     m.add_argument("--resume", action="store_true",
                    help="skip mutants whose verdicts are already in the resume store "
                         "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "

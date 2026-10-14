@@ -81,6 +81,10 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 
 ### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run] [--resume]`
 
+- **默认并行（SEE-1413）**：`--jobs` 缺省时单文件同样走并发 per-mutant 切片路径（默认 jobs = 上限 `max(2, cpu//2)`，复用 executor.default_jobs）。顶层契约形态不变（flat，`{"tool","ok","jobs","results"}`，失败态才含 `failures`）；`results[i].summary` 新增 `jobs` 键（串行=1，并行=该文件实际分片数）——只增不减，既有键集零变化。
+- **自动退串行（SEE-1413）**：单文件变异点总数 ≤ 生效 jobs 时自动走既有串行路径（判定在变异点收集后、任何 GUT / prewarm / 共享 baseline 预跑之前——少变异场景并发固定开销倒挂），报告形态与串行一致（`jobs=1`）。显式 `--jobs 1` 仍强制串行。`--jobs` 帮助文本已修正为 per-file AND per-mutant slicing（单文件同样生效）。
+- **timing store 语义（SEE-1413）**：退串行路径与 `--jobs 1` 串行快路径接线 TimingStore（预算协商/采样不丢）；并发分片路径不接线（worker 分片跳过 store 读写是 SEE-1356 L1 既有契约，adaptive timeout 只放大不收紧）。
+
 - 前置：`<root>/addons/gut/gut_cmdln.gd` 必须存在；`godot` 可执行文件必须在 PATH。缺失任一 → 统一 JSON failure（exit 1，`failures[0].reason` 含 `not found`）。
 - 执行：baseline GUT（原文件）→ 逐 mutant 改写目标文件跑 GUT（每次后恢复原文件，最终态与原状一致）。
 - **kill 判定 = 失败测试名集合相对 baseline 的差集**，不看 exit code——被测项目基线在无头环境可能自带 pre-existing failures，按 rc 判定会全部误杀。

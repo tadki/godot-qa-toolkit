@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 from .ops import _collect_mutations
 from .runner import run_mutation
@@ -76,6 +77,7 @@ def run_mutation_files(
     jobs: int | None = None,
     resume: bool = False,
     binary_kind: str | None = None,
+    timing_store=None,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -86,13 +88,19 @@ def run_mutation_files(
     文件逐文件出 no_sites 记录——任何输入文件都不得从报告中消失。
     resume（SEE-1400 §SPEC-002）：穿线到单文件路径与各 chunk worker——
     worker 各管各 seq 分片，per-mutant 落盘天然无跨 worker 竞态。
+    SEE-1413：单文件 jobs>1 时变异点总数 ≤ jobs 自动退串行（判定在收集
+    后、prewarm/baseline 之前——少变异场景共享 baseline 预跑的固定开销
+    会倒挂），summary.jobs=1 与显式 --jobs 1 同形态。
     """
     files = _group_by_file(files)
-    if len(files) == 1 and (jobs is None or jobs <= 1):
+    # SEE-1413：--jobs 1（显式串行）走单文件串行快路径；缺省时默认并行
+    # 上限几乎必然 >1，不需要在这里走快路径。
+    if len(files) == 1 and jobs == 1:
         r = run_mutation(files[0], project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=dry_run,
                          tests_glob=tests_glob, resume=resume,
-                         binary_kind=binary_kind)
+                         binary_kind=binary_kind,
+                         timing_store=timing_store)
         r["summary"].setdefault("jobs", 1)
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
@@ -110,6 +118,30 @@ def run_mutation_files(
                 "results": results}
 
     jobs = default_jobs(jobs)
+    # SEE-1413 退串行判定：必须在任何 GUT 调用（prewarm / 共享 baseline
+    # 预跑）之前——变异点太少时走并发路径反而比纯串行慢。判定对缺省与
+    # 显式 jobs 一体生效（§SPEC-002：总数 ≤ jobs 即退）；--jobs 1 在上方
+    # 串行快路径已拦截。
+    if len(files) == 1:
+        # 目标缺失：与串行路径同款 FileNotFoundError（CLI 层
+        # failures[0].reason 含 "not found" 的既定 caller 契约）。
+        if not Path(files[0]).is_file():
+            raise FileNotFoundError(f"mutation target not found: {files[0]}")
+        try:
+            src = open(files[0], encoding="utf-8").read()
+            total = min(len(_collect_mutations(src, files[0])), budget)
+        except Exception:
+            total = -1  # 收集异常交给 _build_chunks 定终态（error 契约）
+        if total == 0 or 0 < total <= jobs:
+            r = run_mutation(files[0], project_root, budget=budget,
+                             timeout_s=timeout_s, dry_run=False,
+                             tests_glob=tests_glob, resume=resume,
+                             binary_kind=binary_kind,
+                             timing_store=timing_store)
+            r["summary"].setdefault("jobs", 1)
+            return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
+                    "results": [r]}
+
     prewarm_import(project_root)
     chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
                                     tests_glob, jobs, resume,

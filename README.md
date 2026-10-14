@@ -73,6 +73,18 @@ gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . \
     --tests res://tests/unit/ui/ --jobs 8
 ```
 
+**Single files go parallel too (SEE-1413).** `--jobs` slices a single file
+per-mutant as well, and it is on by default (`max(2, cpu//2)`):
+
+```bash
+gqt mutation <file> --project-root . --jobs 8
+```
+
+Omitting `--jobs` uses the default pool; a file whose mutation count is ≤
+jobs automatically falls back to serial (no prewarm, no shared-baseline
+pre-run — the fixed overhead would outweigh the parallelism); `--jobs 1`
+always forces serial.
+
 - `--jobs N` — per-process worker pool, clamped to `max(2, cpu//2)`.
 - `GQT_GLOBAL_GODOT_SLOTS` — **cross-process** cap on live godot subprocesses
   (default `max(2, cpu//2)`). Every GUT run (baseline + per-mutant, and

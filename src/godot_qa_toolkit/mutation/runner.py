@@ -260,6 +260,7 @@ def run_mutation(
     timing_store=None,
     resume: bool = False,
     resume_store=None,
+    binary_kind: str | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -318,7 +319,8 @@ def run_mutation(
     # SEE-1400 §SPEC-001：每个 verdict 增量落盘——常规 run 也写（中断即可
     # 续跑），--resume 才打开跳过语义。dry-run 已在上方短路（零 IO）。
     if resume_store is None:
-        resume_store = ResumeStore(project_root, str(path), tests_glob, budget)
+        resume_store = ResumeStore(project_root, str(path), tests_glob,
+                                   budget, binary_kind=binary_kind)
 
     effective_timeout, timing_meta = _negotiate_budget(
         timing_store, timeout_s, precomputed_baseline)

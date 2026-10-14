@@ -110,10 +110,19 @@ def project_relative(project_root: str, file_path: str) -> str:
         return real
 
 
+def binary_kind_tag(binary_kind: str | None = None) -> str:
+    """key 二进制成分（§SPEC-012 发现二）：None 时按目标二进制实时解析。"""
+    if binary_kind is None:
+        from .mutation.inject import detect_binary_kind
+        binary_kind = detect_binary_kind()
+    return binary_kind
+
+
 def store_key(project_root: str, file_path: str, suite_kind: str,
-              tests_glob: str | None) -> str:
+              tests_glob: str | None, binary_kind: str | None = None) -> str:
+    kind = binary_kind_tag(binary_kind)
     rel = project_relative(project_root, file_path)
-    payload = f"{rel}|{suite_kind}|{tests_glob or ''}"
+    payload = f"{rel}|{suite_kind}|{tests_glob or ''}|{kind}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -128,12 +137,15 @@ class TimingStore:
     """
 
     def __init__(self, project_root: str, file_path: str, suite_kind: str,
-                 tests_glob: str | None = None, now: float | None = None):
+                 tests_glob: str | None = None, now: float | None = None,
+                 binary_kind: str | None = None):
         self.project_root = str(Path(project_root).resolve())
         self.file_path = file_path
         self.suite_kind = suite_kind
         self.tests_glob = tests_glob
-        self.key = store_key(project_root, file_path, suite_kind, tests_glob)
+        self.binary_kind = binary_kind_tag(binary_kind)
+        self.key = store_key(project_root, file_path, suite_kind, tests_glob,
+                             binary_kind=self.binary_kind)
         self._now = time.time() if now is None else now
 
     def ensure_store_dir(self) -> None:

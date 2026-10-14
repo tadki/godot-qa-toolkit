@@ -43,7 +43,9 @@ _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 # 变化都必须 bump——旧 verdict 跨版本复用 = 脏合并。
 # see1405/2（SEE-1405 §SPEC-001）：resume key 路径成分归一为项目内相对路径
 # （跨检出/投影同 key）——旧 store 条目随本版本一次性失效（显式披露）。
-OPS_VERSION = "see1405/2"
+# see1405/3（SEE-1405 §SPEC-012 发现二）：key 增二进制标识成分（win64/linux
+# verdict 互不复用，防跨二进制 store 互写）——又一次一次性失效窗口。
+OPS_VERSION = "see1405/3"
 
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {

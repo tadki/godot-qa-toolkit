@@ -15,6 +15,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -117,6 +118,106 @@ def _win_path(p: str) -> str:
     return wslpath_win(p) or p
 
 
+ENV_GODOT_BIN = "GQT_GODOT_BIN"
+
+# 二进制类型判定结果缓存（per-process）：mutant 循环内每 mutant 调
+# mutant_env，PATH 扫描/子进程探测不该重复付；显式 env 变更经 detect
+# 强制参数绕过缓存。
+_BINARY_KIND_CACHE: str | None = None
+
+
+def _resolved_godot_path() -> str | None:
+    """目标二进制的解析路径：GQT_GODOT_BIN 显式优先，否则 PATH 首匹配。"""
+    explicit = os.environ.get(ENV_GODOT_BIN, "").strip()
+    if explicit:
+        return explicit
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        cand = os.path.join(d, "godot")
+        if os.access(cand, os.X_OK) and os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _kind_of_executable(path: str) -> str:
+    """二进制类型：.exe 后缀 / wrapper exec 目标 / ELF 魔数。无法判定视为
+    win64（现网缺省二进制为 win64 wrapper——P1 探针 binary_resolution 实证，
+    缺省通道必须保持现网行为）。"""
+    low = path.casefold()
+    if low.endswith(".exe"):
+        return "win64"
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return "win64"
+    if head.startswith(b"\x7fELF"):
+        return "linux"
+    # wrapper（bash/python 脚本）：P1 实证 ~/.local/bin/godot 是 exec
+    # win64 exe 的 bash wrapper——扫描文本段找 exec 目标。
+    for line in head.decode("utf-8", errors="replace").splitlines():
+        m = re.search(r'exec\s+"?([^"\s]+)"?', line)
+        if m:
+            return _kind_of_executable(m.group(1))
+    return "win64"
+
+
+def detect_binary_kind(*, refresh: bool = False) -> str:
+    """目标 godot 二进制类型 ∈ {"win64", "linux"}（§SPEC-012 平台分支判据）。
+
+    cli 层（mutation 子命令）在 dispatch 前调用一次并注入 env 判定；
+    mutant_env 内部经此取类型。无法解析 → win64（现网缺省，行为不变）。
+    """
+    global _BINARY_KIND_CACHE
+    if _BINARY_KIND_CACHE is not None and not refresh:
+        return _BINARY_KIND_CACHE
+    resolved = _resolved_godot_path()
+    kind = _kind_of_executable(resolved) if resolved else "win64"
+    _BINARY_KIND_CACHE = kind
+    return kind
+
+
+def reset_binary_kind_cache() -> None:
+    """测试钩子：清空 per-process 判定缓存。"""
+    global _BINARY_KIND_CACHE
+    _BINARY_KIND_CACHE = None
+
+
+def _win_env(cfg_fs: str, user_dir: str | None) -> tuple[dict, str]:
+    """win64 通道（既有语义逐字节保留）：UNC/wslpath + APPDATA + WSLENV。"""
+    env: dict[str, str] = {}
+    if user_dir:
+        # 双通道隔离：win64 godot 无视 XDG_DATA_HOME、user:// 跟随
+        # %APPDATA%（OS 探针实测 USER_DIR 收敛到自定义 APPDATA）——
+        # XDG 同设只为 Linux godot 通道，win64-only 下保留既有双设形态。
+        env["XDG_DATA_HOME"] = _win_path(user_dir)
+        env["APPDATA"] = _win_path(user_dir)
+    env["GQT_MUTATION_CFG"] = _win_path(cfg_fs)
+    # win64 godot（WSL interop 启动）不继承 WSL 自定义 env——必须经
+    # WSLENV 显式放行（/w = 仅 Windows 侧可见）。调用方已有 WSLENV 时
+    # 追加不覆写（LOW-4）。
+    existing_wslenv = os.environ.get("WSLENV", "").rstrip(":")
+    ours = "GQT_MUTATION_CFG/w:XDG_DATA_HOME/w:APPDATA/w"
+    env["WSLENV"] = f"{existing_wslenv}:{ours}" if existing_wslenv else ours
+    return env, cfg_fs
+
+
+def _linux_env(cfg_fs: str, user_dir: str | None) -> tuple[dict, str]:
+    """linux 原生通道（§SPEC-012 发现一修复）：cfg/env 原生形态。
+
+    P1 实证两形态缺口：UNC cfg → linux 引擎静默无效化注入（10/10 静默
+    survived）；UNC user:// 与原生 impl 混合根 → SIGABRT。原生通道：
+    XDG_DATA_HOME 原生 Linux 路径、不设 APPDATA（win64-only 语义）、
+    不设 WSLENV（Linux godot 原生继承 env，WSLENV 无副作用也无需放行）。
+    """
+    env: dict[str, str] = {}
+    if user_dir:
+        env["XDG_DATA_HOME"] = user_dir
+    env["GQT_MUTATION_CFG"] = cfg_fs
+    return env, cfg_fs
+
+
 # 本进程创建的临时文件登记表（SPEC-015）：SIGTERM handler 内 os._exit 跳过
 # finally 与 atexit——handler 必须在此处显式调 cleanup_temp_files；atexit 兜底
 # 覆盖 SIGINT/未知退出路径。registry 是 per-process 的（每个 worker 管自己
@@ -181,22 +282,12 @@ def mutant_env(target_res: str, mutated_src: str, project_root: str,
     cfg_path.write_text(json.dumps(payload), encoding="utf-8")
     cfg_fs = str(cfg_path.absolute())
     register_temp(cfg_fs)
-    env: dict[str, str] = {}
     user_dir = make_user_dir()
-    if user_dir:
-        # 双通道隔离：Linux godot 走 XDG_DATA_HOME；win64 godot（本项目
-        # 实际二进制）无视 XDG_DATA_HOME、user:// 跟随 %APPDATA%（OS 探针
-        # 实测 USER_DIR 收敛到自定义 APPDATA）——两者同设保证任一平台生效
-        env["XDG_DATA_HOME"] = _win_path(user_dir)
-        env["APPDATA"] = _win_path(user_dir)
-    env["GQT_MUTATION_CFG"] = _win_path(cfg_fs)
-    # win64 godot（WSL interop 启动）不继承 WSL 自定义 env——必须经
-    # WSLENV 显式放行（/w = 仅 Windows 侧可见；Linux godot 下 WSLENV 是
-    # 无副作用的普通变量）。调用方已有 WSLENV 时追加不覆写（LOW-4）。
-    existing_wslenv = os.environ.get("WSLENV", "").rstrip(":")
-    ours = "GQT_MUTATION_CFG/w:XDG_DATA_HOME/w:APPDATA/w"
-    env["WSLENV"] = f"{existing_wslenv}:{ours}" if existing_wslenv else ours
-    return env, cfg_fs
+    # §SPEC-012 平台分支：按目标 godot 二进制类型选通道（发现一 HIGH 修复）。
+    kind = detect_binary_kind()
+    if kind == "linux":
+        return _linux_env(cfg_fs, user_dir)
+    return _win_env(cfg_fs, user_dir)
 
 
 def seed_host_script(project_root: str) -> Path:

@@ -75,6 +75,7 @@ def run_mutation_files(
     tests_glob: str | None = None,
     jobs: int | None = None,
     resume: bool = False,
+    binary_kind: str | None = None,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -90,7 +91,8 @@ def run_mutation_files(
     if len(files) == 1 and (jobs is None or jobs <= 1):
         r = run_mutation(files[0], project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=dry_run,
-                         tests_glob=tests_glob, resume=resume)
+                         tests_glob=tests_glob, resume=resume,
+                         binary_kind=binary_kind)
         r["summary"].setdefault("jobs", 1)
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
@@ -99,7 +101,7 @@ def run_mutation_files(
         results = [
             run_mutation(f, project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=True,
-                         tests_glob=tests_glob)
+                         tests_glob=tests_glob, binary_kind=binary_kind)
             for f in files
         ]
         return {"tool": "mutation",
@@ -110,7 +112,8 @@ def run_mutation_files(
     jobs = default_jobs(jobs)
     prewarm_import(project_root)
     chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
-                                    tests_glob, jobs, resume)
+                                    tests_glob, jobs, resume,
+                                    binary_kind=binary_kind)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -163,17 +166,18 @@ def _chunk_worker(payload: dict) -> dict:
     file+glob+budget 同 key，各 worker 只写各自 seq 的条目文件。
     """
     resume = bool(payload.get("resume"))
+    binary_kind = payload.get("binary_kind")
     if payload.get("serial"):
         return run_mutation(
             payload["file"], payload["project_root"], budget=payload["budget"],
             timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
-            resume=resume)
+            resume=resume, binary_kind=binary_kind)
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
         precomputed_baseline=payload["baseline"],
         mutant_slice=(payload["start"], payload["stop"]),
-        resume=resume,
+        resume=resume, binary_kind=binary_kind,
     )
 
 
@@ -240,7 +244,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
 
 def _build_chunks(files: list[str], project_root: str, budget: int,
                   timeout_s: int, tests_glob: str | None,
-                  jobs: int, resume: bool = False) -> tuple[list[dict], list[dict]]:
+                  jobs: int, resume: bool = False,
+                  binary_kind: str | None = None) -> tuple[list[dict], list[dict]]:
     """父层：per-file 收集 mutant 总数 → 分片；同样 glob 共享一份 baseline。
 
     返回 (chunks, settled)：settled 是收集异常（error 契约）与零变异
@@ -269,7 +274,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             chunks.append({
                 "file": f, "project_root": project_root, "budget": budget,
                 "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
-                "resume": resume,
+                "resume": resume, "binary_kind": binary_kind,
             })
             continue
         n_chunks = min(jobs, total)
@@ -284,6 +289,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                 "budget": budget,
                 "timeout_s": timeout_s,
                 "tests_glob": glob,
+                "binary_kind": binary_kind,
                 "start": start,
                 "stop": stop,
                 "baseline": baselines.get(glob),

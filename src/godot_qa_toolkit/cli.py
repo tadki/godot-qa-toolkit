@@ -129,8 +129,14 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:
+    from .mutation.inject import detect_binary_kind
     from .mutation.runner import run_mutation
     from .timing import TimingStore
+
+    # §SPEC-012（定案 C 项 a+b）：GQT_GODOT_BIN 覆写限 mutation 子命令——
+    # dispatch 前钉死二进制类型（平台分支与 key 二进制成分共用判定）；
+    # coverage/gherkin 子命令不触碰该 env，行为面冻结。
+    binary_kind = detect_binary_kind(refresh=True)
 
     files = args.files
     multi_concurrency = len(files) > 1 or args.jobs is not None
@@ -140,7 +146,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             timing_store = None
             if not args.dry_run:
                 timing_store = TimingStore(args.project_root, files[0],
-                                           "mutation", args.tests)
+                                           "mutation", args.tests,
+                                           binary_kind=binary_kind)
             result = run_mutation(
                 file_path=files[0],
                 project_root=args.project_root,
@@ -150,13 +157,15 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 tests_glob=args.tests,
                 timing_store=timing_store,
                 resume=args.resume,
+                binary_kind=binary_kind,
             )
         else:
             from .mutation.executor import run_mutation_files
             result = run_mutation_files(
                 files, args.project_root, budget=args.budget,
                 timeout_s=args.timeout, dry_run=args.dry_run,
-                tests_glob=args.tests, jobs=args.jobs, resume=args.resume)
+                tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
+                binary_kind=binary_kind)
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",

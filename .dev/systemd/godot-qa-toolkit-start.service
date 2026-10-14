@@ -1,0 +1,35 @@
+[Unit]
+Description=godot-qa-toolkit dev tool chain (multica daemon + repo-sync)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jerry
+Group=jerry
+# NOTE: do NOT use the %h specifier here. In a system service the systemd
+# manager (running as root) expands %h to /root, not to User='s home, so the
+# jerry service cannot chdir into it ("Permission denied"). Use the explicit
+# absolute path.
+WorkingDirectory=/home/jerry
+
+# Paths and user are HARDCODED to the WSL checkout — change them here (and in
+# godot-qa-toolkit-start.sh) if the checkout moves. GQT_REPO_ROOT resolves the
+# __GQT_REPO_ROOT__ sentinel inside repo-sync/repo_sync_config.json.
+Environment=GQT_REPO_ROOT=/home/jerry/tools/godot-qa-toolkit
+
+# Login shell so the multica CLI is on PATH. The script backgrounds repo-sync
+# then execs the multica daemon in the foreground, so MainPID == the daemon.
+ExecStart=/bin/bash -l /home/jerry/tools/godot-qa-toolkit/.dev/launch/godot-qa-toolkit-start.sh
+
+# No explicit ExecStop: systemd's default stop sends SIGTERM to the whole
+# control group, which coarse-stops both the foreground daemon and the
+# backgrounded repo-sync (accepted tradeoff, mirrors the KOL unit).
+
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

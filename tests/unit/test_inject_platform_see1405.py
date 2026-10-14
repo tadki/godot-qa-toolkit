@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,9 @@ class TestKillListSemantics:
                                                         monkeypatch,
                                                         tmp_path):
         """既有契约：win64 下 env 值经 wslpath -w（D:\ 或 UNC 形式）。"""
+        if shutil.which("wslpath") is None:
+            pytest.skip("wslpath unavailable (non-WSL CI runner) — "
+                        "win64 path conversion contract is WSL-bound")
         root, _ = toy
         exe = _fake_binary(tmp_path, "godot.exe", b"MZ\x90\x00")
         monkeypatch.setenv("GQT_GODOT_BIN", str(exe))

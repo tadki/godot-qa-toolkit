@@ -26,7 +26,7 @@ GQT_REPO_ROOT=~/tools/godot-qa-toolkit \
 | `remote` / `branch` | `origin` / `master` | 同步远端与分支（branch guard 仅允许 master，与 KOL 一致） |
 | `lock_file` / `pid_file` | `/tmp/godot-qa-toolkit-sync.lock` / `...-daemon.pid` | flock 互斥与 daemon 单实例（陈锁按 PID 回收） |
 | `log_dir` / `state_file` | `.dev/logs` / `.dev/logs/repo-sync-state.json` | 相对 `repo_path` 解析 |
-| `alert_issue_id` | `a3181de2-539c-4624-9db8-30b1003ec6f9` | multica 告警 inbox（复用 KOL 同步告警 issue） |
+| `alert_issue_id` | `01a137aa-65c1-7c0b-a726-10e40d7c2a7a` | multica 告警收件 issue（SEE-1406 自身，GQT 告警独立成流；与 KOL inbox 分离，改配即可换） |
 | `daemon_poll_interval_seconds` | `5` | 轮询间隔；失败指数退避至 `daemon_backoff_max_seconds` |
 | `daemon_max_consecutive_failures` | `10` | 连续持久失败熔断阈值（触发后停守护 + 告警） |
 | `subprocess_timeout_seconds` | `120` | 单次同步子进程超时 |
@@ -49,6 +49,7 @@ GQT_REPO_ROOT=~/tools/godot-qa-toolkit \
 | 锁/PID 文件名 | `king-of-likes-sync.*` | `godot-qa-toolkit-sync.*` |
 | `gitlink_forward_enabled` | `true`（有 submodule，三道 gate 适用） | **`false`**（GQT 无 `.gitmodules`；代码保留，无 submodule 时所有 gitlink 路径自动短路） |
 | 启动接线 | `.dev/launch/kingoflikes-start.sh` + `.dev/systemd/kingoflikes-start-all.service` | `.dev/launch/godot-qa-toolkit-start.sh` + `.dev/systemd/godot-qa-toolkit-start.service` |
+| 告警 issue | KOL 同步告警 inbox（KOL 仓配置内独立 issue） | `01a137aa-65c1-7c0b-a726-10e40d7c2a7a`（SEE-1406 自身，**独立收件**不与 KOL 混流） |
 | 复杂度门 | 无（KOL 侧无此工具） | `gqt complexity .dev/repo-sync --warn 10 --max 15` 纳入本仓质量门 |
 | 测试树 | `.dev/tests`（与游戏测试混居） | `.dev/tests`（本仓仅 repo-sync unit + integration） |
 

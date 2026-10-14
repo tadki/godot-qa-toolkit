@@ -7,7 +7,7 @@
     "pid_file": "/tmp/godot-qa-toolkit-sync-daemon.pid",
     "log_dir": ".dev/logs",
     "state_file": ".dev/logs/repo-sync-state.json",
-    "alert_issue_id": "a3181de2-539c-4624-9db8-30b1003ec6f9",
+    "alert_issue_id": "01a137aa-65c1-7c0b-a726-10e40d7c2a7a",
     "daemon_poll_interval_seconds": 5,
     "daemon_max_consecutive_failures": 10,
     "daemon_backoff_max_seconds": 300,

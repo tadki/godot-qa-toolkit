@@ -706,28 +706,6 @@ def _stash_and_switch(
     return True, f"switched from {current} to master", had_stash
 
 
-def _master_guard_blockers(
-    repo_path: str, timeout: int | None = None
-) -> tuple[bool, str]:
-    """Blocking preconditions for the branch guard (boundary matrix #3/#4).
-
-    Returns (blocked, reason). Worktree occupation and dirty-tree cases are
-    handled by the caller (they are skip/stash cases, not hard blockers).
-    """
-    # 3. In-progress operation (#3)
-    if has_git_operation_in_progress(repo_path):
-        return (
-            True,
-            "merge/rebase/cherry-pick in progress; abort required before switching",
-        )
-    # 4. Submodule intermediate state (#4)
-    if has_submodule_changes(repo_path, timeout=timeout):
-        return (
-            True,
-            "submodule in intermediate state; manual cleanup required",
-        )
-    return False, ""
-
 
 def git_fetch(
     repo_path: str, remote: str, timeout: int | None = None

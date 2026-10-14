@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Add .dev to path so imports resolve
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "repo-sync"))
+# sys.path setup is centralized in ../conftest.py
 
 from repo_sync import (
     ConflictResolution,

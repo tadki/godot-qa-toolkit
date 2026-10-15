@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 from .ops import _collect_mutations
 from .runner import run_mutation
@@ -76,6 +77,7 @@ def run_mutation_files(
     jobs: int | None = None,
     resume: bool = False,
     binary_kind: str | None = None,
+    timing_store=None,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -86,13 +88,19 @@ def run_mutation_files(
     文件逐文件出 no_sites 记录——任何输入文件都不得从报告中消失。
     resume（SEE-1400 §SPEC-002）：穿线到单文件路径与各 chunk worker——
     worker 各管各 seq 分片，per-mutant 落盘天然无跨 worker 竞态。
+    SEE-1413：单文件 jobs>1 时变异点总数 ≤ jobs 自动退串行（判定在收集
+    后、prewarm/baseline 之前——少变异场景共享 baseline 预跑的固定开销
+    会倒挂），summary.jobs=1 与显式 --jobs 1 同形态。
     """
     files = _group_by_file(files)
-    if len(files) == 1 and (jobs is None or jobs <= 1):
+    # SEE-1413：--jobs 1（显式串行）走单文件串行快路径；缺省时默认并行
+    # 上限几乎必然 >1，不需要在这里走快路径。
+    if len(files) == 1 and jobs == 1:
         r = run_mutation(files[0], project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=dry_run,
                          tests_glob=tests_glob, resume=resume,
-                         binary_kind=binary_kind)
+                         binary_kind=binary_kind,
+                         timing_store=timing_store)
         r["summary"].setdefault("jobs", 1)
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
@@ -104,12 +112,38 @@ def run_mutation_files(
                          tests_glob=tests_glob, binary_kind=binary_kind)
             for f in files
         ]
+        for result in results:
+            result["summary"].setdefault("jobs", 1)
         return {"tool": "mutation",
                 "ok": all(r["ok"] for r in results),
                 "jobs": 1,
                 "results": results}
 
     jobs = default_jobs(jobs)
+    # SEE-1413 退串行判定：必须在任何 GUT 调用（prewarm / 共享 baseline
+    # 预跑）之前——变异点太少时走并发路径反而比纯串行慢。判定对缺省与
+    # 显式 jobs 一体生效（§SPEC-002：总数 ≤ jobs 即退）；--jobs 1 在上方
+    # 串行快路径已拦截。
+    if len(files) == 1:
+        # 目标缺失：与串行路径同款 FileNotFoundError（CLI 层
+        # failures[0].reason 含 "not found" 的既定 caller 契约）。
+        if not Path(files[0]).is_file():
+            raise FileNotFoundError(f"mutation target not found: {files[0]}")
+        try:
+            src = open(files[0], encoding="utf-8").read()
+            total = min(len(_collect_mutations(src, files[0])), budget)
+        except Exception:
+            total = -1  # 收集异常交给 _build_chunks 定终态（error 契约）
+        if total == 0 or 0 < total <= jobs:
+            r = run_mutation(files[0], project_root, budget=budget,
+                             timeout_s=timeout_s, dry_run=False,
+                             tests_glob=tests_glob, resume=resume,
+                             binary_kind=binary_kind,
+                             timing_store=timing_store)
+            r["summary"].setdefault("jobs", 1)
+            return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
+                    "results": [r]}
+
     prewarm_import(project_root)
     chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
                                     tests_glob, jobs, resume,
@@ -140,7 +174,7 @@ def _settled_error(file: str, err) -> dict:
     return {
         "tool": "mutation",
         "ok": False,
-        "summary": {"file": file, "mutants": 0, "error": str(err)},
+        "summary": {"file": file, "mutants": 0, "jobs": 0, "error": str(err)},
         "failures": [{"reason": f"mutation setup failed: {err}"}],
     }
 
@@ -150,7 +184,8 @@ def _settled_no_sites(file: str, scoped: bool) -> dict:
     return {
         "tool": "mutation",
         "ok": True,
-        "summary": {"file": file, "mutants": 0, "killed": 0, "survived": 0,
+        "summary": {"file": file, "mutants": 0, "jobs": 0,
+                    "killed": 0, "survived": 0,
                     "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
                     "scoped": bool(scoped)},
         "failures": [],
@@ -181,6 +216,25 @@ def _chunk_worker(payload: dict) -> dict:
     )
 
 
+def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) -> None:
+    """把单个 chunk 累加进文件级聚合。"""
+    s = cr["summary"]
+    agg["jobs"] += 1
+    agg["ok"] = agg["ok"] and bool(cr.get("ok", True))
+    for k in passthrough_keys:
+        if k in s:
+            agg[k] = s[k]
+    for k in ("mutants", "killed", "survived", "suspect",
+              "timeout", "run_errors", "invalid_mutants", "resumed"):
+        agg[k] += s.get(k, 0)
+    agg["failures"].extend(cr.get("failures", []))
+    agg["scoped"] = bool(s.get("scoped"))
+    agg["budget"] = s.get("budget")
+    agg["baseline_reused"] = bool(s.get("baseline_reused"))
+    total = agg["mutants"]
+    agg["kill_rate"] = round(agg["killed"] / total, 4) if total else 0.0
+
+
 def _merge_results(chunks: list[dict], chunk_results: list[dict],
                    jobs: int) -> dict:
     """按文件合并分片契约：计数求和、failures 拼接、kill_rate 重算。
@@ -190,34 +244,32 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     数，与单文件扁平路径口径一致；无 resume 语义的 chunk 按缺省 0 计，
     报告形态保持与单文件路径同构。
     """
+    passthrough_keys = (
+        "adaptive_timeout_s", "timing_source", "samples_n", "baseline_p90",
+        "run_error", "error",
+    )
     per_file: dict[str, dict] = {}
+    resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
     for chunk, cr in zip(chunks, chunk_results):
         file = chunk["file"]
         agg = per_file.setdefault(file, {
             "file": file, "mutants": 0, "killed": 0, "survived": 0,
             "suspect": 0, "timeout": 0, "run_errors": 0,
-            "invalid_mutants": 0, "resumed": 0, "failures": [], "scoped": None,
+            "invalid_mutants": 0, "resumed": 0, "jobs": 0,
+            "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
         })
-        s = cr["summary"]
-        for k in ("mutants", "killed", "survived", "suspect",
-                  "timeout", "run_errors", "invalid_mutants", "resumed"):
-            agg[k] += s.get(k, 0)
-        agg["failures"].extend(cr.get("failures", []))
-        agg["scoped"] = bool(s.get("scoped"))
-        agg["budget"] = s.get("budget")
-        agg["baseline_reused"] = bool(s.get("baseline_reused"))
-        t = agg["mutants"]
-        agg["kill_rate"] = round(agg["killed"] / t, 4) if t else 0.0
+        _accumulate_chunk(agg, cr, passthrough_keys)
     results = []
     for agg in per_file.values():
-        ok = (agg["survived"] == 0 and agg["timeout"] == 0
+        ok = (agg["ok"] and agg["survived"] == 0 and agg["timeout"] == 0
               and agg["run_errors"] == 0 and agg["suspect"] == 0)
         results.append({
             "tool": "mutation",
             "ok": ok,
             "summary": {
                 "file": agg["file"],
+                "jobs": agg["jobs"],
                 "mutants": agg["mutants"],
                 "killed": agg["killed"],
                 "survived": agg["survived"],
@@ -229,7 +281,9 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
                 "budget": agg["budget"],
                 "scoped": agg["scoped"],
                 "baseline_reused": agg["baseline_reused"],
-                "resumed": agg["resumed"],
+                **{k: agg[k] for k in passthrough_keys if k in agg},
+                **({"resumed": agg["resumed"]}
+                   if resumed_present else {}),
             },
             "failures": agg["failures"],
         })
@@ -264,7 +318,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             settled.append(_settled_error(f, e))
             continue
         glob = tests_glob or _auto_scan_tests_glob(f, project_root)
-        if total == 0:
+        if total <= 0:
             settled.append(_settled_no_sites(f, bool(glob)))
             continue
         baseline = baselines.get(glob)

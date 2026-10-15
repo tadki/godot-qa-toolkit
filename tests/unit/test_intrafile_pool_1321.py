@@ -90,7 +90,10 @@ class TestMutantSlice:
 
 class TestIntraFileJobs:
     def test_single_file_jobs_chunks(self, tmp_path, monkeypatch, passing_gut):
-        """单文件 + jobs=4：mutants 切片分派（内存注入路径放开同文件并发）。"""
+        """单文件 + jobs=4：mutants 切片分派（内存注入路径放开同文件并发）。
+
+        GD_TARGET 收集数固定为 3（本文件顶部源码），jobs=2 保证收集数 > jobs
+        走分片路径（SEE-1413 起总数 ≤ jobs 会退串行，jobs=4 会触发退串行）。"""
         proj, files = _write_project(tmp_path)
         monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
         monkeypatch.setattr(
@@ -98,11 +101,10 @@ class TestIntraFileJobs:
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
         d = executor.run_mutation_files(
             [files[0]], proj, budget=3, timeout_s=60, dry_run=False,
-            tests_glob="res://tests/unit/save/", jobs=4)
-        # CI 无 godot 且 gdtoolkit 版本随环境——mutant 收集数不做绝对断言；
+            tests_glob="res://tests/unit/save/", jobs=2)
         # 分片数与生产同口径：jobs 先经 default_jobs 钳制（CI 2 核 cap=2）
         # 再与收集数取 min——测试不得自行假设钳制结果
-        expected_jobs = executor.default_jobs(4)
+        expected_jobs = executor.default_jobs(2)
         collected = min(3, len(_collect_mutations(
             Path(files[0]).read_text(encoding="utf-8"), files[0])))
         assert d["jobs"] == min(expected_jobs, collected)
@@ -118,7 +120,9 @@ class TestIntraFileJobs:
         assert len(d["results"]) == 1
 
     def test_single_file_auto_scan_with_jobs(self, tmp_path, monkeypatch, passing_gut):
-        """未显式 --tests：父层推导 scoped glob → baseline 只跑一份。"""
+        """未显式 --tests：父层推导 scoped glob → baseline 只跑一份。
+
+        jobs=2（收集数 3 > 2）保证走分片路径——SEE-1413 起总数 ≤ jobs 退串行。"""
         proj, files = _write_project(tmp_path)
         baselines = {"n": 0}
         monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
@@ -126,9 +130,11 @@ class TestIntraFileJobs:
             executor, "_run_baseline_snapshot",
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
         d = executor.run_mutation_files(
-            [files[0]], proj, budget=2, timeout_s=60, dry_run=False,
-            tests_glob=None, jobs=4)
+            [files[0]], proj, budget=3, timeout_s=60, dry_run=False,
+            tests_glob=None, jobs=2)
         # fake 全 pass → mutant 存活 → ok=False 是正确判定；
         # 关键断言：父层 scoped glob 推导生效、baseline 零跑双份
         assert all(c["summary"]["scoped"] for c in d["results"])
+        # SEE-1413：GD_TARGET 收集数为 3，jobs=2 时收集数 > jobs 才真正走
+        # 分片路径（总数 ≤ jobs 会退串行，baseline_reused 断言会失真）
         assert all(c["summary"]["baseline_reused"] for c in d["results"])

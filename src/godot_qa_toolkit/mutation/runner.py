@@ -6,15 +6,8 @@ SEE-1268 自研（gdtoolkit lark AST 定位 → 源码 span 替换 → 跑 GUT �
 P0' 判定原则落点：每个 mutant 输出机器可判的 killed/survived/timeout 布尔 +
 结构化 failures；exit 0=全部杀死 1=有存活/超时。
 
-SEE-1312 增强（plan-debate 定案）：
-- 变异点扩展：三元表达式（cond 取反 + 两臂交换）、守卫取反（含去重）、
-  算子第二梯队（and⇄or / in→not in / is 取反）、UOI token 级删 not（排除 not in）、
-  常量 Token 级精确匹配（原 atom 节点在 lark 折叠下永不出现，已死代码——改直查）。
-- 定位机制升级为 span 替换（gather_metadata 提供 start_pos/end_pos），
-  取代脆弱的 line/column 单点替换。
-- 成本控制：--dry-run（只清点不跑 GUT）、--tests 受影响测试子集、
-  自适应 timeout（baseline 实测耗时 × k）。
-- 有效性分类：invalid_mutant 语法预检、suspect 标签（baseline 脏 ∧ 差集空）。
+SEE-1312 增强：变异点扩展（三元/守卫/第二梯队算子/常量）、span 替换定位、
+--dry-run/--tests/自适应 timeout 成本控制、invalid_mutant 预检与 suspect 标签。
 """
 
 from __future__ import annotations
@@ -52,6 +45,17 @@ from .ops import (  # noqa: F401
 
 from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
                      mutant_env, seed_host_script, wslpath_win)
+# 统一 mutant 明细记录形态（SEE-1416 扩列）在 reporting.py（<800 行纪律拆分）；
+# re-export 保持既有 import / monkeypatch 名称空间稳定。
+from .reporting import (  # noqa: F401
+    SURVIVOR_DETAIL_KEYS,
+    SURVIVORS_CAP,
+    _mutant_record,
+    _record_invalid_mutants,
+    _valid_mutants,
+    line_text_of,
+    survivors_projection,
+)
 from .godot_gate import GlobalGodotGate
 from .resume import ResumeStore
 from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
@@ -200,13 +204,6 @@ def _parse_failing_tests(gut_output: str) -> set[str]:
 _TIMEOUT_SCALE = 2.0
 
 
-def _mutant_record(m: Mutant, verdict: str, reason: str) -> dict:
-    """统一 mutant 明细记录形态（契约 §4.3 failures 项）。"""
-    return {"file": m.file, "line": m.line, "kind": m.kind,
-            "original": m.original, "mutated": m.mutated,
-            "verdict": verdict, "reason": reason}
-
-
 def _run_error_result(file: str, error: str, failure_reason: str,
                       hint: str | None = None) -> dict:
     """统一 run_error 中止契约（contract.md §4.3 中止形态）。
@@ -223,31 +220,6 @@ def _run_error_result(file: str, error: str, failure_reason: str,
         "summary": summary,
         "failures": [{"reason": failure_reason}],
     }
-
-
-def _valid_mutants(src: str, mutants: list[Mutant]) -> list[Mutant]:
-    return _split_invalid_mutants(src, mutants)[0]
-
-
-def _record_invalid_mutants(src: str, mutants: list[Mutant],
-                            mutant_slice: tuple[int, int] | None = None
-                            ) -> tuple[list[dict], int]:
-    """预检并记录 invalid_mutant 明细；返回 (results, invalid_count)。
-
-    mutant_slice 时只预检分片区间（per-mutant 并发 worker 各管各片区，
-    合并层求和不得重复计数）。
-    """
-    results: list[dict] = []
-    scoped = mutants
-    if mutant_slice is not None:
-        start, stop = mutant_slice
-        scoped = mutants[start:stop]
-    _, invalid = _split_invalid_mutants(src, scoped)
-    for m in invalid:
-        results.append(_mutant_record(m, "invalid_mutant",
-                                      f"mutated source fails to parse (operator bug): "
-                                      f"{m.kind} {m.original}→{m.mutated}"))
-    return results, len(invalid)
 
 
 def run_mutation(
@@ -546,6 +518,11 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     # SEE-1356 L1 (§SPEC-L1-03)：报告字段 timing_source/samples_n/baseline_p90
     # ——timing store 未接入时缺省 explicit（显式 timeout 即最终预算）。
     summary.update(timing_meta or explicit_timing_meta())
+    # SEE-1416 §SPEC-1416-1：summary 自足——非 killed verdict 的 top 明细
+    # 投影进场（键恒在场，`| jq '.summary'` 切片也不失明；零命中为空数组）。
+    summary["survivors"], truncated = survivors_projection(failures)
+    if truncated:
+        summary["survivors_truncated"] = True
     return {
         "tool": "mutation",
         # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok
@@ -655,7 +632,7 @@ def _run_mutant_loop(
                 if seq in completed:
                     c = completed[seq]
                     results.append(_mutant_record(
-                        m, c["verdict"], c["reason"]))
+                        m, c["verdict"], c["reason"], src=original_src))
                     continue
                 verdict = _run_single_mutant(m, path, project_root, original_src,
                                              backup, tests_glob, seq,
@@ -729,14 +706,20 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                     return _mutant_record(
                         m, "invalid_mutant",
                         f"mutated source fails to compile in-project (parser "
-                        f"rejection): {m.kind} {m.original}→{m.mutated}")
+                        f"rejection): {m.kind} {m.original}→{m.mutated}",
+                        src=original_src)
                 return _mutant_record(m, "run_error",
-                                      f"memory injection failed: {tail.strip()[:200]}")
+                                      f"memory injection failed: {tail.strip()[:200]}",
+                                      src=original_src)
+            # classify 保持 5 参签名（interrupt 令牌测试以同签名 fake 替换）；
+            # line_text 统一在消费侧补——所有 verdict 记录同构（SEE-1416）。
             verdict = _classify_mutant_run(m, rc, tail, baseline_failures,
                                            baseline_dirty)
+            verdict = {**verdict, "line_text": line_text_of(original_src, m.line)}
         except subprocess.TimeoutExpired:
             verdict = _mutant_record(m, "timeout",
-                                     f"GUT timed out after {m.kind} {m.original}→{m.mutated}")
+                                     f"GUT timed out after {m.kind} {m.original}→{m.mutated}",
+                                     src=original_src)
     finally:
         _ACTIVE_ENV = None
         _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
@@ -787,23 +770,28 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
         # godot 进程级失败（脚本没加载起来）≠ 测试抓到 mutant——Revy QA FAIL
         # 实证：绝对 -s 路径恒 rc=1 被误判 killed。记 run_error，宁可报错不报通过。
         return _mutant_record(m, "run_error",
-                              f"godot launch failed (tests did not run): {tail.strip()[:200]}")
+                              f"godot launch failed (tests did not run): {tail.strip()[:200]}",
+                              src=None)
     if rc == 0:
         # 测试通过 = mutant 存活（测试没抓住它）
         return _mutant_record(m, "survived",
-                              f"tests passed after {m.kind} {m.original}→{m.mutated}")
+                              f"tests passed after {m.kind} {m.original}→{m.mutated}",
+                              src=None)
     new_failures = _parse_failing_tests(tail) - baseline_failures
     if new_failures:
         return _mutant_record(m, "killed",
                               f"new failures after {m.kind} {m.original}→{m.mutated}: "
-                              f"{sorted(new_failures)[:3]}")
+                              f"{sorted(new_failures)[:3]}",
+                              src=None)
     # SPEC-010 suspect 标签：baseline 脏 ∧ 差集空——无法区分「测试没抓住 mutant」
     # 与「测试根本没跑到该区域」，保守标记（不计 killed 也不计 survived）。
     if baseline_dirty:
         return _mutant_record(m, "suspect",
                               f"dirty baseline ∧ empty diff after {m.kind} "
                               f"{m.original}→{m.mutated} — cannot distinguish "
-                              f"survive from unexercised")
+                              f"survive from unexercised",
+                              src=None)
     return _mutant_record(m, "survived",
                           f"only pre-existing failures after {m.kind} "
-                          f"{m.original}→{m.mutated} — not a kill")
+                          f"{m.original}→{m.mutated} — not a kill",
+                          src=None)

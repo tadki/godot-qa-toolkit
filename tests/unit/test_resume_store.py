@@ -330,11 +330,14 @@ class TestRunMutationResume:
     def test_resume_failures_signature_isomorphic_to_full_run(
             self, tmp_path, monkeypatch):
         """Revy QA 回踢（SEE-1400 缺陷 #1）防回归判据：合并报告 failures
-        明细与全量跑**逐字段全签名**相等——7 字段（file/line/kind/original/
-        mutated/verdict/reason）逐一相等，store 信封字段（schema/key/seq/
-        recorded_at）不得出现在报告里。"""
-        RECORD_KEYS = {"file", "line", "kind", "original", "mutated",
-                       "verdict", "reason"}
+        明细与全量跑**逐字段全签名**相等——10 字段（file/line/column/kind/
+        operator/original/mutated/verdict/reason/line_text）逐一相等，store
+        信封字段（schema/key/seq/recorded_at）不得出现在报告里。SEE-1416
+        扩列：column/operator/line_text 同构升级（resume 复用重建与新跑
+        记录形态一致）。"""
+        RECORD_KEYS = {"file", "line", "column", "kind", "operator",
+                       "original", "mutated", "verdict", "reason",
+                       "line_text"}
         proj, target = _write_project(tmp_path)
         calls_full = {"n": 0}
         monkeypatch.setattr(mrunner, "_run_gut_on_project",

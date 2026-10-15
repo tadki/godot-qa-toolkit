@@ -356,3 +356,59 @@ class TestCliRouting:
         out = cli_mod.json.loads(capsys.readouterr().out)
         assert rc == 1
         assert "not found" in out["failures"][0]["reason"]
+
+
+class TestAttentionEnvelopeSEE1416:
+    """§SPEC-1416-3：多文件信封顶层 summary.attention；单文件 flat 契径不加。"""
+
+    def test_multifile_envelope_has_top_level_attention(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        proj, paths = _write_project_multi(tmp_path)
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+        monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        monkeypatch.setattr(
+            executor, "_run_baseline_snapshot",
+            lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+        d = executor.run_mutation_files(
+            paths, proj, budget=3, timeout_s=60, dry_run=False,
+            tests_glob="res://tests/unit/save/", jobs=2)
+        assert "summary" in d
+        attention = d["summary"]["attention"]
+        assert isinstance(attention, list) and attention
+        for item in attention:
+            assert item["verdict"] == "survived"
+            assert item["file"].endswith(".gd")
+
+    def test_single_file_flat_contract_has_no_attention(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        proj, paths = _write_project_multi(tmp_path)
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+        monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        monkeypatch.setattr(
+            executor, "_run_baseline_snapshot",
+            lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+        d = executor.run_mutation_files(
+            paths[:1], proj, budget=3, timeout_s=60, dry_run=False,
+            tests_glob="res://tests/unit/save/", jobs=1)
+        assert "summary" not in d
+
+
+def _write_project_multi(tmp_path: Path) -> tuple[str, list[str]]:
+    proj = tmp_path / "proj"
+    (proj / "addons" / "gut").mkdir(parents=True, exist_ok=True)
+    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+    save = proj / "tests" / "unit" / "save"
+    save.mkdir(parents=True, exist_ok=True)
+    (save / "test_save.gd").write_text('preload("res://calc.gd")\n')
+    paths = []
+    for name in ("calc.gd", "other.gd"):
+        p = proj / name
+        p.write_text(GD_TARGET)
+        paths.append(str(p))
+    return str(proj), paths

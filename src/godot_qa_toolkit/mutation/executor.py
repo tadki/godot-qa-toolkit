@@ -155,8 +155,29 @@ def run_mutation_files(
     merged = _merge_results(chunks, chunk_results, jobs)
     # settled（异常/零变异文件）按输入顺序并入 results——任何输入文件都留痕
     results = _order_results(files, merged.pop("results"), settled)
-    return {**merged, "ok": all(r["ok"] for r in results),
-            "results": results}
+    envelope = {**merged, "ok": all(r["ok"] for r in results),
+                "results": results}
+    # SEE-1416 §SPEC-1416-3：多文件信封顶层 summary.attention——跨文件
+    # 非 killed 明细合并投影（≤5 条，B 记录形态）；单文件 flat 契径不加
+    # attention（保持既有形态，兼容判据 §SPEC-1416-3）。
+    if len(files) > 1:
+        envelope["summary"] = {"attention": _attention_details(results)}
+    return envelope
+
+
+def _attention_details(results: list[dict]) -> list[dict]:
+    """跨文件非 killed 明细合并（≤5 条）：只取带完整 mutant 字段的记录，
+    error/no_sites 契约的 reason-only 失败项不进投影。"""
+    from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP
+    details: list[dict] = []
+    for r in results:
+        for f in r.get("failures", []):
+            if "verdict" in f:
+                details.append({k: f[k] for k in SURVIVOR_DETAIL_KEYS
+                                if k in f})
+            if len(details) >= SURVIVORS_CAP:
+                return details
+    return details
 
 
 def _order_results(files: list[str], merged: list[dict],

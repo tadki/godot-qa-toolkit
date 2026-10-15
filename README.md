@@ -168,6 +168,28 @@ contract):
 - `ok = survived == 0 AND timeout == 0 AND run_errors == 0 AND suspect == 0`
   (`suspect` = cannot prove the mutant was killed — gated same as survived).
 
+### Survivor location in the report (SEE-1416)
+
+Every verdict record (in `failures`, killed records included) now carries
+`column`, `operator`, and `line_text` (the exact source line that was
+mutated) on top of the existing `file/line/kind/original/mutated/verdict/
+reason` — locate the failure without opening the source file.
+
+`.summary` is self-sufficient too: it carries `survivors` (top ≤5 non-killed
+records in a compact `{file,line,column,kind,original,mutated,verdict,reason}`
+projection) with `survivors_truncated: true` when more exist; the key is
+always present (empty list when nothing survived). Slicing with
+`| jq '.summary'` therefore no longer loses the location detail:
+
+```bash
+gqt mutation systems/world/occupancy_map.gd --project-root .     --budget 50 --timeout 120 | jq '.summary'
+```
+
+Multi-file runs add a top-level `summary.attention` on the envelope
+(cross-file merged non-killed details, same record shape, ≤5 entries);
+single-file flat contract output is unchanged apart from the new fields
+(additive only — no existing field changed meaning).
+
 ### Concurrency & resume
 
 **Prefer one gqt process over many files.** `gqt mutation a.gd b.gd` splits

@@ -1,0 +1,60 @@
+{
+  "issue": "SEE-1416",
+  "substep": "hardener",
+  "spec": "§SPEC-1416-8",
+  "base_commit": "12e07f1",
+  "date": "2026-10-15",
+  "scope": "reporting.py 投影/记录面（survivors_projection/_mutant_record/line_text_of/_record_invalid_mutants/_valid_mutants）+ runner.py:523-525 调用点 + executor.py _attention_details/信封门 + 新增测试面",
+  "method": "人工注入 28 个文本变异（R01-R28），逐个注入 → python3 -m pytest tests/unit -q（判据命令）→ git checkout 还原；存活者补 RED 验证过的对抗测试后全量复跑",
+  "pytest": {
+    "baseline_12e07f1": 561,
+    "after_hardening": 569,
+    "added": 8,
+    "added_file": "tests/unit/test_mutation_reporting_adversarial_see1416.py",
+    "final_exit_code": 0
+  },
+  "mutation_injection": {
+    "total": 28,
+    "first_round": {"killed": 21, "survived": 7},
+    "final_round": {"killed": 28, "survived": 0},
+    "kill_rate": 1.0,
+    "mutants": [
+      {"id": "R01", "site": "reporting.line_text_of", "change": "lines[line-1]→lines[line]", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R02", "site": "reporting.line_text_of", "change": "lines[line-1]→lines[line-2]", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R03", "site": "reporting.line_text_of", "change": "下界 0<line→0<=line（line=0 返末行）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestLineTextBoundary::test_zero_and_negative_line_yield_empty"},
+      {"id": "R04", "site": "reporting.line_text_of", "change": "上界 line<=len→line<len（末行返空）", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R05", "site": "reporting.line_text_of", "change": "splitlines()→split(\"\\n\")（CRLF 残留 \\r）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestLineTextBoundary::test_crlf_source_line_text_has_no_cr"},
+      {"id": "R06", "site": "reporting.survivors_projection", "change": "切片 CAP→CAP-1", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R07", "site": "reporting.survivors_projection", "change": "切片 CAP→CAP+1", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R08", "site": "reporting.survivors_projection", "change": "截断 >CAP→>=CAP（恰好 5 条误报 truncated）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestSurvivorsProjectionBoundary::test_exactly_cap_failures_not_truncated"},
+      {"id": "R09", "site": "reporting.survivors_projection", "change": "截断 >CAP→>CAP+1", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R10", "site": "reporting.SURVIVOR_DETAIL_KEYS", "change": "删 reason 键", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R11", "site": "reporting.SURVIVOR_DETAIL_KEYS", "change": "删 column 键", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R12", "site": "reporting.SURVIVORS_CAP", "change": "常量 5→4", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R13", "site": "reporting.survivors_projection", "change": "f[k]→f.get(k)（残缺记录静默投影 None）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestSurvivorsProjectionBoundary::test_partial_record_fails_fast"},
+      {"id": "R14", "site": "reporting._mutant_record", "change": "删 column 列", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R15", "site": "reporting._mutant_record", "change": "删 operator 列", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R16", "site": "reporting._mutant_record", "change": "src is None→src is not None（条件反转）", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R17", "site": "reporting._mutant_record", "change": "line_text_of(src, m.line)→(src, m.column)（行列互换）", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R18", "site": "reporting._mutant_record", "change": "丢 line_text 键", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R19", "site": "reporting._record_invalid_mutants", "change": "分片 stop→stop+1（tidy 夹具 (1,3)/3 项不判别）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestInvalidSliceDiscrimination::test_slice_stop_is_exclusive"},
+      {"id": "R20", "site": "reporting._record_invalid_mutants", "change": "分片 start→start+1", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R21", "site": "reporting._record_invalid_mutants", "change": "reason 删 (operator bug)", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R22", "site": "reporting._valid_mutants", "change": "返回索引 [0]→[1]（valid/invalid 互换）", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R23", "site": "runner._mutation_report", "change": "if truncated→if not truncated", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R24", "site": "runner._mutation_report", "change": "投影输入 failures→results（killed 混入）", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R25", "site": "executor._attention_details", "change": "verdict in f→not in f", "round1": "KILLED", "final": "KILLED"},
+      {"id": "R26", "site": "executor._attention_details", "change": "cap >=CAP→>CAP（第 6 条进场）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestAttentionCap::test_attention_caps_at_five"},
+      {"id": "R27", "site": "executor._attention_details", "change": "去 if k in f 过滤（残缺记录崩溃）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "TestAttentionCap::test_attention_tolerates_partial_records"},
+      {"id": "R28", "site": "executor.run_mutation_files", "change": "信封门 len(files)>1→>2", "round1": "KILLED", "final": "KILLED"}
+    ]
+  },
+  "test_face_weaknesses_found": [
+    "tidy 测试 test_invalid_mutant_slice_scopes_records 夹具 slice=(1,3)/3 项不判别 stop+1 越界（R19 存活根因）——本轮以 (1,2) 判别性夹具补刀",
+    "恰好 5 条非 killed 的 truncated 边界无测试（R08）",
+    "line=0/负数行号与 CRLF 源无测试（R03/R05）",
+    "attention 超过 5 条的 cap 无测试（R26）",
+    "survivors_projection 严格 f[k] 与 _attention_details 容错 if-k-in-f 两形态此前均无契约钉死（R13/R27）"
+  ],
+  "compatibility": "§SPEC-1416-4 复核：全部变异已 git checkout 还原，git diff src/ 为空；还原后全量 569 passed exit=0；既有字段语义零变更（本轮仅新增测试文件，产品代码零改动）"
+}

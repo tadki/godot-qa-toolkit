@@ -257,6 +257,11 @@ class TestAutoSerialFallback:
             executor, "_collect_mutations",
             lambda src, path: (_ for _ in ()).throw(ValueError("ops boom")))
         monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        # total=-1 落到 _build_chunks 后会先 _precompute_baselines——不 fake
+        # 会拉起真实 GUT 吃满 timeout（rev7 运行注记：单用例 ~2×60s 假挂起）。
+        monkeypatch.setattr(
+            executor, "_run_baseline_snapshot",
+            lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
         d = executor.run_mutation_files(
             [target], proj, budget=3, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=None)

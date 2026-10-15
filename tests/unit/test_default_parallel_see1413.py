@@ -246,6 +246,28 @@ class TestAutoSerialFallback:
             timing_store=store)
         assert store.read(), "退串行 baseline 采样必须回写 timing store"
 
+    def test_collect_crash_falls_to_settled_error_contract(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """§SPEC-009 LOW①：退串行块 _collect_mutations 异常 → total=-1 →
+        必须委托 _build_chunks 的 settled-error 契约落终态（error 进
+        results、顶层 ok=false、failures 含 mutation setup failed），而不是
+        静默消失或裸抛。翻转注入证明守护非恒真（见汇报 RED/GREEN）。"""
+        proj, target = _write_project(tmp_path)
+        monkeypatch.setattr(
+            executor, "_collect_mutations",
+            lambda src, path: (_ for _ in ()).throw(ValueError("ops boom")))
+        monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        d = executor.run_mutation_files(
+            [target], proj, budget=3, timeout_s=60, dry_run=False,
+            tests_glob="res://tests/unit/save/", jobs=None)
+        assert d["ok"] is False
+        assert len(d["results"]) == 1
+        s = d["results"][0]["summary"]
+        assert s["file"].endswith("calc.gd")
+        assert "ops boom" in s["error"]
+        assert any("mutation setup failed" in f["reason"]
+                   for f in d["results"][0]["failures"])
+
 
 class TestDocsSurface:
     def test_jobs_help_mentions_both_slicing_levels(self):

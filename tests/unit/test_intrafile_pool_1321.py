@@ -135,6 +135,6 @@ class TestIntraFileJobs:
         # fake 全 pass → mutant 存活 → ok=False 是正确判定；
         # 关键断言：父层 scoped glob 推导生效、baseline 零跑双份
         assert all(c["summary"]["scoped"] for c in d["results"])
-        # SEE-1413：预算提到 50 保证收集数 > jobs，真正走分片路径
-        # （budget=2 时收集数 ≤ jobs 会退串行，baseline_reused 断言失真）
+        # SEE-1413：GD_TARGET 收集数为 3，jobs=2 时收集数 > jobs 才真正走
+        # 分片路径（总数 ≤ jobs 会退串行，baseline_reused 断言会失真）
         assert all(c["summary"]["baseline_reused"] for c in d["results"])

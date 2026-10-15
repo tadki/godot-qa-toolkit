@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import shutil
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -60,6 +61,15 @@ def register(registry: Registry) -> None:
         source = GD_4_SITES if int(count) >= 4 else GD_2_SITES
         root, target = _write_project(source)
         state["expected_mutants"] = int(count)
+        # 模块级 patch 全部记原件，after_scenario 统一恢复（对齐硬化组
+        # CPU mock 口径——场景超时/失败也不泄漏 patch 到后续场景）。
+        origs = {
+            "worker_pool": executor._worker_pool,
+            "baseline": executor._run_baseline_snapshot,
+            "gut": runner_mod._run_gut_on_project,
+            "prewarm": executor.prewarm_import,
+        }
+        state["origs"] = origs
         executor._worker_pool = _SerialPool
         executor._run_baseline_snapshot = (  # type: ignore[method-assign]
             lambda r, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
@@ -67,10 +77,23 @@ def register(registry: Registry) -> None:
             lambda r, timeout_s=60, tests_glob=None: (0, "pass"))
         state["root"], state["target"] = root, target
         state["prewarm"] = {"n": 0}
-        orig_prewarm = executor.prewarm_import
         executor.prewarm_import = lambda r: state["prewarm"].__setitem__(  # type: ignore[method-assign]
             "n", state["prewarm"]["n"] + 1)
-        state["orig_prewarm"] = orig_prewarm
+
+    @registry.after_scenario
+    def _restore_patches() -> None:
+        # try/finally 逐项恢复：单个恢复失败不得吞掉后续原件还原。
+        for attr, orig in state.pop("origs", {}).items():
+            try:
+                if attr == "gut":
+                    runner_mod._run_gut_on_project = orig
+                else:
+                    setattr(executor, attr, orig)
+            except AttributeError:
+                pass
+        root = state.pop("root", None)
+        if root:
+            shutil.rmtree(root, ignore_errors=True)  # 研究目录自清理，非交付物
 
     @registry.step("gqt mutation runs the single file with jobs omitted")
     def _when_default(_p: dict[str, str]) -> None:

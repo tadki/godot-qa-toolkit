@@ -19,6 +19,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .ops import _collect_mutations
+from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP
 from .runner import run_mutation
 
 # 进程池工厂（可注入替身做单测）
@@ -168,7 +169,6 @@ def run_mutation_files(
 def _attention_details(results: list[dict]) -> list[dict]:
     """跨文件非 killed 明细合并（≤5 条）：只取带完整 mutant 字段的记录，
     error/no_sites 契约的 reason-only 失败项不进投影。"""
-    from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP
     details: list[dict] = []
     for r in results:
         for f in r.get("failures", []):

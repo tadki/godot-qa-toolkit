@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .ops import Mutant
 
+from .ops import _split_invalid_mutants
+
 # summary.survivors 精简投影键（§SPEC-1416-1）——切片 .summary 也自足：
 # 不带 operator/line_text（failures 明细里已有全量）。
 SURVIVOR_DETAIL_KEYS = ("file", "line", "column", "kind", "original",
@@ -50,7 +52,6 @@ def _mutant_record(m: "Mutant", verdict: str, reason: str,
 
 
 def _valid_mutants(src: str, mutants: list) -> list:
-    from .ops import _split_invalid_mutants
     return _split_invalid_mutants(src, mutants)[0]
 
 
@@ -62,7 +63,6 @@ def _record_invalid_mutants(src: str, mutants: list,
     mutant_slice 时只预检分片区间（per-mutant 并发 worker 各管各片区，
     合并层求和不得重复计数）。
     """
-    from .ops import _split_invalid_mutants
     results: list[dict] = []
     scoped = mutants
     if mutant_slice is not None:

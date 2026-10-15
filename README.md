@@ -1,34 +1,71 @@
+<div align="center">
+
 # godot-qa-toolkit
 
-Deterministic five-stage QA toolchain for Godot / GDScript projects
-(SEE-1256 → SEE-1268). Every tool emits a machine-decidable verdict under the
-unified JSON contract:
+**Deterministic five-stage QA toolchain for Godot / GDScript projects.**
+
+Every tool emits a machine-decidable verdict under one unified JSON contract —
+exit code `0` = pass, `1` = fail. No agent scoring, no heuristics inside tool
+code: judgments are deterministic by design (the P0' principle).
+
+[![ci-pytest](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml)
+[![ci-devtests](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-devtests.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-devtests.yml)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+
+</div>
+
+---
+
+## The unified JSON contract
+
+Every tool speaks the same language, so anything (agent, CI job, shell
+pipeline) can consume a verdict without tool-specific glue:
 
 ```json
 {"tool": "...", "ok": true, "summary": {...}, "failures": [...]}
 ```
 
-Exit code `0` = pass, `1` = fail. Judgments are deterministic (P0' principle);
-no agent/heuristic scoring inside tool code.
+## Tools at a glance
 
-## Tools
-
-| Tool | Command | Status |
+| Tool | Command | Stage |
 |---|---|---|
-| Gherkin runner | `gqt gherkin <file.feature> [--steps module.py]` | M1 |
-| Complexity gate | `gqt complexity <paths...> [--warn 10] [--max 15]` | M1 |
-| Mutation runner | — | M2 |
-| Coverage | — | M2 |
-| Godot determinism | — | M2+ (logic/scheduling here; the deterministic commands register into the godot-mcp ① runtime addon) |
+| **Gherkin runner** | `gqt gherkin <file.feature> [--steps module.py]` | M1 |
+| **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | M1 |
+| **Mutation runner** | `gqt mutation <files...> --project-root . [--jobs 8]` | M2 |
+| **Coverage** | — | M2 |
+| **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp ① runtime addon | M2+ |
 
-> The godot-mcp control plane (launcher/proxy/shim/port arbitration) belongs to
-> the **godot-mcp runtime library** (①), not here. This library is the
-> tool-state half of a two-library split: run-time driving (①) vs test means
-> (②, this repo).
+> **Two-library split:** the godot-mcp control plane (launcher / proxy / shim /
+> port arbitration) belongs to the **godot-mcp runtime library** (①). This repo
+> is the tool-state half (②): *run-time driving* lives in ①, *test means* live
+> here.
 
-## Gherkin (self-authored)
+## Quick start
 
-Minimal, strict Gherkin subset: `Feature`, `Background`, `Scenario`,
+```bash
+pip install -e .
+pytest                      # run the suite
+gqt doctor                  # verify your install + toolchain wiring
+```
+
+Then pick a tool:
+
+```bash
+# 1. Run a Gherkin feature against a Python step registry
+gqt gherkin features/leaderboard.feature --steps steps.py
+
+# 2. Gate cyclomatic complexity
+gqt complexity src/systems --warn 8 --max 12
+
+# 3. Mutation-test two scenes in one process, 8 workers
+gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . --jobs 8
+```
+
+---
+
+## Gherkin runner (self-authored)
+
+A minimal, **strict** Gherkin subset: `Feature`, `Background`, `Scenario`,
 `Scenario Outline`, tags (`@tag`), and `Given/When/Then/And/But` steps.
 `And`/`But` inherit the previous keyword. Anything unparseable is an error
 with `path:line` context — a spec that only "mostly" parses is not
@@ -61,7 +98,7 @@ signal, never a silent skip.
 gqt complexity src/systems --warn 8 --max 12
 ```
 
-## Mutation: concurrency & resume (SEE-1400)
+## Mutation runner: concurrency & resume (SEE-1400 / SEE-1413)
 
 **Prefer one gqt process over many files.** `gqt mutation a.gd b.gd` splits
 mutants across both files inside one process (the `--jobs` worker pool
@@ -84,6 +121,9 @@ Omitting `--jobs` uses the default pool; a file whose mutation count is ≤
 jobs automatically falls back to serial (no prewarm, no shared-baseline
 pre-run — the fixed overhead would outweigh the parallelism); `--jobs 1`
 always forces serial.
+
+<details>
+<summary><strong>Concurrency knobs & resume semantics</strong></summary>
 
 - `--jobs N` — per-process worker pool, clamped to `max(2, cpu//2)`.
 - `GQT_GLOBAL_GODOT_SLOTS` — **cross-process** cap on live godot subprocesses
@@ -109,6 +149,10 @@ exactly one test file, the scanner now scopes to that file (GUT `-gselect`)
 instead of its directory — same conservative direction (narrower can only
 over-report survivors, never fake kills), cheaper per round.
 
+</details>
+
+---
+
 ## Development
 
 ```bash
@@ -116,7 +160,8 @@ pip install -e .
 pytest
 ```
 
-### PYTHONPATH convention (multi-workdir safety, SEE-1308 §SPEC-003)
+<details>
+<summary><strong>PYTHONPATH convention (multi-workdir safety, SEE-1308 §SPEC-003)</strong></summary>
 
 When several KOL worktrees live on the same machine and share one Python
 site-packages, a `pip install -e .` from an older checkout leaves an
@@ -144,7 +189,13 @@ Two belts guard against this:
    cd <gqt-checkout-root> && pip install -e .
    ```
 
-### Standalone install mode (SEE-1396)
+   The rule: never rely on an editable install whose egg-link you did not just
+   create from the tree you are testing.
+
+</details>
+
+<details>
+<summary><strong>Standalone install mode (SEE-1396)</strong></summary>
 
 gqt no longer lives under a KOL `.dev/qa-toolkit` submodule — it is an
 independent CLI installed from a standalone checkout (e.g. a persistent
@@ -157,5 +208,15 @@ install against a specific tree, point it there:
 GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
 ```
 
-The rule: never rely on an editable install whose egg-link you did not just
-create from the tree you are testing.
+</details>
+
+## Design principles
+
+- **Deterministic verdicts** (P0' principle) — every tool's outcome is fully
+  reproducible; no agent or heuristic scoring inside tool code.
+- **One JSON contract** — uniform `{tool, ok, summary, failures}` output and
+  `0`/`1` exit codes across the whole toolchain.
+- **Unmeasured is a fail** — unconvertible code, unscanned targets and silent
+  skips are reported as structural failures, never swallowed.
+- **Honest degradation** — caches, locks and resume stores degrade to safe,
+  explicitly-reported behavior instead of wrong answers.

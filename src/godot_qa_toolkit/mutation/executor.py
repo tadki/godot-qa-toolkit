@@ -633,7 +633,7 @@ def _inject_one(r: dict, ctx: dict) -> None:
     if plan.diff_active:
         # §SPEC-1420-07（D6）：差分在场的 run 才携带差分披露——首次全量
         # run（无 manifest）的报告形态与升级前逐键同构。
-        s["diff_skipped"] = sorted(reused)
+        s["diff_skipped"] = sorted(plan.reused)
         s["retry_total"] = len(plan.executed)
         s.setdefault("executed", len(ctx["executed"]))
         s["untouched_ranges"] = untouched_ranges(ctx["untouched"])

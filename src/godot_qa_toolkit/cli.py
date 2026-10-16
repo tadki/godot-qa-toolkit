@@ -170,6 +170,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 timing_store=timing_store,
                 resume=args.resume,
                 binary_kind=binary_kind,
+                mutation_warning=args.mutation_warning,
+                timeout_factor=args.timeout_factor,
             )
             result["summary"].setdefault("jobs", 1)
         else:
@@ -186,7 +188,9 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 files, args.project_root, budget=args.budget,
                 timeout_s=args.timeout, dry_run=args.dry_run,
                 tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
-                binary_kind=binary_kind, timing_store=timing_store)
+                binary_kind=binary_kind, timing_store=timing_store,
+                mutation_warning=args.mutation_warning,
+                timeout_factor=args.timeout_factor)
             if len(files) == 1 and args.jobs is None:
                 # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
                 envelope = result
@@ -264,6 +268,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
                         "re-runs them — every run persists verdicts, resume just "
                         "turns on the skip")
+    m.add_argument("--mutation-warning", type=int, default=50,
+                   help="warn on stderr + summary.attention when the pre-truncation "
+                        "mutation site count exceeds N (default 50, aligned with "
+                        "the default budget; SEE-1420)")
+    m.add_argument("--timeout-factor", type=float, default=2.0,
+                   help="adaptive per-mutant timeout = max(timeout, baseline*F+1); "
+                        "default 2.0 (overrides the built-in scale only, never "
+                        "tightens; SEE-1420)")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

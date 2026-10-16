@@ -79,6 +79,8 @@ def run_mutation_files(
     resume: bool = False,
     binary_kind: str | None = None,
     timing_store=None,
+    mutation_warning: int | None = None,
+    timeout_factor: float | None = None,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -101,7 +103,9 @@ def run_mutation_files(
                          timeout_s=timeout_s, dry_run=dry_run,
                          tests_glob=tests_glob, resume=resume,
                          binary_kind=binary_kind,
-                         timing_store=timing_store)
+                         timing_store=timing_store,
+                         mutation_warning=mutation_warning,
+                         timeout_factor=timeout_factor)
         r["summary"].setdefault("jobs", 1)
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
@@ -110,7 +114,9 @@ def run_mutation_files(
         results = [
             run_mutation(f, project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=True,
-                         tests_glob=tests_glob, binary_kind=binary_kind)
+                         tests_glob=tests_glob, binary_kind=binary_kind,
+                         mutation_warning=mutation_warning,
+                         timeout_factor=timeout_factor)
             for f in files
         ]
         for result in results:
@@ -140,7 +146,9 @@ def run_mutation_files(
                              timeout_s=timeout_s, dry_run=False,
                              tests_glob=tests_glob, resume=resume,
                              binary_kind=binary_kind,
-                             timing_store=timing_store)
+                             timing_store=timing_store,
+                             mutation_warning=mutation_warning,
+                             timeout_factor=timeout_factor)
             r["summary"].setdefault("jobs", 1)
             return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                     "results": [r]}
@@ -148,7 +156,9 @@ def run_mutation_files(
     prewarm_import(project_root)
     chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
                                     tests_glob, jobs, resume,
-                                    binary_kind=binary_kind)
+                                    binary_kind=binary_kind,
+                                    mutation_warning=mutation_warning,
+                                    timeout_factor=timeout_factor)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -220,20 +230,25 @@ def _chunk_worker(payload: dict) -> dict:
     （serial=True，无 slice、worker 自跑 baseline）。
     resume store（SEE-1400）由 run_mutation 内按 payload 同参自建——同
     file+glob+budget 同 key，各 worker 只写各自 seq 的条目文件。
+    timeout_factor（§SPEC-1420-02）随 payload 穿线——自适应上限在
+    baseline 快照 elapsed 上按 worker 侧 factor 计算。
     """
     resume = bool(payload.get("resume"))
     binary_kind = payload.get("binary_kind")
+    timeout_factor = payload.get("timeout_factor")
     if payload.get("serial"):
         return run_mutation(
             payload["file"], payload["project_root"], budget=payload["budget"],
             timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
-            resume=resume, binary_kind=binary_kind)
+            resume=resume, binary_kind=binary_kind,
+            timeout_factor=timeout_factor)
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
         precomputed_baseline=payload["baseline"],
         mutant_slice=(payload["start"], payload["stop"]),
         resume=resume, binary_kind=binary_kind,
+        timeout_factor=timeout_factor,
     )
 
 
@@ -279,8 +294,14 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
             "invalid_mutants": 0, "resumed": 0, "jobs": 0,
             "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
+            "total_sites": None, "attention": None,
         })
         _accumulate_chunk(agg, cr, passthrough_keys)
+        # §SPEC-1420-01：截断面 N/M 披露的父层聚合锚（截断前全量位点数）
+        if agg["total_sites"] is None:
+            agg["total_sites"] = chunk.get("total_sites")
+        if agg.get("attention") is None:
+            agg["attention"] = chunk.get("attention")
     results = []
     for agg in per_file.values():
         ok = (agg["ok"] and agg["survived"] == 0 and agg["timeout"] == 0
@@ -302,6 +323,12 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
                 "budget": agg["budget"],
                 "scoped": agg["scoped"],
                 "baseline_reused": agg["baseline_reused"],
+                **({"total_sites": agg["total_sites"],
+                    "executed": min(agg["total_sites"], agg["budget"])}
+                   if agg["total_sites"] is not None and agg["budget"] is not None
+                   and agg["total_sites"] > agg["budget"] else {}),
+                **({"attention": agg["attention"]}
+                   if agg.get("attention") else {}),
                 **{k: agg[k] for k in passthrough_keys if k in agg},
                 **({"resumed": agg["resumed"]}
                    if resumed_present else {}),
@@ -320,7 +347,10 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
 def _build_chunks(files: list[str], project_root: str, budget: int,
                   timeout_s: int, tests_glob: str | None,
                   jobs: int, resume: bool = False,
-                  binary_kind: str | None = None) -> tuple[list[dict], list[dict]]:
+                  binary_kind: str | None = None,
+                  mutation_warning: int | None = None,
+                  timeout_factor: float | None = None
+                  ) -> tuple[list[dict], list[dict]]:
     """父层：per-file 收集 mutant 总数 → 分片；同样 glob 共享一份 baseline。
 
     返回 (chunks, settled)：settled 是收集异常（error 契约）与零变异
@@ -334,10 +364,21 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     for f in files:
         try:
             src = open(f, encoding="utf-8").read()
-            total = min(len(_collect_mutations(src, f)), budget)
+            raw_total = len(_collect_mutations(src, f))
+            total = min(raw_total, budget)
         except Exception as e:
             settled.append(_settled_error(f, e))
             continue
+        # §SPEC-1420-01：告警由父层发一次（并发 worker 不重复）——按截断前
+        # 全量位点数判定，budget 截断不掩盖规模问题。
+        attention = None
+        if mutation_warning is not None and raw_total > mutation_warning:
+            attention = (f"{raw_total} mutation sites exceed "
+                         f"--mutation-warning {mutation_warning} — consider "
+                         f"splitting this file")
+            print(f"mutation-warning: {raw_total} mutation sites exceed "
+                  f"--mutation-warning {mutation_warning} in {f} — consider "
+                  f"splitting this file", file=sys.stderr)
         glob = tests_glob or _auto_scan_tests_glob(f, project_root)
         if total <= 0:
             settled.append(_settled_no_sites(f, bool(glob)))
@@ -350,6 +391,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                 "file": f, "project_root": project_root, "budget": budget,
                 "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
                 "resume": resume, "binary_kind": binary_kind,
+                "timeout_factor": timeout_factor, "total_sites": raw_total,
+                "attention": attention,
             })
             continue
         n_chunks = min(jobs, total)
@@ -369,6 +412,9 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                 "stop": stop,
                 "baseline": baselines.get(glob),
                 "resume": resume,
+                "timeout_factor": timeout_factor,
+                "total_sites": raw_total,
+                "attention": attention,
             })
     return chunks, settled
 

@@ -331,3 +331,21 @@ def seed_host_script(project_root: str) -> Path:
 
 def host_script_res() -> str:
     return "res://" + _host_gd_name()
+
+
+def _impl_fs_path(project_root: str, cfg_path: Path) -> str | None:
+    """从 cfg JSON 读 impl_res 换算磁盘路径；cfg 不可读返回 None（不吞异常）。
+
+    SEE-1420 Phase 0 自 runner.py 迁入（<800 行纪律）：impl 临时文件清理
+    属注入域关注点。"""
+    try:
+        import json
+        payload = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+        rel = payload["impl_res"].removeprefix("res://")
+        return str((Path(project_root) / rel).absolute())
+    except (OSError, ValueError, KeyError) as e:
+        # cfg 已被中断前删除属正常轮次序——静默返回；其余异常显式暴露
+        if not Path(cfg_path).exists():
+            return None
+        print(f"impl path resolution failed for {cfg_path}: {e}", file=sys.stderr)
+        return None

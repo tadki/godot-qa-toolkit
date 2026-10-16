@@ -20,6 +20,66 @@ SURVIVOR_DETAIL_KEYS = ("file", "line", "column", "kind", "original",
 SURVIVORS_CAP = 5
 
 
+def _setup_error_result(file: str, err) -> dict:
+    return {
+        "tool": "mutation",
+        "ok": False,
+        "summary": {"file": file, "mutants": 0, "error": str(err)},
+        "failures": [{"reason": f"mutation setup failed: {err}"}],
+    }
+
+
+def _no_sites_result(file: str, scoped: bool | None = None) -> dict:
+    return {
+        "tool": "mutation",
+        "ok": True,
+        "summary": {"file": file, "mutants": 0, "killed": 0, "survived": 0,
+                    "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
+                    "scoped": bool(scoped)},
+        "failures": [],
+    }
+
+
+def _run_error_result(file: str, error: str, failure_reason: str,
+                      hint: str | None = None) -> dict:
+    """统一 run_error 中止契约（contract.md §4.3 中止形态）。
+
+    hint（SEE-1356 L1）：baseline 超时中止附 suggested_action，机器可执行
+    的补救指令直接可读。
+    """
+    summary = {"file": file, "run_error": True, "error": error}
+    if hint:
+        summary["suggested_action"] = hint
+    return {
+        "tool": "mutation",
+        "ok": False,
+        "summary": summary,
+        "failures": [{"reason": failure_reason}],
+    }
+
+
+def _dry_run_result(file: str, mutants: list["Mutant"], budget: int,
+                    scoped: bool | None = None,
+                    total_sites: int | None = None) -> dict:
+    """SPEC-009：清点模式——零 GUT 调用，mutant 清单即产出。
+
+    §SPEC-1420-01：budget 截断时同步披露 total_sites（截断前全量位点数）。
+    """
+    kinds: dict[str, int] = {}
+    for m in mutants[:budget]:
+        kinds[m.kind] = kinds.get(m.kind, 0) + 1
+    summary = {"file": file, "mutants": len(mutants[:budget]),
+               "dry_run": True, "kinds": kinds, "scoped": bool(scoped)}
+    if total_sites is not None and total_sites > budget:
+        summary["total_sites"] = total_sites
+    return {
+        "tool": "mutation",
+        "ok": True,
+        "summary": summary,
+        "failures": [],
+    }
+
+
 def line_text_of(src: str, line: int) -> str:
     """变异行原文；行号越界返回空串（不吞错误——记录仍可判读）。"""
     lines = src.splitlines()

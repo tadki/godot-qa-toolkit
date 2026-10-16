@@ -60,10 +60,13 @@ def _run_error_result(file: str, error: str, failure_reason: str,
 
 def _dry_run_result(file: str, mutants: list["Mutant"], budget: int,
                     scoped: bool | None = None,
-                    total_sites: int | None = None) -> dict:
+                    total_sites: int | None = None,
+                    estimate: dict | None = None) -> dict:
     """SPEC-009：清点模式——零 GUT 调用，mutant 清单即产出。
 
     §SPEC-1420-01：budget 截断时同步披露 total_sites（截断前全量位点数）。
+    §SPEC-1420-18：estimate = 差分计数预估（retry_estimate/executed_estimate/
+    diff_available）。
     """
     kinds: dict[str, int] = {}
     for m in mutants[:budget]:
@@ -72,6 +75,8 @@ def _dry_run_result(file: str, mutants: list["Mutant"], budget: int,
                "dry_run": True, "kinds": kinds, "scoped": bool(scoped)}
     if total_sites is not None and total_sites > budget:
         summary["total_sites"] = total_sites
+    if estimate:
+        summary.update(estimate)
     return {
         "tool": "mutation",
         "ok": True,

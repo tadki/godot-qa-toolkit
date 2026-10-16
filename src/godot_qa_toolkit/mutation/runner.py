@@ -44,7 +44,8 @@ from .ops import (  # noqa: F401
 )
 
 from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
-                     _impl_fs_path, mutant_env, seed_host_script, wslpath_win)
+                     _impl_fs_path, _interrupt_guard, make_sigterm_restore_handler,
+                     mutant_env, seed_host_script, wslpath_win)  # noqa: F401
 # 统一 mutant 明细记录形态（SEE-1416 扩列）与结果塑形契约在 reporting.py
 # （<800 行纪律拆分）；re-export 保持既有 import / monkeypatch 名称空间稳定。
 from .reporting import (  # noqa: F401
@@ -187,6 +188,8 @@ def run_mutation(
     mutate_all: bool = False,
     retry_ids: list[str] | None = None,
     resume2_store=None,
+    select_ids: list[str] | None = None,
+    select_lines: list[int] | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -254,13 +257,30 @@ def run_mutation(
 
     if dry_run:
         # SPEC-009：dry-run 跳过 timing store 读写（清点模式零 IO）。
+        # §SPEC-1420-18：dry-run 升级为差分计数预估——manifest 在场时按 D4
+        # 矩阵估 retry 面（只读，不落盘、不跑 GUT）。
+        est_store = resume2_store if resume2_store is not None else \
+            ResumeStoreV2(project_root, str(path), tests_glob,
+                          binary_kind=binary_kind)
+        old = est_store.load_manifest()
+        if old is not None and not mutate_all:
+            est_plan = plan_diff(header_hash, scope_hashes, old, mutants,
+                                 est_store.load_entries())
+            retry = len(est_plan.executed)
+            estimate = {"diff_available": True, "retry_estimate": retry,
+                        "executed_estimate": min(retry, budget)}
+        else:
+            estimate = {"diff_available": False,
+                        "retry_estimate": total_sites,
+                        "executed_estimate": min(total_sites, budget)}
         return _dry_run_result(str(path), mutants, budget, scoped,
-                               total_sites=total_sites)
+                               total_sites=total_sites, estimate=estimate)
 
     if not mutants:
         return _no_sites_result(str(path), scoped)
 
-    # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行 retry_ids。
+    # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行 retry_ids；
+    # 显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分复用。
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
         project_root, str(path), tests_glob, binary_kind=binary_kind)
     prior_entries: dict = {}
@@ -269,7 +289,24 @@ def run_mutation(
     disclosures: dict = {}
     if attention is not None:
         disclosures["attention"] = attention
-    if retry_ids is not None:
+    if select_ids is not None or select_lines is not None:
+        # §SPEC-1420-11（D7 卡尺）：显式寻址 = 公平的重跑通道——不查缓存。
+        if select_ids is not None:
+            wanted = set(select_ids)
+            executed_list = [m for m in mutants if m.stable_id in wanted]
+            missing = wanted - {m.stable_id for m in executed_list}
+        else:
+            lines = set(select_lines)
+            executed_list = [m for m in mutants if m.line in lines]
+            missing = lines - {m.line for m in executed_list}
+        if missing:
+            raise ValueError(
+                "selection matched no mutation sites (stale id after source "
+                f"change, or out-of-range line?): {sorted(missing)[:5]}")
+        prior_entries = store2.load_entries()  # streak 连续性（仅读）
+        disclosures["executed"] = len(executed_list)
+        disclosures["selected"] = True
+    elif retry_ids is not None:
         by_id = {m.stable_id: m for m in mutants}
         missing = [i for i in retry_ids if i not in by_id]
         if missing:
@@ -393,65 +430,6 @@ def _record_timing_sample(timing_store, baseline_reused: bool,
     if fresh:
         timing_meta["samples_n"] = fresh["samples_n"]
         timing_meta["baseline_p90"] = fresh["p90"]
-
-
-def make_sigterm_restore_handler(file_path: str, backup: str):
-    """SIGTERM/SIGHUP 硬杀不保证执行 finally——handler 内先恢复再终止。
-
-    exit code 128+sign（POSIX shell 约定），用 os._exit 跳过任何可能再次
-    抛异常的清理路径，保证恢复写盘是最后动作。
-    """
-    def _handler(signum, frame):
-        try:
-            Path(file_path).write_text(backup, encoding="utf-8")
-        except OSError as e:
-            # 恢复失败必须显式暴露——静默吞掉会把变异体遗留进共享分支
-            print(f"mutation SIGTERM restore failed for {file_path}: {e}",
-                  file=sys.stderr)
-        # SPEC-015：os._exit 跳过 finally 与 atexit——临时文件（cfg JSON +
-        # 宿主 .gd）必须在此显式清理，否则中断后工作树残留（QA MEDIUM 实测
-        # 12 个 untracked 文件）。
-        cleanup_temp_files()
-        os._exit(128 + signum)
-    return _handler
-
-
-class _interrupt_guard:
-    """缺陷1 兜底恢复守卫：任何异常/硬杀路径均恢复原文件。
-
-    per-mutant finally 覆盖不到 SIGTERM/SIGINT 硬杀与循环外未知异常（Revy QA
-    TaskStop 实证遗留变异体进 git diff）。SIGTERM/SIGHUP 走 handler 主动恢复
-    （硬杀不保证 finally），其余异常走 context manager finally 兜底——两路合
-    一后原样上抛，不吞中断语义。信号安装失败（非主线程/受限环境）降级为仅
-    finally 兜底。
-    """
-
-    def __init__(self, path: Path, backup: str):
-        self._path = path
-        self._backup = backup
-        self._handlers: dict = {}
-
-    def __enter__(self):
-        restore_handler = make_sigterm_restore_handler(str(self._path), self._backup)
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            try:
-                self._handlers[sig] = signal.signal(sig, restore_handler)
-            except (ValueError, OSError):
-                pass  # 非主线程/受限环境：守卫降级为 finally 兜底
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        for sig, prev in self._handlers.items():
-            try:
-                signal.signal(sig, prev)
-            except (ValueError, OSError):
-                pass
-        # 幂等恢复——正常路径与 per-mutant finally 重复写同内容无副作用。
-        try:
-            self._path.write_text(self._backup, encoding="utf-8")
-        except OSError as e:
-            print(f"mutation restore failed for {self._path}: {e}", file=sys.stderr)
-        return False
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:

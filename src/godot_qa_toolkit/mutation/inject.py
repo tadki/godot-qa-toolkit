@@ -15,6 +15,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import signal
 import re
 import subprocess
 import sys
@@ -349,3 +350,64 @@ def _impl_fs_path(project_root: str, cfg_path: Path) -> str | None:
             return None
         print(f"impl path resolution failed for {cfg_path}: {e}", file=sys.stderr)
         return None
+
+
+# SEE-1420 Phase 2 自 runner.py 迁入（<800 行纪律）：中断恢复守卫属
+# 目标文件写回 + 临时清理域，与 cleanup_temp_files 同模块闭环。
+def make_sigterm_restore_handler(file_path: str, backup: str):
+    """SIGTERM/SIGHUP 硬杀不保证执行 finally——handler 内先恢复再终止。
+
+    exit code 128+sign（POSIX shell 约定），用 os._exit 跳过任何可能再次
+    抛异常的清理路径，保证恢复写盘是最后动作。
+    """
+    def _handler(signum, frame):
+        try:
+            Path(file_path).write_text(backup, encoding="utf-8")
+        except OSError as e:
+            # 恢复失败必须显式暴露——静默吞掉会把变异体遗留进共享分支
+            print(f"mutation SIGTERM restore failed for {file_path}: {e}",
+                  file=sys.stderr)
+        # SPEC-015：os._exit 跳过 finally 与 atexit——临时文件（cfg JSON +
+        # 宿主 .gd）必须在此显式清理，否则中断后工作树残留（QA MEDIUM 实测
+        # 12 个 untracked 文件）。
+        cleanup_temp_files()
+        os._exit(128 + signum)
+    return _handler
+
+
+class _interrupt_guard:
+    """缺陷1 兜底恢复守卫：任何异常/硬杀路径均恢复原文件。
+
+    per-mutant finally 覆盖不到 SIGTERM/SIGINT 硬杀与循环外未知异常（Revy QA
+    TaskStop 实证遗留变异体进 git diff）。SIGTERM/SIGHUP 走 handler 主动恢复
+    （硬杀不保证 finally），其余异常走 context manager finally 兜底——两路合
+    一后原样上抛，不吞中断语义。信号安装失败（非主线程/受限环境）降级为仅
+    finally 兜底。
+    """
+
+    def __init__(self, path: Path, backup: str):
+        self._path = path
+        self._backup = backup
+        self._handlers: dict = {}
+
+    def __enter__(self):
+        restore_handler = make_sigterm_restore_handler(str(self._path), self._backup)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                self._handlers[sig] = signal.signal(sig, restore_handler)
+            except (ValueError, OSError):
+                pass  # 非主线程/受限环境：守卫降级为 finally 兜底
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for sig, prev in self._handlers.items():
+            try:
+                signal.signal(sig, prev)
+            except (ValueError, OSError):
+                pass
+        # 幂等恢复——正常路径与 per-mutant finally 重复写同内容无副作用。
+        try:
+            self._path.write_text(self._backup, encoding="utf-8")
+        except OSError as e:
+            print(f"mutation restore failed for {self._path}: {e}", file=sys.stderr)
+        return False

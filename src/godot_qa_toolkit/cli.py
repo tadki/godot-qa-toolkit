@@ -149,9 +149,23 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         })
 
     files = args.files
+    # §SPEC-1420-11：单点寻址（--mutation/--lines）= 卡尺语义，仅单文件；
+    # 走串行路径（1 baseline + N selected，秒级确认）。
+    selecting = getattr(args, "mutation", None) or getattr(args, "lines", None)
+    if selecting and len(files) > 1:
+        return _emit({
+            "tool": "mutation",
+            "ok": False,
+            "summary": {"files": files,
+                        "error": "--mutation/--lines target a single file"},
+            "failures": [{"reason": "--mutation/--lines require exactly one "
+                                    "target file"}],
+        })
     # SEE-1413：--jobs 缺省时单文件同样走并发切片路径（默认并行）；显式
     # --jobs 1 在 executor 内强制串行。串行快路径仅留给显式串行请求。
-    multi_concurrency = len(files) > 1 or args.jobs is None or args.jobs > 1
+    multi_concurrency = (len(files) > 1 or args.jobs is None or args.jobs > 1)
+    if selecting:
+        multi_concurrency = False
     try:
         if not multi_concurrency:
             # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
@@ -173,6 +187,10 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 mutation_warning=args.mutation_warning,
                 timeout_factor=args.timeout_factor,
                 mutate_all=args.mutate_all,
+                select_ids=([args.mutation] if getattr(args, "mutation", None)
+                            else None),
+                select_lines=([args.lines] if getattr(args, "lines", None)
+                              else None),
             )
             result["summary"].setdefault("jobs", 1)
         else:
@@ -203,6 +221,14 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             "tool": "mutation",
             "ok": False,
             # 多文件场景报全部输入（仅报 files[0] 会误导为只缺第一个——LOW-6）
+            "summary": {"files": files, "error": str(e)},
+            "failures": [{"reason": str(e)}],
+        }
+    except ValueError as e:
+        # §SPEC-1420-11：单点寻址无命中（源码漂移/越界行）= 显式错误契约
+        result = {
+            "tool": "mutation",
+            "ok": False,
             "summary": {"files": files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
@@ -283,6 +309,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "diff is ON by default when a v2 resume manifest exists "
                         "(unchanged killed sites are reused, survived/timeout "
                         "always re-run); this flag forces full execution")
+    m.add_argument("--mutation", default=None, metavar="ID",
+                   help="single-site rerun: '<file>#<scope_id>#<n>' (SEE-1420 "
+                        "P3 caliper) — forces fresh execution of that one "
+                        "site (1 baseline + 1 mutant), bypassing diff reuse; "
+                        "single-file only")
+    m.add_argument("--lines", type=int, default=None, metavar="N",
+                   help="rerun all mutation sites on source line N (SEE-1420 "
+                        "P3); single-file only")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

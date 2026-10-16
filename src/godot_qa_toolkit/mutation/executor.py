@@ -591,10 +591,6 @@ def _run_baseline_snapshot(project_root: str, tests_glob: str | None,
     return {"rc": rc, "tail": tail, "elapsed": elapsed}
 
 
-# _accumulate_chunk 求和键增补（D5）：timeout_pinned 独立档跨分片求和。
-_PINNED_KEY = "timeout_pinned"
-
-
 def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
     """P1 差分收尾（父层单点）：reused 记录注入 + 披露字段 + manifest 落盘。
 
@@ -669,9 +665,5 @@ def _inject_one(r: dict, ctx: dict) -> None:
     s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0
     r["ok"] = (s["survived"] == 0 and s["timeout"] == 0
                and s["run_errors"] == 0 and s["suspect"] == 0)
-
-
-# _accumulate_chunk 求和键增补（D5）：timeout_pinned 独立档跨分片求和。
-_PINNED_KEY = "timeout_pinned"
 
 

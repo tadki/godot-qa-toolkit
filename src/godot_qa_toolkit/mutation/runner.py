@@ -64,6 +64,7 @@ from .reporting import (  # noqa: F401
 from .godot_gate import GlobalGodotGate
 from .diffengine import apply_timeout_streaks, budget_on_retry, make_entry, \
     plan_diff, streak_for, untouched_ranges
+from .coverlink import load_reusable_coverage
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
 from ..timing import (BUDGET_CAP_S, explicit_timing_meta, project_relative,
@@ -190,6 +191,7 @@ def run_mutation(
     resume2_store=None,
     select_ids: list[str] | None = None,
     select_lines: list[int] | None = None,
+    reuse_coverage: bool = False,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -286,6 +288,7 @@ def run_mutation(
     prior_entries: dict = {}
     reused: dict = {}
     untouched: list = []
+    results_uncovered: list[dict] = []
     disclosures: dict = {}
     if attention is not None:
         disclosures["attention"] = attention
@@ -321,8 +324,29 @@ def run_mutation(
         prior_entries = store2.load_entries()
         plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
                          prior_entries, mutate_all=mutate_all)
-        executed_list, untouched = budget_on_retry(plan.executed, budget)
+        # §SPEC-1420-12（L3/D7 P2）：coverage 前置过滤——先于 budget：
+        # 预算只花在被测试覆盖的位点上（uncovered 不消耗预算，全部显式标记）。
+        uncovered_mutants: list = []
+        cov_lines: set | None = None
+        if reuse_coverage:
+            cov_lines, cov_reason = load_reusable_coverage(
+                project_root, str(path), tests_glob, binary_kind)
+            if cov_lines is None:
+                print(f"mutation: coverage store miss ({cov_reason}) — "
+                      f"running unfiltered", file=sys.stderr)
+                disclosures["coverage_prefilter"] = "store_miss"
+        retry_pool = plan.executed
+        if cov_lines is not None:
+            retry_pool = [m for m in plan.executed if m.line in cov_lines]
+            uncovered_mutants = [m for m in plan.executed
+                                 if m.line not in cov_lines]
+        executed_list, untouched = budget_on_retry(retry_pool, budget)
         reused = plan.reused
+        if cov_lines is not None:
+            disclosures["coverage_prefilter"] = {
+                "uncovered": len(uncovered_mutants),
+                "covered_executed": len(executed_list),
+            }
         if plan.diff_active or mutate_all:
             disclosures.update({
                 "retry_total": len(plan.executed),
@@ -332,6 +356,12 @@ def run_mutation(
             })
         if mutant_slice is not None:
             executed_list = list(executed_list[slice(*mutant_slice)])
+        # uncovered 位点：不执行、不进 ok 门禁，failures 显式标记（§12）
+        for m in uncovered_mutants:
+            results_uncovered.append(_mutant_record(
+                m, "uncovered",
+                f"line {m.line} not covered by tests (reused coverage "
+                f"prefilter; site never executed)", src=original_src))
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
     if not executed_list and not reused:
@@ -350,10 +380,10 @@ def run_mutation(
             results.append(_mutant_record(m, entry["verdict"],
                                           entry.get("reason", ""),
                                           src=original_src))
-    # _record_invalid_mutants 返回新列表——与 reused 记录拼接而非覆盖。
+    # _record_invalid_mutants 返回新列表——与 reused/uncovered 记录拼接而非覆盖。
     invalid_results, invalid_count = _record_invalid_mutants(
         original_src, executed_list, None)
-    results = results + invalid_results
+    results = results + results_uncovered + invalid_results
     executed_ids = {m.stable_id for m in executed_list}
     # P1：manifest 索引层先行写入（中断安全——索引在场 + 条目增量，下轮
     # 差分对已执行子集正确复用，未落盘位点按 new_site 重跑，保守正确）。

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .ops import _collect_mutations
 from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record
+from .coverlink import load_reusable_coverage
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
@@ -85,6 +86,7 @@ def run_mutation_files(
     mutation_warning: int | None = None,
     timeout_factor: float | None = None,
     mutate_all: bool = False,
+    reuse_coverage: bool = False,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -164,7 +166,8 @@ def run_mutation_files(
                                            resume, binary_kind=binary_kind,
                                            mutation_warning=mutation_warning,
                                            timeout_factor=timeout_factor,
-                                           mutate_all=mutate_all)
+                                           mutate_all=mutate_all,
+                                           reuse_coverage=reuse_coverage)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -363,7 +366,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   binary_kind: str | None = None,
                   mutation_warning: int | None = None,
                   timeout_factor: float | None = None,
-                  mutate_all: bool = False
+                  mutate_all: bool = False,
+                  reuse_coverage: bool = False
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
@@ -412,7 +416,21 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         entries = store2.load_entries()
         plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
                          entries, mutate_all=mutate_all)
-        executed_list, untouched = budget_on_retry(plan.executed, budget)
+        # §SPEC-1420-12（P2）：coverage 前置过滤先于 budget（预算只花在
+        # covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。
+        uncovered_mutants: list = []
+        retry_pool = plan.executed
+        if reuse_coverage:
+            cov, cov_reason = load_reusable_coverage(project_root, f, glob,
+                                                     binary_kind)
+            if cov is None:
+                print(f"mutation: coverage store miss ({cov_reason}) for {f} "
+                      f"— running unfiltered", file=sys.stderr)
+            else:
+                retry_pool = [m for m in plan.executed if m.line in cov]
+                uncovered_mutants = [m for m in plan.executed
+                                     if m.line not in cov]
+        executed_list, untouched = budget_on_retry(retry_pool, budget)
         if not executed_list:
             # 差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
             # GUT + 1 baseline 锚），报告由 run_mutation 自建。
@@ -442,6 +460,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             "plan": plan, "executed": executed_list, "untouched": untouched,
             "header_hash": header_hash, "scope_hashes": scope_hashes,
             "store2": store2, "src": src, "mutants": mutants,
+            "uncovered": uncovered_mutants,
         }
         n_chunks = min(jobs, len(ids))
         size = (len(ids) + n_chunks - 1) // n_chunks
@@ -547,12 +566,23 @@ def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
                        "suspect": "suspect"}[rec["verdict"]]] += 1
                 s["mutants"] += 1
             s["resumed"] = len(reused)
+        # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures
+        # 显式标记（计数与覆盖执行面在 summary.coverage_prefilter 披露）。
+        uncovered = ctx.get("uncovered") or []
+        if uncovered:
+            for m in uncovered:
+                r["failures"].append(_mutant_record(
+                    m, "uncovered",
+                    f"line {m.line} not covered by tests (reused coverage "
+                    f"prefilter; site never executed)", src=ctx["src"]))
+            s["coverage_prefilter"] = {"uncovered": len(uncovered),
+                                       "covered_executed": len(ctx["executed"])}
         if plan.diff_active:
             # §SPEC-1420-07（D6）：差分在场的 run 才携带差分披露——首次全量
             # run（无 manifest）的报告形态与升级前逐键同构。
             s["diff_skipped"] = sorted(reused)
             s["retry_total"] = len(plan.executed)
-            s["executed"] = len(ctx["executed"])
+            s.setdefault("executed", len(ctx["executed"]))
             s["untouched_ranges"] = untouched_ranges(ctx["untouched"])
         total = s["mutants"]
         s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0

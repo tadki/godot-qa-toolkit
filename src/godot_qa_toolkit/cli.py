@@ -191,6 +191,7 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                             else None),
                 select_lines=([args.lines] if getattr(args, "lines", None)
                               else None),
+                reuse_coverage=args.reuse_coverage,
             )
             result["summary"].setdefault("jobs", 1)
         else:
@@ -210,7 +211,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 binary_kind=binary_kind, timing_store=timing_store,
                 mutation_warning=args.mutation_warning,
                 timeout_factor=args.timeout_factor,
-                mutate_all=args.mutate_all)
+                mutate_all=args.mutate_all,
+                reuse_coverage=args.reuse_coverage)
             if len(files) == 1 and args.jobs is None:
                 # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
                 envelope = result
@@ -317,6 +319,11 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--lines", type=int, default=None, metavar="N",
                    help="rerun all mutation sites on source line N (SEE-1420 "
                         "P3); single-file only")
+    m.add_argument("--reuse-coverage", action="store_true",
+                   help="prefilter mutation sites by line coverage from the "
+                        "last `gqt coverage` run for this file (SEE-1420 P2; "
+                        "provenance-checked: source/tests/binary must match; "
+                        "uncovered sites are marked 'uncovered' and skipped)")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

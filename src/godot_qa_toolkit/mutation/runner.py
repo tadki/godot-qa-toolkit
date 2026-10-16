@@ -282,6 +282,8 @@ def run_mutation(    file_path: str,
         return _no_sites_result(str(path), scoped)
     if total_sites > budget:
         disclosures["total_sites"] = total_sites
+        # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid
+        # 预检后以 actually_executed 覆写（实际执行语义的唯一出处）。
         disclosures.setdefault("executed", len(executed_list))
 
     return _execute_planned(
@@ -316,9 +318,19 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                                           entry.get("reason", ""),
                                           src=original_src))
     # _record_invalid_mutants 返回新列表——与 reused/uncovered 记录拼接而非覆盖。
+    # O2：invalid_mutant（语法预检剔除）从未进入 GUT 执行——执行面以
+    # _valid_mutants 过滤后的可执行集合为准，summary.executed 报实际执行数
+    # 而非计划面（Revy 实机 20 vs mutants 19 实证口径漂移）。
     invalid_results, invalid_count = _record_invalid_mutants(
         original_src, executed_list, None)
     results = results + results_uncovered + invalid_results
+    # O2 键在场性守卫：executed 只在【披露语义在场】（差分/寻址/截断披露）
+    # 时出现——无披露语义的常规 run 保持既有 summary 形态（零键增量）；
+    # 在场时以 actually_executed（invalid 预检剔除后的真实 GUT 执行数）
+    # 覆写计划面值（Revy 实机 20 vs mutants 19 实证口径漂移）。
+    if "executed" in disclosures:
+        disclosures["executed"] = len(_valid_mutants(original_src,
+                                                     executed_list))
     # P1：manifest 索引层先行写入（中断安全——索引在场 + 条目增量，下轮
     # 差分对已执行子集正确复用，未落盘位点按 new_site 重跑，保守正确）。
     # worker 注入路径不写（父层合并后单点写，规避并发竞态）。
@@ -475,8 +487,9 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
     # SPEC-017：runtime invalid_mutant（impl 编译被拒）与静态预检 invalid 合并
-    # 计数——同档同语义，failures 里已留明细。
-    invalid_count += sum(1 for r in results if r["verdict"] == "invalid_mutant")
+    # 计数——同档同语义，failures 里已留明细。O2 修复：静态 invalid 记录本身
+    # 已在 results 内——param 传入值与扫描会双计数，改为扫描唯一口径。
+    invalid_count = sum(1 for r in results if r["verdict"] == "invalid_mutant")
     summary = {
         "file": file,
         "mutants": total,

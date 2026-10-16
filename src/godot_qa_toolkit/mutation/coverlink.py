@@ -38,8 +38,13 @@ def coverage_cache_path(project_root: str, file_path: str,
 def save_coverage(covered_lines: set[int], total_lines: int,
                   project_root: str, file_path: str, tests_glob: str | None,
                   binary_kind: str | None = None,
-                  coverage_percent: float | None = None) -> bool:
-    """coverage 成功 run 的行级事实落盘（原子写；失败告警一次，best-effort）。"""
+                  coverage_percent: float | None = None,
+                  instrumentable_lines: set[int] | None = None) -> bool:
+    """coverage 成功 run 的行级事实落盘（原子写；失败告警一次，best-effort）。
+
+    instrumentable_lines（D3）：本次 run 的探针可插桩行集——mutation 前置
+    过滤的唯一合法跳过锚。None = 旧 schema 形态（读回侧按无该集降级）。
+    """
     kind = binary_kind_tag(binary_kind)
     rel = project_relative(project_root, file_path)
     try:
@@ -60,6 +65,8 @@ def save_coverage(covered_lines: set[int], total_lines: int,
         "coverage_percent": coverage_percent,
         "recorded_at": time.time(),
     }
+    if instrumentable_lines is not None:
+        doc["instrumentable_lines"] = sorted(int(l) for l in instrumentable_lines)
     path = coverage_cache_path(project_root, file_path, tests_glob,
                                binary_kind=kind)
     try:
@@ -86,6 +93,36 @@ def load_reusable_coverage(project_root: str, file_path: str,
     源码 sha1 在读回时对当前文件实测（落盘后源码变更即失效——行级事实
     必须锚定同一份源码）。vacuous（零可执行行）按无数据降级——过滤无意义。
     """
+    lines, _doc_or_reason = _load_coverage_doc(project_root, file_path,
+                                               tests_glob, binary_kind)
+    if lines is None:
+        return None, _doc_or_reason
+    return lines, None
+
+
+def load_instrumentable_lines(project_root: str, file_path: str,
+                              tests_glob: str | None, binary_kind=None
+                              ) -> tuple[set[int] | None, str | None]:
+    """D3：读回可插桩行集（provenance 同 load_reusable_coverage）。
+
+    旧 schema（无 instrumentable_lines 键）返回 None——调用方按
+    「整文件视为可插桩」的既有语义降级（不假阴性也不扩面）。
+    """
+    _, doc_or_reason = _load_coverage_doc(project_root, file_path, tests_glob,
+                                          binary_kind)
+    if isinstance(doc_or_reason, str):
+        return None, doc_or_reason
+    raw = doc_or_reason
+    inst = raw.get("instrumentable_lines")
+    if not isinstance(inst, list):
+        return None, "coverage cache lacks instrumentable_lines (old schema)"
+    return {int(l) for l in inst if isinstance(l, (int, float))}, None
+
+
+def _load_coverage_doc(project_root: str, file_path: str,
+                       tests_glob: str | None, binary_kind=None
+                       ) -> tuple[set[int] | None, dict | str | None]:
+    """provenance 校验 + (covered_lines, doc-or-reason) 复合读取。"""
     kind = binary_kind_tag(binary_kind)
     path = coverage_cache_path(project_root, file_path, tests_glob,
                                binary_kind=kind)
@@ -111,4 +148,4 @@ def load_reusable_coverage(project_root: str, file_path: str,
     lines = raw.get("covered_lines")
     if not isinstance(lines, list):
         return None, "coverage cache malformed (covered_lines missing)"
-    return {int(l) for l in lines if isinstance(l, (int, float))}, None
+    return ({int(l) for l in lines if isinstance(l, (int, float))}, raw)

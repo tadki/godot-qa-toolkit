@@ -65,6 +65,7 @@ class ResumeStoreV2:
                             binary_kind=self.binary_kind)
         self._now = time.time() if now is None else now
         self._warned_write = False
+        self._warned_manifest = False
 
     # -- 路径面 ----------------------------------------------------------
 
@@ -142,7 +143,17 @@ class ResumeStoreV2:
         """
         try:
             raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError as e:
+            # 读失败（缺失=正常首跑；权限/IO 异常=存疑）——缺失静默，异常告警
+            if self.manifest_path.exists():
+                self._warn_manifest_once(
+                    f"manifest unreadable ({self.manifest_path.name}: {e})")
+            return None
+        except ValueError as e:
+            # O1：损坏 JSON 静默降级 = 坏条目同款纪律违反——按无历史处理
+            # 但必须告警（拒复用 ≠ 静默吞；每实例一次，不重刷）。
+            self._warn_manifest_once(
+                f"manifest corrupted ({self.manifest_path.name}: {e})")
             return None
         if not isinstance(raw, dict):
             print(f"resume v2 store: manifest is not an object "
@@ -240,6 +251,13 @@ class ResumeStoreV2:
             self._warned_write = True
             print(f"resume v2 store write failed ({self.store_dir}): {err} "
                   f"— continuing without resumable history", file=sys.stderr)
+
+    def _warn_manifest_once(self, detail: str) -> None:
+        """O1：每实例告警一次——与坏条目 load 告警同口径。"""
+        if not self._warned_manifest:
+            self._warned_manifest = True
+            print(f"resume v2 store: {detail} — treating as no history "
+                  f"(full rerun)", file=sys.stderr)
 
 
 def _is_poison_entry(entry: dict) -> bool:

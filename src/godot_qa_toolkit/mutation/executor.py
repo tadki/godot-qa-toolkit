@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .ops import _collect_mutations
 from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record
-from .coverlink import load_reusable_coverage
+from .coverlink import load_instrumentable_lines, load_reusable_coverage
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
@@ -484,7 +484,11 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
 def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
                               reuse_coverage):
     """§SPEC-1420-12（P2）：coverage 前置过滤先于 budget（预算只花在
-    covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。"""
+    covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。
+
+    D3 修复：过滤锚 = covered ∧ instrumentable——不可插桩行上的位点留在
+    执行面（与 planner._apply_coverage_prefilter 同语义）；可插桩集不可得
+    = 不过滤（宁多跑不假阴性）。"""
     if not reuse_coverage:
         return [], plan.executed
     cov, cov_reason = load_reusable_coverage(project_root, f, glob,
@@ -493,7 +497,14 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
         print(f"mutation: coverage store miss ({cov_reason}) for {f} "
               f"— running unfiltered", file=sys.stderr)
         return [], plan.executed
-    uncovered = [m for m in plan.executed if m.line not in cov]
+    inst, inst_reason = load_instrumentable_lines(project_root, f, glob,
+                                                  binary_kind)
+    if inst is None:
+        print(f"mutation: instrumentable face unavailable ({inst_reason}) "
+              f"for {f} — running unfiltered", file=sys.stderr)
+        return [], plan.executed
+    uncovered = [m for m in plan.executed
+                 if m.line not in cov and m.line in inst]
     return uncovered, [m for m in plan.executed if m.line in cov]
 
 
@@ -634,9 +645,10 @@ def _inject_one(r: dict, ctx: dict) -> None:
                 f"prefilter; site never executed)", src=ctx["src"]))
         s["coverage_prefilter"] = {"uncovered": len(uncovered),
                                    "covered_executed": len(ctx["executed"])}
-    if plan.diff_active:
-        # §SPEC-1420-07（D6）：差分在场的 run 才携带差分披露——首次全量
-        # run（无 manifest）的报告形态与升级前逐键同构。
+    if plan.diff_active or plan.mutate_all:
+        # §SPEC-1420-07（D6）+ O3 键集对齐：差分在场与 --mutate-all 两径披露
+        # 同一键集（--mutate-all 全量面也可见：executed == retry_total、
+        # diff_skipped 空）。
         s["diff_skipped"] = sorted(plan.reused)
         s["retry_total"] = len(plan.executed)
         s.setdefault("executed", len(ctx["executed"]))

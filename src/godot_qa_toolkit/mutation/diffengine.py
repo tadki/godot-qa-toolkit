@@ -44,6 +44,7 @@ class DiffPlan:
     triggers: dict = field(default_factory=dict)   # stable_id → 判定理由
     header_changed: bool = False
     diff_active: bool = False                      # 旧 manifest 在场 ∧ 未 --mutate-all
+    mutate_all: bool = False                       # --mutate-all 退路标记（披露口径 O3 对齐）
 
 
 def signature_matches(entry: dict, mutant) -> bool:
@@ -54,7 +55,8 @@ def plan_diff(header_hash: str, scopes: dict, old_manifest: dict | None,
               mutants: list, entries: dict, mutate_all: bool = False) -> DiffPlan:
     """D4 矩阵：逐位点判 skip/retry。mutants 须已标 stable_id/scope_id。"""
     if mutate_all or old_manifest is None:
-        plan = DiffPlan(executed=list(mutants), diff_active=False)
+        plan = DiffPlan(executed=list(mutants), diff_active=False,
+                        mutate_all=mutate_all)
         reason = "mutate_all" if mutate_all else "no_prior_manifest"
         for m in mutants:
             plan.triggers[m.stable_id] = reason

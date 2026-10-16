@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from .coverlink import load_reusable_coverage
+from .coverlink import load_instrumentable_lines, load_reusable_coverage
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .reporting import _dry_run_result, _mutant_record
 from .resume2 import ResumeStoreV2
@@ -110,19 +110,21 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
     prior_entries = store2.load_entries()
     plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
                      prior_entries, mutate_all=mutate_all)
-    uncovered_mutants, cov_lines = _apply_coverage_prefilter(
+    uncovered_mutants, retry_pool = _apply_coverage_prefilter(
         plan, path, project_root, tests_glob, binary_kind, reuse_coverage,
         disclosures)
-    executed_list, untouched = budget_on_retry(
-        [m for m in plan.executed if cov_lines is None or m.line in cov_lines],
-        budget)
+    executed_list, untouched = budget_on_retry(retry_pool, budget)
     reused = plan.reused
-    if cov_lines is not None:
+    if disclosures.get("coverage_prefilter") not in ("store_miss", "instrumentable_face_missing") \
+            and reuse_coverage:
         disclosures["coverage_prefilter"] = {
             "uncovered": len(uncovered_mutants),
             "covered_executed": len(executed_list),
         }
     if plan.diff_active or mutate_all:
+        # O3 对齐：差分在场与 --mutate-all 两径披露同一键集（retry_total /
+        # executed / untouched_ranges / diff_skipped）——mutate_all 全量面
+        # （executed == retry_total，diff_skipped 空）也必须可见。
         disclosures.update({
             "retry_total": len(plan.executed),
             "executed": len(executed_list),
@@ -143,17 +145,33 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
 def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
                               binary_kind, reuse_coverage, disclosures):
     """§SPEC-1420-12（L3/D7 P2）：coverage 前置过滤（budget 之前）——预算只
-    花在 covered 位点上；uncovered 全部显式标记。store miss = 告警不过滤。"""
+    花在 covered 位点上；uncovered 全部显式标记。store miss = 告警不过滤。
+
+    返回 (uncovered, retry_pool)。D3 修复：过滤锚 = covered ∧ instrumentable
+    ——落在不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的位
+    点**留在执行面**（Revy 实机 item.gd 11/60 假阴性实证）；可插桩集读不到
+    （旧 schema/缺失）= 不过滤（宁多跑不假阴性）。
+    """
     if not reuse_coverage:
-        return [], None
+        return [], plan.executed
     cov_lines, cov_reason = load_reusable_coverage(
         project_root, str(path), tests_glob, binary_kind)
     if cov_lines is None:
         print(f"mutation: coverage store miss ({cov_reason}) — "
               f"running unfiltered", file=sys.stderr)
         disclosures["coverage_prefilter"] = "store_miss"
-        return [], None
-    uncovered = [m for m in plan.executed if m.line not in cov_lines]
-    return uncovered, cov_lines
+        return [], plan.executed
+    inst_lines, inst_reason = load_instrumentable_lines(
+        project_root, str(path), tests_glob, binary_kind)
+    if inst_lines is None:
+        print(f"mutation: instrumentable face unavailable ({inst_reason}) — "
+              f"running unfiltered", file=sys.stderr)
+        disclosures["coverage_prefilter"] = "instrumentable_face_missing"
+        return [], plan.executed
+    uncovered = [m for m in plan.executed
+                 if m.line not in cov_lines and m.line in inst_lines]
+    pool = [m for m in plan.executed
+            if m.line in cov_lines or m.line not in inst_lines]
+    return uncovered, pool
 
 

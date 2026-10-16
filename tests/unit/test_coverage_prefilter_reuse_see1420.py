@@ -74,8 +74,9 @@ class TestCoveragePrefilter:
     def test_uncovered_sites_marked_and_not_executed(self, tmp_path,
                                                      monkeypatch):
         proj, target = _write_project(tmp_path)
-        # 行 2（add 体）覆盖；行 5（sub 体）未覆盖
-        save_coverage({2}, 6, str(proj), str(target), "res://tests/")
+        # 行 2（add 体）覆盖；行 5（sub 体）未覆盖；位点行全部可插桩（D3）
+        save_coverage({2}, 6, str(proj), str(target), "res://tests/",
+                      instrumentable_lines={2, 5})
         calls = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):
@@ -99,7 +100,8 @@ class TestCoveragePrefilter:
     def test_uncovered_not_in_ok_gate(self, tmp_path, monkeypatch):
         """uncovered 不计入 ok 门禁失败档——quality 信号非工具失败。"""
         proj, target = _write_project(tmp_path)
-        save_coverage({2}, 6, str(proj), str(target), "res://tests/")
+        save_coverage({2}, 6, str(proj), str(target), "res://tests/",
+                      instrumentable_lines={2, 5})
 
         state = {"n": 0}
 
@@ -144,8 +146,9 @@ class TestCoveragePrefilter:
                "func two(a):\n"
                "\treturn a + 2\n")
         proj, target = _write_project(tmp_path, src)
-        # 只覆盖 two 体（行 5）；one（行 2）uncovered
-        save_coverage({5}, 6, str(proj), str(target), "res://tests/")
+        # 只覆盖 two 体（行 5）；one（行 2）uncovered；位点行全可插桩（D3）
+        save_coverage({5}, 6, str(proj), str(target), "res://tests/",
+                      instrumentable_lines={2, 5})
         calls = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):
@@ -188,8 +191,9 @@ class TestCoveredVerdictConsistency:
                                     tests_glob="res://tests/",
                                     mutate_all=True)
         assert full["summary"]["killed"] == 6
-        # 只覆盖 add 体（行 2）→ covered 位点 = 3
-        save_coverage({2}, 6, str(proj), str(target), "res://tests/")
+        # 只覆盖 add 体（行 2）→ covered 位点 = 3；位点行全可插桩（D3）
+        save_coverage({2}, 6, str(proj), str(target), "res://tests/",
+                      instrumentable_lines={2, 5})
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         filtered = mrunner.run_mutation(str(target), str(proj), budget=10,
                                         tests_glob="res://tests/",

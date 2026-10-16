@@ -97,7 +97,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
   - **resume key 负面清单（定案 D6/D5 红线）**：`--mutation-warning`、`--timeout-factor`、`timeout_streak` **绝不进任何 resume key**——调配置不得引发全库重跑。
   - **v1 目录（`gqt-mutation-resume`）不读不写不删**；在场时 stderr 一次性显式披露。**CI 迁移点**：升级后首个 v2 run 全量重跑（一次性失效，不迁移不脏合并）。
 - **timeout_pinned（定案 D5，N=2）**：resume 条目增 `timeout_streak`（连续 timeout 跨 run 计数）。复用位点重判仍 timeout → +1；**streak ≥ 2 → 独立 verdict `timeout_pinned`**：永不并入 killed、**不计入 ok 门禁失败档**、报告持续可见并披露降级来源（failures reason 含 `timeout_pinned after N consecutive timeouts`）；任一后续 run 非超时（survived/killed 均合法）→ 解除清零。**毒 run 守卫**：单 run timeout ≥50% 且 ≥5 条 → 本窗口 timeout 不落 streak，报告披露（stderr `timeout streak suspended: suspected infra run`；守卫窗口=串行整 run / 并发 worker 分片）。
-- **budget-on-retry（定案 D6）**：budget 按**差分后 retry 数**计（截断保序，拒轮转）。差分在场 run 强制披露 `summary.retry_total`（差分 retry 总数）/ `executed`（实际执行）/ `untouched_ranges`（未触达位点的行号区间列表 `[[a,b],...]`）+ `diff_skipped`（被跳过位点 id 全列）。位点数 > budget 时同步披露 `total_sites`（截断前全量）。
+- **budget-on-retry（定案 D6）**：budget 按**差分后 retry 数**计（截断保序，拒轮转）。差分在场 run 与 `--mutate-all` run 同键集披露 `summary.retry_total`（差分 retry 总数）/ `executed`（**实际执行数**——静态预检剔除 invalid_mutant 后真实跑 GUT 的位点数）/ `untouched_ranges`（未触达位点的行号区间列表 `[[a,b],...]`）+ `diff_skipped`（被跳过位点 id 全列；mutate-all 下为空列）。位点数 > budget 时同步披露 `total_sites`（截断前全量）。
 - 可选 flag（向后兼容——省略即既有行为，差分除外，见 CI 迁移点）：
   - `--tests <res://glob>`：受影响测试子集（SEE-1312/1400 语义不变）。
   - `--dry-run`：只清点不跑 GUT（零调用契约不变）。**SEE-1420 §18 升级**：manifest 在场时输出差分计数预估 `summary.{diff_available, retry_estimate, executed_estimate}`（无历史时 `diff_available: false` 且 retry_estimate = 全位点数）。
@@ -105,7 +105,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
   - `--mutation-warning N`（默认 50）：按**截断前**全量位点数判定，超阈值 stderr 告警 + `summary.attention`（建议拆分字符串）。不进任何 resume key。
   - `--timeout-factor F`（默认 2.0）：覆盖内置 `_TIMEOUT_SCALE`，自适应 per-mutant 上限 = `max(timeout, baseline×F+1)`（只放大不收紧；`summary.adaptive_timeout_s` 可查）。不进任何 resume key。
   - `--mutation <file>#<scope_id>#<n>` / `--lines N`（P3 卡尺，单文件）：单点重跑——强制新执行（**绕过差分复用与 coverage 前置过滤**——随机抽查被剔位点防假阴性的公平通道），1 baseline + N selected GUT 调用。无命中 = 显式错误契约（ok=false，`failures[0].reason` 含 id/line），绝不静默空跑。
-  - `--reuse-coverage`（P2）：按 `gqt coverage` 最近一次成功 run 的行级事实（`<root>/.qa-cache/gqt-coverage/<key>.json`，provenance 校验：schema/项目内相对路径/源码 sha1/tests_glob 精确匹配/二进制类型——任一不符 = 告警 + **不过滤**继续跑）前置过滤：uncovered 位点判 **`uncovered` verdict**（failures 显式标记、不执行、不计入 ok 门禁、不消耗 budget——过滤先于 budget）。coverage 刷新后立即生效（uncovered 不持久化）。
+  - `--reuse-coverage`（P2）：按 `gqt coverage` 最近一次成功 run 的行级事实（`<root>/.qa-cache/gqt-coverage/<key>.json`，provenance 校验：schema/项目内相对路径/源码 sha1/tests_glob 精确匹配/二进制类型——任一不符 = 告警 + **不过滤**继续跑）前置过滤：跳过锚 = **可插桩 ∧ 未覆盖**——`uncovered` 位点（failures 显式标记 `uncovered` verdict、不执行、不计入 ok 门禁、不消耗 budget——过滤先于 budget）；**不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的位点一律留在执行面**（修复 Revy 实机假阴性），可插桩集缺失（旧 schema 缓存）= 告警 + 不过滤（宁多跑不假阴性）。coverage 刷新后立即生效（uncovered 不持久化）。
 - 中止契约（baseline 本身不可信时，mutant 数据不产出）：
 
 ```json
@@ -148,7 +148,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
   - 零可执行行 → `ok=true` + `summary.vacuous: true`（空集覆盖不是满分证据）。
 - **comparability 契约**（SEE-1312 分支覆盖 v1 = 纯推导层，observational 不进 ok 判定）：`summary` 新增 `branch_total / branch_covered / branch_coverage_percent`（行探针命中 + AST 分支结构推导；if/elif/else/match case 各计 1 分支）。语义只回答「分支是否被执行」，不回答「是否被断言守护」。
 - godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖 → `summary.run_error: true`，与 mutation 同款中止契约。
-- **行级事实落盘（SEE-1420 P2）**：成功 run（探针点火 >0）额外原子写 `<root>/.qa-cache/gqt-coverage/<key>.json`——stdout 契约的超集（多带全量 `covered_lines` + provenance：schema `see1420-coverage/1`/项目内相对路径/源码 sha1/tests_glob/binary_kind），供 mutation `--reuse-coverage` 消费；provenance 不符 = 缓存作废重测。stdout 契约零变化。
+- **行级事实落盘（SEE-1420 P2）**：成功 run（探针点火 >0）额外原子写 `<root>/.qa-cache/gqt-coverage/<key>.json`——stdout 契约的超集（多带全量 `covered_lines` + `instrumentable_lines`（本次 run 的探针可插桩行集）+ provenance：schema `see1420-coverage/1`/项目内相对路径/源码 sha1/tests_glob/binary_kind），供 mutation `--reuse-coverage` 消费；provenance 不符 = 缓存作废重测。stdout 契约零变化。
 - 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent}` + SEE-1312 新增 `{probes_fired, branch_total, branch_covered, branch_coverage_percent}`；未达标时 `failures[0]` 附 `covered/total/uncovered_lines`（截断 20 行）。
 - `ok = coverage_percent >= min_percent`（probes_fired=0 与 run_error 时强制 ok=false）。
 

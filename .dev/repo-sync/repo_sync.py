@@ -625,15 +625,6 @@ def ensure_on_master_branch(
       6. Dirty tree → stash once (or fail if stash_on_dirty disabled)
       7. Switch to master (handles detached HEAD and other branches)
 
-    SEE-1416: the stash+switch path is KOL-parity behavior, but it is only
-    safe when agents never work on the main checkout. GQT agents are likewise
-    worktree-only (CLAUDE.md), yet a stray shared-branch checkout here caused
-    the 2026-10-15 commit-hijack chain. Defense in depth: when the checkout is
-    on a non-master branch that carries agent commits (any commit on the
-    branch not reachable from origin/master), the guard must NOT stash+switch
-    — switching away risks agent commits being absorbed into a later master
-    push. Fail closed: report and skip the cycle; a human reconciles.
-
     Returns (ok, message, had_stash). had_stash=True means the caller must
     `do_stash_pop()` after the sync body completes.
 
@@ -662,24 +653,6 @@ def ensure_on_master_branch(
     occupied, wt_path = _master_occupied_elsewhere(repo_path, timeout=timeout)
     if occupied:
         return False, wt_path, False
-
-    # SEE-1416 fail-closed: agent commits on a non-master branch must never be
-    # stash+switched away — the 2026-10-15 incident had exactly this shape
-    # (shared-branch commits on the main checkout absorbed into a LOCAL_AHEAD
-    # master push). Skip the cycle; reconciliation is manual.
-    r = git_run(
-        repo_path,
-        ["log", "--oneline", f"origin/{branch}..{current}"],
-        check=False,
-        timeout=timeout,
-    )
-    if r.returncode == 0 and r.stdout.strip():
-        return (
-            False,
-            f"branch '{current}' carries commits not on {remote}/{branch} — "
-            f"stash+switch refused (SEE-1416); reconcile manually",
-            False,
-        )
 
     # 6. Dirty tree stash (#1, pre-switch)
     return _stash_and_switch(

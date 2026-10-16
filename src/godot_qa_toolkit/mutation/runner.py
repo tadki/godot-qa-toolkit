@@ -13,9 +13,8 @@ SEE-1312 增强：变异点扩展（三元/守卫/第二梯队算子/常量）�
 from __future__ import annotations
 
 import os
-import re
 import shutil
-import signal
+import signal  # noqa: F401  # 测试经 mrunner.signal monkeypatch signal.signal
 import subprocess
 import sys
 import tempfile

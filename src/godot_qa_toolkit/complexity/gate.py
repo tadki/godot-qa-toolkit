@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .collector import FunctionComplexity, collect_paths
+from .collector import collect_paths
 
 DEFAULT_WARN_COMPLEXITY = 10  # radon rank B boundary
 DEFAULT_MAX_COMPLEXITY = 15   # radon rank C boundary — hard fail

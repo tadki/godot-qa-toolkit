@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 import signal
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 

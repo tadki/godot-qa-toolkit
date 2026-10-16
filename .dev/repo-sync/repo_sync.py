@@ -669,7 +669,7 @@ def ensure_on_master_branch(
     # master push). Skip the cycle; reconciliation is manual.
     r = git_run(
         repo_path,
-        ["log", "--oneline", f"{remote}/{branch}..{current}"],
+        ["log", "--oneline", f"origin/{branch}..{current}"],
         check=False,
         timeout=timeout,
     )

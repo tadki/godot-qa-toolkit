@@ -668,6 +668,8 @@ class TestJobsMergeResumed:
             store = ResumeStoreV2(str(proj), str(proj / name),
                                   "res://tests/unit/save/")
             assert res["summary"]["resumed"] == len(store.load_entries()) == 6
-        # 全复用：零 mutant 执行；每文件仍实测 1 次 baseline（判定语义锚，
-        # 定案 §四.6 B 场景 GUT 调用 = 1 baseline）→ 2 文件 = 2 轮
-        assert calls2["n"] == 2
+        # 全复用：零 mutant 执行；B 场景 GUT 调用 = 1 baseline/文件由父层
+        # 预跑快照承担（executor 零执行回退注入 precomputed_baseline——
+        # SEE-1420 QA 实机计数 shim 实证：回退自实测会 double 到 2≠1）。
+        # 本测试 _run_baseline_snapshot 已 mock → fake 计数应为 0。
+        assert calls2["n"] == 0

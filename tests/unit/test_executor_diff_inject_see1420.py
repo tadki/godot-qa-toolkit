@@ -132,3 +132,47 @@ def test_parallel_first_run_has_no_diff_disclosures(tmp_path, monkeypatch,
     assert "diff_skipped" not in s
     assert "retry_total" not in s
     assert s["mutants"] == 9
+
+
+def test_zero_executed_reuses_precomputed_baseline(tmp_path, monkeypatch):
+    """§14-B 回归：全复用零执行时不得再实测第二轮 baseline（GUT 调用 1≠2）。
+
+    实机缺陷：executor 零执行回退 run_mutation 未注入父层已预跑的共享
+    baseline 快照 → run_mutation「永远实测」再跑全套 GUT 一次。
+    """
+    proj, target = _write_project(tmp_path)
+    header_hash, _spans, mutants, scope_hashes = _mutants_of(target)
+    store = ResumeStoreV2(proj, target, "res://tests/unit/save/")
+    src = Path(target).read_text(encoding="utf-8")
+    assert store.write_manifest(header_hash, scope_hashes,
+                                store._sha1_text(src), "calc.gd")
+    for m in mutants:
+        assert store.record_entry({
+            "id": m.stable_id, "verdict": "killed", "reason": "seed",
+            "line": m.line, "column": m.column, "kind": m.kind,
+            "original": m.original, "mutated": m.mutated,
+            "scope_hash": scope_hashes[m.scope_id], "timeout_streak": 0,
+        })
+
+    calls = {"gut": 0}
+
+    def counting_gut(root, timeout_s=60, tests_glob=None):
+        calls["gut"] += 1
+        return (1, "* test_killed_by_probe\n\t[Failed]\n")
+
+    monkeypatch.setattr(runner_mod, "_run_gut_on_project", counting_gut)
+    monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+    monkeypatch.setattr(executor, "_run_baseline_snapshot",
+                        lambda *a, **k: {"rc": 0, "tail": "pass",
+                                         "elapsed": 5.0})
+
+    result = run_mutation_files([target], proj, budget=10, timeout_s=60,
+                                tests_glob="res://tests/unit/save/", jobs=4)
+
+    r = result["results"][0]
+    assert r["ok"] is True
+    assert r["summary"]["executed"] == 0
+    assert r["summary"]["resumed"] == 9
+    assert calls["gut"] == 0, (
+        "zero-executed fallback must reuse the precomputed baseline — "
+        f"got {calls['gut']} extra baseline GUT runs (§14-B: GUT==1)")

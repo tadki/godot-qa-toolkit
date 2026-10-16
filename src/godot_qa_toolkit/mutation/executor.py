@@ -441,17 +441,21 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     uncovered_mutants, retry_pool = _apply_coverage_prefilter(
         plan, f, project_root, glob, binary_kind, reuse_coverage)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
+    baseline = baselines.get(glob)
     if not executed_list:
         # 差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
-        # GUT + 1 baseline 锚），报告由 run_mutation 自建。
+        # GUT + 1 baseline 锚），报告由 run_mutation 自建。父层已预跑的
+        # 共享 baseline 快照必须注入（SEE-1420 QA 实证：不注入则
+        # run_mutation「永远实测」再跑一轮 baseline——B 场景 GUT 调用
+        # 2≠1，白付一次全套 GUT）。
         r = run_mutation(f, project_root, budget=budget,
                          timeout_s=timeout_s, tests_glob=glob,
                          resume=False, binary_kind=binary_kind,
                          mutation_warning=None, timeout_factor=timeout_factor,
-                         mutate_all=mutate_all)
+                         mutate_all=mutate_all,
+                         precomputed_baseline=baseline)
         r["summary"].setdefault("jobs", 1)
         return [], None, r
-    baseline = baselines.get(glob)
     ids = [m.stable_id for m in executed_list]
     if baseline is None:
         # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回

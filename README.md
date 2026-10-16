@@ -136,16 +136,74 @@ failing); unparseable file → failure. Lowering `--max` below `--warn`
 collapses warn into max. `ok = no violation AND no unparseable` — warnings
 alone still pass.
 
-## Mutation runner (SEE-1400 / SEE-1413)
+## Mutation runner (SEE-1400 / SEE-1413 / SEE-1420)
 
-Runs baseline GUT on the untouched source, then per-mutant rewrites the file
-(restoring it after every run, SIGTERM/atexit cleanup included — an
-interrupted run leaves no `.gqt_mutation_*` temp files behind).
+Runs baseline GUT on the untouched source (always measured — it is the
+verdict anchor), plans the execution face differentially, then per-mutant
+rewrites the file in-memory (restoring it after every run, SIGTERM/atexit
+cleanup included — an interrupted run leaves no `.gqt_mutation_*` temp files
+behind).
 
 ```bash
 gqt mutation src/save/save_manager.gd --project-root /path/to/project \
     --budget 50 --timeout 240
 ```
+
+Key semantics (deterministic, see `docs/contract.md` §4.3 for the full field
+contract):
+
+- **Kill verdicts are set-differenced, not exit-code based**: kill = the set
+  of *newly failing* test names relative to baseline, so pre-existing project
+  failures are never misread as kills.
+- Mutations are source-level (AST-derived) operator swaps: `AOR`, `ROR`,
+  `UOI`, boundary flips, ternary/guard-notation/logical/membership/`is`
+  variants — `kind` is an **open enum**, filter by prefix, tolerate unknown
+  values. Product generates *invalid* mutants (python syntax check) are
+  dropped before running, not scored against the suite.
+- Baseline itself untrustable / timed out → unified **abort shape**
+  (`summary.run_error: true`, no killed/survived keys — consumers must not
+  default-read them).
+- Per-mutant timeout auto-adapts to `baseline wall-clock × F` (default 2.0,
+  override with `--timeout-factor`; only widened, never tightened; visible as
+  `summary.adaptive_timeout_s`).
+- `--tests <res://glob>` scopes GUT to an affected-test directory;
+  `--dry-run` only counts mutation sites (and estimates the differential
+  retry face) without running GUT.
+- `ok = survived == 0 AND timeout == 0 AND run_errors == 0 AND suspect == 0`
+  (`suspect` = cannot prove the mutant was killed — gated same as survived).
+
+### Differential mutation core (SEE-1420, on by default)
+
+Once a v2 resume manifest exists, runs are **differential by default**
+(scope manifests per top-level func / inner class / module + header hash;
+stable ids `<file>#<scope_id>#<n>`): unchanged scopes reuse `killed`
+verdicts; `survived`/`timeout`/`timeout_pinned`/`run_error` sites are
+**always re-run** (cache is never trusted for unproven kills); a header
+(non-func top-level declaration) change re-runs the whole file. `--mutate-all`
+forces full execution. Budget applies to the **post-diff retry set** and the
+report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
+
+- `# gqt: no-mutate` filters sites (function-level when placed on/above a
+  top-level `func`, else line-level).
+- A mutant that times out in **2+ consecutive runs** degrades to its own
+  `timeout_pinned` verdict: always re-run, visible forever, **not** in the
+  ok gate and never merged into `killed`; a poisoned run (≥50% timeouts and
+  ≥5 sites) suspends streak accrual outright.
+- `--mutation <file>#<scope>#<n>` / `--lines N` re-run single sites in
+  seconds (1 baseline + N sites) — the fair spot-check channel; they bypass
+  diff reuse and the coverage prefilter.
+- `--mutation-warning N` (default 50) warns on pre-truncation site count;
+  sites > budget always disclose `total_sites/executed`.
+- `--reuse-coverage` pre-filters sites by the last `gqt coverage` run for
+  the file (own-JSON store, provenance-checked): uncovered sites are marked
+  verdict `uncovered` (explicit, not in the ok gate, never executed, do not
+  consume budget).
+- **CI migration (one-time)**: first run after upgrade re-executes
+  everything — the v1 resume store is neither read, written, nor deleted
+  (disclosed on stderr), and diff changes the red/green surface from
+  "every run is full" to "every run re-runs unproven kills".
+  `--mutation-warning` / `--timeout-factor` / `timeout_streak` never enter
+  any resume key.`
 
 Key semantics (deterministic, see `docs/contract.md` §4.3 for the full field
 contract):

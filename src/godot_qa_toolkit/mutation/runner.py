@@ -261,7 +261,7 @@ def run_mutation(    file_path: str,
         return dry_run_estimate(
             str(path), mutants, budget, scoped, total_sites,
             project_root, tests_glob, binary_kind, resume2_store,
-            mutate_all, header_hash, scope_hashes)
+            mutate_all, header_hash, scope_hashes, attention=attention)
 
     if not mutants:
         return _no_sites_result(str(path), scoped)

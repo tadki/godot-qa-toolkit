@@ -20,7 +20,8 @@ __all__ = ["dry_run_estimate", "plan_execution"]
 
 def dry_run_estimate(file_label, mutants, budget, scoped, total_sites,
                       project_root, tests_glob, binary_kind, resume2_store,
-                      mutate_all, header_hash, scope_hashes):
+                      mutate_all, header_hash, scope_hashes,
+                      attention: str | None = None):
     """SPEC-009 清点模式（零 GUT/零落盘）+ §SPEC-1420-18 差分计数预估
     （manifest 在场时按 D4 矩阵估 retry 面，只读）。"""
     est_store = resume2_store if resume2_store is not None else \
@@ -36,6 +37,8 @@ def dry_run_estimate(file_label, mutants, budget, scoped, total_sites,
     else:
         estimate = {"diff_available": False, "retry_estimate": total_sites,
                     "executed_estimate": min(total_sites, budget)}
+    if attention is not None:
+        estimate = {**estimate, "attention": attention}
     return _dry_run_result(file_label, mutants, budget, scoped,
                            total_sites=total_sites, estimate=estimate)
 

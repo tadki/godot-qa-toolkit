@@ -19,7 +19,10 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .ops import _collect_mutations
-from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP
+from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record
+from .resume2 import ResumeStoreV2
+from .diffengine import budget_on_retry, plan_diff, untouched_ranges
+from .scopemanifest import build_manifest
 from .runner import run_mutation
 
 # 进程池工厂（可注入替身做单测）
@@ -81,6 +84,7 @@ def run_mutation_files(
     timing_store=None,
     mutation_warning: int | None = None,
     timeout_factor: float | None = None,
+    mutate_all: bool = False,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -148,24 +152,30 @@ def run_mutation_files(
                              binary_kind=binary_kind,
                              timing_store=timing_store,
                              mutation_warning=mutation_warning,
-                             timeout_factor=timeout_factor)
+                             timeout_factor=timeout_factor,
+                             mutate_all=mutate_all)
             r["summary"].setdefault("jobs", 1)
             return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                     "results": [r]}
 
     prewarm_import(project_root)
-    chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
-                                    tests_glob, jobs, resume,
-                                    binary_kind=binary_kind,
-                                    mutation_warning=mutation_warning,
-                                    timeout_factor=timeout_factor)
+    chunks, settled, v2ctx = _build_chunks(files, project_root, budget,
+                                           timeout_s, tests_glob, jobs,
+                                           resume, binary_kind=binary_kind,
+                                           mutation_warning=mutation_warning,
+                                           timeout_factor=timeout_factor,
+                                           mutate_all=mutate_all)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
             chunk_results = list(pool.map(_chunk_worker, chunks))
     merged = _merge_results(chunks, chunk_results, jobs)
+    results_merged = merged.pop("results")
+    # P1 差分（SEE-1420）：父层单点注入 reused 记录与差分披露，并写
+    # manifest 索引层（worker 不写——并发竞态规避，D5 高风险通道裁决）。
+    _inject_diff_results(results_merged, v2ctx)
     # settled（异常/零变异文件）按输入顺序并入 results——任何输入文件都留痕
-    results = _order_results(files, merged.pop("results"), settled)
+    results = _order_results(files, results_merged, settled)
     envelope = {**merged, "ok": all(r["ok"] for r in results),
                 "results": results}
     # SEE-1416 §SPEC-1416-3：多文件信封顶层 summary.attention——跨文件
@@ -224,14 +234,13 @@ def _settled_no_sites(file: str, scoped: bool) -> dict:
 
 
 def _chunk_worker(payload: dict) -> dict:
-    """worker 进程入口：消费共享 baseline 与分片区间跑单文件 mutation。
+    """worker 进程入口：消费共享 baseline 与父层差分规划的 retry_ids 分片。
 
     baseline 快照缺失（冷启动失败 / 脏 baseline）时退回串行单任务
-    （serial=True，无 slice、worker 自跑 baseline）。
-    resume store（SEE-1400）由 run_mutation 内按 payload 同参自建——同
-    file+glob+budget 同 key，各 worker 只写各自 seq 的条目文件。
-    timeout_factor（§SPEC-1420-02）随 payload 穿线——自适应上限在
-    baseline 快照 elapsed 上按 worker 侧 factor 计算。
+    （serial=True，无 retry_ids、worker 自跑 baseline 并自建差分）。
+    v2 条目由 run_mutation 内增量落盘——各 worker 只写各自 retry_ids 的
+    条目文件（分片零重叠），manifest 索引层由父层收尾单点写。
+    timeout_factor（§SPEC-1420-02）随 payload 穿线。
     """
     resume = bool(payload.get("resume"))
     binary_kind = payload.get("binary_kind")
@@ -241,12 +250,13 @@ def _chunk_worker(payload: dict) -> dict:
             payload["file"], payload["project_root"], budget=payload["budget"],
             timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
             resume=resume, binary_kind=binary_kind,
-            timeout_factor=timeout_factor)
+            timeout_factor=timeout_factor,
+            mutate_all=bool(payload.get("mutate_all")))
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
         precomputed_baseline=payload["baseline"],
-        mutant_slice=(payload["start"], payload["stop"]),
+        retry_ids=payload["retry_ids"],
         resume=resume, binary_kind=binary_kind,
         timeout_factor=timeout_factor,
     )
@@ -261,7 +271,8 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
         if k in s:
             agg[k] = s[k]
     for k in ("mutants", "killed", "survived", "suspect",
-              "timeout", "run_errors", "invalid_mutants", "resumed"):
+              "timeout", "run_errors", "invalid_mutants", "resumed",
+              "timeout_pinned"):
         agg[k] += s.get(k, 0)
     agg["failures"].extend(cr.get("failures", []))
     agg["scoped"] = bool(s.get("scoped"))
@@ -291,8 +302,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
         agg = per_file.setdefault(file, {
             "file": file, "mutants": 0, "killed": 0, "survived": 0,
             "suspect": 0, "timeout": 0, "run_errors": 0,
-            "invalid_mutants": 0, "resumed": 0, "jobs": 0,
-            "ok": True, "failures": [], "scoped": None,
+            "invalid_mutants": 0, "resumed": 0, "timeout_pinned": 0,
+            "jobs": 0, "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
             "total_sites": None, "attention": None,
         })
@@ -320,6 +331,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
                 "run_errors": agg["run_errors"],
                 "invalid_mutants": agg["invalid_mutants"],
                 "kill_rate": agg["kill_rate"],
+                **({"timeout_pinned": agg["timeout_pinned"]}
+                   if agg["timeout_pinned"] else {}),
                 "budget": agg["budget"],
                 "scoped": agg["scoped"],
                 "baseline_reused": agg["baseline_reused"],
@@ -349,23 +362,29 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   jobs: int, resume: bool = False,
                   binary_kind: str | None = None,
                   mutation_warning: int | None = None,
-                  timeout_factor: float | None = None
-                  ) -> tuple[list[dict], list[dict]]:
-    """父层：per-file 收集 mutant 总数 → 分片；同样 glob 共享一份 baseline。
+                  timeout_factor: float | None = None,
+                  mutate_all: bool = False
+                  ) -> tuple[list[dict], list[dict], dict]:
+    """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
-    返回 (chunks, settled)：settled 是收集异常（error 契约）与零变异
-    （no_sites 契约）的定终态文件——SPEC-016：任何输入文件都不得从报告
-    消失（此前 except 静默丢弃 + 零 chunk 早退只报 files[0] 是报告失真）。
+    返回 (chunks, settled, v2ctx)。P1 差分规划在父层单点完成（D4/D6）：
+    plan_diff + budget_on_retry 后按 retry 位点分片，worker 只执行注入的
+    retry_ids——分片间零重叠，per-id 条目写天然无竞态。v2ctx 供合并层注入
+    reused 记录/披露并单点写 manifest（D5 高风险通道：并发下 manifest 索引
+    层只允许收尾方写）。
+    settled 是收集异常（error 契约）与零变异（no_sites 契约）的定终态文件
+    ——SPEC-016：任何输入文件都不得从报告消失。
     """
     baselines = _precompute_baselines(files, project_root, timeout_s,
                                       tests_glob)
     chunks: list[dict] = []
     settled: list[dict] = []
+    v2ctx: dict = {}
     for f in files:
         try:
             src = open(f, encoding="utf-8").read()
-            raw_total = len(_collect_mutations(src, f))
-            total = min(raw_total, budget)
+            collected = _collect_mutations(src, f)
+            raw_total = len(collected)
         except Exception as e:
             settled.append(_settled_error(f, e))
             continue
@@ -380,26 +399,55 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   f"--mutation-warning {mutation_warning} in {f} — consider "
                   f"splitting this file", file=sys.stderr)
         glob = tests_glob or _auto_scan_tests_glob(f, project_root)
-        if total <= 0:
+        # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
+        # 不得触发 baseline/prewarm。
+        if raw_total <= 0 or budget <= 0:
             settled.append(_settled_no_sites(f, bool(glob)))
             continue
+        # P1 manifest 标定 + 差分规划（父层单点）。
+        header_hash, spans, mutants, scope_hashes = build_manifest(src, f, collected)
+        store2 = ResumeStoreV2(project_root, f, glob, binary_kind=binary_kind)
+        store2.disclose_v1_superseded()
+        old_manifest = store2.load_manifest()
+        entries = store2.load_entries()
+        plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
+                         entries, mutate_all=mutate_all)
+        executed_list, untouched = budget_on_retry(plan.executed, budget)
+        if not executed_list:
+            # 差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
+            # GUT + 1 baseline 锚），报告由 run_mutation 自建。
+            r = run_mutation(f, project_root, budget=budget,
+                             timeout_s=timeout_s, tests_glob=glob,
+                             resume=False, binary_kind=binary_kind,
+                             mutation_warning=None, timeout_factor=timeout_factor,
+                             mutate_all=mutate_all)
+            r["summary"].setdefault("jobs", 1)
+            settled.append(r)
+            continue
         baseline = baselines.get(glob)
+        ids = [m.stable_id for m in executed_list]
         if baseline is None:
             # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
-            # 串行单任务（worker 自跑 baseline）；分片保证必须锚在共享快照上
+            # 串行单任务（worker 自跑 baseline 并自建差分报告——父层不注入，
+            # 防重复计数）
             chunks.append({
                 "file": f, "project_root": project_root, "budget": budget,
                 "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
                 "resume": resume, "binary_kind": binary_kind,
                 "timeout_factor": timeout_factor, "total_sites": raw_total,
-                "attention": attention,
+                "attention": attention, "mutate_all": mutate_all,
             })
             continue
-        n_chunks = min(jobs, total)
-        size = (total + n_chunks - 1) // n_chunks
+        v2ctx[f] = {
+            "plan": plan, "executed": executed_list, "untouched": untouched,
+            "header_hash": header_hash, "scope_hashes": scope_hashes,
+            "store2": store2, "src": src, "mutants": mutants,
+        }
+        n_chunks = min(jobs, len(ids))
+        size = (len(ids) + n_chunks - 1) // n_chunks
         for i in range(n_chunks):
-            start, stop = i * size, min((i + 1) * size, total)
-            if start >= stop:
+            slice_ids = ids[i * size:(i + 1) * size]
+            if not slice_ids:
                 continue
             chunks.append({
                 "file": f,
@@ -408,15 +456,14 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                 "timeout_s": timeout_s,
                 "tests_glob": glob,
                 "binary_kind": binary_kind,
-                "start": start,
-                "stop": stop,
-                "baseline": baselines.get(glob),
+                "retry_ids": slice_ids,
+                "baseline": baseline,
                 "resume": resume,
                 "timeout_factor": timeout_factor,
                 "total_sites": raw_total,
                 "attention": attention,
             })
-    return chunks, settled
+    return chunks, settled, v2ctx
 
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob):
@@ -459,3 +506,61 @@ def _run_baseline_snapshot(project_root: str, tests_glob: str | None,
     if rc != 0:
         return None
     return {"rc": rc, "tail": tail, "elapsed": elapsed}
+
+
+# _accumulate_chunk 求和键增补（D5）：timeout_pinned 独立档跨分片求和。
+_PINNED_KEY = "timeout_pinned"
+
+
+def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
+    """P1 差分收尾（父层单点）：reused 记录注入 + 披露字段 + manifest 落盘。
+
+    只处理走 retry_ids 分片的文件（v2ctx 键集）；串行 fallback / executed 空
+    的文件由 run_mutation 自建完整报告（已含 reused），不得重复注入。
+    """
+    if not v2ctx:
+        return
+    from ..timing import project_relative
+    from .ops import OPS_VERSION
+
+    for r in results:
+        f = r.get("summary", {}).get("file")
+        ctx = v2ctx.get(f)
+        if ctx is None:
+            continue
+        plan = ctx["plan"]
+        s = r["summary"]
+        reused = plan.reused
+        if reused:
+            by_id = {m.stable_id: m for m in ctx["mutants"]}
+            for sid, entry in reused.items():
+                m = by_id.get(sid)
+                if m is None:
+                    continue
+                rec = _mutant_record(m, entry["verdict"],
+                                     entry.get("reason", ""), src=ctx["src"])
+                r["failures"].append(rec)
+                if rec["verdict"] in ("killed", "survived", "timeout",
+                                      "run_error", "suspect"):
+                    s[{"killed": "killed", "survived": "survived",
+                       "timeout": "timeout", "run_error": "run_errors",
+                       "suspect": "suspect"}[rec["verdict"]]] += 1
+                s["mutants"] += 1
+            s["resumed"] = len(reused)
+        if plan.diff_active:
+            # §SPEC-1420-07（D6）：差分在场的 run 才携带差分披露——首次全量
+            # run（无 manifest）的报告形态与升级前逐键同构。
+            s["diff_skipped"] = sorted(reused)
+            s["retry_total"] = len(plan.executed)
+            s["executed"] = len(ctx["executed"])
+            s["untouched_ranges"] = untouched_ranges(ctx["untouched"])
+        total = s["mutants"]
+        s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0
+        ok = (s["survived"] == 0 and s["timeout"] == 0
+              and s["run_errors"] == 0 and s["suspect"] == 0)
+        r["ok"] = ok
+        # manifest 索引层单点写（收尾方唯一写者——并发竞态规避）
+        ctx["store2"].write_manifest(
+            ctx["header_hash"], ctx["scope_hashes"],
+            ResumeStoreV2._sha1_text(ctx["src"]),
+            project_relative(ctx["store2"].project_root, f))

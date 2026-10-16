@@ -61,44 +61,22 @@ from .reporting import (  # noqa: F401
     survivors_projection,
 )
 from .godot_gate import GlobalGodotGate
-from .resume import ResumeStore
-from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
+from .diffengine import apply_timeout_streaks, budget_on_retry, make_entry, \
+    plan_diff, streak_for, untouched_ranges
+from .resume2 import ResumeStoreV2
+from .scopemanifest import build_manifest
+from ..timing import (BUDGET_CAP_S, explicit_timing_meta, project_relative,
+                      resolve_budget, suggested_action)
 
 
-# GUT 的命令行入口必须以 res:// 形式传给 `godot -s`：Godot 对绝对路径的 -s
-# 一律报 "Attempt to open script ... File not found"（Revy QA FAIL 实证），
-# 文件真实存在也一样——res:// 是唯一可靠形式。
-GUT_SCRIPT_RES_PATH = "res://addons/gut/gut_cmdln.gd"
-
-# godot 进程级失败的特征（与"测试跑过但失败"截然不同——绝不能计入 kill）。
-_GODOT_LAUNCH_ERROR_MARKERS = (
-    "attempt to open script",
-    "file not found",
-    "failed loading resource",
-    "error: failed to load script",
+# GUT 执行域判定原语在 gutrun.py（SEE-1420 <800 行纪律拆分）；re-export
+# 保持既有 import / monkeypatch 名称空间稳定。
+from .gutrun import (  # noqa: F401,E402
+    GUT_SCRIPT_RES_PATH,
+    _GUT_RUN_EVIDENCE,
+    _looks_like_godot_launch_failure,
+    _parse_failing_tests,
 )
-
-# GUT 测试流证据：运行流 `* test_x` 行 / Run Summary 段 `- test_x` 行 / 逐测试
-# 结果标记 [passed]/[Failed]/[Pending]/[Risky]。与 _parse_failing_tests 同族
-# token——kill 判定能看到的流，本守卫必须承认"测试确实跑了"。
-_GUT_RUN_EVIDENCE = re.compile(
-    r"(?mi)^[*-]\s+test_\S+|\[(?:passed|failed|pending|risky)\]")
-
-
-def _looks_like_godot_launch_failure(output: str) -> bool:
-    """true 仅当：启动失败特征在场 ∧ 输出中无任何 GUT 测试流证据。
-
-    SEE-1400 §SPEC-012（Revy 实测 CRITICAL）：整段输出子串匹配会被项目
-    既有资源加载告警污染——KOL 的 item_container_visual.tscn 在无头环境
-    恒报 `Failed loading resource`（干净 baseline rc=0 也在报），变异轮
-    rc=1 且失败差集真实存在时被错杀成 run_error（item.gd 默认子集口径
-    15/15 全灭）。判定不得对 stdout/stderr 截断窗口形态敏感：测试流证据
-    在场时，告警字样一律按背景噪声处理，继续走 kill/survive 分类。
-    """
-    low = output.lower()
-    if not any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS):
-        return False
-    return _GUT_RUN_EVIDENCE.search(output) is None
 
 
 def _godot_project_path(project_root: str) -> str:
@@ -177,33 +155,6 @@ _ACTIVE_ENV: dict | None = None
 _ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
 
 
-def _parse_failing_tests(gut_output: str) -> set[str]:
-    """从 GUT 输出解析失败测试名集合。
-
-    双格式兼容（硬化 实机实证）：
-    - 运行流：'* test_xxx' 开启一个测试，其后 [Failed] 行归属它；
-    - Run Summary 段（GUT 4.6 win64 实测）：'- test_xxx' 后跟 [Failed] 行，
-      但输出被 stdout[-2000:] 截断后往往只剩该段——单靠运行流正则会漏掉
-      全部失败（save_manager 实机 66/66 假 survived 的根因）。
-    另辅以 junit XML（res://tests/reports/junit_report_*.xml）兜底——格式
-    变化最稳的机器判据。
-    用测试名集合做 kill 判定——exit code 只能说明"有没有失败"，无法区分
-    pre-existing 失败与 mutant 引入的新失败（SEE-1268 Revy QA 实证）。
-    """
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
-    failing: set[str] = set()
-    current = None
-    for raw in gut_output.splitlines():
-        line = ansi.sub("", raw).replace("\r", "")
-        m = re.match(r"^[*-]\s+(test_\S+)", line)
-        if m:
-            current = m.group(1)
-            continue
-        if "[Failed]" in line and current:
-            failing.add(current)
-    return failing
-
-
 # 自适应 timeout 倍数：per-mutant 上限 = baseline 实测耗时 × 该倍数。
 _TIMEOUT_SCALE = 2.0
 
@@ -230,10 +181,12 @@ def run_mutation(
     mutant_slice: tuple[int, int] | None = None,
     timing_store=None,
     resume: bool = False,
-    resume_store=None,
     binary_kind: str | None = None,
     mutation_warning: int | None = None,
     timeout_factor: float | None = None,
+    mutate_all: bool = False,
+    retry_ids: list[str] | None = None,
+    resume2_store=None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -247,9 +200,14 @@ def run_mutation(
     mutant_slice（SEE-1321 SPEC-003 修订）：per-mutant 并发 worker 的分片，
     只跑 [start, stop) 的 mutants；必须携带共享 baseline（worker 各自跑
     baseline 会 N 倍放大启动税且并发期耗时污染 timeout 锚）。
-    resume（SEE-1400 §SPEC-002）：跳过 resume store 中已完成的变异只跑剩余；
-    resume_store 显式注入时优先（测试替身），否则按生效 tests_glob 自建。
-    常规 run 同样落盘（中断后即可续跑），--resume 只打开跳过语义。
+    resume（SEE-1400 §SPEC-002）：v1 遗留开关。SEE-1420 起差分**默认开启**
+    （manifest 在场即差分，定案 D4）；--mutate-all 显式退路；本 flag 仅保留
+    summary.resumed 键在场性（无复用时为 0），语义已被差分吸收。
+    mutate_all（§SPEC-1420-07）：--mutate-all 显式全量——忽略旧 manifest，
+    全位点执行（仍落盘 v2）。
+    retry_ids（并发 worker 注入面）：父层（executor）已做差分规划与预算
+    截断，worker 只执行这些 stable_id；注入时 worker 不再自建 plan、
+    不写 manifest 索引层（父层单点写，规避并发竞态）。
     mutation_warning（§SPEC-1420-01）：按截断前全量位点数计数的告警阈值
     （默认 50）——超阈值 stderr 告警 + summary.attention 建议拆分。
     timeout_factor（§SPEC-1420-02）：覆盖 _TIMEOUT_SCALE 的自适应倍数
@@ -261,9 +219,10 @@ def run_mutation(
     if not path.is_file():
         raise FileNotFoundError(f"mutation target not found: {file_path}")
 
-    if mutant_slice is not None and precomputed_baseline is None:
+    if ((mutant_slice is not None or retry_ids is not None)
+            and precomputed_baseline is None):
         raise ValueError(
-            "mutant_slice workers require a precomputed baseline snapshot — "
+            "slice/retry_ids workers require a precomputed baseline snapshot — "
             "each worker running its own baseline would multiply the startup "
             f"tax N-fold and pollute the adaptive timeout anchor: {mutant_slice}")
 
@@ -275,12 +234,14 @@ def run_mutation(
     backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
 
     try:
-        mutants = _collect_mutations(original_src, str(path))
+        raw_mutants = _collect_mutations(original_src, str(path))
     except Exception as e:
         return _setup_error_result(str(path), e)
 
-    # §SPEC-1420-01：告警与 N/M 披露都按【截断前】全量位点数计数——
-    # budget 截断不掩盖规模问题（截断恰恰是最需要被告知的形态）。
+    # P1 manifest 标定（定案 D1/D2/D3 + L6）：scope 提取 → no-mutate 过滤
+    # → stable id。total_sites 按过滤后位点数计（无位点 scope 不进 manifest）。
+    header_hash, spans, mutants, scope_hashes = build_manifest(
+        original_src, str(path), raw_mutants)
     total_sites = len(mutants)
     attention: str | None = None
     if mutation_warning is not None and total_sites > mutation_warning:
@@ -299,24 +260,71 @@ def run_mutation(
     if not mutants:
         return _no_sites_result(str(path), scoped)
 
-    mutants = mutants[:budget]
-    # budget 截断后可能为空（budget=0 / 极小预算）——零 mutant 不得触发
-    # baseline GUT（硬化 反例实证：白付一轮 108s baseline）。
-    if not mutants:
-        return _no_sites_result(str(path), scoped)
-    # §SPEC-1420-01：位点数 > budget 即强制披露 N/M（截断面披露）。
-    disclosures: dict | None = None
-    if total_sites > len(mutants):
-        disclosures = {"total_sites": total_sites, "executed": len(mutants)}
+    # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行 retry_ids。
+    store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
+        project_root, str(path), tests_glob, binary_kind=binary_kind)
+    prior_entries: dict = {}
+    reused: dict = {}
+    untouched: list = []
+    disclosures: dict = {}
     if attention is not None:
-        disclosures = {**(disclosures or {}), "attention": attention}
-    results, invalid_count = _record_invalid_mutants(original_src, mutants,
-                                                     mutant_slice)
-    # SEE-1400 §SPEC-001：每个 verdict 增量落盘——常规 run 也写（中断即可
-    # 续跑），--resume 才打开跳过语义。dry-run 已在上方短路（零 IO）。
-    if resume_store is None:
-        resume_store = ResumeStore(project_root, str(path), tests_glob,
-                                   budget, binary_kind=binary_kind)
+        disclosures["attention"] = attention
+    if retry_ids is not None:
+        by_id = {m.stable_id: m for m in mutants}
+        missing = [i for i in retry_ids if i not in by_id]
+        if missing:
+            raise ValueError(
+                f"retry_ids not found in current scan (source drift?): "
+                f"{missing[:5]}")
+        executed_list = [by_id[i] for i in retry_ids]
+        disclosures["executed"] = len(executed_list)
+    else:
+        store2.disclose_v1_superseded()
+        old_manifest = store2.load_manifest()
+        prior_entries = store2.load_entries()
+        plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
+                         prior_entries, mutate_all=mutate_all)
+        executed_list, untouched = budget_on_retry(plan.executed, budget)
+        reused = plan.reused
+        if plan.diff_active or mutate_all:
+            disclosures.update({
+                "retry_total": len(plan.executed),
+                "executed": len(executed_list),
+                "untouched_ranges": untouched_ranges(untouched),
+                "diff_skipped": sorted(reused),
+            })
+        if mutant_slice is not None:
+            executed_list = list(executed_list[slice(*mutant_slice)])
+    # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
+    # 反例实证：白付一轮 108s baseline）。
+    if not executed_list and not reused:
+        return _no_sites_result(str(path), scoped)
+    if total_sites > budget:
+        disclosures["total_sites"] = total_sites
+        disclosures.setdefault("executed", len(executed_list))
+
+    # 复用记录重建（全签名已验）——串行路径在此落报告面；worker 路径的
+    # reused 为空（父层合并后单点注入，避免分片重复计数）。
+    results: list[dict] = []
+    by_id_all = {m.stable_id: m for m in mutants}
+    for sid, entry in reused.items():
+        m = by_id_all.get(sid)
+        if m is not None:
+            results.append(_mutant_record(m, entry["verdict"],
+                                          entry.get("reason", ""),
+                                          src=original_src))
+    # _record_invalid_mutants 返回新列表——与 reused 记录拼接而非覆盖。
+    invalid_results, invalid_count = _record_invalid_mutants(
+        original_src, executed_list, None)
+    results = results + invalid_results
+    executed_ids = {m.stable_id for m in executed_list}
+    # P1：manifest 索引层先行写入（中断安全——索引在场 + 条目增量，下轮
+    # 差分对已执行子集正确复用，未落盘位点按 new_site 重跑，保守正确）。
+    # worker 注入路径不写（父层合并后单点写，规避并发竞态）。
+    if retry_ids is None:
+        store2.write_manifest(header_hash, scope_hashes,
+                              ResumeStoreV2._sha1_text(original_src),
+                              project_relative(project_root, str(path)))
 
     effective_timeout, timing_meta = _negotiate_budget(
         timing_store, timeout_s, precomputed_baseline)
@@ -325,21 +333,35 @@ def run_mutation(
     # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。
     with _interrupt_guard(path, backup):
         outcome = _run_mutant_loop_with_aborts(
-            path, project_root, original_src, backup, mutants, tests_glob,
-            effective_timeout, results, precomputed_baseline, mutant_slice,
-            resume_store, resume, timeout_factor)
+            path, project_root, original_src, backup, executed_list,
+            tests_glob, effective_timeout, precomputed_baseline,
+            store2, prior_entries, scope_hashes, timeout_factor)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
-    counts, baseline_reused, baseline_elapsed, resumed_count = outcome
+    raw_pairs, baseline_reused, baseline_elapsed = outcome
+    resumed_count = len(reused)
+
+    # D5 落定（权威口径）：streak/pinned 转化 + 毒 run 修正——循环内乐观
+    # 落盘已保证中断安全，此处毒窗口时改写条目为未递增 streak。
+    streaks = apply_timeout_streaks(raw_pairs, prior_entries, scope_hashes,
+                                    time.time())
+    results.extend(streaks.records)
+    if streaks.suspended:
+        for e in streaks.entries:
+            store2.record_entry(e)
+        print("mutation: timeout streak suspended: suspected infra run",
+              file=sys.stderr)
 
     _record_timing_sample(timing_store, baseline_reused, baseline_elapsed,
                           timing_meta)
 
-    return _mutation_report(str(path), *counts, invalid_count, budget,
-                            results, scoped, baseline_reused, timing_meta,
-                            resumed_count if resume else None,
-                            disclosures=disclosures)
+    return _mutation_report(str(path), *_tally(results), invalid_count,
+                            budget, results, scoped, baseline_reused,
+                            timing_meta,
+                            resumed_count if (resumed_count or resume) else None,
+                            disclosures=disclosures or None,
+                            pinned_count=len(streaks.pinned_ids))
 
 
 def _negotiate_budget(timing_store, timeout_s: int,
@@ -457,19 +479,30 @@ def _res_path_of(file_path: str, project_root: str) -> str:
     return "res://" + rel
 
 
+def _tally(results: list[dict]) -> tuple[int, int, int, int, int]:
+    """results（含复用/invalid/streak 终态记录）→ 五档计数。"""
+    tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0,
+             "suspect": 0}
+    for r in results:
+        if r["verdict"] in tally:
+            tally[r["verdict"]] += 1
+    return (tally["killed"], tally["survived"], tally["timeout"],
+            tally["run_error"], tally["suspect"])
+
+
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
-                                 mutants, tests_glob, timeout_s, results,
+                                 executed_list, tests_glob, timeout_s,
                                  precomputed_baseline=None,
-                                 mutant_slice=None,
-                                 resume_store=None, resume=False,
+                                 store2=None, prior_entries=None,
+                                 scopes=None,
                                  timeout_factor: float | None = None):
-    """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回计数。"""
+    """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
             path, project_root, original_src, backup,
-            _valid_mutants(original_src, mutants), tests_glob, timeout_s,
-            results, precomputed_baseline, mutant_slice,
-            resume_store, resume, timeout_factor,
+            _valid_mutants(original_src, executed_list), tests_glob, timeout_s,
+            precomputed_baseline, store2, prior_entries, scopes,
+            timeout_factor,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -494,7 +527,8 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      baseline_reused: bool = False,
                      timing_meta: dict | None = None,
                      resumed: int | None = None,
-                     disclosures: dict | None = None) -> dict:
+                     disclosures: dict | None = None,
+                     pinned_count: int = 0) -> dict:
     total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
@@ -520,7 +554,12 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     # 常规 run 的 summary 与升级前逐字节同构（既有消费方零感知）。
     if resumed is not None:
         summary["resumed"] = resumed
-    # §SPEC-1420-01：截断面 N/M 强制披露（total_sites/executed）。
+    # §SPEC-1420-08（D5）：timeout_pinned 独立档——永不并入 killed、不计入
+    # ok 门禁失败档；报告持续可见并披露降级来源（failures 明细 reason）。
+    if pinned_count:
+        summary["timeout_pinned"] = pinned_count
+    # §SPEC-1420-01/07：截断面 N/M 披露 + 差分披露（retry_total/executed/
+    # untouched_ranges/diff_skipped）。
     if disclosures:
         summary.update(disclosures)
     # SEE-1356 L1 (§SPEC-L1-03)：报告字段 timing_source/samples_n/baseline_p90
@@ -557,23 +596,23 @@ def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
-    results: list[dict], precomputed_baseline: dict | None = None,
-    mutant_slice: tuple[int, int] | None = None,
-    resume_store=None, resume: bool = False,
+    precomputed_baseline: dict | None = None,
+    store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
     timeout_factor: float | None = None,
-) -> tuple[tuple[int, int, int, int, int], bool, float, int]:
-    """逐 mutant 跑 GUT 并分类判定；返回 (counts, baseline_reused, baseline_elapsed, resumed)。
+) -> tuple[list, bool, float]:
+    """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused, baseline_elapsed)。
 
-    mutant_slice（SPEC-003 修订）：per-mutant 并发 worker 分片，只跑
-    [start, stop) 区间（下界含、上界不含）；分片工作线程复用共享 baseline，
-    不自跑 baseline。baseline_elapsed（SEE-1356 L1）供 timing store 采样
-    ——baseline 永远实测，快照 elapsed 只喂预算锚。
-    resumed（SEE-1400）：从 resume store 复用的已完成 verdict 数。
+    mutants = 已过差分/预算的【执行面】（串行：budget_on_retry 产物；worker：
+    父层注入的 retry_ids 子集）。verdict 记录不在此处进 results——D5 streak
+    是窗口级判定，由调用方 apply_timeout_streaks 落定后统一扩展。
+    条目增量落盘（中断安全）：每 verdict 立即以乐观 streak 写 v2 条目；
+    毒 run 守卫在窗口收尾修正（apply_timeout_streaks + 调用方改写）。
+    baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。
     timeout_factor（§SPEC-1420-02）：None = 模块默认 _TIMEOUT_SCALE。
     """
     global _adaptive_timeout
-    killed = survived = timeout_count = run_error_count = suspect_count = 0
-    resumed_count = 0
+    raw_pairs: list[tuple] = []
+    prior_entries = prior_entries or {}
 
     with tempfile.TemporaryDirectory() as workdir:
         backup_path = os.path.join(workdir, "original.gd")
@@ -581,9 +620,6 @@ def _run_mutant_loop(
 
         # Baseline：原文件的 GUT 结果（失败测试名集合）。pre-existing 失败
         # 不属于任何 mutant——kill 判定只看相对 baseline 的【新增】失败。
-        # SEE-1321 SPEC-008：同次运行内可复用上游单进程冷启动产出的 baseline
-        # 快照（同一份代码状态）；无快照时亲自跑。快照 elapsed 也是自适应
-        # timeout 锚（SPEC-005：并发前锚定，worker 不采并发期耗时）。
         if precomputed_baseline is not None:
             baseline_rc = int(precomputed_baseline["rc"])
             baseline_tail = str(precomputed_baseline["tail"])
@@ -593,8 +629,6 @@ def _run_mutant_loop(
             # Revy QA retest 实证：baseline 必然花最久（实测项目 ~108s），默认
             # --timeout 60 下 TimeoutExpired 漏网成原始 traceback（无统一 JSON）——
             # 与 per-mutant 循环的 timeout 同款处理：归 run_error JSON 契约。
-            # SEE-1356 L1：这里的 timeout 已是协商后预算（缓存锚只抬下限）；
-            # 实测耗时照常产出并回写 timing store（调用方 record）。
             baseline_rc, baseline_tail, baseline_elapsed = _run_baseline(
                 project_root, tests_glob, timeout_s)
             baseline_reused = False
@@ -611,49 +645,27 @@ def _run_mutant_loop(
 
         host = seed_host_script(str(Path(project_root)))
         try:
-            start, stop = (mutant_slice if mutant_slice is not None
-                           else (0, len(mutants)))
-            # SEE-1400 §SPEC-002：指纹已由 store key 保证；条目再与当前
-            # mutant 逐一核对身份后复用。复用条目按 _mutant_record 字段面
-            # 重建再 append——store 信封字段（schema/key/seq/recorded_at）
-            # 绝不能进报告，否则 failures 明细与全量跑 7 字段形态不等
-            #（Revy QA 实机 FAIL 实证，§SPEC-002 同构按明细全签名口径）。
-            completed: dict[int, dict] = {}
-            if resume_store is not None and resume:
-                completed = resume_store.load_completed(mutants, start, stop)
-                resumed_count = len(completed)
             for seq, m in enumerate(mutants):
-                if not start <= seq < stop:
-                    continue
-                if seq in completed:
-                    c = completed[seq]
-                    results.append(_mutant_record(
-                        m, c["verdict"], c["reason"], src=original_src))
-                    continue
-                verdict = _run_single_mutant(m, path, project_root, original_src,
-                                             backup, tests_glob, seq,
-                                             baseline_failures, baseline_dirty)
-                results.append(verdict)
-                # SEE-1405 发现三毒条目防护：启动失败类 run_error（注入 env
-                # 缺失 / godot 未拉起）说明引擎没执行该 mutant——verdict 对
-                # mutant 本身零信息量，落盘会让后续 --resume 误复用。
-                if resume_store is not None and not _is_launch_failure_record(verdict):
-                    resume_store.record(seq, verdict)
+                verdict = _run_single_mutant(m, path, project_root,
+                                             original_src, backup, tests_glob,
+                                             seq, baseline_failures,
+                                             baseline_dirty)
+                raw_pairs.append((m, verdict))
+                # 中断安全增量落盘：乐观 streak（毒窗口收尾修正）。
+                # SEE-1405 发现三毒条目防护由 resume2.record_entry 承接
+                # （启动失败类 run_error 拒收——verdict 零信息量）。
+                if store2 is not None:
+                    prior = prior_entries.get(m.stable_id)
+                    streak, v2_verdict = streak_for(prior,
+                                                    verdict["verdict"])
+                    store2.record_entry(make_entry(m, verdict, v2_verdict,
+                                                   streak, scopes or {},
+                                                   time.time()))
         finally:
             host.unlink(missing_ok=True)
             forget_temp(host)
 
-    # SPEC-017：runtime 层 invalid_mutant（impl 编译被引擎解析器拒绝）计入
-    # 同一 invalid 档——与静态预检同口径（failures 列表 + invalid 计数），不
-    # 静默消失。
-    tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0,
-             "suspect": 0}
-    for r in results:
-        if r["verdict"] in tally:
-            tally[r["verdict"]] += 1
-    return ((tally["killed"], tally["survived"], tally["timeout"],
-             tally["run_error"], tally["suspect"]), baseline_reused,
-            baseline_elapsed, resumed_count)
+    return raw_pairs, baseline_reused, baseline_elapsed
 
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,

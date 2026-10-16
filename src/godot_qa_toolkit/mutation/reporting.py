@@ -14,9 +14,9 @@ if TYPE_CHECKING:
 from .ops import _split_invalid_mutants
 
 # summary.survivors 精简投影键（§SPEC-1416-1）——切片 .summary 也自足：
-# 不带 operator/line_text（failures 明细里已有全量）。
+# 不带 operator/line_text（failures 明细里已有全量）。§SPEC-1420-04 增 id。
 SURVIVOR_DETAIL_KEYS = ("file", "line", "column", "kind", "original",
-                        "mutated", "verdict", "reason")
+                        "mutated", "verdict", "reason", "id")
 SURVIVORS_CAP = 5
 
 
@@ -99,13 +99,14 @@ def _mutant_record(m: "Mutant", verdict: str, reason: str,
 
     SEE-1416：扩列 column/operator/line_text——Mutant 的定位面全量透出，
     agent 不必打开源文件对照。所有 verdict（含 killed / 静态预检 invalid）
-    同构升级；resume 复用重建走同一函数，保证新旧记录形态逐字段一致
-    （指纹含源码 sha1，line_text 与首次落盘必然一致）。
+    同构升级；resume 复用重建走同一函数，保证新旧记录形态逐字段一致。
+    §SPEC-1420-04：增 id 列（D3 寻址提示；未标定 scope 的 mutant 为空串）。
     """
     record = {"file": m.file, "line": m.line, "column": m.column,
               "kind": m.kind, "operator": m.operator,
               "original": m.original, "mutated": m.mutated,
-              "verdict": verdict, "reason": reason}
+              "verdict": verdict, "reason": reason,
+              "id": getattr(m, "stable_id", "") or ""}
     if src is None:
         return record
     return {**record, "line_text": line_text_of(src, m.line)}

@@ -548,7 +548,8 @@ class TestSurvivorSummarySEE1416:
         assert len(s["survivors"]) == s["survived"] == 2
         for item in s["survivors"]:
             assert set(item) == {"file", "line", "column", "kind",
-                                 "original", "mutated", "verdict", "reason"}
+                                 "original", "mutated", "verdict", "reason",
+                                 "id"}
             assert item["verdict"] == "survived"
             assert item["file"].endswith("calc.gd")
 

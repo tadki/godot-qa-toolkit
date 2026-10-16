@@ -172,6 +172,7 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 binary_kind=binary_kind,
                 mutation_warning=args.mutation_warning,
                 timeout_factor=args.timeout_factor,
+                mutate_all=args.mutate_all,
             )
             result["summary"].setdefault("jobs", 1)
         else:
@@ -190,7 +191,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
                 tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
                 binary_kind=binary_kind, timing_store=timing_store,
                 mutation_warning=args.mutation_warning,
-                timeout_factor=args.timeout_factor)
+                timeout_factor=args.timeout_factor,
+                mutate_all=args.mutate_all)
             if len(files) == 1 and args.jobs is None:
                 # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
                 envelope = result
@@ -276,6 +278,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="adaptive per-mutant timeout = max(timeout, baseline*F+1); "
                         "default 2.0 (overrides the built-in scale only, never "
                         "tightens; SEE-1420)")
+    m.add_argument("--mutate-all", action="store_true",
+                   help="disable differential skipping for this run (SEE-1420): "
+                        "diff is ON by default when a v2 resume manifest exists "
+                        "(unchanged killed sites are reused, survived/timeout "
+                        "always re-run); this flag forces full execution")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")

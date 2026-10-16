@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ from godot_qa_toolkit.mutation.resume import (
     ResumeStore,
     resume_key,
 )
+from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 from godot_qa_toolkit.mutation.testscan import derive_tests_glob
 
 # 6 个变异点（ROR < 3 枚 + AOR + 3 枚）——budget=4 必然截断，seq 空间稳定。
@@ -53,7 +55,9 @@ def _fake_gut(calls, kill_every=2):
         if calls["n"] == 1:
             return (0, "baseline ok")
         if calls["n"] % kill_every == 0:
-            return (1, "test_x [Failed]")
+            # 运行流形态：`* test_x` 开行 + 次行 [Failed]（解析器开行命中后
+            # continue，同行 [Failed] 不被识别——真实 GUT 流即两行形态）。
+            return (1, "* test_x\n\t\ttest_x [Failed]")
         return (0, "all passed")
 
     return fake
@@ -244,6 +248,12 @@ class TestStoreDegradation:
 
 
 class TestRunMutationResume:
+    """SEE-1420 v2 差分语义下的续跑集成面（v1 类级行为见上方 Test* 类）。
+
+    v2 关键语义：差分默认开启（manifest 在场即差分）；killed/suspect/
+    invalid_mutant 复用，survived/timeout/run_error 永远重跑（D4）。
+    """
+
     GLOB = "res://tests/"  # 显式 glob——与 run 内自建 store 的 key 成分对齐
 
     def test_plain_run_persists_every_verdict(self, tmp_path, monkeypatch):
@@ -254,8 +264,8 @@ class TestRunMutationResume:
                                  tests_glob=self.GLOB)
         assert r["ok"] is False  # 有 survived
         assert "resumed" not in r["summary"]  # 常规 run 不带 resume 字段
-        store = ResumeStore(str(proj), str(target), self.GLOB, 3)
-        assert len(_records_with_verdicts(store)) == 3
+        store = ResumeStoreV2(str(proj), str(target), self.GLOB)
+        assert len(store.load_entries()) == 3
 
     def test_interrupt_keeps_completed_verdicts(self, tmp_path, monkeypatch):
         proj, target = _write_project(tmp_path)
@@ -271,41 +281,39 @@ class TestRunMutationResume:
         with pytest.raises(KeyboardInterrupt):
             mrunner.run_mutation(str(target), str(proj), budget=4,
                                  tests_glob=self.GLOB)
-        store = ResumeStore(str(proj), str(target), self.GLOB, 4)
-        assert len(_records_with_verdicts(store)) == 2  # 已完成的 2 个保留可查
+        store = ResumeStoreV2(str(proj), str(target), self.GLOB)
+        # 中断安全：条目逐 verdict 增量落盘（乐观 streak），已完成的 2 个保留可查
+        assert len(store.load_entries()) == 2
 
-    def test_resume_skips_and_merges_isomorphic_report(
+    def test_diff_reuses_killed_and_reruns_survived_isomorphically(
             self, tmp_path, monkeypatch):
+        """D4 矩阵端到端：首跑（killed/survived 混合）落盘 → 二跑零改动：
+        killed 复用跳过、survived 永远重跑——最终报告与全量跑逐键同构。
+
+        二跑 fake 全 survived：与首跑中 survived 位点（call 3/5）的判定一致，
+        使重跑子集 verdict 与全量跑可逐键对照（call 计数 fake 的确定性口径）。"""
         proj, target = _write_project(tmp_path)
-        # 全量跑的参照 JSON（同 fake 确定性）
         calls_full = {"n": 0}
         monkeypatch.setattr(mrunner, "_run_gut_on_project",
-                            _fake_gut(calls_full))
-        full = mrunner.run_mutation(str(target), str(proj), budget=4,
+                            _fake_gut(calls_full, kill_every=2))
+        full = mrunner.run_mutation(str(target), str(proj), budget=10,
                                     tests_glob=self.GLOB)
-        # 清掉刚才 plain run 的落盘，重造"中断 2 个后剩 2 个"的局面
-        store = ResumeStore(str(proj), str(target), self.GLOB, 4)
-        all_verdicts = _records_with_verdicts(store)
-        for p in store.store_dir.glob("*.json"):
-            p.unlink()
-        kept = {}
-        for seq, v in all_verdicts.items():
-            kept[seq] = v
-            if len(kept) == 2:
-                break
-        for seq, v in kept.items():
-            mutants = _collect_mutations(TARGET_SRC, "calc.gd")
-            store.record(seq, {
-                "file": "calc.gd", "line": mutants[seq].line,
-                "kind": mutants[seq].kind, "original": mutants[seq].original,
-                "mutated": mutants[seq].mutated, "verdict": v, "reason": "r"})
-        # 续跑：同 fake 确定性 → 剩余 mutant 的 verdict 与全量跑一致
+        assert full["summary"]["killed"] == 3
+        assert full["summary"]["survived"] == 3
         calls_res = {"n": 0}
-        monkeypatch.setattr(mrunner, "_run_gut_on_project",
-                            _fake_gut(calls_res))
-        resumed = mrunner.run_mutation(str(target), str(proj), budget=4,
-                                       tests_glob=self.GLOB, resume=True)
-        assert resumed["summary"]["resumed"] == 2
+
+        def all_pass(root, timeout_s=60, tests_glob=None):
+            calls_res["n"] += 1
+            return (0, "all passed")
+
+        monkeypatch.setattr(mrunner, "_run_gut_on_project", all_pass)
+        resumed = mrunner.run_mutation(str(target), str(proj), budget=10,
+                                       tests_glob=self.GLOB)
+        assert resumed["summary"]["resumed"] == 3  # killed 复用
+        assert resumed["summary"]["diff_skipped"] and \
+            len(resumed["summary"]["diff_skipped"]) == 3
+        assert resumed["summary"]["retry_total"] == 3
+        assert resumed["summary"]["executed"] == 3
         for k in ("mutants", "killed", "survived", "timeout", "run_errors",
                   "invalid_mutants", "kill_rate"):
             assert resumed["summary"][k] == full["summary"][k], k
@@ -313,9 +321,9 @@ class TestRunMutationResume:
         fail_key = lambda fs: sorted((f["kind"], f["original"], f["mutated"])
                                      for f in fs)  # noqa: E731
         assert fail_key(resumed["failures"]) == fail_key(full["failures"])
-        # 全量跑 GUT 轮次 = baseline+4；续跑只补剩余
-        assert calls_full["n"] == 5
-        assert calls_res["n"] == 3
+        # 全量跑 GUT 轮次 = baseline+6；差分跑 = baseline + survived 重跑 3
+        assert calls_full["n"] == 7
+        assert calls_res["n"] == 4
 
     def test_resume_without_store_equals_plain_run(self, tmp_path, monkeypatch):
         proj, target = _write_project(tmp_path)
@@ -327,56 +335,65 @@ class TestRunMutationResume:
         assert r["summary"]["resumed"] == 0
         assert calls["n"] == 4  # baseline + 3，无跳过
 
-    def test_resume_failures_signature_isomorphic_to_full_run(
+    def test_reused_failure_records_are_fully_isomorphic(
             self, tmp_path, monkeypatch):
-        """Revy QA 回踢（SEE-1400 缺陷 #1）防回归判据：合并报告 failures
-        明细与全量跑**逐字段全签名**相等——10 字段（file/line/column/kind/
-        operator/original/mutated/verdict/reason/line_text）逐一相等，store
-        信封字段（schema/key/seq/recorded_at）不得出现在报告里。SEE-1416
-        扩列：column/operator/line_text 同构升级（resume 复用重建与新跑
-        记录形态一致）。"""
+        """Revy QA 回踢（SEE-1400 缺陷 #1）防回归判据的 v2 版：复用记录按
+        _mutant_record 字段面重建——store 信封字段（schema/key/recorded_at/
+        timeout_streak）不得泄漏进报告，复用与首跑记录逐字段一致。"""
         RECORD_KEYS = {"file", "line", "column", "kind", "operator",
                        "original", "mutated", "verdict", "reason",
-                       "line_text"}
+                       "line_text", "id"}
         proj, target = _write_project(tmp_path)
         calls_full = {"n": 0}
         monkeypatch.setattr(mrunner, "_run_gut_on_project",
-                            _fake_gut(calls_full))
-        full = mrunner.run_mutation(str(target), str(proj), budget=4,
+                            _fake_gut(calls_full, kill_every=1))
+        full = mrunner.run_mutation(str(target), str(proj), budget=10,
                                     tests_glob=self.GLOB)
-        # 造"全部 4 个已完成"的 store，让续跑 100% 走 skip 分支——最严形态
-        store = ResumeStore(str(proj), str(target), self.GLOB, 4)
-        assert len(_records_with_verdicts(store)) == 4
+        assert full["summary"]["killed"] == 6
         calls_res = {"n": 0}
         monkeypatch.setattr(mrunner, "_run_gut_on_project",
-                            _fake_gut(calls_res))
-        resumed = mrunner.run_mutation(str(target), str(proj), budget=4,
-                                       tests_glob=self.GLOB, resume=True)
-        assert resumed["summary"]["resumed"] == 4
+                            _fake_gut(calls_res, kill_every=1))
+        resumed = mrunner.run_mutation(str(target), str(proj), budget=10,
+                                       tests_glob=self.GLOB)
+        assert resumed["summary"]["resumed"] == 6
         assert calls_res["n"] == 1  # 只跑 baseline
-        f_full = sorted(full["failures"], key=lambda f: f["kind"])
-        f_res = sorted(resumed["failures"], key=lambda f: f["kind"])
-        assert len(f_full) == len(f_res) > 0  # 有可对照的非 killed 明细
-        for a, b in zip(f_full, f_res):
-            assert set(b) == RECORD_KEYS, f"store envelope leaked: {sorted(b)}"
-            for k in RECORD_KEYS:
-                assert a[k] == b[k], (k, a[k], b[k])
+        # 全 killed → failures 空；同构面在 killed 计数与 ok 上钉死
+        assert resumed["summary"]["killed"] == full["summary"]["killed"] == 6
+        assert resumed["ok"] is True and full["ok"] is True
+        assert resumed["failures"] == full["failures"] == []
+        # 复用重建的记录字段面：从 store 反查一条 killed 条目重建应带全字段
+        store = ResumeStoreV2(str(proj), str(target), self.GLOB)
+        entry = next(iter(store.load_entries().values()))
+        rebuilt = mrunner._mutant_record(
+            SimpleNamespace(file="calc.gd", line=entry["line"],
+                            column=entry["column"], kind=entry["kind"],
+                            operator=entry.get("operator", ""),
+                            original=entry["original"],
+                            mutated=entry["mutated"]),
+            entry["verdict"], entry["reason"], src=TARGET_SRC)
+        assert set(rebuilt) == RECORD_KEYS
 
-    def test_resume_after_source_change_reruns_all(self, tmp_path,
-                                                   monkeypatch):
+    def test_resume_after_source_change_reruns_changed_scope_only(
+            self, tmp_path, monkeypatch):
+        """v2 差分核心语义（替代 v1 的全量重跑断言）：源码变更 → scope hash
+        判定。尾部注释不改任何 scope → 零重跑（killed 全复用）；真实改动
+        func 体 → 仅该 scope 重跑。"""
         proj, target = _write_project(tmp_path)
         calls = {"n": 0}
-        monkeypatch.setattr(mrunner, "_run_gut_on_project", _fake_gut(calls))
-        mrunner.run_mutation(str(target), str(proj), budget=3,
+        monkeypatch.setattr(mrunner, "_run_gut_on_project",
+                            _fake_gut(calls, kill_every=1))
+        mrunner.run_mutation(str(target), str(proj), budget=10,
                              tests_glob=self.GLOB)
-        # 指纹篡改：源码变化 → 换 key → 旧条目全部作废重跑
+        # 尾部注释：全部 scope hash 不变 → killed 全复用，零 mutant 执行
         target.write_text(TARGET_SRC + "\n# touched\n")
         calls2 = {"n": 0}
-        monkeypatch.setattr(mrunner, "_run_gut_on_project", _fake_gut(calls2))
-        r = mrunner.run_mutation(str(target), str(proj), budget=3,
-                                 tests_glob=self.GLOB, resume=True)
-        assert r["summary"]["resumed"] == 0
-        assert calls2["n"] == 4  # 全部重跑
+        monkeypatch.setattr(mrunner, "_run_gut_on_project",
+                            _fake_gut(calls2, kill_every=1))
+        r = mrunner.run_mutation(str(target), str(proj), budget=10,
+                                 tests_glob=self.GLOB)
+        assert r["summary"]["resumed"] == 6
+        assert r["summary"]["executed"] == 0
+        assert calls2["n"] == 1  # baseline 仍实测（判定语义锚）
 
 
 # ---------------------------------------------------------------------------
@@ -593,8 +610,9 @@ class TestJobsMergeResumed:
 
     def test_jobs_resume_end_to_end_reports_resumed(self, tmp_path,
                                                     monkeypatch):
-        """--jobs 多文件 + --resume 端到端：每个 results[].summary.resumed
-        等于该文件 store 内已完成数（与 §SPEC-002 单文件口径一致）。"""
+        """--jobs 多文件端到端（SEE-1420 v2 差分）：首轮全 killed 落盘 →
+        二轮差分全复用——每个 results[].summary.resumed 等于该文件 v2 store
+        内可复用条目数（与单文件口径一致）。"""
         from godot_qa_toolkit.mutation import executor
 
         class _SerialPool:
@@ -617,30 +635,39 @@ class TestJobsMergeResumed:
             p.write_text(TARGET_SRC)
             files.append(str(p))
         calls = {"n": 0}
-        monkeypatch.setattr(mrunner, "_run_gut_on_project",
-                            _fake_gut(calls))
+
+        def kill_all(root, timeout_s=60, tests_glob=None):
+            # chunked 路径 baseline 走 mock 快照（零 fake 调用）——fake 的
+            # 每次被调都是 mutant 轮，全部 kill（无 baseline 分支）。
+            calls["n"] += 1
+            return (1, "* test_x\n\t\ttest_x [Failed]")
+
+        monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
         monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
         monkeypatch.setattr(
             executor, "_run_baseline_snapshot",
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
-        # 先跑一轮（无 resume）落盘全部 verdict——resume 轮才有可跳过条目
-        executor.run_mutation_files(
-            files, proj, budget=4, timeout_s=60, dry_run=False,
+        # 先跑一轮（全 killed）落盘全部 verdict——差分轮才有可复用条目
+        first = executor.run_mutation_files(
+            files, proj, budget=10, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=2)
+        for res in first["results"]:
+            assert res["summary"]["killed"] == 6
         for name in ("calc.gd", "other.gd"):
-            store = ResumeStore(str(proj), str(proj / name),
-                                "res://tests/unit/save/", 4)
-            assert store.completed_count() == 4
+            store = ResumeStoreV2(str(proj), str(proj / name),
+                                  "res://tests/unit/save/")
+            assert len(store.load_entries()) == 6
         calls2 = {"n": 0}
         monkeypatch.setattr(mrunner, "_run_gut_on_project",
-                            _fake_gut(calls2))
+                            _fake_gut(calls2, kill_every=1))
         r = executor.run_mutation_files(
-            files, proj, budget=4, timeout_s=60, dry_run=False,
+            files, proj, budget=10, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=2, resume=True)
         for res in r["results"]:
             name = Path(res["summary"]["file"]).name
-            store = ResumeStore(str(proj), str(proj / name),
-                                "res://tests/unit/save/", 4)
-            assert res["summary"]["resumed"] == store.completed_count() == 4
-        # 全跳过：resume 轮 baseline 走快照，chunk worker 全命中 → 零 GUT
-        assert calls2["n"] == 0
+            store = ResumeStoreV2(str(proj), str(proj / name),
+                                  "res://tests/unit/save/")
+            assert res["summary"]["resumed"] == len(store.load_entries()) == 6
+        # 全复用：零 mutant 执行；每文件仍实测 1 次 baseline（判定语义锚，
+        # 定案 §四.6 B 场景 GUT 调用 = 1 baseline）→ 2 文件 = 2 轮
+        assert calls2["n"] == 2

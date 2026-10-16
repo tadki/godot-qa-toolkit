@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation import runner as mrunner
-from godot_qa_toolkit.mutation.resume import resume_key
+from godot_qa_toolkit.mutation.resume import ResumeStore, resume_key
 
 # 6 个变异点（与既有 resume 测试同源 fixture——budget=2 必然截断）。
 TARGET_SRC = (
@@ -130,7 +130,7 @@ class TestWarningAndFactorNeverEnterResumeKey:
         resume key——调配置不得引发全库重跑。两参数不在 key 函数签名内，
         同输入恒同 key（幂等性钉死）。"""
         proj, target = _write_project(tmp_path)
-        sha = mrunner.ResumeStore._sha1_of(str(target))
+        sha = ResumeStore._sha1_of(str(target))
         k1 = resume_key(str(proj), str(target), sha, "res://tests/", 50)
         k2 = resume_key(str(proj), str(target), sha, "res://tests/", 50)
         assert k1 == k2

@@ -203,28 +203,7 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   (disclosed on stderr), and diff changes the red/green surface from
   "every run is full" to "every run re-runs unproven kills".
   `--mutation-warning` / `--timeout-factor` / `timeout_streak` never enter
-  any resume key.`
-
-Key semantics (deterministic, see `docs/contract.md` §4.3 for the full field
-contract):
-
-- **Kill verdicts are set-differenced, not exit-code based**: kill = the set
-  of *newly failing* test names relative to baseline, so pre-existing project
-  failures are never misread as kills.
-- Mutations are source-level (AST-derived) operator swaps: `AOR`, `ROR`,
-  `UOI`, boundary flips, ternary/guard-notation/logical/membership/`is`
-  variants — `kind` is an **open enum**, filter by prefix, tolerate unknown
-  values. Product generates *invalid* mutants (python syntax check) are
-  dropped before running, not scored against the suite.
-- Baseline itself untrustable / timed out → unified **abort shape**
-  (`summary.run_error: true`, no killed/survived keys — consumers must not
-  default-read them).
-- Per-mutant timeout auto-adapts to `baseline wall-clock × 2` (only widened,
-  never tightened; visible as `summary.adaptive_timeout_s`).
-- `--tests <res://glob>` scopes GUT to an affected-test directory;
-  `--dry-run` only counts mutation sites without running GUT.
-- `ok = survived == 0 AND timeout == 0 AND run_errors == 0 AND suspect == 0`
-  (`suspect` = cannot prove the mutant was killed — gated same as survived).
+  any resume key.
 
 ### Survivor location in the report (SEE-1416)
 

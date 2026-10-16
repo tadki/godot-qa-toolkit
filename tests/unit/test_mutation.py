@@ -523,3 +523,87 @@ class TestLaunchFailureGuard:
         # 失败集合与 baseline 相同（差集空）→ 保守 suspect（不可证杀）
         assert s["suspect"] == s["mutants"] > 0
         assert s["run_errors"] == 0
+
+
+class TestSurvivorSummarySEE1416:
+    """§SPEC-1416-1：summary.survivors 自足——切片 .summary 也携带定位明细。"""
+
+    def _write_project(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        target = proj / "calc.gd"
+        target.write_text("func add(a, b):\n\treturn a + b\n")
+        return proj, target
+
+    def test_one_survivor_appears_in_summary(self, tmp_path, monkeypatch):
+        proj, target = self._write_project(tmp_path)
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+        result = run_mutation(str(target), str(proj), budget=2)
+        s = result["summary"]
+        assert "survivors" in s
+        assert len(s["survivors"]) == s["survived"] == 2
+        for item in s["survivors"]:
+            assert set(item) == {"file", "line", "column", "kind",
+                                 "original", "mutated", "verdict", "reason"}
+            assert item["verdict"] == "survived"
+            assert item["file"].endswith("calc.gd")
+
+    def test_zero_survivors_keeps_empty_list_key(self, tmp_path, monkeypatch):
+        proj, target = self._write_project(tmp_path)
+        calls = {"n": 0}
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (0, "baseline ok")
+            return (1, "* test_kill\n    [Failed]: caught\n")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
+        result = run_mutation(str(target), str(proj), budget=3)
+        assert result["summary"]["survivors"] == []
+        assert "survivors_truncated" not in result["summary"]
+
+    def test_more_than_five_survivors_truncated(self, tmp_path, monkeypatch):
+        proj, target = self._write_project(tmp_path)
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+        src = ("func add(a, b):\n"
+               "\treturn a + b\n"
+               "\treturn a - b\n"
+               "\treturn a * b\n"
+               "\treturn a / b\n")
+        target.write_text(src)
+        result = run_mutation(str(target), str(proj), budget=6)
+        s = result["summary"]
+        assert len(s["survivors"]) == 5
+        assert s["survivors_truncated"] is True
+        assert s["survived"] == 6
+
+
+class TestMutantRecordColumnsSEE1416:
+    """§SPEC-1416-2：全部 verdict 记录扩列 column/operator/line_text。"""
+
+    def test_survived_record_has_extended_columns(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        src = "func add(a, b):\n\treturn a + b\n"
+        target = proj / "calc.gd"
+        target.write_text(src)
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+        result = run_mutation(str(target), str(proj), budget=3)
+        for f in result["failures"]:
+            assert "column" in f and "operator" in f and "line_text" in f
+            # line_text 与被测源文件对应行一致
+            assert f["line_text"] == src.splitlines()[f["line"] - 1]
+            assert f["operator"] in ("+", "-", "*", "/")
+            assert f["column"] > 0

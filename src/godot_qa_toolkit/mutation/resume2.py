@@ -79,8 +79,9 @@ class ResumeStoreV2:
 
     def entry_path(self, stable_id: str) -> Path:
         # stable_id 含 '/' 形态的 file 成分时压平（GDScript 标识符本无 '/',
-        # 防御外部构造的 id 破坏目录结构）
-        safe = stable_id.replace("/", "__")
+        # 防御外部构造的 id 破坏目录结构；'\' 同压——Windows 路径分隔符
+        # 的目录逃逸面，合法 id 经 project_relative 归一后不含反斜杠）。
+        safe = stable_id.replace("/", "__").replace("\\", "__")
         return self.store_dir / f"{safe}.json"
 
     def ensure_store_dir(self) -> None:
@@ -135,14 +136,24 @@ class ResumeStoreV2:
             return False
 
     def load_manifest(self) -> dict | None:
-        """读合法 manifest；schema/key 不符或读失败 = None（诚实降级→全量跑）。"""
+        """读合法 manifest；schema/key 不符或读失败 = None（诚实降级→全量跑）。
+
+        §SPEC-1420-05：信封校验失败必须告警（拒复用 ≠ 静默吞）。
+        """
         try:
             raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         if not isinstance(raw, dict):
+            print(f"resume v2 store: manifest is not an object "
+                  f"({self.manifest_path.name}) — treating as no history",
+                  file=sys.stderr)
             return None
         if raw.get("schema") != SCHEMA_V2 or raw.get("file_key") != self.key:
+            print(f"resume v2 store: manifest envelope mismatch "
+                  f"(schema={raw.get('schema')!r}, file_key_match="
+                  f"{raw.get('file_key') == self.key}) — treating as no "
+                  f"history (full rerun)", file=sys.stderr)
             return None
         return raw
 
@@ -169,13 +180,19 @@ class ResumeStoreV2:
             return False
 
     def load_entries(self) -> dict[str, dict]:
-        """{stable_id: entry}；损坏/毒/信封漂移条目告警一次并按无数据处理。"""
+        """{stable_id: entry}；损坏/毒/信封漂移条目告警一次并按无数据处理。
+
+        §SPEC-1420-05：信封（schema/file_key）校验失败与毒条目拒用的同批
+        汇总告警一次——拒复用，但绝不静默吞掉身份漂移的证据。
+        """
         entries: dict[str, dict] = {}
         try:
             paths = sorted(self.store_dir.glob("*.json"))
         except OSError:
             return entries
         warned = False
+        drifted = 0
+        poisoned = 0
         for p in paths:
             if p.name == "manifest.json":
                 continue
@@ -187,16 +204,22 @@ class ResumeStoreV2:
                     print(f"resume v2 store: unreadable entry {p.name} "
                           f"— treating as no history", file=sys.stderr)
                 continue
-            if not isinstance(raw, dict) or raw.get("schema") != SCHEMA_V2:
-                continue
-            if raw.get("file_key") != self.key:
+            if not isinstance(raw, dict) or raw.get("schema") != SCHEMA_V2 \
+                    or raw.get("file_key") != self.key:
+                drifted += 1
                 continue
             if _is_poison_entry(raw):
+                poisoned += 1
                 continue
             sid = raw.get("id")
             if not isinstance(sid, str) or not sid:
+                drifted += 1
                 continue
             entries[sid] = raw
+        if drifted or poisoned:
+            print(f"resume v2 store: {drifted} envelope-drift and "
+                  f"{poisoned} poison entries rejected — treating as "
+                  f"no history", file=sys.stderr)
         return entries
 
     # -- 内部 ---------------------------------------------------------------

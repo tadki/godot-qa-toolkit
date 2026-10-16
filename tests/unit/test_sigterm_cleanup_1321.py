@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import godot_qa_toolkit.mutation.inject as inject_mod
+import godot_qa_toolkit.mutation.inject as inject_mod
 import godot_qa_toolkit.mutation.runner as runner_mod
 from godot_qa_toolkit.mutation.inject import (
     cleanup_temp_files,
@@ -104,8 +105,8 @@ class TestSigtermHandlerCleans:
             raise _ExitJump(code)
 
         monkeypatch.setattr(runner_mod.os, "_exit", fake_exit)
-        # handler 调用的是 runner 命名空间里的绑定（from .inject import）
-        monkeypatch.setattr(runner_mod, "cleanup_temp_files",
+        # SEE-1420：handler 迁入 inject.py——补丁面对准其命名空间绑定
+        monkeypatch.setattr(inject_mod, "cleanup_temp_files",
                             lambda: exited.setdefault("cleaned", True))
         target = tmp_path / "t.gd"
         target.write_text("mutated")

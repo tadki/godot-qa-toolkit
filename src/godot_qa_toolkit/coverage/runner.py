@@ -373,6 +373,16 @@ def run_coverage(
     if probes_fired == 0:
         return _no_probe_result(str(path), total_lines, min_percent)
 
+    # SEE-1420 P2（L3/D7）：成功 run 的行级事实落盘（自家 JSON 超集，
+    # stdout 契约不动）——mutation --reuse-coverage 的唯一数据源。
+    from ..mutation.coverlink import save_coverage
+    covered_pct = 100.0 * len(hits) / total_lines if total_lines else 100.0
+    # D3：可插桩行集随行级事实同盘落盘——mutation 前置过滤的唯一合法跳过
+    # 锚（不可插桩行 ≠ uncovered）。
+    save_coverage(hits, total_lines, project_root, str(path), tests_glob,
+                  coverage_percent=round(covered_pct, 2),
+                  instrumentable_lines={l.line for l in executable_lines})
+
     return _coverage_report(str(path), original_src, executable_lines, hits,
                             probes_fired, min_percent, timing_meta)
 

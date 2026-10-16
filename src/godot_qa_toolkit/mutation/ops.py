@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from pathlib import Path
 
 from gdtoolkit.parser import parser as gdtoolkit_parser
 
@@ -45,7 +43,10 @@ _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 # （跨检出/投影同 key）——旧 store 条目随本版本一次性失效（显式披露）。
 # see1405/3（SEE-1405 §SPEC-012 发现二）：key 增二进制标识成分（win64/linux
 # verdict 互不复用，防跨二进制 store 互写）——又一次一次性失效窗口。
-OPS_VERSION = "see1405/3"
+# see1420/1（SEE-1420 Phase 1 一次 schema bump）：scope manifest + 稳定 id +
+# header hash + no-mutate + timeout_streak 并入同一次 v2 落地（定案 §三：
+# 一次 bump 不拆三次失效窗口）——v1 store 不读不写不删，显式披露。
+OPS_VERSION = "see1420/1"
 
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {
@@ -77,6 +78,20 @@ class Mutant:
     kind: str
     start_pos: int = -1  # span 替换起点（gather_metadata 偏移）；-1 = 退回 line/column
     end_pos: int = -1    # span 替换终点（不含）
+    # SEE-1420 稳定 id 域（D3）：scope_id/n 由 scopemanifest 标定后回填；
+    # stable_id = "<file>#<scope_id>#<n>"，仅寻址提示（正确性靠全签名校验）。
+    scope_id: str = ""
+    n: int = 0
+    stable_id: str = ""
+
+    def with_scope(self, scope_id: str, n: int, stable_id: str) -> "Mutant":
+        return Mutant(
+            file=self.file, line=self.line, column=self.column,
+            operator=self.operator, original=self.original,
+            mutated=self.mutated, kind=self.kind,
+            start_pos=self.start_pos, end_pos=self.end_pos,
+            scope_id=scope_id, n=n, stable_id=stable_id,
+        )
 
 
 def _tree_depth_walk(node, callback, depth=0):

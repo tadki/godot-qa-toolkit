@@ -92,7 +92,8 @@ class TestDefaultParallelRouting:
         assert expected_jobs > 1
         assert d["jobs"] == expected_jobs
         assert len(calls) == expected_jobs
-        assert all("mutant_slice" in call for call in calls)
+        # SEE-1420：分片面从 mutant_slice 迁移为父层差分规划的 retry_ids
+        assert all("retry_ids" in call for call in calls)
         assert d["results"][0]["summary"]["jobs"] == expected_jobs
 
     def test_default_jobs_is_cpu_cap(self, monkeypatch):

@@ -17,6 +17,7 @@ import pytest
 from godot_qa_toolkit.mutation import inject
 from godot_qa_toolkit.mutation import runner as mrunner
 from godot_qa_toolkit.mutation.resume import ResumeStore
+from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 
 TARGET_SRC = (
     "func add(a, b):\n"
@@ -139,10 +140,11 @@ class TestPoisonEntryGuard:
         orig_gut = mrunner._run_gut_on_project
         mrunner._run_gut_on_project = monkey_runs
         try:
-            store = ResumeStore(str(root), str(target), None, 4)
+            # SEE-1420：落盘面迁移到 resume v2 store（per-id 条目）。
+            store = ResumeStoreV2(str(root), str(target), None)
             result = mrunner.run_mutation(
                 file_path=str(target), project_root=str(root), budget=4,
-                resume_store=store, resume=resume)
+                resume2_store=store, resume=resume)
         finally:
             mrunner._run_gut_on_project = orig_gut
         return result, store
@@ -151,19 +153,19 @@ class TestPoisonEntryGuard:
         """毒条目防护主断言：注入失败 run_error 不得写入 resume store。"""
         result, store = self._run(tmp_path, "inject_fail")
         assert result["summary"]["run_errors"] == 4
-        assert store.completed_count() == 0
+        assert store.load_entries() == {}
 
     def test_launch_failure_verdicts_not_persisted(self, tmp_path):
         """启动失败 run_error 同样拒写（win64 引擎产物不进 linux-kind key）。"""
         result, store = self._run(tmp_path, "launch_fail")
         assert result["summary"]["run_errors"] >= 1
-        assert store.completed_count() == 0
+        assert store.load_entries() == {}
 
     def test_normal_verdicts_still_persisted(self, tmp_path):
         """正对照：正常判定（survived）照常落盘——防护不误伤 resume 语义。"""
         result, store = self._run(tmp_path, "ok", resume=True)
         assert result["summary"]["run_errors"] == 0
-        assert store.completed_count() == 4
+        assert len(store.load_entries()) == 4
 
     def test_poisoned_entry_rejected_on_resume(self, tmp_path):
         """端到端：已存在的注入失败条目（模拟断连期写入）在 --resume 时

@@ -19,7 +19,12 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .ops import _collect_mutations
-from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP
+from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
+                        _valid_mutants)
+from .coverlink import load_instrumentable_lines, load_reusable_coverage
+from .resume2 import ResumeStoreV2
+from .diffengine import budget_on_retry, plan_diff, untouched_ranges
+from .scopemanifest import build_manifest
 from .runner import run_mutation
 
 # 进程池工厂（可注入替身做单测）
@@ -79,6 +84,10 @@ def run_mutation_files(
     resume: bool = False,
     binary_kind: str | None = None,
     timing_store=None,
+    mutation_warning: int | None = None,
+    timeout_factor: float | None = None,
+    mutate_all: bool = False,
+    reuse_coverage: bool = False,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -101,7 +110,9 @@ def run_mutation_files(
                          timeout_s=timeout_s, dry_run=dry_run,
                          tests_glob=tests_glob, resume=resume,
                          binary_kind=binary_kind,
-                         timing_store=timing_store)
+                         timing_store=timing_store,
+                         mutation_warning=mutation_warning,
+                         timeout_factor=timeout_factor)
         r["summary"].setdefault("jobs", 1)
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
@@ -110,7 +121,9 @@ def run_mutation_files(
         results = [
             run_mutation(f, project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=True,
-                         tests_glob=tests_glob, binary_kind=binary_kind)
+                         tests_glob=tests_glob, binary_kind=binary_kind,
+                         mutation_warning=mutation_warning,
+                         timeout_factor=timeout_factor)
             for f in files
         ]
         for result in results:
@@ -140,22 +153,33 @@ def run_mutation_files(
                              timeout_s=timeout_s, dry_run=False,
                              tests_glob=tests_glob, resume=resume,
                              binary_kind=binary_kind,
-                             timing_store=timing_store)
+                             timing_store=timing_store,
+                             mutation_warning=mutation_warning,
+                             timeout_factor=timeout_factor,
+                             mutate_all=mutate_all)
             r["summary"].setdefault("jobs", 1)
             return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                     "results": [r]}
 
     prewarm_import(project_root)
-    chunks, settled = _build_chunks(files, project_root, budget, timeout_s,
-                                    tests_glob, jobs, resume,
-                                    binary_kind=binary_kind)
+    chunks, settled, v2ctx = _build_chunks(files, project_root, budget,
+                                           timeout_s, tests_glob, jobs,
+                                           resume, binary_kind=binary_kind,
+                                           mutation_warning=mutation_warning,
+                                           timeout_factor=timeout_factor,
+                                           mutate_all=mutate_all,
+                                           reuse_coverage=reuse_coverage)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
             chunk_results = list(pool.map(_chunk_worker, chunks))
     merged = _merge_results(chunks, chunk_results, jobs)
+    results_merged = merged.pop("results")
+    # P1 差分（SEE-1420）：父层单点注入 reused 记录与差分披露，并写
+    # manifest 索引层（worker 不写——并发竞态规避，D5 高风险通道裁决）。
+    _inject_diff_results(results_merged, v2ctx)
     # settled（异常/零变异文件）按输入顺序并入 results——任何输入文件都留痕
-    results = _order_results(files, merged.pop("results"), settled)
+    results = _order_results(files, results_merged, settled)
     envelope = {**merged, "ok": all(r["ok"] for r in results),
                 "results": results}
     # SEE-1416 §SPEC-1416-3：多文件信封顶层 summary.attention——跨文件
@@ -214,26 +238,31 @@ def _settled_no_sites(file: str, scoped: bool) -> dict:
 
 
 def _chunk_worker(payload: dict) -> dict:
-    """worker 进程入口：消费共享 baseline 与分片区间跑单文件 mutation。
+    """worker 进程入口：消费共享 baseline 与父层差分规划的 retry_ids 分片。
 
     baseline 快照缺失（冷启动失败 / 脏 baseline）时退回串行单任务
-    （serial=True，无 slice、worker 自跑 baseline）。
-    resume store（SEE-1400）由 run_mutation 内按 payload 同参自建——同
-    file+glob+budget 同 key，各 worker 只写各自 seq 的条目文件。
+    （serial=True，无 retry_ids、worker 自跑 baseline 并自建差分）。
+    v2 条目由 run_mutation 内增量落盘——各 worker 只写各自 retry_ids 的
+    条目文件（分片零重叠），manifest 索引层由父层收尾单点写。
+    timeout_factor（§SPEC-1420-02）随 payload 穿线。
     """
     resume = bool(payload.get("resume"))
     binary_kind = payload.get("binary_kind")
+    timeout_factor = payload.get("timeout_factor")
     if payload.get("serial"):
         return run_mutation(
             payload["file"], payload["project_root"], budget=payload["budget"],
             timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
-            resume=resume, binary_kind=binary_kind)
+            resume=resume, binary_kind=binary_kind,
+            timeout_factor=timeout_factor,
+            mutate_all=bool(payload.get("mutate_all")))
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
         precomputed_baseline=payload["baseline"],
-        mutant_slice=(payload["start"], payload["stop"]),
+        retry_ids=payload["retry_ids"],
         resume=resume, binary_kind=binary_kind,
+        timeout_factor=timeout_factor,
     )
 
 
@@ -246,8 +275,13 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
         if k in s:
             agg[k] = s[k]
     for k in ("mutants", "killed", "survived", "suspect",
-              "timeout", "run_errors", "invalid_mutants", "resumed"):
+              "timeout", "run_errors", "invalid_mutants", "resumed",
+              "timeout_pinned"):
         agg[k] += s.get(k, 0)
+    # O2（SEE-1420 qa 复验）：executed = 实际执行语义——worker 层已按
+    # invalid 预检覆写，逐分片求和（父层不得回填计划面值）。
+    if s.get("executed") is not None:
+        agg["executed"] = (agg["executed"] or 0) + s["executed"]
     agg["failures"].extend(cr.get("failures", []))
     agg["scoped"] = bool(s.get("scoped"))
     agg["budget"] = s.get("budget")
@@ -276,38 +310,20 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
         agg = per_file.setdefault(file, {
             "file": file, "mutants": 0, "killed": 0, "survived": 0,
             "suspect": 0, "timeout": 0, "run_errors": 0,
-            "invalid_mutants": 0, "resumed": 0, "jobs": 0,
-            "ok": True, "failures": [], "scoped": None,
+            "invalid_mutants": 0, "resumed": 0, "timeout_pinned": 0,
+            "executed": None,
+            "jobs": 0, "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
+            "total_sites": None, "attention": None,
         })
         _accumulate_chunk(agg, cr, passthrough_keys)
-    results = []
-    for agg in per_file.values():
-        ok = (agg["ok"] and agg["survived"] == 0 and agg["timeout"] == 0
-              and agg["run_errors"] == 0 and agg["suspect"] == 0)
-        results.append({
-            "tool": "mutation",
-            "ok": ok,
-            "summary": {
-                "file": agg["file"],
-                "jobs": agg["jobs"],
-                "mutants": agg["mutants"],
-                "killed": agg["killed"],
-                "survived": agg["survived"],
-                "suspect": agg["suspect"],
-                "timeout": agg["timeout"],
-                "run_errors": agg["run_errors"],
-                "invalid_mutants": agg["invalid_mutants"],
-                "kill_rate": agg["kill_rate"],
-                "budget": agg["budget"],
-                "scoped": agg["scoped"],
-                "baseline_reused": agg["baseline_reused"],
-                **{k: agg[k] for k in passthrough_keys if k in agg},
-                **({"resumed": agg["resumed"]}
-                   if resumed_present else {}),
-            },
-            "failures": agg["failures"],
-        })
+        # §SPEC-1420-01：截断面 N/M 披露的父层聚合锚（截断前全量位点数）
+        if agg["total_sites"] is None:
+            agg["total_sites"] = chunk.get("total_sites")
+        if agg.get("attention") is None:
+            agg["attention"] = chunk.get("attention")
+    results = [_file_summary(agg, passthrough_keys, resumed_present)
+               for agg in per_file.values()]
     return {
         "tool": "mutation",
         "ok": all(r["ok"] for r in results),
@@ -317,60 +333,220 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     }
 
 
+def _file_summary(agg: dict, passthrough_keys: tuple[str, ...],
+                  resumed_present: bool) -> dict:
+    """聚合态 → 单文件 result（summary 形态唯一出处，<800/复杂度纪律拆分）。"""
+    ok = (agg["ok"] and agg["survived"] == 0 and agg["timeout"] == 0
+          and agg["run_errors"] == 0 and agg["suspect"] == 0)
+    total = agg["mutants"]
+    kill_rate = round(agg["killed"] / total, 4) if total else 0.0
+    return {
+        "tool": "mutation",
+        "ok": ok,
+        "summary": {
+            "file": agg["file"],
+            "jobs": agg["jobs"],
+            "mutants": agg["mutants"],
+            "killed": agg["killed"],
+            "survived": agg["survived"],
+            "suspect": agg["suspect"],
+            "timeout": agg["timeout"],
+            "run_errors": agg["run_errors"],
+            "invalid_mutants": agg["invalid_mutants"],
+            "kill_rate": kill_rate,
+            "budget": agg["budget"],
+            "scoped": agg["scoped"],
+            "baseline_reused": agg["baseline_reused"],
+            **({"timeout_pinned": agg["timeout_pinned"]}
+               if agg["timeout_pinned"] else {}),
+            **({"total_sites": agg["total_sites"],
+                "executed": (agg["executed"] if agg["executed"] is not None
+                             else min(agg["total_sites"], agg["budget"]))}
+               if agg["total_sites"] is not None and agg["budget"] is not None
+               and agg["total_sites"] > agg["budget"] else {}),
+            **({"attention": agg["attention"]}
+               if agg.get("attention") else {}),
+            **{k: agg[k] for k in passthrough_keys if k in agg},
+            **({"resumed": agg["resumed"]} if resumed_present else {}),
+        },
+        "failures": agg["failures"],
+    }
+
+
 def _build_chunks(files: list[str], project_root: str, budget: int,
                   timeout_s: int, tests_glob: str | None,
                   jobs: int, resume: bool = False,
-                  binary_kind: str | None = None) -> tuple[list[dict], list[dict]]:
-    """父层：per-file 收集 mutant 总数 → 分片；同样 glob 共享一份 baseline。
+                  binary_kind: str | None = None,
+                  mutation_warning: int | None = None,
+                  timeout_factor: float | None = None,
+                  mutate_all: bool = False,
+                  reuse_coverage: bool = False
+                  ) -> tuple[list[dict], list[dict], dict]:
+    """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
-    返回 (chunks, settled)：settled 是收集异常（error 契约）与零变异
-    （no_sites 契约）的定终态文件——SPEC-016：任何输入文件都不得从报告
-    消失（此前 except 静默丢弃 + 零 chunk 早退只报 files[0] 是报告失真）。
+    返回 (chunks, settled, v2ctx)。P1 差分规划在父层单点完成（D4/D6）：
+    plan_diff + budget_on_retry 后按 retry 位点分片，worker 只执行注入的
+    retry_ids——分片间零重叠，per-id 条目写天然无竞态。v2ctx 供合并层注入
+    reused 记录/披露并单点写 manifest（D5 高风险通道：并发下 manifest 索引
+    层只允许收尾方写）。
+    settled 是收集异常（error 契约）与零变异（no_sites 契约）的定终态文件
+    ——SPEC-016：任何输入文件都不得从报告消失。
     """
     baselines = _precompute_baselines(files, project_root, timeout_s,
                                       tests_glob)
     chunks: list[dict] = []
     settled: list[dict] = []
+    v2ctx: dict = {}
     for f in files:
-        try:
-            src = open(f, encoding="utf-8").read()
-            total = min(len(_collect_mutations(src, f)), budget)
-        except Exception as e:
-            settled.append(_settled_error(f, e))
+        file_chunks, file_ctx, file_settled = _plan_file_chunks(
+            f, project_root, budget, timeout_s, tests_glob, jobs, resume,
+            binary_kind, mutation_warning, timeout_factor, mutate_all,
+            reuse_coverage, baselines)
+        chunks.extend(file_chunks)
+        if file_ctx is not None:
+            v2ctx[f] = file_ctx
+        if file_settled is not None:
+            settled.append(file_settled)
+    return chunks, settled, v2ctx
+
+
+def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
+                      resume, binary_kind, mutation_warning, timeout_factor,
+                      mutate_all, reuse_coverage, baselines):
+    """单文件规划：收集 → 差分 plan → P2 覆盖过滤 → budget → 分片。
+
+    返回 (chunks_for_file, v2ctx_entry_or_None, settled_or_None)。
+    """
+    try:
+        src = open(f, encoding="utf-8").read()
+        collected = _collect_mutations(src, f)
+        raw_total = len(collected)
+    except Exception as e:
+        return [], None, _settled_error(f, e)
+    # §SPEC-1420-01：告警由父层发一次（并发 worker 不重复）——按截断前
+    # 全量位点数判定，budget 截断不掩盖规模问题。
+    attention = None
+    if mutation_warning is not None and raw_total > mutation_warning:
+        attention = (f"{raw_total} mutation sites exceed "
+                     f"--mutation-warning {mutation_warning} — consider "
+                     f"splitting this file")
+        print(f"mutation-warning: {raw_total} mutation sites exceed "
+              f"--mutation-warning {mutation_warning} in {f} — consider "
+              f"splitting this file", file=sys.stderr)
+    glob = tests_glob or _auto_scan_tests_glob(f, project_root)
+    # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
+    # 不得触发 baseline/prewarm。
+    if raw_total <= 0 or budget <= 0:
+        return [], None, _settled_no_sites(f, bool(glob))
+    header_hash, spans, mutants, scope_hashes = build_manifest(src, f, collected)
+    store2 = ResumeStoreV2(project_root, f, glob, binary_kind=binary_kind)
+    store2.disclose_v1_superseded()
+    old_manifest = store2.load_manifest()
+    entries = store2.load_entries()
+    plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
+                     entries, mutate_all=mutate_all)
+    uncovered_mutants, retry_pool = _apply_coverage_prefilter(
+        plan, f, project_root, glob, binary_kind, reuse_coverage)
+    executed_list, untouched = budget_on_retry(retry_pool, budget)
+    baseline = baselines.get(glob)
+    if not executed_list:
+        # 差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
+        # GUT + 1 baseline 锚），报告由 run_mutation 自建。父层已预跑的
+        # 共享 baseline 快照必须注入（SEE-1420 QA 实证：不注入则
+        # run_mutation「永远实测」再跑一轮 baseline——B 场景 GUT 调用
+        # 2≠1，白付一次全套 GUT）。
+        r = run_mutation(f, project_root, budget=budget,
+                         timeout_s=timeout_s, tests_glob=glob,
+                         resume=False, binary_kind=binary_kind,
+                         mutation_warning=None, timeout_factor=timeout_factor,
+                         mutate_all=mutate_all,
+                         precomputed_baseline=baseline)
+        r["summary"].setdefault("jobs", 1)
+        return [], None, r
+    ids = [m.stable_id for m in executed_list]
+    if baseline is None:
+        # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
+        # 串行单任务（worker 自跑 baseline 并自建差分报告——父层不注入，
+        # 防重复计数）
+        chunk = {
+            "file": f, "project_root": project_root, "budget": budget,
+            "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
+            "resume": resume, "binary_kind": binary_kind,
+            "timeout_factor": timeout_factor, "total_sites": raw_total,
+            "attention": attention, "mutate_all": mutate_all,
+        }
+        return [chunk], None, None
+    ctx = {
+        "plan": plan, "executed": executed_list, "untouched": untouched,
+        "header_hash": header_hash, "scope_hashes": scope_hashes,
+        "store2": store2, "src": src, "mutants": mutants,
+        "uncovered": uncovered_mutants,
+    }
+    chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
+                              binary_kind, ids, baseline, resume,
+                              timeout_factor, raw_total, attention, jobs)
+    return chunks, ctx, None
+
+
+def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
+                              reuse_coverage):
+    """§SPEC-1420-12（P2）：coverage 前置过滤先于 budget（预算只花在
+    covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。
+
+    D3 修复：过滤锚 = covered ∧ instrumentable——不可插桩行上的位点留在
+    执行面（与 planner._apply_coverage_prefilter 同语义）；可插桩集不可得
+    = 不过滤（宁多跑不假阴性）。"""
+    if not reuse_coverage:
+        return [], plan.executed
+    cov, cov_reason = load_reusable_coverage(project_root, f, glob,
+                                             binary_kind)
+    if cov is None:
+        print(f"mutation: coverage store miss ({cov_reason}) for {f} "
+              f"— running unfiltered", file=sys.stderr)
+        return [], plan.executed
+    inst, inst_reason = load_instrumentable_lines(project_root, f, glob,
+                                                  binary_kind)
+    if inst is None:
+        print(f"mutation: instrumentable face unavailable ({inst_reason}) "
+              f"for {f} — running unfiltered", file=sys.stderr)
+        return [], plan.executed
+    uncovered = [m for m in plan.executed
+                 if m.line not in cov and m.line in inst]
+    # D3 锚统一（SEE-1420 qa 复验 FAIL 实证）：执行面 = covered ∨ 不可插桩
+    # ——此前本函数 uncovered 行已换新锚、pool 行仍 covered-only，导致不
+    # 可插桩行位点被静默丢弃（不执行也不标记，比修复前更不可见）。
+    return uncovered, [m for m in plan.executed
+                       if m.line in cov or m.line not in inst]
+
+
+def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
+                     ids, baseline, resume, timeout_factor, raw_total,
+                     attention, jobs):
+    """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。"""
+    n_chunks = min(jobs, len(ids))
+    size = (len(ids) + n_chunks - 1) // n_chunks
+    chunks = []
+    for i in range(n_chunks):
+        slice_ids = ids[i * size:(i + 1) * size]
+        if not slice_ids:
             continue
-        glob = tests_glob or _auto_scan_tests_glob(f, project_root)
-        if total <= 0:
-            settled.append(_settled_no_sites(f, bool(glob)))
-            continue
-        baseline = baselines.get(glob)
-        if baseline is None:
-            # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
-            # 串行单任务（worker 自跑 baseline）；分片保证必须锚在共享快照上
-            chunks.append({
-                "file": f, "project_root": project_root, "budget": budget,
-                "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
-                "resume": resume, "binary_kind": binary_kind,
-            })
-            continue
-        n_chunks = min(jobs, total)
-        size = (total + n_chunks - 1) // n_chunks
-        for i in range(n_chunks):
-            start, stop = i * size, min((i + 1) * size, total)
-            if start >= stop:
-                continue
-            chunks.append({
-                "file": f,
-                "project_root": project_root,
-                "budget": budget,
-                "timeout_s": timeout_s,
-                "tests_glob": glob,
-                "binary_kind": binary_kind,
-                "start": start,
-                "stop": stop,
-                "baseline": baselines.get(glob),
-                "resume": resume,
-            })
-    return chunks, settled
+        chunks.append({
+            "file": f,
+            "project_root": project_root,
+            "budget": budget,
+            "timeout_s": timeout_s,
+            "tests_glob": glob,
+            "binary_kind": binary_kind,
+            "retry_ids": slice_ids,
+            "baseline": baseline,
+            "resume": resume,
+            "timeout_factor": timeout_factor,
+            "total_sites": raw_total,
+            "attention": attention,
+        })
+    return chunks
+
+
 
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob):
@@ -413,3 +589,81 @@ def _run_baseline_snapshot(project_root: str, tests_glob: str | None,
     if rc != 0:
         return None
     return {"rc": rc, "tail": tail, "elapsed": elapsed}
+
+
+def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
+    """P1 差分收尾（父层单点）：reused 记录注入 + 披露字段 + manifest 落盘。
+
+    只处理走 retry_ids 分片的文件（v2ctx 键集）；串行 fallback / executed 空
+    的文件由 run_mutation 自建完整报告（已含 reused），不得重复注入。
+    """
+    if not v2ctx:
+        return
+    from ..timing import project_relative
+
+    for r in results:
+        ctx = v2ctx.get(r.get("summary", {}).get("file"))
+        if ctx is None:
+            continue
+        _inject_one(r, ctx)
+        # manifest 索引层单点写（收尾方唯一写者——并发竞态规避）
+        ctx["store2"].write_manifest(
+            ctx["header_hash"], ctx["scope_hashes"],
+            ResumeStoreV2._sha1_text(ctx["src"]),
+            project_relative(ctx["store2"].project_root,
+                             r["summary"]["file"]))
+
+
+_VERDICT_SUMMARY_KEY = {"killed": "killed", "survived": "survived",
+                        "timeout": "timeout", "run_error": "run_errors",
+                        "suspect": "suspect"}
+
+
+def _inject_reused(r: dict, ctx: dict) -> None:
+    """reused 条目 → 报告记录重建 + 计数并入（全签名已在 plan 阶段验证）。"""
+    s = r["summary"]
+    for sid, entry in ctx["plan"].reused.items():
+        m = next((x for x in ctx["mutants"] if x.stable_id == sid), None)
+        if m is None:
+            continue
+        rec = _mutant_record(m, entry["verdict"],
+                             entry.get("reason", ""), src=ctx["src"])
+        r["failures"].append(rec)
+        if rec["verdict"] in _VERDICT_SUMMARY_KEY:
+            s[_VERDICT_SUMMARY_KEY[rec["verdict"]]] += 1
+        s["mutants"] += 1
+    s["resumed"] = len(ctx["plan"].reused)
+
+
+def _inject_one(r: dict, ctx: dict) -> None:
+    """单文件收尾注入：reused/uncovered 记录 + 差分与覆盖披露 + gate 重算。"""
+    plan = ctx["plan"]
+    s = r["summary"]
+    if plan.reused:
+        _inject_reused(r, ctx)
+    # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures
+    # 显式标记（计数与覆盖执行面在 summary.coverage_prefilter 披露）。
+    uncovered = ctx.get("uncovered") or []
+    if uncovered:
+        for m in uncovered:
+            r["failures"].append(_mutant_record(
+                m, "uncovered",
+                f"line {m.line} not covered by tests (reused coverage "
+                f"prefilter; site never executed)", src=ctx["src"]))
+        s["coverage_prefilter"] = {"uncovered": len(uncovered),
+                                   "covered_executed": len(ctx["executed"])}
+    if plan.diff_active or plan.mutate_all:
+        # §SPEC-1420-07（D6）+ O3 键集对齐：差分在场与 --mutate-all 两径披露
+        # 同一键集（--mutate-all 全量面也可见：executed == retry_total、
+        # diff_skipped 空）。
+        s["diff_skipped"] = sorted(plan.reused)
+        s["retry_total"] = len(plan.executed)
+        s.setdefault("executed",
+                     len(_valid_mutants(ctx["src"], ctx["executed"])))
+        s["untouched_ranges"] = untouched_ranges(ctx["untouched"])
+    total = s["mutants"]
+    s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0
+    r["ok"] = (s["survived"] == 0 and s["timeout"] == 0
+               and s["run_errors"] == 0 and s["suspect"] == 0)
+
+

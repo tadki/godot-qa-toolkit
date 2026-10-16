@@ -66,19 +66,73 @@ def _parse_tags(raw: str, path: str, line_no: int) -> list[str]:
     return tags
 
 
+def _parse_scenario_header(stripped: str, tags: list[str], line_no: int) -> Scenario | None:
+    if stripped.startswith("Scenario Outline:"):
+        keyword = "Scenario Outline:"
+    elif stripped.startswith("Scenario:"):
+        keyword = "Scenario:"
+    else:
+        return None
+    return Scenario(name=stripped[len(keyword):].strip(), line=line_no, tags=tags)
+
+
+def _append_step(
+    stripped: str,
+    first_word: str,
+    current_steps: list[Step] | None,
+    last_kind: str | None,
+    path: str,
+    line_no: int,
+) -> str:
+    if current_steps is None:
+        raise GherkinSyntaxError(path, line_no, f"step outside Scenario/Background — {stripped!r}")
+    if first_word in ("And", "But"):
+        if last_kind is None:
+            raise GherkinSyntaxError(path, line_no, f"{first_word} before any Given/When/Then")
+        kind = last_kind
+    else:
+        kind = first_word
+    text_part = stripped[len(first_word):].strip()
+    current_steps.append(Step(keyword=kind, text=text_part, line=line_no))
+    return kind
+
+
+def _apply_block_line(
+    feature: Feature,
+    stripped: str,
+    current_steps: list[Step] | None,
+    pending_tags: list[str],
+    last_kind: str | None,
+    path: str,
+    line_no: int,
+) -> tuple[list[Step], list[str], str | None]:
+    if stripped.startswith("Background:"):
+        # And/But 继承只在本 block 内生效——新 block 头重置（修复跨
+        # Scenario/Background 泄漏：上一 block 末尾 Then 会让下一 block
+        # 起手的 And 被误判合法，runner 按 keyword 匹配即错路由）。
+        return feature.background, pending_tags, None
+    scenario = _parse_scenario_header(stripped, pending_tags, line_no)
+    if scenario is not None:
+        feature.scenarios.append(scenario)
+        return scenario.steps, [], None
+    first_word = stripped.split(None, 1)[0]
+    if first_word in STEP_KEYWORDS:
+        new_kind = _append_step(stripped, first_word, current_steps, last_kind, path, line_no)
+        return current_steps, pending_tags, new_kind
+    raise GherkinSyntaxError(path, line_no, f"unrecognized line — {stripped!r}")
+
+
 def parse(text: str, path: str = "<feature>") -> Feature:
     """Parse .feature text into a Feature tree. Raises GherkinSyntaxError."""
     feature: Feature | None = None
-    current: Scenario | None = None
     current_steps: list[Step] | None = None  # background or scenario steps
     pending_tags: list[str] = []
     last_kind: str | None = None  # for And/But chaining
 
     for line_no, raw in enumerate(text.splitlines(), start=1):
-        line = _strip_comment(raw)
-        if not line.strip():
+        stripped = _strip_comment(raw).strip()
+        if not stripped:
             continue
-        stripped = line.strip()
 
         if stripped.startswith("@"):
             pending_tags.extend(_parse_tags(stripped, path, line_no))
@@ -98,38 +152,9 @@ def parse(text: str, path: str = "<feature>") -> Feature:
         if feature is None:
             raise GherkinSyntaxError(path, line_no, f"line before Feature: — {stripped!r}")
 
-        if stripped.startswith("Background:"):
-            current = None
-            current_steps = feature.background
-            continue
-
-        if stripped.startswith(("Scenario:", "Scenario Outline:")):
-            keyword = "Scenario Outline:" if stripped.startswith("Scenario Outline:") else "Scenario:"
-            current = Scenario(
-                name=stripped[len(keyword):].strip(),
-                line=line_no,
-                tags=pending_tags,
-            )
-            pending_tags = []
-            current_steps = current.steps
-            feature.scenarios.append(current)
-            continue
-
-        # Step lines: must follow a Scenario/Background block.
-        first_word = stripped.split(None, 1)[0] if stripped else ""
-        if first_word in STEP_KEYWORDS:
-            if current_steps is None:
-                raise GherkinSyntaxError(path, line_no, f"step outside Scenario/Background — {stripped!r}")
-            text_part = stripped[len(first_word):].strip()
-            # And/But inherit the previous step kind so runners see a clean GWT.
-            kind = last_kind if first_word in ("And", "But") else first_word
-            if first_word in ("And", "But") and last_kind is None:
-                raise GherkinSyntaxError(path, line_no, f"{first_word} before any Given/When/Then")
-            last_kind = kind
-            current_steps.append(Step(keyword=kind, text=text_part, line=line_no))
-            continue
-
-        raise GherkinSyntaxError(path, line_no, f"unrecognized line — {stripped!r}")
+        current_steps, pending_tags, last_kind = _apply_block_line(
+            feature, stripped, current_steps, pending_tags, last_kind, path, line_no
+        )
 
     if feature is None:
         raise GherkinSyntaxError(path, 1, "no Feature: line found")

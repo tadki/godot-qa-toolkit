@@ -19,7 +19,8 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .ops import _collect_mutations
-from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record
+from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
+                        _valid_mutants)
 from .coverlink import load_instrumentable_lines, load_reusable_coverage
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
@@ -277,6 +278,10 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
               "timeout", "run_errors", "invalid_mutants", "resumed",
               "timeout_pinned"):
         agg[k] += s.get(k, 0)
+    # O2（SEE-1420 qa 复验）：executed = 实际执行语义——worker 层已按
+    # invalid 预检覆写，逐分片求和（父层不得回填计划面值）。
+    if s.get("executed") is not None:
+        agg["executed"] = (agg["executed"] or 0) + s["executed"]
     agg["failures"].extend(cr.get("failures", []))
     agg["scoped"] = bool(s.get("scoped"))
     agg["budget"] = s.get("budget")
@@ -306,6 +311,7 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
             "file": file, "mutants": 0, "killed": 0, "survived": 0,
             "suspect": 0, "timeout": 0, "run_errors": 0,
             "invalid_mutants": 0, "resumed": 0, "timeout_pinned": 0,
+            "executed": None,
             "jobs": 0, "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
             "total_sites": None, "attention": None,
@@ -354,7 +360,8 @@ def _file_summary(agg: dict, passthrough_keys: tuple[str, ...],
             **({"timeout_pinned": agg["timeout_pinned"]}
                if agg["timeout_pinned"] else {}),
             **({"total_sites": agg["total_sites"],
-                "executed": min(agg["total_sites"], agg["budget"])}
+                "executed": (agg["executed"] if agg["executed"] is not None
+                             else min(agg["total_sites"], agg["budget"]))}
                if agg["total_sites"] is not None and agg["budget"] is not None
                and agg["total_sites"] > agg["budget"] else {}),
             **({"attention": agg["attention"]}
@@ -505,7 +512,11 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
         return [], plan.executed
     uncovered = [m for m in plan.executed
                  if m.line not in cov and m.line in inst]
-    return uncovered, [m for m in plan.executed if m.line in cov]
+    # D3 锚统一（SEE-1420 qa 复验 FAIL 实证）：执行面 = covered ∨ 不可插桩
+    # ——此前本函数 uncovered 行已换新锚、pool 行仍 covered-only，导致不
+    # 可插桩行位点被静默丢弃（不执行也不标记，比修复前更不可见）。
+    return uncovered, [m for m in plan.executed
+                       if m.line in cov or m.line not in inst]
 
 
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
@@ -651,7 +662,8 @@ def _inject_one(r: dict, ctx: dict) -> None:
         # diff_skipped 空）。
         s["diff_skipped"] = sorted(plan.reused)
         s["retry_total"] = len(plan.executed)
-        s.setdefault("executed", len(ctx["executed"]))
+        s.setdefault("executed",
+                     len(_valid_mutants(ctx["src"], ctx["executed"])))
         s["untouched_ranges"] = untouched_ranges(ctx["untouched"])
     total = s["mutants"]
     s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0

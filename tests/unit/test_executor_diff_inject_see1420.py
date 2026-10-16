@@ -134,6 +134,87 @@ def test_parallel_first_run_has_no_diff_disclosures(tmp_path, monkeypatch,
     assert s["mutants"] == 9
 
 
+def test_parallel_truncation_executed_excludes_static_invalid(
+        tmp_path, monkeypatch):
+    """O2 并行缝回归（SEE-1420 qa 复验实机 FAIL 实证）：截断披露的
+    executed 不得回填计划面（min(total_sites, budget)）——worker 层已按
+    invalid 预检覆写，父层逐分片求和。实机 20 vs mutants 19 漂移即此缝。"""
+    src = ("func one(a):\n"
+           "\treturn a + 1\n"
+           "\n"
+           "func two(a):\n"
+           "\treturn a + 2\n")
+    proj, target = _write_project(tmp_path)
+    Path(target).write_text(src, encoding="utf-8")
+    monkeypatch.setattr(runner_mod, "_run_gut_on_project",
+                        lambda root, timeout_s=60, tests_glob=None:
+                            (1, "* test_killed_by_probe\n\t[Failed]\n"))
+
+    from godot_qa_toolkit.mutation import reporting as _rep
+    orig_split = _rep._split_invalid_mutants
+
+    def split_with_one_invalid(src_text, mutants):
+        # 按 stable_id 精确失效一个位点（one#1）——分片 worker 各自调用
+        # split，按序号搬运会 每个 chunk 各产一个 invalid。
+        valid, invalid = orig_split(src_text, mutants)
+        target = next((m for m in valid
+                       if m.stable_id.endswith("#one#1")), None)
+        if target is not None:
+            valid = [m for m in valid if m is not target]
+            invalid = invalid + [target]
+        return valid, invalid
+
+    monkeypatch.setattr(_rep, "_split_invalid_mutants", split_with_one_invalid)
+    monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+    monkeypatch.setattr(executor, "_run_baseline_snapshot",
+                        lambda *a, **k: {"rc": 0, "tail": "pass",
+                                         "elapsed": 5.0})
+
+    result = run_mutation_files([target], proj, budget=4, timeout_s=60,
+                                tests_glob="res://tests/unit/save/", jobs=2)
+
+    s = result["results"][0]["summary"]
+    assert s["invalid_mutants"] == 1
+    # 截断面 4 位点、1 个静态 invalid → 实际 GUT 执行 3
+    assert s["executed"] == 3, (
+        "truncation-disclosed executed must count real GUT runs only "
+        f"(plan-face leak: {s['executed']})")
+
+
+def test_parallel_reuse_coverage_keeps_non_instrumentable_sites(
+        tmp_path, monkeypatch):
+    """D3 并行缝回归（SEE-1420 qa 复验 FAIL 实证）：executor 侧预检的
+    uncovered 行换新锚、pool 行仍 covered-only → 不可插桩行位点被静默
+    丢弃（不执行也不标记）。修复后：执行面 = covered ∨ 不可插桩。"""
+    proj, target = _write_project(tmp_path)
+    monkeypatch.setattr(runner_mod, "_run_gut_on_project",
+                        lambda root, timeout_s=60, tests_glob=None:
+                            (1, "* test_killed_by_probe\n\t[Failed]\n"))
+    monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+    monkeypatch.setattr(executor, "_run_baseline_snapshot",
+                        lambda *a, **k: {"rc": 0, "tail": "pass",
+                                         "elapsed": 5.0})
+
+    from godot_qa_toolkit.mutation.coverlink import save_coverage
+    # 位点行 2/3/4；2、3 covered 且可插桩；行 4 不可插桩（探针面外）
+    assert save_coverage({2, 3}, 4, proj, target,
+                         "res://tests/unit/save/",
+                         instrumentable_lines={2, 3})
+
+    result = run_mutation_files([target], proj, budget=10, timeout_s=60,
+                                tests_glob="res://tests/unit/save/",
+                                jobs=2, reuse_coverage=True)
+
+    r = result["results"][0]
+    s = r["summary"]
+    unc = [f for f in r.get("failures", []) if f.get("verdict") == "uncovered"]
+    assert unc == [], "no site may be marked uncovered in this fixture"
+    assert s["mutants"] == 9, (
+        "non-instrumentable-line sites must stay in the execution face "
+        f"(covered-only pool leak: {s['mutants']} of 9)")
+    assert s["killed"] == 9
+
+
 def test_zero_executed_reuses_precomputed_baseline(tmp_path, monkeypatch):
     """§14-B 回归：全复用零执行时不得再实测第二轮 baseline（GUT 调用 1≠2）。
 

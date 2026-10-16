@@ -50,7 +50,7 @@ TWO_FUNCS = ("extends Node\n"
              "func sub(a, b):\n"
              "\treturn a - b\n")
 
-MANIFEST = {"header_hash": "H", "scopes": {"add": "S1"}}
+MANIFEST = {"header_hash": "H", "scopes": {"func:add": "S1"}}
 PRIOR = {"verdict": "killed", "reason": "r", "scope_hash": "S1",
          "line": 2, "column": 11, "kind": "AOR", "original": "+",
          "mutated": "-", "timeout_streak": 0}
@@ -225,7 +225,7 @@ class TestMatrixCompletion:
         mutants = _mutants(TARGET_SRC)
         sid = mutants[0].stable_id
         prior = {sid: {**PRIOR, "verdict": verdict, **(prior_extra or {})}}
-        return plan_diff("H", {"add": "S1"}, MANIFEST, mutants, prior), sid
+        return plan_diff("H", {"func:add": "S1"}, MANIFEST, mutants, prior), sid
 
     def test_suspect_reused(self):
         plan, sid = self._plan("suspect")
@@ -257,7 +257,7 @@ class TestMatrixOrdering:
         mutants = _mutants(TARGET_SRC)
         sid = mutants[0].stable_id
         prior = {sid: {**PRIOR, "verdict": "survived"}}
-        plan = plan_diff("H", {"add": "S2"}, MANIFEST, mutants, prior)
+        plan = plan_diff("H", {"func:add": "S2"}, MANIFEST, mutants, prior)
         assert plan.triggers[sid] == "scope_changed"
         assert plan.reused == {}
 
@@ -265,7 +265,7 @@ class TestMatrixOrdering:
         mutants = _mutants(TARGET_SRC)
         sid = mutants[0].stable_id
         prior = {sid: dict(PRIOR)}
-        plan = plan_diff("H2", {"add": "S1"}, MANIFEST, mutants, prior)
+        plan = plan_diff("H2", {"func:add": "S1"}, MANIFEST, mutants, prior)
         assert plan.triggers[sid] == "header_changed"
         assert plan.reused == {}
 
@@ -274,14 +274,14 @@ class TestMatrixOrdering:
         mutants = _mutants(TARGET_SRC)
         sid = mutants[0].stable_id
         prior = {sid: {**PRIOR, "verdict": "survived", "line": 99}}
-        plan = plan_diff("H", {"add": "S1"}, MANIFEST, mutants, prior)
+        plan = plan_diff("H", {"func:add": "S1"}, MANIFEST, mutants, prior)
         assert plan.triggers[sid] == "signature_drift"
         assert plan.reused == {}
 
     def test_scope_absent_from_old_manifest_is_scope_new(self):
         mutants = _mutants(TARGET_SRC)
         sid = mutants[0].stable_id
-        plan = plan_diff("H", {"add": "S1"},
+        plan = plan_diff("H", {"func:add": "S1"},
                          {"header_hash": "H", "scopes": {}},
                          mutants, {sid: dict(PRIOR)})
         assert plan.triggers[sid] == "scope_new"
@@ -308,7 +308,7 @@ class TestBudgetAndRanges:
 def _m(i=1):
     return Mutant(file="x.gd", line=2, column=11, operator="+", original="+",
                   mutated="-", kind="AOR", scope_id="add", n=i,
-                  stable_id=f"x.gd#add#{i}")
+                  stable_id=f"x.gd#func:add#{i}")
 
 
 def _rec(verdict="timeout"):
@@ -327,7 +327,7 @@ class TestPoisonGuardBoundaries:
     def test_exact_half_ratio_5_of_10_is_poison(self):
         """边界精确定义：≥50% 且 ≥5 条——5/10 恰好落毒；毒窗口内 timeout
         不落 streak（无 prior → 保持 0）且无人 pinned。"""
-        out = apply_timeout_streaks(self._raw(5, 5), {}, {"add": "S"}, 0.0)
+        out = apply_timeout_streaks(self._raw(5, 5), {}, {"func:add": "S"}, 0.0)
         assert out.suspended is True
         assert out.pinned_ids == []
         timeouts = [e for e in out.entries if e["verdict"] == "timeout"]
@@ -337,7 +337,7 @@ class TestPoisonGuardBoundaries:
 
     def test_four_of_eight_not_poison(self):
         """占比过半但条数不足 5 → 非毒（count 门在前）。"""
-        out = apply_timeout_streaks(self._raw(4, 4), {}, {"add": "S"}, 0.0)
+        out = apply_timeout_streaks(self._raw(4, 4), {}, {"func:add": "S"}, 0.0)
         assert out.suspended is False
 
     def test_empty_window_no_crash_and_not_poison(self):
@@ -349,20 +349,20 @@ class TestPoisonGuardBoundaries:
     def test_poison_window_keeps_pinned_pinned_with_held_streak(self):
         """毒窗口内 prior pinned 重判 timeout：保留原 streak，仍 pinned
         （毒窗口不提供任何解除证据）。"""
-        priors = {"x.gd#add#1": {"verdict": "timeout_pinned",
+        priors = {"x.gd#func:add#1": {"verdict": "timeout_pinned",
                                  "timeout_streak": 2}}
         # 非毒窗口（1/10）：prior pinned 重判 timeout → streak 增长 2→3
         raw = [(_m(1), _rec("timeout"))]
         raw += [(_m(10 + j), _rec("killed")) for j in range(9)]
-        out = apply_timeout_streaks(raw, priors, {"add": "S"}, 0.0)
-        e1 = next(e for e in out.entries if e["id"] == "x.gd#add#1")
+        out = apply_timeout_streaks(raw, priors, {"func:add": "S"}, 0.0)
+        e1 = next(e for e in out.entries if e["id"] == "x.gd#func:add#1")
         assert (e1["verdict"], e1["timeout_streak"]) == ("timeout_pinned", 3)
         poison_raw = [(_m(1), _rec("timeout"))]
         poison_raw += [(_m(50 + j), _rec("killed")) for j in range(5)]
         poison_raw += [(_m(60 + j), _rec("timeout")) for j in range(4)]
-        out2 = apply_timeout_streaks(poison_raw, priors, {"add": "S"}, 0.0)
+        out2 = apply_timeout_streaks(poison_raw, priors, {"func:add": "S"}, 0.0)
         assert out2.suspended is True
-        e1b = next(e for e in out2.entries if e["id"] == "x.gd#add#1")
+        e1b = next(e for e in out2.entries if e["id"] == "x.gd#func:add#1")
         assert (e1b["verdict"], e1b["timeout_streak"]) == \
             ("timeout_pinned", 2)
 
@@ -381,11 +381,11 @@ class TestPoisonGuardBoundaries:
         非毒，合并不毒化历史——钉死契约口径防实现漂移。"""
         wa = self._raw(3, 2)
         wb = self._raw(3, 2, base=200)
-        assert apply_timeout_streaks(wa, {}, {"add": "S"}, 0.0).suspended \
+        assert apply_timeout_streaks(wa, {}, {"func:add": "S"}, 0.0).suspended \
             is False
-        assert apply_timeout_streaks(wb, {}, {"add": "S"}, 0.0).suspended \
+        assert apply_timeout_streaks(wb, {}, {"func:add": "S"}, 0.0).suspended \
             is False
-        assert apply_timeout_streaks(wa + wb, {}, {"add": "S"}, 0.0) \
+        assert apply_timeout_streaks(wa + wb, {}, {"func:add": "S"}, 0.0) \
             .suspended is True
 
 
@@ -421,7 +421,7 @@ class TestConcurrentShardWriteRace:
             try:
                 barrier.wait(timeout)
                 for _ in range(25):
-                    assert store.write_manifest("H", {"add": "S"},
+                    assert store.write_manifest("H", {"func:add": "S"},
                                                 "SHA", "calc.gd")
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
@@ -486,7 +486,7 @@ class TestDiffVsAllWithPinnedPrior:
 
         def mk_keyed():
             def keyed(m, *a, **k):
-                verdict = "killed" if m.scope_id == "add" else "timeout"
+                verdict = "killed" if m.scope_id == "func:add" else "timeout"
                 return {"file": m.file, "line": m.line, "column": m.column,
                         "kind": m.kind, "operator": m.operator,
                         "original": m.original, "mutated": m.mutated,
@@ -548,18 +548,18 @@ class TestStableIdCounterexamples:
         src2 = TWO_FUNCS.replace("return a - b", "return a - b - 1")
         s1 = _state(TWO_FUNCS)
         s2 = _state(src2)
-        add1 = sorted(m.stable_id for m in s1[2] if m.scope_id == "add")
-        add2 = sorted(m.stable_id for m in s2[2] if m.scope_id == "add")
+        add1 = sorted(m.stable_id for m in s1[2] if m.scope_id == "func:add")
+        add2 = sorted(m.stable_id for m in s2[2] if m.scope_id == "func:add")
         assert add1 == add2
-        sub1 = sorted(m.stable_id for m in s1[2] if m.scope_id == "sub")
-        sub2 = sorted(m.stable_id for m in s2[2] if m.scope_id == "sub")
+        sub1 = sorted(m.stable_id for m in s1[2] if m.scope_id == "func:sub")
+        sub2 = sorted(m.stable_id for m in s2[2] if m.scope_id == "func:sub")
         assert sub1 != sub2  # 新语句改变 sub 的位点集（n 序或签名）
         plan = plan_diff(s2[4], s2[3], s1[0], s2[2], s1[1])
         reused_scopes = {sid.split("#")[1]
                          for sid in plan.reused}
-        assert reused_scopes == {"add"}
+        assert reused_scopes == {"func:add"}
         assert all(plan.triggers[m.stable_id] == "scope_changed"
-                   for m in s2[2] if m.scope_id == "sub")
+                   for m in s2[2] if m.scope_id == "func:sub")
 
     def test_new_func_between_leaves_add_reused_sub_degrades(self):
         """A 与 B 之间插新 func：A 复用；C scope_new；B 行号位移 → 全签名
@@ -572,9 +572,9 @@ class TestStableIdCounterexamples:
         plan = plan_diff(s2[4], s2[3], s1[0], s2[2], s1[1])
         for m in s2[2]:
             trigger = plan.triggers[m.stable_id]
-            if m.scope_id == "add":
+            if m.scope_id == "func:add":
                 assert trigger == "reused:killed"
-            elif m.scope_id == "mid":
+            elif m.scope_id == "func:mid":
                 assert trigger == "scope_new"
             else:
                 assert trigger == "signature_drift", \
@@ -586,16 +586,16 @@ class TestStableIdCounterexamples:
         src1 = ("func add(a):\n\treturn a + 1\n\n"
                 "func add(a):\n\treturn a + 1\n")
         s1 = _state(src1)
-        assert any(m.scope_id == "add#2" for m in s1[2])
+        assert any(m.scope_id == "func:add#2" for m in s1[2])
         src2 = src1.replace("func add(a):\n\treturn a + 1\n\nfunc add",
                             "func plus(a):\n\treturn a + 1\n\nfunc add", 1)
         s2 = _state(src2)
-        assert any(m.scope_id == "plus" for m in s2[2])
-        assert all(m.scope_id != "add#2" for m in s2[2])
+        assert any(m.scope_id == "func:plus" for m in s2[2])
+        assert all(m.scope_id != "func:add#2" for m in s2[2])
         plan = plan_diff(s2[4], s2[3], s1[0], s2[2], s1[1])
         assert plan.reused == {}
         for m in s2[2]:
-            expected = ("scope_new" if m.scope_id == "plus"
+            expected = ("scope_new" if m.scope_id == "func:plus"
                         else "signature_drift")
             assert plan.triggers[m.stable_id] == expected, \
                 f"{m.stable_id}: {plan.triggers[m.stable_id]}"

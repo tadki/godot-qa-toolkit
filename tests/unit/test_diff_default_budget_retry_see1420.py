@@ -114,7 +114,7 @@ class TestDiffDefaultOn:
         skipped = r2["summary"]["diff_skipped"]
         assert len(skipped) == 3
         assert all(s.startswith("res") or "#" in s for s in skipped)
-        assert all("calc.gd#add#" in s for s in skipped)
+        assert all("calc.gd#func:add#" in s for s in skipped)
 
 
 class TestBudgetOnRetryEndToEnd:

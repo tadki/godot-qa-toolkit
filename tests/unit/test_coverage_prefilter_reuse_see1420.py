@@ -212,7 +212,7 @@ class TestCaliperBypassesPrefilter:
         """P3 卡尺随机抽查被剔位点防假阴性：显式寻址绕过 coverage 前置。"""
         proj, target = _write_project(tmp_path)
         save_coverage({2}, 6, str(proj), str(target), "res://tests/")
-        sid = f"{target}#sub#1"
+        sid = f"{target}#func:sub#1"
         calls = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):

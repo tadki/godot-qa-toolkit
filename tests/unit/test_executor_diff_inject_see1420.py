@@ -158,7 +158,7 @@ def test_parallel_truncation_executed_excludes_static_invalid(
         # split，按序号搬运会 每个 chunk 各产一个 invalid。
         valid, invalid = orig_split(src_text, mutants)
         target = next((m for m in valid
-                       if m.stable_id.endswith("#one#1")), None)
+                       if m.stable_id.endswith("#func:one#1")), None)
         if target is not None:
             valid = [m for m in valid if m is not target]
             invalid = invalid + [target]

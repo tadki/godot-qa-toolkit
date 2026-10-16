@@ -44,7 +44,7 @@ class TestReportIdColumn:
             # id = <file>#<scope_id>#<n>（D3）
             parts = f["id"].split("#")
             assert parts[-1].isdigit()
-            assert parts[-2] in ("add", "sub")
+            assert parts[-2] in ("func:add", "func:sub")
             assert f["id"].endswith("calc.gd#") is False
             assert f["id"].split("#")[0].endswith("calc.gd")
 
@@ -76,7 +76,7 @@ class TestDiffVsMutateAllConsistency:
 
         def mk_keyed():
             def keyed(m, *a, **k):
-                verdict = "killed" if m.scope_id == "add" else "survived"
+                verdict = "killed" if m.scope_id == "func:add" else "survived"
                 return {"file": m.file, "line": m.line, "column": m.column,
                         "kind": m.kind, "operator": m.operator,
                         "original": m.original, "mutated": m.mutated,

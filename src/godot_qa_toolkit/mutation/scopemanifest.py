@@ -70,14 +70,21 @@ def _max_leaf_line(node) -> int:
     return best
 
 
-def _disambiguate(names_in_order: list[str]) -> dict[int, str]:
-    """出现序 → scope_id：首个用本名，后续同名加 ``#k``（k 从 2 起）。"""
+def _disambiguate(names_in_order: list[str], kind: str = "") -> dict[int, str]:
+    """出现序 → scope_id：首个用本名，后续同名加 ``#k``（k 从 2 起）。
+
+    kind 非空时并入 scope_id 前缀（``func:foo`` / ``class:foo``）——func 与
+    class 各自独立计数空间（Final Review MEDIUM-2：同文件同名 func+class
+    碰撞会使 site_scopes 后者覆盖前者，靠前 scope 的差分信号被吞）。
+    """
+    prefix = f"{kind}:" if kind else ""
     seen: dict[str, int] = {}
     out: dict[int, str] = {}
     for idx, name in enumerate(names_in_order):
-        n = seen.get(name, 0) + 1
-        seen[name] = n
-        out[idx] = name if n == 1 else f"{name}#{n}"
+        key = f"{prefix}{name}"
+        n = seen.get(key, 0) + 1
+        seen[key] = n
+        out[idx] = key if n == 1 else f"{key}#{n}"
     return out
 
 
@@ -105,14 +112,20 @@ def extract_scopes(src: str) -> tuple[str, list[ScopeSpan]]:
                 header_spans.append((meta.line, _max_leaf_line(child)))
 
     scopes: list[ScopeSpan] = []
+    # 消歧键并入 kind（Final Review MEDIUM-2）：func 与 class 分别独立计数时
+    # 同文件同名 func+class 碰撞为同一 scope_id，site_scopes 后者覆盖前者——
+    # 靠前 scope 的 hash 变化不再触发差分重跑（跨内容复用，方向不安全）。
+    # scope_id 带 ``func:``/``class:`` 前缀（D1/D3 语义名仍可读；id 形态变化
+    # 属 v2 schema 内部面，一次性失效随 OPS_VERSION 既有 bump 口径披露）。
     func_ids = _disambiguate(
-        [_func_name(n) for n in func_nodes])
+        [_func_name(n) for n in func_nodes], kind="func")
     for i, node in enumerate(func_nodes):
         start = getattr(node.meta, "line", 0)
         end = max(_max_leaf_line(node), start)
         scopes.append(ScopeSpan(func_ids[i], "func", start, end,
                                 _sha1(_span_text(lines, start, end))))
-    class_ids = _disambiguate([_class_name(n) for n in class_nodes])
+    class_ids = _disambiguate([_class_name(n) for n in class_nodes],
+                              kind="class")
     for i, node in enumerate(class_nodes):
         start = getattr(node.meta, "line", 0)
         end = max(_max_leaf_line(node), start)

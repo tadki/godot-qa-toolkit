@@ -18,7 +18,7 @@ from godot_qa_toolkit.mutation.scopemanifest import build_manifest
 SRC = ("func add(a, b):\n"
        "\treturn a + b\n")
 
-MANIFEST = {"header_hash": "H", "scopes": {"add": "S1"}}
+MANIFEST = {"header_hash": "H", "scopes": {"func:add": "S1"}}
 PRIOR = {"verdict": "killed", "reason": "r", "scope_hash": "S1",
          "line": 2, "column": 11, "kind": "AOR", "original": "+",
          "mutated": "-", "timeout_streak": 0}
@@ -37,7 +37,7 @@ class TestDiffMatrix:
     def _plan(self, *, old=MANIFEST, scopes=None, header="H", prior=None,
               mutate_all=False):
         mutants = _mutants()
-        return plan_diff(header, scopes or {"add": "S1"}, old, mutants,
+        return plan_diff(header, scopes or {"func:add": "S1"}, old, mutants,
                          prior if prior is not None else
                          {_first(mutants).stable_id: dict(PRIOR)},
                          mutate_all=mutate_all)
@@ -68,16 +68,16 @@ class TestDiffMatrix:
             "retry:timeout_pinned"
 
     def test_scope_change_runs_whole_scope(self):
-        plan = self._plan(scopes={"add": "S2"})
+        plan = self._plan(scopes={"func:add": "S2"})
         sid = _first(_mutants()).stable_id
         assert plan.triggers[sid] == "scope_changed"
         assert sid not in plan.reused
 
     def test_new_scope_runs(self):
-        plan = self._plan(scopes={"add": "S1", "other": "S9"})
+        plan = self._plan(scopes={"func:add": "S1", "other": "S9"})
         # add 未变 → 复用路径不受新 scope 影响；换全新 scope 判定：
-        plan2 = self._plan(scopes={"add": "S1"}, old={"header_hash": "H",
-                                                      "scopes": {}})
+        plan2 = self._plan(scopes={"func:add": "S1"}, old={"header_hash": "H",
+                                                           "scopes": {}})
         assert plan2.triggers[_first(_mutants()).stable_id] == "scope_new"
 
     def test_header_change_runs_whole_file(self):
@@ -115,7 +115,7 @@ class TestSignatureDrift:
         mutants = _mutants()
         m = _first(mutants)
         prior = {**PRIOR, "line": m.line + 10}  # 行漂移但 id 相同
-        plan = plan_diff("H", {"add": "S1"}, MANIFEST, mutants, {m.stable_id: prior})
+        plan = plan_diff("H", {"func:add": "S1"}, MANIFEST, mutants, {m.stable_id: prior})
         assert plan.triggers[m.stable_id] == "signature_drift"
         assert m in plan.executed
 
@@ -124,7 +124,7 @@ class TestSignatureDrift:
         mutants = _mutants()
         m = _first(mutants)
         prior = {**PRIOR, "scope_hash": "STALE"}
-        plan = plan_diff("H", {"add": "S1"}, MANIFEST, mutants, {m.stable_id: prior})
+        plan = plan_diff("H", {"func:add": "S1"}, MANIFEST, mutants, {m.stable_id: prior})
         assert plan.triggers[m.stable_id] == "scope_hash_drift"
 
     def test_signature_matches_pure(self):

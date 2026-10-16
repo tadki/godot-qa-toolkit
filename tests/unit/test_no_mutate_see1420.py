@@ -33,10 +33,10 @@ def _ids(src):
 class TestNoMutateFuncLevel:
     def test_inline_marker_suppresses_whole_func(self):
         tagged = _ids(SRC)
-        assert all(not m.stable_id.startswith("x.gd#skip_me")
+        assert all(not m.stable_id.startswith("x.gd#func:skip_me")
                    for m in tagged)
-        assert any(m.scope_id == "keep" for m in tagged)
-        assert any(m.scope_id == "keep_too" for m in tagged)
+        assert any(m.scope_id == "func:keep" for m in tagged)
+        assert any(m.scope_id == "func:keep_too" for m in tagged)
 
     def test_marker_line_above_func_suppresses_whole_func(self):
         src = ("func a(x):\n"
@@ -46,8 +46,8 @@ class TestNoMutateFuncLevel:
                "func b(x):\n"
                "\treturn x + 2\n")
         tagged = _ids(src)
-        assert all(m.scope_id != "b" for m in tagged)
-        assert any(m.scope_id == "a" for m in tagged)
+        assert all(m.scope_id != "func:b" for m in tagged)
+        assert any(m.scope_id == "func:a" for m in tagged)
 
     def test_suppression_extends_to_next_top_level_decl(self):
         """函数级抑制域 = 至下一顶层声明（多行函数体全覆盖）。"""
@@ -62,9 +62,9 @@ class TestNoMutateFuncLevel:
                "func c(x):\n"
                "\treturn x + 4\n")
         tagged = _ids(src)
-        assert all(m.scope_id != "b" for m in tagged)
-        assert any(m.scope_id == "a" for m in tagged)
-        assert any(m.scope_id == "c" for m in tagged)
+        assert all(m.scope_id != "func:b" for m in tagged)
+        assert any(m.scope_id == "func:a" for m in tagged)
+        assert any(m.scope_id == "func:c" for m in tagged)
 
 
 class TestNoMutateLineLevel:
@@ -94,5 +94,5 @@ class TestNoMutateLineLevel:
                "\treturn x + 2\n")
         _, _, _, site_scopes = build_manifest(
             src, "x.gd", _collect_mutations(src, "x.gd"))
-        assert "a" in site_scopes
-        assert "b" not in site_scopes
+        assert "func:a" in site_scopes
+        assert "func:b" not in site_scopes

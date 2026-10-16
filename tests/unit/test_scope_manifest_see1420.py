@@ -56,19 +56,19 @@ class TestScopeSet:
     def test_top_level_funcs_each_one_scope(self):
         hh, spans = extract_scopes(TOP_LEVEL_FUNCS)
         func_ids = [s.scope_id for s in spans if s.kind == "func"]
-        assert func_ids == ["add", "sub"]
+        assert func_ids == ["func:add", "func:sub"]
 
     def test_inner_class_is_single_black_box_scope(self):
         hh, spans = extract_scopes(INNER_CLASS)
         by_kind = {(s.kind, s.scope_id) for s in spans}
-        assert ("func", "outer") in by_kind
-        assert ("class", "Inner") in by_kind
+        assert ("func", "func:outer") in by_kind
+        assert ("class", "class:Inner") in by_kind
         # 黑盒：内部 class 的方法不单独成 scope
-        assert not any(s.scope_id == "bump" for s in spans)
+        assert not any(s.scope_id.endswith("bump") for s in spans)
 
     def test_class_span_covers_whole_class_body(self):
         hh, spans = extract_scopes(INNER_CLASS)
-        inner = next(s for s in spans if s.scope_id == "Inner")
+        inner = next(s for s in spans if s.scope_id == "class:Inner")
         lines = INNER_CLASS.splitlines()
         # bump 方法体（黑盒内）行落在 Inner span 内
         bump_line = next(i + 1 for i, t in enumerate(lines)
@@ -81,14 +81,14 @@ class TestScopeSet:
         # MAX = 3 的常量行（第 3 行）不在任何 func/class span → module
         assert scope_of_line(spans, 3) == "module"
         # func 体行归对应 func scope
-        assert scope_of_line(spans, 5) == "add"
+        assert scope_of_line(spans, 5) == "func:add"
 
     def test_lambda_belongs_to_enclosing_func(self):
         hh, spans = extract_scopes(LAMBDA_IN_FUNC)
         lines = LAMBDA_IN_FUNC.splitlines()
         lambda_line = next(i + 1 for i, t in enumerate(lines)
                            if "func(x)" in t)
-        assert scope_of_line(spans, lambda_line) == "host"
+        assert scope_of_line(spans, lambda_line) == "func:host"
 
     def test_same_name_disambiguation(self):
         src = ("func heal(a):\n"
@@ -98,7 +98,7 @@ class TestScopeSet:
                "\treturn b + 2\n")
         hh, spans = extract_scopes(src)
         ids = [s.scope_id for s in spans]
-        assert ids == ["heal", "heal#2"]
+        assert ids == ["func:heal", "func:heal#2"]
 
 
 class TestHeaderHash:
@@ -131,7 +131,7 @@ class TestHeaderHash:
         ha, sa = extract_scopes(src_a)
         hb, sb = extract_scopes(src_b)
         assert ha == hb
-        assert scopes_map(sa)["sub"] != scopes_map(sb)["sub"]
+        assert scopes_map(sa)["func:sub"] != scopes_map(sb)["func:sub"]
 
 
 class TestManifestBuild:
@@ -146,8 +146,8 @@ class TestManifestBuild:
                "\tpass\n")
         mutants = _collect_mutations(src, "x.gd")
         _, _, _, site_scopes = build_manifest(src, "x.gd", mutants)
-        assert "with_site" in site_scopes
-        assert "no_site" not in site_scopes
+        assert "func:with_site" in site_scopes
+        assert "func:no_site" not in site_scopes
 
     def test_module_sites_anchor_to_header_hash(self):
         """module 位点的 scope hash = header hash（D2 同域）——顶层 const
@@ -165,10 +165,10 @@ class TestManifestBuild:
                "\treturn a + b\n")
         mutants = _collect_mutations(src, "x.gd")
         hh, spans, tagged, site_scopes = build_manifest(src, "x.gd", mutants)
-        assert all(m.stable_id.startswith("x.gd#add#") for m in tagged)
+        assert all(m.stable_id.startswith("x.gd#func:add#") for m in tagged)
         ns = sorted(m.n for m in tagged)
         assert ns == list(range(1, len(tagged) + 1))
-        assert set(site_scopes) == {"add"}
+        assert set(site_scopes) == {"func:add"}
 
     def test_comment_insertion_does_not_shift_any_id(self):
         """§SPEC-1420-04 属性断言（scope 域）：插入注释行不位移任何 id。"""
@@ -199,12 +199,12 @@ class TestManifestBuild:
         mb = build_manifest(src_b, "x.gd",
                             _collect_mutations(src_b, "x.gd"))[2]
         add_a = [(m.kind, m.original, m.mutated, m.n) for m in ma
-                 if m.scope_id == "add"]
+                 if m.scope_id == "func:add"]
         add_b = [(m.kind, m.original, m.mutated, m.n) for m in mb
-                 if m.scope_id == "add"]
+                 if m.scope_id == "func:add"]
         assert add_a != add_b  # add 域内位移
         sub_a = [(m.kind, m.original, m.mutated, m.n) for m in ma
-                 if m.scope_id == "sub"]
+                 if m.scope_id == "func:sub"]
         sub_b = [(m.kind, m.original, m.mutated, m.n) for m in mb
-                 if m.scope_id == "sub"]
+                 if m.scope_id == "func:sub"]
         assert sub_a == sub_b  # 其他 scope 零位移

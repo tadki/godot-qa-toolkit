@@ -107,11 +107,14 @@ def _apply_block_line(
     line_no: int,
 ) -> tuple[list[Step], list[str], str | None]:
     if stripped.startswith("Background:"):
-        return feature.background, pending_tags, last_kind
+        # And/But 继承只在本 block 内生效——新 block 头重置（修复跨
+        # Scenario/Background 泄漏：上一 block 末尾 Then 会让下一 block
+        # 起手的 And 被误判合法，runner 按 keyword 匹配即错路由）。
+        return feature.background, pending_tags, None
     scenario = _parse_scenario_header(stripped, pending_tags, line_no)
     if scenario is not None:
         feature.scenarios.append(scenario)
-        return scenario.steps, [], last_kind
+        return scenario.steps, [], None
     first_word = stripped.split(None, 1)[0]
     if first_word in STEP_KEYWORDS:
         new_kind = _append_step(stripped, first_word, current_steps, last_kind, path, line_no)

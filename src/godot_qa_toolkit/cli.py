@@ -130,8 +130,6 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import BinaryConfigError, detect_binary_kind
-    from .mutation.runner import run_mutation
-    from .timing import TimingStore
 
     # §SPEC-012（定案 C 项 a+b）：GQT_GODOT_BIN 覆写限 mutation 子命令——
     # dispatch 前钉死二进制类型（平台分支与 key 二进制成分共用判定）；
@@ -147,83 +145,14 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             "summary": {"error": str(e)},
             "failures": [{"reason": str(e)}],
         })
-
-    files = args.files
-    # §SPEC-1420-11：单点寻址（--mutation/--lines）= 卡尺语义，仅单文件；
-    # 走串行路径（1 baseline + N selected，秒级确认）。
-    selecting = getattr(args, "mutation", None) or getattr(args, "lines", None)
-    if selecting and len(files) > 1:
-        return _emit({
-            "tool": "mutation",
-            "ok": False,
-            "summary": {"files": files,
-                        "error": "--mutation/--lines target a single file"},
-            "failures": [{"reason": "--mutation/--lines require exactly one "
-                                    "target file"}],
-        })
-    # SEE-1413：--jobs 缺省时单文件同样走并发切片路径（默认并行）；显式
-    # --jobs 1 在 executor 内强制串行。串行快路径仅留给显式串行请求。
-    multi_concurrency = (len(files) > 1 or args.jobs is None or args.jobs > 1)
-    if selecting:
-        multi_concurrency = False
     try:
-        if not multi_concurrency:
-            # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
-            timing_store = None
-            if not args.dry_run:
-                timing_store = TimingStore(args.project_root, files[0],
-                                           "mutation", args.tests,
-                                           binary_kind=binary_kind)
-            result = run_mutation(
-                file_path=files[0],
-                project_root=args.project_root,
-                budget=args.budget,
-                timeout_s=args.timeout,
-                dry_run=args.dry_run,
-                tests_glob=args.tests,
-                timing_store=timing_store,
-                resume=args.resume,
-                binary_kind=binary_kind,
-                mutation_warning=args.mutation_warning,
-                timeout_factor=args.timeout_factor,
-                mutate_all=args.mutate_all,
-                select_ids=([args.mutation] if getattr(args, "mutation", None)
-                            else None),
-                select_lines=([args.lines] if getattr(args, "lines", None)
-                              else None),
-                reuse_coverage=args.reuse_coverage,
-            )
-            result["summary"].setdefault("jobs", 1)
-        else:
-            from .mutation.executor import run_mutation_files
-            # SEE-1413：timing store 只喂退串行路径的 run_mutation（与原串行
-            # 快路径同接线）；并发分片路径不接线（worker 分片跳过 store 读写
-            # 是既有 SPEC-005/L1 契约，adaptive timeout 语义不静默丢失）。
-            timing_store = None
-            if not args.dry_run and len(files) == 1:
-                timing_store = TimingStore(args.project_root, files[0],
-                                           "mutation", args.tests,
-                                           binary_kind=binary_kind)
-            result = run_mutation_files(
-                files, args.project_root, budget=args.budget,
-                timeout_s=args.timeout, dry_run=args.dry_run,
-                tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
-                binary_kind=binary_kind, timing_store=timing_store,
-                mutation_warning=args.mutation_warning,
-                timeout_factor=args.timeout_factor,
-                mutate_all=args.mutate_all,
-                reuse_coverage=args.reuse_coverage)
-            if len(files) == 1 and args.jobs is None:
-                # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
-                envelope = result
-                result = envelope["results"][0]
-                result["summary"].setdefault("jobs", envelope["jobs"])
+        result = _dispatch_mutation(args, binary_kind)
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",
             "ok": False,
             # 多文件场景报全部输入（仅报 files[0] 会误导为只缺第一个——LOW-6）
-            "summary": {"files": files, "error": str(e)},
+            "summary": {"files": args.files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
     except ValueError as e:
@@ -231,10 +160,93 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         result = {
             "tool": "mutation",
             "ok": False,
-            "summary": {"files": files, "error": str(e)},
+            "summary": {"files": args.files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
     return _emit(result)
+
+
+def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
+    """mutation 子命令派发（串行 / 并发编排两径，<800/复杂度纪律拆分）。"""
+    from .timing import TimingStore
+
+    files = args.files
+    # §SPEC-1420-11：单点寻址（--mutation/--lines）= 卡尺语义，仅单文件；
+    # 走串行路径（1 baseline + N selected，秒级确认）。
+    selecting = getattr(args, "mutation", None) or getattr(args, "lines", None)
+    if selecting and len(files) > 1:
+        return {
+            "tool": "mutation",
+            "ok": False,
+            "summary": {"files": files,
+                        "error": "--mutation/--lines target a single file"},
+            "failures": [{"reason": "--mutation/--lines require exactly one "
+                                    "target file"}],
+        }
+    # SEE-1413：--jobs 缺省时单文件同样走并发切片路径（默认并行）；显式
+    # --jobs 1 在 executor 内强制串行。串行快路径仅留给显式串行请求。
+    multi_concurrency = (len(files) > 1 or args.jobs is None or args.jobs > 1)
+    if selecting:
+        multi_concurrency = False
+    if not multi_concurrency:
+        return _run_mutation_serial(args, binary_kind)
+    from .mutation.executor import run_mutation_files
+    # SEE-1413：timing store 只喂退串行路径的 run_mutation（与原串行
+    # 快路径同接线）；并发分片路径不接线（worker 分片跳过 store 读写
+    # 是既有 SPEC-005/L1 契约，adaptive timeout 语义不静默丢失）。
+    timing_store = None
+    if not args.dry_run and len(files) == 1:
+        timing_store = TimingStore(args.project_root, files[0],
+                                   "mutation", args.tests,
+                                   binary_kind=binary_kind)
+    result = run_mutation_files(
+        files, args.project_root, budget=args.budget,
+        timeout_s=args.timeout, dry_run=args.dry_run,
+        tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
+        binary_kind=binary_kind, timing_store=timing_store,
+        mutation_warning=args.mutation_warning,
+        timeout_factor=args.timeout_factor,
+        mutate_all=args.mutate_all,
+        reuse_coverage=args.reuse_coverage)
+    if len(files) == 1 and args.jobs is None:
+        # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
+        envelope = result
+        result = envelope["results"][0]
+        result["summary"].setdefault("jobs", envelope["jobs"])
+    return result
+
+
+def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
+    from .mutation.runner import run_mutation
+    from .timing import TimingStore
+
+    # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
+    timing_store = None
+    if not args.dry_run:
+        timing_store = TimingStore(args.project_root, args.files[0],
+                                   "mutation", args.tests,
+                                   binary_kind=binary_kind)
+    result = run_mutation(
+        file_path=args.files[0],
+        project_root=args.project_root,
+        budget=args.budget,
+        timeout_s=args.timeout,
+        dry_run=args.dry_run,
+        tests_glob=args.tests,
+        timing_store=timing_store,
+        resume=args.resume,
+        binary_kind=binary_kind,
+        mutation_warning=args.mutation_warning,
+        timeout_factor=args.timeout_factor,
+        mutate_all=args.mutate_all,
+        select_ids=([args.mutation] if getattr(args, "mutation", None)
+                    else None),
+        select_lines=([args.lines] if getattr(args, "lines", None)
+                      else None),
+        reuse_coverage=args.reuse_coverage,
+    )
+    result["summary"].setdefault("jobs", 1)
+    return result
 
 
 def cmd_coverage(args: argparse.Namespace) -> int:

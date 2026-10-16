@@ -62,8 +62,8 @@ from .reporting import (  # noqa: F401
     survivors_projection,
 )
 from .godot_gate import GlobalGodotGate
-from .diffengine import apply_timeout_streaks, budget_on_retry, make_entry, \
-    plan_diff, streak_for, untouched_ranges
+from .diffengine import apply_timeout_streaks, make_entry, streak_for
+from .planner import dry_run_estimate, plan_execution
 from .coverlink import load_reusable_coverage
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
@@ -172,8 +172,8 @@ def adaptive_timeout_for(baseline_elapsed: float, timeout_s: int,
     return max(timeout_s, int(baseline_elapsed * k) + 1)
 
 
-def run_mutation(
-    file_path: str,
+
+def run_mutation(    file_path: str,
     project_root: str,
     budget: int = 50,
     timeout_s: int = 60,
@@ -258,25 +258,10 @@ def run_mutation(
               f"splitting this file", file=sys.stderr)
 
     if dry_run:
-        # SPEC-009：dry-run 跳过 timing store 读写（清点模式零 IO）。
-        # §SPEC-1420-18：dry-run 升级为差分计数预估——manifest 在场时按 D4
-        # 矩阵估 retry 面（只读，不落盘、不跑 GUT）。
-        est_store = resume2_store if resume2_store is not None else \
-            ResumeStoreV2(project_root, str(path), tests_glob,
-                          binary_kind=binary_kind)
-        old = est_store.load_manifest()
-        if old is not None and not mutate_all:
-            est_plan = plan_diff(header_hash, scope_hashes, old, mutants,
-                                 est_store.load_entries())
-            retry = len(est_plan.executed)
-            estimate = {"diff_available": True, "retry_estimate": retry,
-                        "executed_estimate": min(retry, budget)}
-        else:
-            estimate = {"diff_available": False,
-                        "retry_estimate": total_sites,
-                        "executed_estimate": min(total_sites, budget)}
-        return _dry_run_result(str(path), mutants, budget, scoped,
-                               total_sites=total_sites, estimate=estimate)
+        return dry_run_estimate(
+            str(path), mutants, budget, scoped, total_sites,
+            project_root, tests_glob, binary_kind, resume2_store,
+            mutate_all, header_hash, scope_hashes)
 
     if not mutants:
         return _no_sites_result(str(path), scoped)
@@ -285,85 +270,36 @@ def run_mutation(
     # 显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分复用。
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
         project_root, str(path), tests_glob, binary_kind=binary_kind)
-    prior_entries: dict = {}
-    reused: dict = {}
-    untouched: list = []
-    results_uncovered: list[dict] = []
-    disclosures: dict = {}
-    if attention is not None:
-        disclosures["attention"] = attention
-    if select_ids is not None or select_lines is not None:
-        # §SPEC-1420-11（D7 卡尺）：显式寻址 = 公平的重跑通道——不查缓存。
-        if select_ids is not None:
-            wanted = set(select_ids)
-            executed_list = [m for m in mutants if m.stable_id in wanted]
-            missing = wanted - {m.stable_id for m in executed_list}
-        else:
-            lines = set(select_lines)
-            executed_list = [m for m in mutants if m.line in lines]
-            missing = lines - {m.line for m in executed_list}
-        if missing:
-            raise ValueError(
-                "selection matched no mutation sites (stale id after source "
-                f"change, or out-of-range line?): {sorted(missing)[:5]}")
-        prior_entries = store2.load_entries()  # streak 连续性（仅读）
-        disclosures["executed"] = len(executed_list)
-        disclosures["selected"] = True
-    elif retry_ids is not None:
-        by_id = {m.stable_id: m for m in mutants}
-        missing = [i for i in retry_ids if i not in by_id]
-        if missing:
-            raise ValueError(
-                f"retry_ids not found in current scan (source drift?): "
-                f"{missing[:5]}")
-        executed_list = [by_id[i] for i in retry_ids]
-        disclosures["executed"] = len(executed_list)
-    else:
-        store2.disclose_v1_superseded()
-        old_manifest = store2.load_manifest()
-        prior_entries = store2.load_entries()
-        plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
-                         prior_entries, mutate_all=mutate_all)
-        # §SPEC-1420-12（L3/D7 P2）：coverage 前置过滤——先于 budget：
-        # 预算只花在被测试覆盖的位点上（uncovered 不消耗预算，全部显式标记）。
-        uncovered_mutants: list = []
-        cov_lines: set | None = None
-        if reuse_coverage:
-            cov_lines, cov_reason = load_reusable_coverage(
-                project_root, str(path), tests_glob, binary_kind)
-            if cov_lines is None:
-                print(f"mutation: coverage store miss ({cov_reason}) — "
-                      f"running unfiltered", file=sys.stderr)
-                disclosures["coverage_prefilter"] = "store_miss"
-        retry_pool = plan.executed
-        if cov_lines is not None:
-            retry_pool = [m for m in plan.executed if m.line in cov_lines]
-            uncovered_mutants = [m for m in plan.executed
-                                 if m.line not in cov_lines]
-        executed_list, untouched = budget_on_retry(retry_pool, budget)
-        reused = plan.reused
-        if cov_lines is not None:
-            disclosures["coverage_prefilter"] = {
-                "uncovered": len(uncovered_mutants),
-                "covered_executed": len(executed_list),
-            }
-        if plan.diff_active or mutate_all:
-            disclosures.update({
-                "retry_total": len(plan.executed),
-                "executed": len(executed_list),
-                "untouched_ranges": untouched_ranges(untouched),
-                "diff_skipped": sorted(reused),
-            })
-        if mutant_slice is not None:
-            executed_list = list(executed_list[slice(*mutant_slice)])
-        # uncovered 位点：不执行、不进 ok 门禁，failures 显式标记（§12）
-        for m in uncovered_mutants:
-            results_uncovered.append(_mutant_record(
-                m, "uncovered",
-                f"line {m.line} not covered by tests (reused coverage "
-                f"prefilter; site never executed)", src=original_src))
+    prior_entries, reused, untouched, disclosures, executed_list, \
+        results_uncovered = plan_execution(
+            path, project_root, mutants, header_hash, scope_hashes, budget,
+            tests_glob, binary_kind, resume2_store, mutate_all, retry_ids,
+            select_ids, select_lines, reuse_coverage, attention,
+            mutant_slice, original_src)
+
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
+    if not executed_list and not reused:
+        return _no_sites_result(str(path), scoped)
+    if total_sites > budget:
+        disclosures["total_sites"] = total_sites
+        disclosures.setdefault("executed", len(executed_list))
+
+    return _execute_planned(
+        path, project_root, original_src, backup, mutants, executed_list,
+        reused, results_uncovered, prior_entries, scope_hashes, disclosures,
+        budget, tests_glob, timing_store, timeout_s, precomputed_baseline,
+        store2, timeout_factor, header_hash, retry_ids, resume, scoped,
+        total_sites)
+
+
+def _execute_planned(path, project_root, original_src, backup, mutants,
+                     executed_list, reused, results_uncovered, prior_entries,
+                     scope_hashes, disclosures, budget, tests_glob,
+                     timing_store, timeout_s, precomputed_baseline, store2,
+                     timeout_factor, header_hash, retry_ids, resume, scoped,
+                     total_sites):
+    """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
     if total_sites > budget:
@@ -384,7 +320,6 @@ def run_mutation(
     invalid_results, invalid_count = _record_invalid_mutants(
         original_src, executed_list, None)
     results = results + results_uncovered + invalid_results
-    executed_ids = {m.stable_id for m in executed_list}
     # P1：manifest 索引层先行写入（中断安全——索引在场 + 条目增量，下轮
     # 差分对已执行子集正确复用，未落盘位点按 new_site 重跑，保守正确）。
     # worker 注入路径不写（父层合并后单点写，规避并发竞态）。

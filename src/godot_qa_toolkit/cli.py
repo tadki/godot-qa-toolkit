@@ -137,6 +137,7 @@ def cmd_accept(args: argparse.Namespace) -> int:
             wrote = [
                 f"acceptance/ir/{suite.feature_key}.json",
                 f"acceptance/generated/test_{suite.feature_key}.gd",
+                "acceptance/generated/accept_worker.gd",
                 f"acceptance/generated/{suite.feature_key}.manifest.json",
             ]
         return _emit({

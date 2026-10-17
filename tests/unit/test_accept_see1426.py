@@ -229,5 +229,5 @@ def test_cli_accept_compile_contract(project: Path, tmp_path: Path) -> None:
          str(f), "--project-root", str(project), "--write"],
         capture_output=True, text=True, env=env)
     out = json.loads(r.stdout)
-    assert len(out["summary"]["wrote"]) == 3
+    assert len(out["summary"]["wrote"]) == 4  # ir/generated/worker/manifest
     assert all(w.startswith("acceptance/") for w in out["summary"]["wrote"])

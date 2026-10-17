@@ -37,7 +37,12 @@ class Mutant:
 
 
 def _numeric_mutants(cell: str) -> list[tuple[str, str]]:
-    """数值 cell → [(mutated, rationale)]：±1 + 边界外推。"""
+    """数值 cell → [(mutated, rationale)]：±1 + 边界外推。
+
+    0-cell 的边界外推（0→-1）与 -1 算子产出同值——rationale 合并为
+    "-1+boundary"，mutant_id（按 mutated 值构成）保持唯一（披露①去重，
+    §SPEC-1426-11 计数一致性）。
+    """
     out: list[tuple[str, str]] = []
     try:
         v = float(cell)
@@ -48,9 +53,14 @@ def _numeric_mutants(cell: str) -> list[tuple[str, str]]:
         m = v + delta
         out.append((str(int(m)) if is_int and float(m).is_integer() else repr(m),
                     tag))
-    # 边界外推：0 → -1（越过下界）
+    # 边界外推：0 → -1（越过下界）；与 -1 算子同值则合并 rationale
     if v == 0:
-        out.append(("-1", "boundary"))
+        for i, (mutated, r) in enumerate(out):
+            if mutated == "-1":
+                out[i] = ("-1", f"{r}+boundary")
+                break
+        else:
+            out.append(("-1", "boundary"))
     return out
 
 

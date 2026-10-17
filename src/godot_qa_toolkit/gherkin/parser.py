@@ -43,6 +43,10 @@ _RUNTIME_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 # 无 `# types:` 声明即 parse error（fail-fast，非披露档）。
 _NUMERIC_CELL_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
+# 枚举形态 cell：标识符形单词（stun/normal 一类域成员形态）。与 numeric
+# 同理，Then 绑定此形态而无 `# types:` 域声明 = parse error（DEF-3）。
+_ENUM_FORM_CELL_RE = re.compile(r"^[A-Za-z_]\w*$")
+
 
 class GherkinSyntaxError(ValueError):
     """Raised on malformed .feature input with file/line context."""
@@ -260,7 +264,10 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
                     path, step.line,
                     f"runtime placeholder {{x}} survives Examples expansion — "
                     f"compile track only accepts <x>: {step.text!r}") from None
-    # Then 绑定 numeric 形 cell 无类型声明 = parse error。
+    # Then 绑定 numeric 形 / 枚举形态 cell 无类型声明 = parse error
+    # （rev2 §四：域未声明的 Then 绑定 = parse error，与 numeric 版对齐；
+    # 枚举形态 = 标识符形单词 cell——不声明域则该占位符面静默逃逸变异
+    # 门禁，fail-fast 拒绝）。
     for row in scenario.examples:
         for step in scenario.steps:
             if step.keyword != "Then":
@@ -268,12 +275,20 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
             for m in _PLACEHOLDER_RE.finditer(step.text):
                 name = m.group(1)
                 cell = row.values.get(name, "")
-                if (_NUMERIC_CELL_RE.match(cell) and name not in scenario.types
-                        and name not in feature.types):
+                if name in scenario.types or name in feature.types:
+                    continue
+                if _NUMERIC_CELL_RE.match(cell):
                     raise GherkinSyntaxError(
                         path, step.line,
                         f"Then binds numeric placeholder <{name}> (cell {cell!r}) "
                         f"with no # types: declaration")
+                if _ENUM_FORM_CELL_RE.match(cell):
+                    raise GherkinSyntaxError(
+                        path, step.line,
+                        f"Then binds enum-form placeholder <{name}> (cell "
+                        f"{cell!r}) with no # types: domain declaration — "
+                        f"declare <{name}>:enum{{...}} or the face escapes "
+                        f"the mutation gate")
 
 
 def _apply_block_line(

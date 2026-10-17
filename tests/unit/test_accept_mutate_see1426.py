@@ -19,20 +19,19 @@ from godot_qa_toolkit.accept.compile import compile_feature, sha256_of
 from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.accept.mutate_runner import AcceptRunError, run_mutate
 
-_CASE_KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n"
+_CASE_KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n* test_s_000_01\n  [Failed]\n"
 _CASE_PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
 
 
 @pytest.fixture(autouse=True)
 def _restore_subprocess():
-    """防测试污染：run_mutate 的 fake 直接换模块属性，autouse 兜底还原。"""
+    """fake 直接换全局 subprocess 模块属性——autouse 兜底还原防泄漏。"""
+    import subprocess as sp
     import godot_qa_toolkit.accept.mutate_runner as mr
-    import godot_qa_toolkit.accept.run as run_mod
-    orig_mr = mr.subprocess.run
-    orig_run = run_mod.subprocess.run
+    orig_run, orig_popen = sp.run, sp.Popen
     yield
-    mr.subprocess.run = orig_mr
-    run_mod.subprocess.run = orig_run
+    sp.run, sp.Popen = orig_run, orig_popen
+    mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
 def _fake_gut(monkeypatch, *, returncode: int, output: str) -> None:
@@ -73,7 +72,10 @@ def test_boundary_extrapolation() -> None:
     case = dict(CASE, values={"hp": "10", "left": "0"})
     m = {(x.mutated, x.rationale) for x in mutate_case(case)
          if x.target == "left" and x.kind == "numeric"}
-    assert ("-1", "boundary") in m
+    # 0-cell 的 -1 与 boundary 同值：rationale 合并、mutant_id 唯一（披露①）
+    assert ("-1", "-1+boundary") in m
+    ids = [x.mutant_id for x in mutate_case(case)]
+    assert len(ids) == len(set(ids))
 
 
 def test_boolean_flip() -> None:
@@ -131,7 +133,7 @@ def test_unchanged_slot_in_matrix() -> None:
 # ---------- runner / 闭环 ----------
 
 FEATURE = """Feature: F
-  Scenario Outline: s <hp>
+  Scenario Outline: s
     Then hp is <left>
     # types: <hp>:int, <left>:numeric
     Examples:
@@ -246,20 +248,55 @@ def test_adversarial_missing_unchanged_slot_caught(project: Path, tmp_path: Path
 
 # ---------- §SPEC-1426-14 --worker 差分对照 ----------
 
+class _FakeWorkerIO:
+    """真常驻 worker 通道假进程（Popen 面）：stdin NDJSON 收请求、
+    stdout 按脚本回 verdict（与 batch 假链同语义，供差分对照）。"""
+
+    def __init__(self, rc: int, case_names: list[str]):
+        self.rc = rc
+        self.case_names = case_names
+        self.stdin = self
+        self.stdout = self
+
+    def write(self, line: str) -> None:
+        self._last = line
+
+    def flush(self) -> None:
+        pass
+
+    def readline(self) -> str:
+        req = json.loads(self._last)
+        return json.dumps({
+            "mutant_id": req["mutant_id"], "rc": self.rc,
+            "executed": len(self.case_names),
+            "failing": self.case_names if self.rc != 0 else [],
+            "ops_version": req["ir"]["ops_version"]}) + "\n"
+
+    def close(self) -> None:
+        pass
+
+
 def test_worker_channel_differential_verdicts(project: Path, tmp_path: Path) -> None:
-    """--worker 与批量式 verdict 一致（同一 fake 执行链，差分对照）。"""
+    """--worker 差分对照：batch 与 worker 两条真实代码路径 verdict 一致
+    （披露③：worker 走 Popen NDJSON 带内路径，非 summary 披露假通道）。"""
     _compile(project, tmp_path)
     # 全 kill 的执行链（fake 确定性）
     _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
     batch = run_mutate(project, "demo", use_worker=False)
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(
+        1, ["test_s_000_00", "test_s_000_01"])
     worker = run_mutate(project, "demo", use_worker=True)
     assert batch["ok"] == worker["ok"]
+    assert batch["summary"]["killed"] == worker["summary"]["killed"]
     assert batch["summary"]["mutants"] == worker["summary"]["mutants"]
     assert worker["summary"]["worker"] is True
 
 
 def test_worker_flag_in_contract(project: Path, tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(
+        1, ["test_s_000_00", "test_s_000_01"])
     result = run_mutate(project, "demo", use_worker=True)
     assert result["summary"]["worker"] is True

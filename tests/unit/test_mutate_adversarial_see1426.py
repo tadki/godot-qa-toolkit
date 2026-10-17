@@ -34,16 +34,19 @@ from godot_qa_toolkit.accept.mutate_runner import (
     run_mutate,
 )
 
-KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n"
+KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n* test_s_000_01\n  [Failed]\n"  # 双 case 各自 [Failed]——DEF-2 归因核对要求当轮 case 名在失败集合内
 PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
 
 
 @pytest.fixture(autouse=True)
 def _restore_subprocess():
+    """fake 直接换全局 subprocess 模块属性——autouse 兜底还原防泄漏。"""
+    import subprocess as sp
     import godot_qa_toolkit.accept.mutate_runner as mr
-    orig = mr.subprocess.run
+    orig_run, orig_popen = sp.run, sp.Popen
     yield
-    mr.subprocess.run = orig
+    sp.run, sp.Popen = orig_run, orig_popen
+    mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
 def _fake_gut(returncode: int, output: str) -> None:
@@ -75,11 +78,15 @@ def test_golden_numeric_negative_and_float_matrix() -> None:
 
 
 def test_golden_zero_boundary_matrix() -> None:
-    # 0-cell：±1 双向 + 边界外推（0→-1 越过下界）三算子齐备。
+    # 0-cell：±1 双向 + 边界外推（0→-1 越过下界）；-1 与 boundary 同值，
+    # rationale 合并为单一 mutant（披露①去重：mutant_id 唯一，计数十
+    # 不再出现重复轮）。
     case = {"test_name": "t", "values": {"n": "0"}, "types": {"n": "int"},
             "steps": [], "then_unchanged": []}
     got = {(m.mutated, m.rationale) for m in mutate_case(case)}
-    assert got == {("1", "+1"), ("-1", "-1"), ("-1", "boundary")}
+    assert got == {("1", "+1"), ("-1", "-1+boundary")}
+    ids = [m.mutant_id for m in mutate_case(case)]
+    assert len(ids) == len(set(ids)), "mutant_id must be unique"
 
 
 def test_golden_enum_domain_sweep_all_neighbors_stay_in_domain() -> None:
@@ -160,8 +167,43 @@ def test_mutated_ir_hits_only_named_case() -> None:
 
 # ---------- 闭环对抗（runner 级） ----------
 
+class _FakeWorkerIO:
+    """真常驻 worker 通道的假进程：stdin 逐行收 NDJSON 请求，stdout 按
+    脚本回 verdict（与 batch 假链同语义，供差分对照）。"""
+
+    def __init__(self, rc: int, case_names: list[str]):
+        self.rc = rc
+        self.case_names = case_names
+        self.stdin = self
+        self.stdout = self
+        self._closed = False
+
+    def write(self, line: str) -> None:
+        self._last = line
+
+    def flush(self) -> None:
+        pass
+
+    def readline(self) -> str:
+        import json as _json
+        req = _json.loads(self._last)
+        return _json.dumps({
+            "mutant_id": req["mutant_id"], "rc": self.rc,
+            "executed": len(self.case_names),
+            "failing": self.case_names if self.rc != 0 else [],
+            "ops_version": req["ir"]["ops_version"]}) + "\n"
+
+    def close(self) -> None:
+        self._closed = True
+
+
+def _fake_worker(rc: int, case_names: list[str]) -> None:
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(rc, case_names)
+
+
 FEATURE = """Feature: F
-  Scenario Outline: s <hp>
+  Scenario Outline: s
     Then hp is <left>
     # types: <hp>:int, <left>:numeric
     Examples:
@@ -333,11 +375,13 @@ def test_mutants_count_equals_full_matrix(project: Path,
 
 def test_worker_differential_survive_side(project: Path,
                                          tmp_path: Path) -> None:
-    """--worker 差分对照（survive 侧）：全绿执行链下两通道 verdict 与
-    survived 计数一致。"""
+    """--worker 差分对照（survive 侧）：batch 与 worker 两条真实代码路径
+    在同一执行链语义下 verdict 与 survived 计数一致（披露③：worker 不再
+    是 summary 披露假通道，走 Popen NDJSON 带内路径）。"""
     _compile(project, tmp_path)
     _fake_gut(0, PASS_OUTPUT)
     batch = run_mutate(project, "demo", use_worker=False)
+    _fake_worker(0, ["test_s_000_00", "test_s_000_01"])
     worker = run_mutate(project, "demo", use_worker=True)
     assert batch["ok"] is False and worker["ok"] is False
     assert batch["summary"]["survived"] == worker["summary"]["survived"]

@@ -72,6 +72,7 @@ def collect_file(path: str | Path) -> tuple[list[ArchViolation], str | None]:
     violations: list[ArchViolation] = []
     violations.extend(_check_extends(tree, p))
     violations.extend(_check_tokens(tree, p))
+    violations.extend(_check_seed_calls(tree, p))
     return violations, None
 
 
@@ -103,7 +104,7 @@ def _check_tokens(tree, p: Path) -> list[ArchViolation]:  # noqa: ANN001
         name = str(tok.value)
         prev = str(tokens[idx - 1].value) if idx > 0 else ""
         member_call = prev == "."
-        if name in BARE_GLOBAL_RANDOM:
+        if name in BARE_GLOBAL_RANDOM and name != "seed":
             if has_explicit_rng and member_call:
                 continue
             out.append(ArchViolation(
@@ -115,6 +116,35 @@ def _check_tokens(tree, p: Path) -> list[ArchViolation]:  # noqa: ANN001
                 file=str(p), line=int(tok.line), rule=RULE_ENGINE,
                 message=f"forbidden engine reference {name!r} in Pure Core",
             ))
+    return out
+
+
+def _check_seed_calls(tree, p: Path) -> list[ArchViolation]:  # noqa: ANN001
+    """DEF-4 seed 收窄：只拦 standalone_call 调用形态（seed(42)/seed(v)）。
+
+    gdtoolkit AST 的括号不是树内 token，"后随 (" 判定不可靠——调用形态
+    经 standalone_call 节点判定：seed 作为裸调用 callee 才违规；参数名
+    /RHS/成员赋值（rng.seed = seed）等显式 Seed 注入合法形态不误杀。
+    """
+    out: list[ArchViolation] = []
+
+    def _walk(node) -> None:  # noqa: ANN001
+        if not hasattr(node, "children"):
+            return
+        if getattr(node, "data", "") == "standalone_call":
+            for tok in node.scan_values(lambda v: hasattr(v, "line")):
+                if str(tok.value) == "seed":
+                    out.append(ArchViolation(
+                        file=str(p), line=int(tok.line), rule=RULE_RANDOM,
+                        message="bare global random seed — inject an explicit "
+                                "RNG/seed instead of the global seed() call",
+                    ))
+                break  # 只看 callee 首 token
+        for child in node.children:
+            if hasattr(child, "data"):
+                _walk(child)
+
+    _walk(tree)
     return out
 
 

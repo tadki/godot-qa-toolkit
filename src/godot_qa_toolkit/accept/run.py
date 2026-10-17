@@ -32,14 +32,14 @@ def _project_gd_path(project_root: Path, res: str) -> Path:
     return project_root / res.removeprefix("res://")
 
 
-def replay_check(project_root: str | Path, feature_key: str,
-                 *, source_check: bool = True) -> dict:
+def replay_check(project_root: str | Path, feature_key: str) -> dict:
     """三件哈希绑定重放校验。失配 raise AcceptRunError。返回 manifest。
 
     §SPEC-1426-24 重锚防线：manifest 可被整体替换为攻击者自造的三件一致
     组合（重锚），故 run 侧额外把 manifest.source_path 指向的源 .feature
     现场重编译，核对产出 IR 与磁盘 IR 哈希一致——锚定回源文件。源文件
-    缺失 = run_error（防删源保伪造产物）。
+    缺失 = run_error（防删源保伪造产物）。重锚核对无旁路参数（原
+    source_check 形参为参数化旁路面，已移除）。
     """
     root = Path(project_root)
     man_path = root / GENERATED_DIR / f"{feature_key}.manifest.json"
@@ -66,8 +66,17 @@ def replay_check(project_root: str | Path, feature_key: str,
             f"generated test hash mismatch — acceptance/generated was modified "
             f"after compile (expected {manifest['generated_hash'][:12]}, "
             f"got {gd_hash[:12]})")
-    if source_check:
-        _reanchor_check(root, manifest, ir_hash)
+    worker_path = root / GENERATED_DIR / "accept_worker.gd"
+    if worker_path.is_file():
+        # worker 以生成产物形态随 compile 落盘并进哈希绑定——在场即核对
+        # （不存在 = 旧版产物，由 recompile 核对兜底）。
+        worker_hash = sha256_of(worker_path.read_text(encoding="utf-8"))
+        if worker_hash != manifest.get("worker_hash"):
+            raise AcceptRunError(
+                f"worker hash mismatch — acceptance/generated/accept_worker.gd "
+                f"was modified after compile (expected "
+                f"{str(manifest.get('worker_hash'))[:12]}, got {worker_hash[:12]})")
+    _reanchor_check(root, manifest, ir_hash)
     return manifest
 
 

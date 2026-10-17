@@ -118,6 +118,64 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
     return _emit(run_feature(feature, registry, scenario_timeout_s=args.timeout))
 
 
+def cmd_accept(args: argparse.Namespace) -> int:
+    from .accept.compile import compile_feature
+    from .accept.run import AcceptRunError, run_suite
+
+    if args.accept_command == "compile":
+        suite, error = compile_feature(
+            args.feature, args.project_root,
+            write=args.write, clean=not args.no_clean)
+        if error is not None:
+            return _emit({
+                "tool": "accept", "ok": False,
+                "summary": {"error": error["reason"]},
+                "failures": [error],
+            })
+        wrote = []
+        if args.write:
+            wrote = [
+                f"acceptance/ir/{suite.feature_key}.json",
+                f"acceptance/generated/test_{suite.feature_key}.gd",
+                "acceptance/generated/accept_worker.gd",
+                f"acceptance/generated/{suite.feature_key}.manifest.json",
+            ]
+        return _emit({
+            "tool": "accept", "ok": True,
+            "summary": {
+                "feature": suite.ir["feature"],
+                "feature_key": suite.feature_key,
+                "cases": len(suite.ir["cases"]),
+                "ir_hash": suite.manifest["ir_hash"],
+                "wrote": wrote,
+            },
+            "failures": [],
+        })
+    # run / mutate
+    try:
+        if args.accept_command == "mutate":
+            from .accept.mutate_runner import run_mutate
+            return _emit(run_mutate(
+                args.directory if args.directory else args.project_root,
+                args.key, timeout_s=args.timeout, use_worker=args.worker))
+        return _emit(run_suite(args.directory if args.directory
+                               else args.project_root, args.key,
+                               timeout_s=args.timeout))
+    except AcceptRunError as e:
+        return _emit({
+            "tool": "accept", "ok": False,
+            "summary": {"error": str(e), "run_error": True},
+            "failures": [{"reason": f"run_error: {e}"}],
+        })
+
+
+def cmd_arch(args: argparse.Namespace) -> int:
+    # gdtoolkit 依赖延迟导入（同 complexity/mutation——§SPEC-114 最小 CI 面）。
+    from .arch.gate import run_arch_gate
+
+    return _emit(run_arch_gate(args.paths))
+
+
 def cmd_complexity(args: argparse.Namespace) -> int:
     from .complexity.gate import GateConfig, run_gate
 
@@ -283,6 +341,53 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--timeout", type=float, default=None,
                    help="per-scenario wall-clock budget in seconds")
     g.set_defaults(func=cmd_gherkin)
+
+    ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")
+    acsub = ac.add_subparsers(dest="accept_command", required=True)
+
+    acc = acsub.add_parser("compile", help=".feature -> versioned IR + generated GUT tests")
+    acc.add_argument("feature", help="path to the .feature file")
+    acc.add_argument("--project-root", required=True,
+                     help="target Godot project root (writes acceptance/ir + acceptance/generated)")
+    acc.add_argument("--write", action="store_true",
+                     help="opt-in: write ir/generated into the project (contract §6 "
+                          "whitelist dirs; omitted = dry compile, summary only)")
+    acc.add_argument("--no-clean", action="store_true",
+                     help="keep existing generated artifacts instead of clean-then-generate")
+    acc.set_defaults(func=cmd_accept)
+
+    acr = acsub.add_parser("run", help="replay-check + headless-run the generated suite")
+    acr.add_argument("directory", nargs="?", default=None,
+                     help="acceptance dir (default: --project-root)")
+    acr.add_argument("--project-root", required=True,
+                     help="target Godot project root containing addons/gut/")
+    acr.add_argument("--key", required=True,
+                     help="feature key the suite was compiled under")
+    acr.add_argument("--timeout", type=int, default=120,
+                     help="GUT timeout seconds (default 120)")
+    acr.set_defaults(func=cmd_accept)
+
+    acm = acsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
+    acm.add_argument("directory", nargs="?", default=None,
+                     help="acceptance dir (default: --project-root)")
+    acm.add_argument("--project-root", required=True,
+                     help="target Godot project root containing addons/gut/")
+    acm.add_argument("--key", required=True,
+                     help="feature key the suite was compiled under")
+    acm.add_argument("--timeout", type=int, default=120,
+                     help="GUT timeout seconds per mutant round (default 120)")
+    acm.add_argument("--worker", action="store_true",
+                     help="opt-in true resident-worker channel: the generated "
+                          "accept_worker.gd artifact serves one godot process "
+                          "for the whole matrix via stdin NDJSON + ir_file "
+                          "transfer, with per-mutant hard discipline "
+                          "(release+rebuild+smoke probe, failure = run_error) "
+                          "and a per-round verdict timeout (SEE-1426 §SPEC-14)")
+    acm.set_defaults(func=cmd_accept)
+
+    a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
+    a.add_argument("paths", nargs="+", help=".gd files or directories to scan")
+    a.set_defaults(func=cmd_arch)
 
     c = sub.add_parser("complexity", help="complexity gate over .gd files")
     c.add_argument("paths", nargs="+", help=".gd files or directories to scan")

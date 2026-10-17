@@ -170,3 +170,18 @@ def test_feature_key_conflict_is_error(project: Path, tmp_path: Path) -> None:
     f2.write_text("Feature: Two\n  Scenario: s\n    Given b\n", encoding="utf-8")
     _, error = compile_feature(f2, project, write=True)
     assert error is not None and "feature_key conflict" in error["reason"]
+
+
+def test_low1_corrupt_manifest_is_contract_error(project: Path,
+                                                 tmp_path: Path) -> None:
+    """Final Review LOW-1：同 key 已有 manifest 损坏 → compile 走统一
+    JSON 契约错误面（reason 指示重编译），不裸抛 json.JSONDecodeError。"""
+    f = tmp_path / "demo.feature"
+    f.write_text("Feature: One\n  Scenario: s\n    Given a\n", encoding="utf-8")
+    suite, error = compile_feature(f, project, write=True)
+    assert error is None
+    man = project / "acceptance/generated/demo.manifest.json"
+    man.write_text("{corrupt json !!!", encoding="utf-8")
+    _, error = compile_feature(f, project, write=True)
+    assert error is not None
+    assert "is corrupt" in error["reason"] and "recompile" in error["reason"]

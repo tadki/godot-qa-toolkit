@@ -526,3 +526,144 @@ def test_qa1_worker_scratch_dir_cleaned(project: Path, tmp_path: Path) -> None:
     scratch = project / ".qa-cache" / "gqt-accept-worker"
     assert not scratch.exists() or not any(scratch.iterdir()), \
         "worker scratch 目录必须清空"
+
+
+# ---------- Final Review MEDIUM-1：worker 读侧超时 ----------
+
+class _HungWorkerIO:
+    """worker 不回 verdict 的挂死形态：请求写入成功，stdout 永无数据
+    （带 fileno 的假 fd 走 select 超时路径）。"""
+
+    def __init__(self):
+        import io
+        self._in = io.StringIO()
+        self.stdin = self
+        self.stdout = _HungReader()
+
+    def write(self, line: str) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _HungReader:
+    def __init__(self):
+        import os
+        self._r, self._w = os.pipe()  # 无数据可读 → select 超时
+        os.set_blocking(self._r, False)
+
+    def readline(self) -> str:
+        import os
+        try:
+            return os.read(self._r, 4096).decode()
+        except BlockingIOError:
+            return ""
+
+    def fileno(self) -> int:
+        return self._r
+
+
+def test_medium1_hung_worker_times_out_into_run_errors(project: Path,
+                                                       tmp_path: Path) -> None:
+    """worker 已启动却永不回 verdict（harness 挂死形态）：verdict 等待
+    超时 → _WorkerDead → 剩余 mutant 全部 run_error（CLI 不再永久阻塞）。"""
+    _compile(project, tmp_path, """Feature: F
+  Scenario Outline: s
+    Then hp is <left>
+    # types: <left>:numeric
+    Examples:
+      | left |
+      | 7    |
+""")
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _HungWorkerIO()
+    import time
+    t0 = time.monotonic()
+    result = run_mutate(project, "demo", use_worker=True, timeout_s=1)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 10, "挂死 worker 必须在 timeout 内收口，不得永久阻塞"
+    assert result["ok"] is False and result["summary"]["killed"] == 0
+    assert result["summary"]["run_errors"] == result["summary"]["mutants"]
+    assert any("verdict timeout" in f["reason"] for f in result["failures"])
+
+
+class _NoFilenoWorkerIO:
+    """无 fileno 的假 worker stdout（队列形态，StringIO 位置语义不适用）
+    ——_readline_with_timeout 的诚实降级分支：无 fileno → 阻塞 readline
+    （fake 即时回包）。"""
+
+    def __init__(self, verdicts: dict):
+        from collections import deque
+        self._lines: deque = deque()
+        self.stdout = self
+        self.stdin = self
+        self._v = verdicts
+
+    def write(self, line: str) -> None:
+        import json as _json
+        self._mid = _json.loads(line).get("mutant_id", "?")
+        v = dict(self._v)
+        v.setdefault("mutant_id", self._mid)
+        self._lines.append(_json.dumps(v) + "\n")
+
+    def readline(self) -> str:
+        return self._lines.popleft() if self._lines else ""
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_medium1_no_fileno_fake_degrades_to_blocking_read(
+        project: Path, tmp_path: Path) -> None:
+    """无 fileno 的 fake stdout（StringIO 形态）：select 不可用 → 诚实
+    降级阻塞 readline，verdict 照常判定。"""
+    _compile(project, tmp_path, """Feature: F
+  Scenario Outline: s
+    Then hp is <left>
+    # types: <left>:numeric
+    Examples:
+      | left |
+      | 7    |
+""")
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _NoFilenoWorkerIO({
+        "rc": 1, "executed": 1,
+        "failing": ["test_s_000_00", "test_s_000_01"],
+        "ops_version": "see1426-accept/1"})
+    result = run_mutate(project, "demo", use_worker=True, timeout_s=5)
+    assert result["ok"] is True
+    assert result["summary"]["killed"] == result["summary"]["mutants"]
+
+
+class _RaisingFilenoWorkerIO(_NoFilenoWorkerIO):
+    """fileno() 存在但抛 OSError（io.StringIO 形态）——select 降级分支。"""
+
+    def fileno(self) -> int:
+        raise OSError("no real fd")
+
+
+def test_medium1_fileno_raising_fake_degrades(project: Path,
+                                              tmp_path: Path) -> None:
+    _compile(project, tmp_path, """Feature: F
+  Scenario Outline: s
+    Then hp is <left>
+    # types: <left>:numeric
+    Examples:
+      | left |
+      | 7    |
+""")
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _RaisingFilenoWorkerIO({
+        "rc": 1, "executed": 1,
+        "failing": ["test_s_000_00", "test_s_000_01"],
+        "ops_version": "see1426-accept/1"})
+    result = run_mutate(project, "demo", use_worker=True, timeout_s=5)
+    assert result["ok"] is True
+    assert result["summary"]["killed"] == result["summary"]["mutants"]

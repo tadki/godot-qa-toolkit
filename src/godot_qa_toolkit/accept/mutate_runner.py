@@ -117,7 +117,8 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
             "no mutants generated — IR has no typed Then bindings and no "
             "unchanged slots; mutation gate cannot run (nothing to verify)")
     if use_worker:
-        verdicts = _run_worker_channel(root, ir, mutants)
+        verdicts = _run_worker_channel(root, ir, mutants,
+                                       timeout_s=timeout_s)
     else:
         verdicts = _run_batch_channel(root, ir_path, ir, mutants, timeout_s)
     return _aggregate_verdicts(manifest, mutants, verdicts, use_worker)
@@ -216,8 +217,9 @@ class _WorkerDead(Exception):
     """worker 进程意外退出 / verdict 流中断——通道级 run_error。"""
 
 
-def _run_worker_channel(root: Path, ir: dict,
-                        mutants: list[Mutant]) -> list[tuple[Mutant, str, str]]:
+def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
+                        timeout_s: int = 120,
+                        ) -> list[tuple[Mutant, str, str]]:
     """真常驻 worker：一次性 Popen，stdin NDJSON 逐 mutant 消费变异 IR。
 
     QA-1 传输协议：`OS.read_string_from_stdin()` 有 1024 字节行缓冲上限
@@ -229,6 +231,12 @@ def _run_worker_channel(root: Path, ir: dict,
 
     worker 侧硬纪律（实例释放 + 重建 + smoke 探针）由生成物内实现，
     探针失败以 run_error verdict 回传。
+
+    MEDIUM-1（Final Review）：读侧带超时——`readline` 阻塞无时限会让
+    "worker 已启动却永不回 verdict"（如被测项目 harness 在 mutant 轮内
+    挂死）把 CLI 永久卡死；fail-loud 纪律下挂死比失败更糟。复用
+    `--timeout` 语义：每轮 verdict 等待上限 = timeout_s，超时即
+    _WorkerDead → 剩余 mutant 记 run_error。
     """
     worker_res = f"res://{GENERATED_DIR}/accept_worker.gd"
     if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
@@ -254,7 +262,8 @@ def _run_worker_channel(root: Path, ir: dict,
                     json.dumps(_mutated_ir(ir, mutant), ensure_ascii=False),
                     encoding="utf-8")
                 register_temp(ir_file)
-                verdicts.append(_worker_round(proc, ir_file, mutant))
+                verdicts.append(_worker_round(proc, ir_file, mutant,
+                                              timeout_s=timeout_s))
             finally:
                 # 用后即删（白名单目录内的轮转临时文件，防残留）。
                 ir_file.unlink(missing_ok=True)
@@ -269,12 +278,34 @@ def _run_worker_channel(root: Path, ir: dict,
     return verdicts
 
 
+def _readline_with_timeout(proc, timeout_s: float) -> str:  # noqa: ANN001
+    """带超时的行读（MEDIUM-1）：select/poll 不可用的假 fd 直接走阻塞
+    readline（测试 fake 恒即时回包，不受影响）；真进程超时抛
+    _WorkerDead——挂死是通道级失败，不是可等待的慢。"""
+    import select
+    fd = proc.stdout
+    raw = getattr(fd, "fileno", None)
+    if raw is None:
+        return fd.readline()  # 测试 fake：StringIO 无 fileno
+    try:
+        selectable = raw()
+        ready, _, _ = select.select([selectable], [], [], timeout_s)
+    except (OSError, ValueError, AttributeError):
+        return fd.readline()  # fd 不可 select（重定向等）：诚实降级阻塞
+    if not ready:
+        raise _WorkerDead(
+            f"worker verdict timeout after {timeout_s}s — hung mutant "
+            f"round (harness deadlock?), execution chain untrusted")
+    return fd.readline()
+
+
 def _worker_round(proc, ir_file: Path,  # noqa: ANN001 — Popen/fake 双形态
-                  mutant: Mutant) -> tuple[Mutant, str, str]:
+                  mutant: Mutant, timeout_s: int = 120,
+                  ) -> tuple[Mutant, str, str]:
     """单 mutant 的 worker 往返 + 判定（哨兵②/DEF-2 worker 侧同构核对）。
 
     QA-1：请求行 = {mutant_id, ir_file}（恒 <1024B，行缓冲安全）；verdict
-    行本身仍是小 JSON，带内回传。
+    行本身仍是小 JSON，带内回传。MEDIUM-1：verdict 等待上限 = timeout_s。
     """
     ir_file_res = "res://" + ir_file.relative_to(_worker_root_of(proc)).as_posix() \
         if _worker_root_of(proc) in ir_file.parents else str(ir_file)
@@ -284,11 +315,11 @@ def _worker_round(proc, ir_file: Path,  # noqa: ANN001 — Popen/fake 双形态
     try:
         proc.stdin.write(request + "\n")
         proc.stdin.flush()
-        line = proc.stdout.readline()
+        line = _readline_with_timeout(proc, timeout_s)
         # Godot 启动横幅/引擎告警与 worker verdict 同走 stdout——跳过一切
         # 非 "{" 开头的噪声行（verdict 恒为 JSON 对象），EOF 即通道死亡。
         while line and not line.lstrip().startswith("{"):
-            line = proc.stdout.readline()
+            line = _readline_with_timeout(proc, timeout_s)
     except (OSError, ValueError) as e:
         raise _WorkerDead(f"worker IO failed: {e}") from e
     if not line:

@@ -104,7 +104,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - 全量契约变异闭环（v1 无 stamp，每轮全量、无增量跳过）：对 IR 全量产 mutants → 逐 mutant 写临时变异 IR（磁盘 IR 每轮后恢复原样）→ headless 跑同一套生成测试 → 挂 = kill；活 = survived 即打回（`ok=false` + survived 明细）。
 - 变异矩阵（§SPEC-1426-11）：数值 ±1 + 边界外推（0→-1）、布尔翻转、枚举声明域内邻值切换（域外从不生成；域未声明的 Then 绑定在 parse 期已被拒）；unchanged 槽纳入矩阵（基线污染探针）。
 - 三层防伪（§SPEC-1426-12）：① 变异器对抗性金测（70/71 fixture 恰好 ±1/边界/邻值，单测面）；② 哨兵核对——GUT 输出零测试流 = 执行链失真 = run_error 面失败；③ unchanged 槽变异必挂（挂不掉 = survived 打回）。零 Then 绑定且零 unchanged 的 IR = run_error（`no mutants generated`）。
-- `--worker`（§SPEC-1426-14）：opt-in 常驻通道，硬纪律由 harness `reset()` + 冒烟探针承担；v1 与批量式同一 GUT 调用形态，`summary.worker` 披露通道。
+- `--worker`（§SPEC-1426-14）：opt-in **真常驻通道**——compile 产出的 worker 生成物（`acceptance/generated/accept_worker.gd`，受先清空再生成管辖 + `worker_hash` 哈希绑定）以单个 godot 进程服务全矩阵：stdin NDJSON 请求行（`{mutant_id, ir_file}` 小载荷，恒 <1024B——`OS.read_string_from_stdin()` 行缓冲上限 1024B，QA-1 实证）+ 变异 IR 经 `.qa-cache/gqt-accept-worker/` 轮转临时文件（FileAccess 读，零行缓冲限制，用后即删、通道结束清目录）；每 mutant 结束硬纪律 = 释放全部 testing_api 实例 + 重建（reload）+ 自检探针断言复位，不符即 run_error verdict。读侧带超时（复用 `--timeout` 为每轮 verdict 等待上限，超时 = _WorkerDead → 剩余 mutant 记 run_error，MEDIUM-1 修复）。验收 = batch 与 worker 两条真实代码路径的差分对照 verdict 一致性（实机口径：IR ≥1678B 量级、非挂死、ok/killed/survived 三项相等）。
 - 输出：`summary.{feature, feature_key, ops_version, mutants, killed, survived, run_errors, full_matrix, worker}`；`failures` = survived（含 target/kind/original/mutated/rationale）+ run_errors。
 
 ### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run] [--resume] [--mutation-warning N] [--timeout-factor F] [--mutate-all] [--mutation <id>] [--lines N] [--reuse-coverage]`

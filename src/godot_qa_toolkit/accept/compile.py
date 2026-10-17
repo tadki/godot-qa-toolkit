@@ -343,7 +343,20 @@ def _feature_key_conflict(root: Path, feature_key: str,
     man_path = root / GENERATED_DIR / f"{feature_key}.manifest.json"
     if not man_path.is_file():
         return None
-    existing = json.loads(man_path.read_text(encoding="utf-8"))
+    try:
+        existing = json.loads(man_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # LOW-1：损坏 manifest 归统一 JSON 契约错误面（compile 裸抛会
+        # 绕过 {ok:false + reason} 形态）——指示重编译而非裸 traceback。
+        return {
+            "reason": f"existing manifest for key {feature_key!r} is corrupt "
+                      f"({type(e).__name__}: {e}) — recompile with "
+                      f"gqt accept compile --write to regenerate"}
+    if not isinstance(existing, dict):
+        return {
+            "reason": f"existing manifest for key {feature_key!r} is not a "
+                      f"JSON object — recompile with "
+                      f"gqt accept compile --write to regenerate"}
     prev = Path(existing.get("source_path", ""))
     if not prev.is_absolute():
         prev = root / prev

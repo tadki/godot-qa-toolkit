@@ -377,9 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     acm.add_argument("--timeout", type=int, default=120,
                      help="GUT timeout seconds per mutant round (default 120)")
     acm.add_argument("--worker", action="store_true",
-                     help="opt-in resident-worker channel with hard discipline "
-                          "(per-mutant release+reset+smoke probe; v1 runs the "
-                          "same one-shot GUT call shape — SEE-1426 §SPEC-14)")
+                     help="opt-in true resident-worker channel: the generated "
+                          "accept_worker.gd artifact serves one godot process "
+                          "for the whole matrix via stdin NDJSON + ir_file "
+                          "transfer, with per-mutant hard discipline "
+                          "(release+rebuild+smoke probe, failure = run_error) "
+                          "and a per-round verdict timeout (SEE-1426 §SPEC-14)")
     acm.set_defaults(func=cmd_accept)
 
     a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")

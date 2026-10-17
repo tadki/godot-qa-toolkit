@@ -35,6 +35,16 @@ func query_state(path: String):
     ## 状态快照查询："entity.field" 点路径。Then 断言与 unchanged
     ## 基线快照都经此读取；未知路径返回 null（比对必挂，fail-safe）。
 
+> **typed cell 双重语义（Revy QA LOW 澄清）**：`case.values` 里的
+> typed cell 同时是**执行输入与期望值的唯一数据面**——变异轮改的就是
+> 这些 cell。harness 执行若从步骤文本/其他来源驱动输入、仅以 values 作
+> Then 期望，则执行输入侧不在变异面内，相应 mutant 不可 kill → 恒
+> survived → 门禁误打回。取舍由人接线时明确：要 kill 输入面 mutant，
+> 就必须让执行从 `case.values` 取数（此时输入变异同时改输入与期望，
+> 不可 kill 的形态由 unchanged 槽与对抗面守卫覆盖）；要 kill 期望面
+> mutant，执行输入必须与 values 分离（从步骤文本等未变异来源驱动）。
+> 两种形态都在本契约内，adoption_spec 接线时二选一并写明。
+
 func check_expectations(case: Dictionary) -> String:
     ## Then 期望值比对（数据驱动断言核心，§SPEC-1426-13）：case.values
     ## 里的每个类型声明 cell 是本 case 的期望值——harness 按自己的

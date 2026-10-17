@@ -423,3 +423,106 @@ def test_worker_spawn_oserror_is_run_error(project: Path,
     mr.subprocess.Popen = boom
     with pytest.raises(AcceptRunError, match="worker process spawn failed"):
         run_mutate(project, "demo", use_worker=True)
+
+
+# ---------- QA-1 回归面：真实尺寸 IR 的 worker 读取路径 ----------
+
+def _big_ir_bytes(min_size: int = 1600) -> tuple[dict, int]:
+    """构造 ≥ min_size 字节的真实尺寸 IR（Revy 实测 1678B 量级）。"""
+    cases = []
+    for i in range(10):
+        cases.append({
+            "test_name": f"test_big_000_{i:02d}",
+            "values": {"ticks": str(i + 1), "pad": "x" * 120},
+            "types": {"ticks": "numeric"},
+            "steps": [{"keyword": "Then",
+                       "text": f"the probe reports {i + 1} ticks with detailed "
+                               f"settlement narrative for row {i}",
+                       "line": i + 2}],
+            "then_unchanged": ["probe.alive", "world.tick"],
+        })
+    ir = {"ops_version": "see1426-accept/1", "feature": "大矩阵",
+          "source_path": "big.feature", "cases": cases}
+    size = len(json.dumps(ir, ensure_ascii=False).encode())
+    assert size >= min_size, f"fixture IR too small: {size}"
+    return ir, size
+
+
+def test_qa1_worker_request_line_under_line_buffer(tmp_path: Path) -> None:
+    """QA-1 回归：ir_file 协议下请求行恒 <1024B（OS.read_string_from_stdin
+    行缓冲上限），且变异 IR 本体落临时文件可被 FileAccess 读回。"""
+    ir, size = _big_ir_bytes()
+    from godot_qa_toolkit.accept.mutate import Mutant
+    from godot_qa_toolkit.accept.mutate_runner import _mutated_ir
+    mutants = []
+    for i, case in enumerate(ir["cases"]):
+        mutants.append(Mutant(
+            mutant_id=f"{case['test_name']}#ticks=999",
+            case_test_name=case["test_name"], target="ticks",
+            kind="numeric", original=case["values"]["ticks"],
+            mutated="999", rationale="+1"))
+    # 全部 mutant 的请求行（ir_file 形态）必须远低于 1024B。
+    for idx, m in enumerate(mutants):
+        ir_file = tmp_path / f"mutant_{idx:04d}.json"
+        mutated = _mutated_ir(ir, m)
+        payload = json.dumps(mutated, ensure_ascii=False)
+        assert len(payload.encode()) > 1024, "fixture must exceed line buffer"
+        request = json.dumps({"mutant_id": m.mutant_id,
+                              "ir_file": "res://.qa-cache/gqt-accept-worker/"
+                                         f"mutant_{idx:04d}.json"})
+        assert len(request.encode()) < 1024, request
+        # 文件通道可读回（FileAccess 语义：Python 侧 json 等价读）。
+        ir_file.write_text(payload, encoding="utf-8")
+        assert json.loads(ir_file.read_text(encoding="utf-8")) == mutated
+
+
+def test_qa1_worker_request_carries_no_inline_ir(project: Path,
+                                                 tmp_path: Path) -> None:
+    """worker 请求载荷不再内嵌 IR 本体（QA-1 挂死根因的协议级防回归）。"""
+    _compile(project, tmp_path)
+    captured: list[str] = []
+
+    class _CaptureWorkerIO:
+        def __init__(self):
+            self.stdin = self
+            self.stdout = self
+
+        def write(self, line: str) -> None:
+            captured.append(line)
+
+        def flush(self) -> None:
+            pass
+
+        def readline(self) -> str:
+            req = json.loads(captured[-1])
+            return json.dumps({"mutant_id": req.get("mutant_id", "?"),
+                               "rc": 1, "executed": 1,
+                               "failing": [req.get("mutant_id", "?")],
+                               "ops_version": "see1426-accept/1"}) + "\n"
+
+        def close(self) -> None:
+            pass
+
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _CaptureWorkerIO()
+    run_mutate(project, "demo", use_worker=True)
+    assert captured, "worker 通道必须发出请求"
+    for line in captured:
+        req = json.loads(line)
+        assert "ir" not in req, f"请求行内嵌 IR 本体（QA-1 根因形态）: {req.keys()}"
+        assert "ir_file" in req, "请求必须走 ir_file 文件通道"
+
+
+def test_qa1_worker_scratch_dir_cleaned(project: Path, tmp_path: Path) -> None:
+    """worker 轮转临时文件用后即删：通道结束 .qa-cache/gqt-accept-worker
+    不留残留。"""
+    _compile(project, tmp_path)
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
+        "rc": 1, "executed": 1,
+        "failing": ["test_s_000_00", "test_s_000_01"],
+        "ops_version": "see1426-accept/1"})
+    run_mutate(project, "demo", use_worker=True)
+    scratch = project / ".qa-cache" / "gqt-accept-worker"
+    assert not scratch.exists() or not any(scratch.iterdir()), \
+        "worker scratch 目录必须清空"

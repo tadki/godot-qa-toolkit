@@ -191,7 +191,7 @@ class _FakeWorkerIO:
             "mutant_id": req["mutant_id"], "rc": self.rc,
             "executed": len(self.case_names),
             "failing": self.case_names if self.rc != 0 else [],
-            "ops_version": req["ir"]["ops_version"]}) + "\n"
+            "ops_version": "see1426-accept/1"}) + "\n"
 
     def close(self) -> None:
         self._closed = True

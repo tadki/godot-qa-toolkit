@@ -194,6 +194,11 @@ def _worker_gd_source() -> str:
     """常驻 worker 生成物（披露③，§SPEC-1426-14）：SceneTree 脚本，
     stdin NDJSON 循环消费变异 IR。
 
+    QA-1 传输协议：`OS.read_string_from_stdin()` 有 1024 字节行缓冲上限
+    （Revy 实机二分实证：1024B OK / 1025B FAIL），真实 IR 的带内 JSON 必
+    挂死——请求行只携带小载荷 {mutant_id, ir_file}，变异 IR 本体经
+    FileAccess 读请求指向的临时文件（零行缓冲限制）。
+
     每请求：加载 harness → 跑该 IR 全部 case（与生成测试同一语义）→
     回一行 NDJSON verdict；每 mutant 结束执行硬纪律——harness.reset() +
     释放实例（引用置空重建，reload 的 v1 落点）+ 自检探针（重建实例
@@ -207,16 +212,31 @@ const OPS_VERSION := "{OPS_VERSION}"
 func _init() -> void:
 \tvar harness: Object = null
 \twhile true:
+\t\t# QA-1：请求行只带 {{"mutant_id", "ir_file"}} 小载荷（恒 <1024B），
+\t\t# IR 本体走 ir_file 文件通道（FileAccess 无行缓冲上限）。
 \t\tvar line := OS.read_string_from_stdin()
 \t\tif line.strip_edges() == "":
 \t\t\tbreak
 \t\tvar req: Dictionary = JSON.parse_string(line)
-\t\tif req == null or not req.has("ir"):
+\t\tif req == null or not req.has("ir_file"):
 \t\t\tprint(JSON.stringify({{"run_error": "malformed worker request"}}))
 \t\t\tcontinue
 \t\tvar verdict := _run_mutant(harness, req)
 \t\tprint(JSON.stringify(verdict))
 \tquit(0)
+
+func _load_ir(req: Dictionary) -> Dictionary:
+\tvar ir_path := String(req.get("ir_file", ""))
+\tif ir_path.begins_with("res://"):
+\t\tir_path = ProjectSettings.globalize_path(ir_path)
+\tvar f := FileAccess.open(ir_path, FileAccess.READ)
+\tif f == null:
+\t\treturn {{}}
+\tvar parsed = JSON.parse_string(f.get_as_text())
+\tf.close()
+\tif parsed == null or not parsed is Dictionary:
+\t\treturn {{}}
+\treturn parsed
 
 func _fresh_harness(harness: Object) -> Object:
 \t# 硬纪律释放面：旧实例引用全部置空后重建（drop = 释放全部
@@ -231,8 +251,10 @@ func _fresh_harness(harness: Object) -> Object:
 \treturn h
 
 func _run_mutant(harness: Object, req: Dictionary) -> Dictionary:
-\tvar ir: Dictionary = req.get("ir", {{}})
 \tvar mid := String(req.get("mutant_id", "?"))
+\tvar ir: Dictionary = _load_ir(req)
+\tif ir.is_empty():
+\t\treturn {{"mutant_id": mid, "run_error": "ir_file unreadable or unparseable: " + String(req.get("ir_file", ""))}}
 \tvar next_h := _fresh_harness(harness)
 \tif next_h == null:
 \t\treturn {{"mutant_id": mid, "run_error": "harness unavailable or smoke_check failed after instance release/rebuild"}}

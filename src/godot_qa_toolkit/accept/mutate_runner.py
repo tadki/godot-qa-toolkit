@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,7 +37,7 @@ from .compile import GENERATED_DIR
 from .mutate import Mutant, mutate_ir
 from .run import AcceptRunError, replay_check
 from ..mutation.gutrun import _looks_like_godot_launch_failure
-from ..mutation.inject import godot_command
+from ..mutation.inject import godot_command, register_temp
 from ..mutation.godot_gate import GlobalGodotGate
 
 # 变异 IR 的防伪层③数据协议：mutated_unchanged 列表里的槽取"基线污染"
@@ -219,14 +220,23 @@ def _run_worker_channel(root: Path, ir: dict,
                         mutants: list[Mutant]) -> list[tuple[Mutant, str, str]]:
     """真常驻 worker：一次性 Popen，stdin NDJSON 逐 mutant 消费变异 IR。
 
-    磁盘 IR 零改写（IR 带内传递）；worker 侧硬纪律（实例释放 + 重建 +
-    smoke 探针）由生成物内实现，探针失败以 run_error verdict 回传。
+    QA-1 传输协议：`OS.read_string_from_stdin()` 有 1024 字节行缓冲上限
+    （Revy 实机二分实证：1024B OK / 1025B FAIL），真实 IR 带内传递必挂
+    死——请求行只带 {mutant_id, ir_file} 小载荷，变异 IR 本体写
+    `<root>/.qa-cache/gqt-accept-worker/` 下的轮转临时文件（contract §6
+    白名单目录，注册进进程清理表，用后即删），worker 经 FileAccess 读
+    （零行缓冲限制）。
+
+    worker 侧硬纪律（实例释放 + 重建 + smoke 探针）由生成物内实现，
+    探针失败以 run_error verdict 回传。
     """
     worker_res = f"res://{GENERATED_DIR}/accept_worker.gd"
     if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
         raise AcceptRunError(
             f"worker artifact missing: {worker_res} — recompile with "
             f"gqt accept compile --write")
+    scratch = Path(root) / ".qa-cache" / "gqt-accept-worker"
+    scratch.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.Popen(
             [godot_command(), "--headless", "--path", str(root),
@@ -237,8 +247,17 @@ def _run_worker_channel(root: Path, ir: dict,
         raise AcceptRunError(f"worker process spawn failed: {e}") from e
     verdicts: list[tuple[Mutant, str, str]] = []
     try:
-        for mutant in mutants:
-            verdicts.append(_worker_round(proc, ir, mutant))
+        for idx, mutant in enumerate(mutants):
+            ir_file = scratch / f"mutant_{idx:04d}.json"
+            try:
+                ir_file.write_text(
+                    json.dumps(_mutated_ir(ir, mutant), ensure_ascii=False),
+                    encoding="utf-8")
+                register_temp(ir_file)
+                verdicts.append(_worker_round(proc, ir_file, mutant))
+            finally:
+                # 用后即删（白名单目录内的轮转临时文件，防残留）。
+                ir_file.unlink(missing_ok=True)
     except _WorkerDead as e:
         # 通道级失败：已判定轮保留，未判定轮全部记 run_error。
         while len(verdicts) < len(mutants):
@@ -246,14 +265,21 @@ def _run_worker_channel(root: Path, ir: dict,
             verdicts.append((m, "run_error", f"worker channel failed: {e}"))
     finally:
         _shutdown_worker(proc)
+        shutil.rmtree(scratch, ignore_errors=True)
     return verdicts
 
 
-def _worker_round(proc, ir: dict,  # noqa: ANN001 — Popen/fake 双形态
+def _worker_round(proc, ir_file: Path,  # noqa: ANN001 — Popen/fake 双形态
                   mutant: Mutant) -> tuple[Mutant, str, str]:
-    """单 mutant 的 worker 往返 + 判定（哨兵②/DEF-2 worker 侧同构核对）。"""
+    """单 mutant 的 worker 往返 + 判定（哨兵②/DEF-2 worker 侧同构核对）。
+
+    QA-1：请求行 = {mutant_id, ir_file}（恒 <1024B，行缓冲安全）；verdict
+    行本身仍是小 JSON，带内回传。
+    """
+    ir_file_res = "res://" + ir_file.relative_to(_worker_root_of(proc)).as_posix() \
+        if _worker_root_of(proc) in ir_file.parents else str(ir_file)
     request = json.dumps({"mutant_id": mutant.mutant_id,
-                          "ir": _mutated_ir(ir, mutant)},
+                          "ir_file": ir_file_res},
                          ensure_ascii=False)
     try:
         proc.stdin.write(request + "\n")
@@ -300,6 +326,16 @@ def _worker_kill_attribution_error(verdict: dict, rc: int,
             f"{sorted(failing)} does not name the mutated case "
             f"test {mutant.case_test_name!r}; execution chain "
             f"untrusted")
+
+
+def _worker_root_of(proc) -> Path:  # noqa: ANN001 — Popen/fake 双形态
+    """worker 的项目根（res:// 解析锚）：真进程取 cwd，fake 无 cwd 时
+    退化为根目录（ir_file 直接走绝对路径形态，worker 侧 FileAccess 一样
+    可读）。"""
+    cwd = getattr(proc, "cwd", None) or getattr(proc, "_cwd", None)
+    if cwd:
+        return Path(cwd)
+    return Path("/")
 
 
 def _shutdown_worker(proc) -> None:  # noqa: ANN001

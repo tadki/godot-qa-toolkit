@@ -147,7 +147,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
   - GUT 正常退出但探针未点火（sink 缺失/空）→ `ok=false` + `summary.run_error: true` + `probes_fired: 0`——「探针从未点火」与「真实 0% 覆盖」必须可区分。
   - 零可执行行 → `ok=true` + `summary.vacuous: true`（空集覆盖不是满分证据）。
 - **comparability 契约**（SEE-1312 分支覆盖 v1 = 纯推导层，observational 不进 ok 判定）：`summary` 新增 `branch_total / branch_covered / branch_coverage_percent`（行探针命中 + AST 分支结构推导；if/elif/else/match case 各计 1 分支）。语义只回答「分支是否被执行」，不回答「是否被断言守护」。
-- godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖 → `summary.run_error: true`，与 mutation 同款中止契约。
+- godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖 → `summary.run_error: true`，与 mutation 同款中止契约。**§SPEC-1420-21 收紧**：中止判定 = `rc≠0 ∧ 无 GUT 测试流证据`（错误 marker 不再是必要条件——godot 加载早期退出无输出无 marker 的形态同样中止，不再降级为 `probes_fired: 0` 哨兵掩盖根因）；项目资源告警在场但 GUT 证据正则命中的正常轮不受影响。
 - **行级事实落盘（SEE-1420 P2）**：成功 run（探针点火 >0）额外原子写 `<root>/.qa-cache/gqt-coverage/<key>.json`——stdout 契约的超集（多带全量 `covered_lines` + `instrumentable_lines`（本次 run 的探针可插桩行集）+ provenance：schema `see1420-coverage/1`/项目内相对路径/源码 sha1/tests_glob/binary_kind），供 mutation `--reuse-coverage` 消费；provenance 不符 = 缓存作废重测。stdout 契约零变化。
 - 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent}` + SEE-1312 新增 `{probes_fired, branch_total, branch_covered, branch_coverage_percent}`；未达标时 `failures[0]` 附 `covered/total/uncovered_lines`（截断 20 行）。
 - `ok = coverage_percent >= min_percent`（probes_fired=0 与 run_error 时强制 ok=false）。

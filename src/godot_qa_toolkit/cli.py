@@ -150,8 +150,13 @@ def cmd_accept(args: argparse.Namespace) -> int:
             },
             "failures": [],
         })
-    # run
+    # run / mutate
     try:
+        if args.accept_command == "mutate":
+            from .accept.mutate_runner import run_mutate
+            return _emit(run_mutate(
+                args.directory if args.directory else args.project_root,
+                args.key, timeout_s=args.timeout, use_worker=args.worker))
         return _emit(run_suite(args.directory if args.directory
                                else args.project_root, args.key,
                                timeout_s=args.timeout))
@@ -360,6 +365,21 @@ def build_parser() -> argparse.ArgumentParser:
     acr.add_argument("--timeout", type=int, default=120,
                      help="GUT timeout seconds (default 120)")
     acr.set_defaults(func=cmd_accept)
+
+    acm = acsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
+    acm.add_argument("directory", nargs="?", default=None,
+                     help="acceptance dir (default: --project-root)")
+    acm.add_argument("--project-root", required=True,
+                     help="target Godot project root containing addons/gut/")
+    acm.add_argument("--key", required=True,
+                     help="feature key the suite was compiled under")
+    acm.add_argument("--timeout", type=int, default=120,
+                     help="GUT timeout seconds per mutant round (default 120)")
+    acm.add_argument("--worker", action="store_true",
+                     help="opt-in resident-worker channel with hard discipline "
+                          "(per-mutant release+reset+smoke probe; v1 runs the "
+                          "same one-shot GUT call shape — SEE-1426 §SPEC-14)")
+    acm.set_defaults(func=cmd_accept)
 
     a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
     a.add_argument("paths", nargs="+", help=".gd files or directories to scan")

@@ -110,26 +110,39 @@ def mutate_case(case: dict) -> list[Mutant]:
         enum_m = _ENUM_RE.match(spec)
         if enum_m:
             cands = [(m, "enum", r) for m, r in _enum_mutants(cell, spec)]
-        elif _NUMERIC_RE.match(cell):
-            cands = [(m, "numeric", r) for m, r in _numeric_mutants(cell)]
-        elif cell.strip().lower() in ("true", "false") or spec == "bool":
-            cands = [(m, "boolean", r) for m, r in _boolean_mutants(cell)]
+        else:
+            cands = _untyped_mutants(cell, spec)
         for mutated, kind, rationale in cands:
             mutants.append(Mutant(
                 mutant_id=f"{case['test_name']}#{name}={mutated}",
                 case_test_name=case["test_name"],
                 target=name, kind=kind,
                 original=cell, mutated=mutated, rationale=rationale))
-    # unchanged 槽变异：篡改"必须不变"的基线值——若断言面完备，被污染状态
-    # 必挂；若 unchanged 槽根本没接线，挂不掉 = 存活即打回（§SPEC-1426-12③）。
-    for u in case.get("then_unchanged", []):
-        mutants.append(Mutant(
+    mutants.extend(_unchanged_mutants(case))
+    return mutants
+
+
+def _untyped_mutants(cell: str, spec: str) -> list[tuple[str, str, str]]:
+    """非枚举声明的变异算子分流：数值 / 布尔（含无类型字面形）。"""
+    if _NUMERIC_RE.match(cell):
+        return [(m, "numeric", r) for m, r in _numeric_mutants(cell)]
+    if cell.strip().lower() in ("true", "false") or spec == "bool":
+        return [(m, "boolean", r) for m, r in _boolean_mutants(cell)]
+    return []
+
+
+def _unchanged_mutants(case: dict) -> list[Mutant]:
+    """unchanged 槽变异：篡改"必须不变"的基线值——若断言面完备，被污染
+    状态必挂；若 unchanged 槽根本没接线，挂不掉 = 存活即打回（§SPEC-1426-12③）。"""
+    return [
+        Mutant(
             mutant_id=f"{case['test_name']}#unchanged:{u}=polluted",
             case_test_name=case["test_name"],
             target=u, kind="unchanged",
             original="<baseline>", mutated="<polluted>",
-            rationale="unchanged-pollution"))
-    return mutants
+            rationale="unchanged-pollution")
+        for u in case.get("then_unchanged", [])
+    ]
 
 
 def mutate_ir(ir: dict) -> list[Mutant]:

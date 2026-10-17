@@ -170,6 +170,12 @@ func _run_case(harness: Object, case: Dictionary) -> Array:
 \t\t\tbreak
 \tif not errs.is_empty():
 \t\treturn errs
+\t# Then 期望值比对（数据驱动断言核心）：期望 cell 全在 case.values，
+\t# 由 harness 按其 query 映射逐项核对——变异轮改的就是这些 cell，
+\t# 断言面缺失会在这里以 mutant survived 形态被打回。
+\tvar assert_err: String = harness.check_expectations(case)
+\tif assert_err != "":
+\t\terrs.append("expectation check failed: " + assert_err)
 \tfor u in case.get("then_unchanged", []):
 \t\tvar key: String = case.get("test_name", "?") + "|" + String(u)
 \t\tif harness.query_state(String(u)) != _baselines[key]:

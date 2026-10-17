@@ -44,6 +44,8 @@ source of truth.
 | Tool | Command | Status |
 |---|---|---|
 | **Gherkin runner** | `gqt gherkin <file.feature> [--steps <module.py or dir>] [--timeout S]` | shipped (M1) |
+| **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard (SEE-1426 P1) | shipped |
+| **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run <dir> --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run (SEE-1426 P2) | shipped |
 | **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped (M1) |
 | **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N]` | shipped (M2 + SEE-1321) |
 | **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S]` | shipped (M2 + SEE-1312) |

@@ -27,7 +27,7 @@ gqt <subcommand> [args]        # console script（pyproject [project.scripts]）
 python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 ```
 
-四子命令：`gherkin` / `complexity` / `mutation` / `coverage`。
+六子命令：`gherkin` / `arch` / `accept` / `complexity` / `mutation` / `coverage`（SEE-1426 起）。
 
 ## 3. 统一输出 JSON 契约
 
@@ -78,6 +78,26 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - 不可转换文件（gd2py 失败）计为 failure（unmeasured = fail signal，绝不静默跳过）。
 - `ok = 无 violation 且无 unparseable`。
 - 输出：`summary: {functions, max_seen, violations, warnings, unparseable}`；`failures` = violations（含 file/name/line/complexity/threshold）+ unparseable；`warnings` 同构独立数组。
+
+### 4.2 `gqt arch <paths...>`（SEE-1426 P1）
+
+- 输入：一个或多个 `.gd` 文件/目录（gdtoolkit AST 静态检查）。
+- 规则 id 开放枚举（contract §7 加法演进），v1：`core/extends-whitelist`（extends 白名单：RefCounted/Resource 等纯数据基类）、`no-engine-api`（禁引用 Node/SceneTree/Engine/Input/get_tree/get_node 等引擎全局/场景树入口，含类型注解形态）、`no-bare-global-random`（禁裸全局随机 randi/randf/randfn/range 版本/randomize；文件内显式 `RandomNumberGenerator` 在场时成员调用形式放行）。
+- 输出：`summary: {files, violations, unparseable, by_rule}`；`failures` = violations（file/line/rule/message）+ unparseable（不可解析 = fail signal）。`ok` = 无违规且无 unparseable。
+- exit 0/1，统一 JSON 契约。
+
+### 4.2a `gqt accept compile <feature> --project-root <root> [--write] [--no-clean]`（SEE-1426 P2）
+
+- `.feature` → 版本化 IR（`ops_version = "see1426-accept/1"`）→ 数据驱动 GUT 测试（运行时读 IR，逐 case 一个 GUT 测试方法）→ 归因 manifest（scenario→test_name，非 ASCII 场景名标识符化 + 序号保障唯一）。
+- IR schema：`{ops_version, feature, source_path, cases:[{scenario, scenario_line, example_row_line, values, steps, types, then_unchanged, test_name}]}`。schema 冻结五件套（Examples 表一等公民、占位符 `<x>` 归一化、`# types:` 类型声明含 `enum{...}` 域、`# unchanged:` 反向断言槽、manifest 哈希绑定）全部在 parse 期 fail-fast（违规 = GherkinSyntaxError → JSON 契约 ok:false）。
+- 产物三件：`acceptance/ir/<key>.json` + `acceptance/generated/test_<key>.gd`（GUT 目录扫描按 `test_` 前缀过滤——非 test_ 前缀脚本被忽略）+ `acceptance/generated/<key>.manifest.json`（含 ir_hash/generated_hash sha256 绑定 + attribution 表）。
+- 写入仅限 §6 白名单两目录；先清空再生成（`--no-clean` 退路）；写入 opt-in（`--write`），`summary.wrote` 逐文件披露；GUT runner 缺失 = JSON 契约 ok:false。
+
+### 4.2b `gqt accept run <dir> --project-root <root> --key <feature-key> [--timeout 120]`（SEE-1426 P2）
+
+- 执行前三件哈希绑定重放校验：manifest 的 ir_hash/generated_hash 与磁盘实际 sha256 必须一致，任一失配 = run_error（`summary.run_error: true`，无告警放行档）；GUT runner 缺失同理。
+- 执行：一次性 `godot --headless` 子进程跑 GUT（`-gdir=res://acceptance/generated`），跨进程槽位闸包裹（复用 mutation 的 GlobalGodotGate）。
+- 输出：统一契约回译——失败测试名经 manifest attribution 对回 scenario/line；无法归因的失败显式披露（`scenario: null` + `not attributable` reason）。`summary.{replay_checked, ir_hash, exit_code, wrote}`。
 
 ### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run] [--resume] [--mutation-warning N] [--timeout-factor F] [--mutate-all] [--mutation <id>] [--lines N] [--reuse-coverage]`
 
@@ -166,7 +186,8 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 
 - 必填于 `mutation` / `coverage`；必须指向含 `addons/gut/gut_cmdln.gd` 的 Godot 项目根。
 - 工具在该 root 下运行 `godot --headless --path <root> -s res://addons/gut/gut_cmdln.gd [-gdir=<tests_glob>] -gexit`（`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
-- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）、coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume v1 断点续跑【SEE-1420 起只读封存：不读不写不删，仅披露】、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目）、gqt-coverage 行级覆盖事实（SEE-1420 P2）、gqt-godot-slots 并发闸锁文件——均自含 .gitignore）。除此之外零写入。
+- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）、coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume v1 断点续跑【SEE-1420 起只读封存：不读不写不删，仅披露】、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目）、gqt-coverage 行级覆盖事实（SEE-1420 P2）、gqt-godot-slots 并发闸锁文件——均自含 .gitignore）。
+- **生成类持久写入档（SEE-1426，Owner 批准的 §6 首次扩张）**：`gqt accept compile --write` 可写 `<root>/acceptance/ir/` 与 `<root>/acceptance/generated/` 两目录（gitignored 一次性产物；先清空再生成；写入 opt-in，`summary.wrote` 逐文件披露；写入前置校验 `<root>/addons/gut/gut_cmdln.gd` 在场）。除此之外零写入。
 - timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = max(显式 timeout, baseline 实测耗时 × F)（SEE-1420 起 F 可由 `--timeout-factor` 覆盖，默认 2.0 不变；只放大不收紧，`summary.adaptive_timeout_s` 可查）。SEE-1400 起全部 godot 子进程（mutation baseline/per-mutant 与 coverage）经跨进程 flock 槽位闸（容量 env `GQT_GLOBAL_GODOT_SLOTS`，缺省 max(2,cpu//2)；等槽时间不计入 timeout；fcntl 缺失平台告警一次后放行不阻塞）。
 
 ## 7. 契约增量分类（SEE-1312 plan-debate 定案：四类归并）

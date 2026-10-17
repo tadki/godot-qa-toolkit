@@ -118,6 +118,13 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
     return _emit(run_feature(feature, registry, scenario_timeout_s=args.timeout))
 
 
+def cmd_arch(args: argparse.Namespace) -> int:
+    # gdtoolkit 依赖延迟导入（同 complexity/mutation——§SPEC-114 最小 CI 面）。
+    from .arch.gate import run_arch_gate
+
+    return _emit(run_arch_gate(args.paths))
+
+
 def cmd_complexity(args: argparse.Namespace) -> int:
     from .complexity.gate import GateConfig, run_gate
 
@@ -283,6 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--timeout", type=float, default=None,
                    help="per-scenario wall-clock budget in seconds")
     g.set_defaults(func=cmd_gherkin)
+
+    a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
+    a.add_argument("paths", nargs="+", help=".gd files or directories to scan")
+    a.set_defaults(func=cmd_arch)
 
     c = sub.add_parser("complexity", help="complexity gate over .gd files")
     c.add_argument("paths", nargs="+", help=".gd files or directories to scan")

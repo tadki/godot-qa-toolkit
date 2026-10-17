@@ -273,7 +273,12 @@ class TestSlotStarvationHardening:
                 p.wait()
 
     def _spawn_locked_children(self, tmp_path):
-        """启动两个真实子进程（各持 gate 睡 2s）；抢到锁后写 ready 标记。"""
+        """启动两个真实子进程（各持 gate 睡 0.8s）；抢到锁后写 ready 标记。
+
+        时序预算（SEE-1420 CI 竞态修复）：探测窗 4.0s 必须 > 两进程串行
+        持锁上界 2×0.8s=1.6s + 大余量——旧值 2.0s×2=4s 串行上界覆盖旧窗
+        2.5s 尾部 → CI 慢机确定性 acquired=0（窗内全程有持有者）。
+        """
         ready = tmp_path / "probe_ready.flag"
         child_src = (
             "import os, sys, time\n"
@@ -281,7 +286,7 @@ class TestSlotStarvationHardening:
             "from godot_qa_toolkit.mutation.godot_gate import GlobalGodotGate\n"
             "with GlobalGodotGate(os.environ['PROBE_ROOT'], capacity=1):\n"
             f"    open({str(ready)!r}, 'a').close()\n"
-            "    time.sleep(2.0)\n"
+            "    time.sleep(0.8)\n"
         )
         (tmp_path / "child.py").write_text(child_src)
         env = dict(os.environ, PROBE_ROOT=str(tmp_path))
@@ -309,14 +314,22 @@ class TestSlotStarvationHardening:
 
     @staticmethod
     def _probe_lock_window(tmp_path, procs):
-        """2.5s 探测窗高频抢锁：窗口开始时锁必然被持有。返回 (busy, acquired)
-        ——busy=锁被某子进程持有次数，acquired=父进程抢到（窗口内空闲）次数。"""
+        """4.0s 探测窗高频抢锁：窗口开始时锁必然被持有。返回 (busy, acquired)
+        ——busy=锁被某子进程持有次数，acquired=父进程抢到（窗口内空闲）次数。
+
+        时序预算（SEE-1420 CI 竞态修复，两缺陷合一）：
+        1. 子进程持锁 0.8s → 串行持锁上界 1.6s（旧值 2.0s×2=4s 覆盖旧窗
+           2.5s 尾部——整窗无空闲，CI 确定性 acquired=0）；
+        2. 循环终止改为【busy>0 ∧ acquired>0 凑齐即停 / 窗到 deadline】——
+           旧条件 `any(p.poll() is None)` 在子进程全部退出后立即退出，
+           空闲尾部从未被采样（修复前的隐性竞态：整窗都在忙→误判闸失效）；
+           采样间隙 ≤15ms × 空闲尾部 ≥2.4s → 空闲事件必被采到，不依赖
+           毫秒级交接间隙踩点。deadline 4.0s > 串行上界 + 启动余量。"""
         import fcntl
         lock_path = slots_dir(str(tmp_path)) / "slot_0.lock"
         busy = acquired = 0
-        deadline = time.monotonic() + 2.5
-        while time.monotonic() < deadline and any(
-                p.poll() is None for p in procs):
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline and not (busy > 0 and acquired > 0):
             if not lock_path.exists():
                 time.sleep(0.02)
                 continue

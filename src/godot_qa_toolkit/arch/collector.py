@@ -68,30 +68,35 @@ def collect_file(path: str | Path) -> tuple[list[ArchViolation], str | None]:
         return [], f"gd parse failed: {type(e).__name__}: {e}"
 
     violations: list[ArchViolation] = []
-    # extends 基类 = extends_stmt 子树里的第一个 NAME token（gdtoolkit 把
-    # 基类名编码为 token，Meta 无行号——继承 token 自带 line）。
+    violations.extend(_check_extends(tree, p))
+    violations.extend(_check_tokens(tree, p))
+    return violations, None
+
+
+def _check_extends(tree, p: Path) -> list[ArchViolation]:  # noqa: ANN001 — lark Tree
+    """extends 基类 = extends_stmt 子树里的第一个 NAME token（gdtoolkit 把
+    基类名编码为 token，Meta 无行号——继承 token 自带 line）。"""
+    out: list[ArchViolation] = []
     for node in tree.children:
         if not hasattr(node, "data") or node.data != "extends_stmt":
             continue
         for tok in node.scan_values(lambda v: hasattr(v, "line")):
             base = str(tok.value)
             if base not in CORE_EXTENDS_WHITELIST:
-                violations.append(ArchViolation(
+                out.append(ArchViolation(
                     file=str(p), line=int(tok.line), rule=RULE_EXTENDS,
                     message=f"extends {base} is not in the Pure Core whitelist",
                 ))
             break
+    return out
 
-    # 引擎引用与裸随机：全树 NAME token 扫描。成员调用（rng.randi_range）
-    # 与显式 RNG 来源豁免：tok 前一个 token 是 DOT、或该文件存在显式
-    # RandomNumberGenerator/rng 绑定时，同名单 token 视为注入的随机源。
-    # class_name/self 注解里出现禁名单同样拦截。
-    tokens = [t for t in tree.scan_values(lambda v: hasattr(v, "line"))]
-    # 先扫本文件是否显式出现 RandomNumberGenerator——命中则成员形式的
-    # 随机调用全部放行（注入语义成立；裸全局形式仍拦截）。
-    has_explicit_rng = any(
-        str(t.value) == "RandomNumberGenerator" for t in tokens
-    )
+
+def _check_tokens(tree, p: Path) -> list[ArchViolation]:  # noqa: ANN001
+    out: list[ArchViolation] = []
+    tokens = _file_tokens(tree)
+    # 显式 RandomNumberGenerator 在场 = 注入语义成立，成员形式的随机
+    # 调用放行（裸全局形式仍拦截）。
+    has_explicit_rng = any(str(t.value) == "RandomNumberGenerator" for t in tokens)
     for idx, tok in enumerate(tokens):
         name = str(tok.value)
         prev = str(tokens[idx - 1].value) if idx > 0 else ""
@@ -99,16 +104,20 @@ def collect_file(path: str | Path) -> tuple[list[ArchViolation], str | None]:
         if name in BARE_GLOBAL_RANDOM:
             if has_explicit_rng and member_call:
                 continue
-            violations.append(ArchViolation(
+            out.append(ArchViolation(
                 file=str(p), line=int(tok.line), rule=RULE_RANDOM,
                 message=f"bare global random {name} — inject an explicit RNG/seed",
             ))
         elif name in FORBIDDEN_ENGINE_IDENTIFIERS:
-            violations.append(ArchViolation(
+            out.append(ArchViolation(
                 file=str(p), line=int(tok.line), rule=RULE_ENGINE,
                 message=f"forbidden engine reference {name!r} in Pure Core",
             ))
-    return violations, None
+    return out
+
+
+def _file_tokens(tree) -> list:  # noqa: ANN001
+    return [t for t in tree.scan_values(lambda v: hasattr(v, "line"))]
 
 
 def collect_paths(paths: list[str | Path]) -> tuple[list[ArchViolation], list[dict]]:

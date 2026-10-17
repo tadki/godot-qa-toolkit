@@ -30,6 +30,9 @@ from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggest
 # 与 mutation runner 同一套判定：godot 进程级失败（-s 脚本没加载起来）≠
 # 测试结果。res:// 是唯一可靠的 -s 形式（Revy QA FAIL 实证）。
 GUT_SCRIPT_RES_PATH = "res://addons/gut/gut_cmdln.gd"
+
+# §SPEC-1420-21：中止判定收紧后错误 marker 不再是必要条件——marker 常量
+# 保留供诊断报告引用（abort reason 拼接），判定面唯一依据 = 证据正则。
 _GODOT_LAUNCH_ERROR_MARKERS = (
     "attempt to open script",
     "file not found",
@@ -44,11 +47,14 @@ _GUT_RUN_EVIDENCE = re.compile(
 
 
 def _looks_like_godot_launch_failure(output: str) -> bool:
-    """与 mutation runner 同口径：true 仅当启动失败特征在场 ∧ 无 GUT
-    测试流证据（§SPEC-012——项目既有资源告警不得吞掉正常跑的轮）。"""
-    low = output.lower()
-    if not any(marker in low for marker in _GODOT_LAUNCH_ERROR_MARKERS):
-        return False
+    """coverage 侧中止判定（§SPEC-1420-21 收紧）。
+
+    旧口径（marker ∧ 无证据）放行了「godot 加载早期退出」形态：rc≠0、
+    快速返回、零 GUT 输出、无任何 marker——被归为 probes_fired=0 哨兵，
+    中止原因失真（Archi 实机取证）。新口径：**rc≠0 ∧ 无 GUT 测试流证据**
+    → 一律 launch failure（错误 marker 不再是必要条件）；资源告警在场但
+    GUT 正常跑（证据正则命中）的场景保持正常分类——保护面不回归。
+    """
     return _GUT_RUN_EVIDENCE.search(output) is None
 
 

@@ -238,6 +238,16 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
         return None, {"reason": f"GUT runner not found: {gut}"}
+    # §SPEC-1426-27：feature_key 冲突显式报错——不同 .feature 归一化成同
+    # 一 key 时静默互相覆盖会掩盖生成物与源文件的对应关系。
+    man_path = root / GENERATED_DIR / f"{feature_key}.manifest.json"
+    if man_path.is_file():
+        existing = json.loads(man_path.read_text(encoding="utf-8"))
+        if Path(existing.get("source_path", "")).resolve() != p.resolve():
+            return None, {
+                "reason": f"feature_key conflict: {feature_key!r} is already bound "
+                          f"to source {existing.get('source_path')!r} — rename one of "
+                          f"the .feature files (keys must be 1:1 with sources)"}
     # 先清空再生成（决策 §3.1a——一次性产物，防止陈旧生成物残留）。
     ir_dir = root / IR_DIR
     gen_dir = root / GENERATED_DIR

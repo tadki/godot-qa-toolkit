@@ -223,6 +223,15 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
     # 非 Outline 场景出现 <x> = parse error（编译轨只认 Outline 展开）。
     if not scenario.outline:
         for step in scenario.steps:
+            # §SPEC-1426-22：非 Outline 步骤文本的 {x} 残留同样 parse
+            # error——编译轨/IR 只认 <x>，{x} 是运行时 runner 私有语法，
+            # 不许带字面 {x} 静默进 IR。
+            bm = _RUNTIME_PLACEHOLDER_RE.search(step.text)
+            if bm:
+                raise GherkinSyntaxError(
+                    path, step.line,
+                    f"runtime placeholder {{{bm.group(1)}}} in non-Outline "
+                    f"scenario {scenario.name!r} — compile track only accepts <x>")
             m = _PLACEHOLDER_RE.search(step.text)
             if m:
                 raise GherkinSyntaxError(
@@ -302,6 +311,15 @@ def _apply_block_line(
             if not current_scenario.examples and not current_scenario.example_columns:
                 if any(not c for c in cells):
                     raise GherkinSyntaxError(path, line_no, "empty Examples column header")
+                # §SPEC-1426-23：重复列名 = parse error（dict(zip(...)) 会
+                # 静默让后列覆盖前列，禁止）。
+                if len(set(cells)) != len(cells):
+                    dupes = sorted({c for c in cells if cells.count(c) > 1})
+                    raise GherkinSyntaxError(
+                        path, line_no,
+                        f"duplicate Examples column(s) {dupes} in scenario "
+                        f"{current_scenario.name!r} — later column would silently "
+                        f"shadow the earlier one")
                 current_scenario.example_columns = cells
             else:
                 if len(cells) != len(current_scenario.example_columns):

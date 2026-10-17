@@ -41,8 +41,10 @@ FORBIDDEN_ENGINE_IDENTIFIERS = frozenset({
 })
 
 # 裸全局随机函数：Pure Core 必须显式 RNG/Seed 注入，任何直接引用即违规。
+# §SPEC-1426-26：seed() 全局种子函数同样收录（开放枚举加法演进）。
 BARE_GLOBAL_RANDOM = frozenset({
     "randi", "randf", "randfn", "randi_range", "randf_range", "randomize",
+    "seed",
 })
 
 

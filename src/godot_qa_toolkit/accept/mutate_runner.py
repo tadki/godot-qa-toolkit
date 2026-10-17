@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -55,25 +56,16 @@ def _mutated_ir(ir: dict, mutant: Mutant) -> dict:
     return m
 
 
-def _write_mutant_project(root: Path, ir: dict, ir_path: Path) -> str:
-    """把变异 IR 写进 IR 白名单目录（临时副本，run 后恢复原 IR）。"""
-    original = ir_path.read_text(encoding="utf-8")
-    mutated_json = json.dumps(ir, ensure_ascii=False, indent=2, sort_keys=True)
-    ir_path.write_text(mutated_json, encoding="utf-8")
-    return original
-
-
 def _run_gut(root: Path, timeout_s: int) -> tuple[int, str]:
-    import subprocess as sp
     try:
         with GlobalGodotGate(str(root)):
-            r = sp.run(
+            r = subprocess.run(
                 [godot_command(), "--headless", "--path", str(root),
                  "-s", "res://addons/gut/gut_cmdln.gd",
                  "-gdir=res://" + GENERATED_DIR, "-gexit"],
                 capture_output=True, text=True, timeout=timeout_s,
                 cwd=str(root), env=dict(os.environ))
-    except sp.TimeoutExpired as e:
+    except subprocess.TimeoutExpired as e:
         raise AcceptRunError(
             f"GUT timed out after {timeout_s}s on mutant round") from e
     return r.returncode, (r.stdout or "") + "\n" + (r.stderr or "")
@@ -105,19 +97,9 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
                 json.dumps(_mutated_ir(ir, mutant), ensure_ascii=False,
                            indent=2, sort_keys=True), encoding="utf-8")
             rc, output = _run_gut(root, timeout_s)
-            if _looks_like_godot_launch_failure(output):
-                run_errors.append({
-                    "mutant": mutant.mutant_id,
-                    "reason": f"godot launch failed on mutant round: "
-                              f"{' / '.join(output.splitlines()[-3:])}"})
-                continue
-            # 哨兵核对②：GUT 输出必须证明测试真的在跑（有运行流证据）。
-            # 零测试流 = 执行链失真 → 整轮 run_error（不产 verdict）。
-            if _count_test_stream(output) == 0:
-                run_errors.append({
-                    "mutant": mutant.mutant_id,
-                    "reason": "sentinel check failed — no test stream in GUT "
-                              "output; execution chain untrusted"})
+            err = _mutant_round_error(mutant, output)
+            if err is not None:
+                run_errors.append({"mutant": mutant.mutant_id, "reason": err})
                 continue
             if rc != 0:
                 killed += 1
@@ -154,6 +136,25 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
     }
 
 
+# GUT 运行流证据：运行流 `* test_x` 行 / Run Summary 段 `- test_x` 行
+# （与 run 侧 tests_executed 计数同族 token；只为哨兵核对，不做 kill 判定）。
+_TEST_STREAM_RE = re.compile(r"(?m)^[*-]\s+(test_\S+)")
+
+
 def _count_test_stream(output: str) -> int:
-    import re
-    return len(set(re.findall(r"(?m)^[*-]\s+(test_\S+)", output)))
+    return len(set(_TEST_STREAM_RE.findall(output)))
+
+
+def _mutant_round_error(mutant: Mutant, output: str) -> str | None:
+    """mutant 轮的执行链失真检查：返回 run_error reason 或 None（可判定）。
+
+    哨兵核对②：GUT 输出必须证明测试真的在跑（有运行流证据）；零测试流 =
+    执行链失真 → 整轮 run_error（不产 verdict）。
+    """
+    if _looks_like_godot_launch_failure(output):
+        return (f"godot launch failed on mutant round: "
+                f"{' / '.join(output.splitlines()[-3:])}")
+    if _count_test_stream(output) == 0:
+        return ("sentinel check failed — no test stream in GUT "
+                "output; execution chain untrusted")
+    return None

@@ -15,12 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept.compile import compile_feature
+from godot_qa_toolkit.accept.compile import compile_feature, sha256_of
 from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.accept.mutate_runner import AcceptRunError, run_mutate
 
+_CASE_KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n"
+_CASE_PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
+
+
 @pytest.fixture(autouse=True)
-def _restore_subprocess(monkeypatch):
+def _restore_subprocess():
     """防测试污染：run_mutate 的 fake 直接换模块属性，autouse 兜底还原。"""
     import godot_qa_toolkit.accept.mutate_runner as mr
     import godot_qa_toolkit.accept.run as run_mod
@@ -29,6 +33,19 @@ def _restore_subprocess(monkeypatch):
     yield
     mr.subprocess.run = orig_mr
     run_mod.subprocess.run = orig_run
+
+
+def _fake_gut(monkeypatch, *, returncode: int, output: str) -> None:
+    import godot_qa_toolkit.accept.mutate_runner as mr
+
+    def fake_run(*a, **k):
+        class R:
+            def __init__(self):
+                self.returncode = returncode
+                self.stdout = output
+                self.stderr = ""
+        return R()
+    mr.subprocess.run = fake_run
 
 
 CASE = {
@@ -142,18 +159,7 @@ def _compile(project: Path, tmp_path: Path) -> Path:
 def test_mutant_ir_is_temporary_copy(project: Path, tmp_path: Path) -> None:
     """变异只落临时副本：跑完磁盘 IR 恢复原样（三件哈希仍自洽）。"""
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import run as run_mod
-
-    def fake_run(*a, **k):
-        class R:
-            returncode = 1  # 全 kill
-            stdout = "* test_s_000_00\n  [Failed]\n"
-            stderr = ""
-        return R()
-    for mod in (run_mod,):
-        mod.subprocess.run = fake_run
-    from godot_qa_toolkit.accept import mutate_runner as mr
-    mr.subprocess.run = fake_run
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
     result = run_mutate(project, "demo")
     ir_disk = (project / "acceptance/ir/demo.json").read_text(encoding="utf-8")
     ir = json.loads(ir_disk)
@@ -164,15 +170,7 @@ def test_mutant_ir_is_temporary_copy(project: Path, tmp_path: Path) -> None:
 def test_survived_mutant_rejects(project: Path, tmp_path: Path) -> None:
     """存活即打回：全部 mutant 轮 GUT 全绿 → ok=false + survived 明细。"""
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import mutate_runner as mr
-
-    def fake_run(*a, **k):
-        class R:
-            returncode = 0
-            stdout = "* test_s_000_00\n  [Passed]\n"
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_run
+    _fake_gut(None, returncode=0, output=_CASE_PASS_OUTPUT)
     result = run_mutate(project, "demo")
     assert result["ok"] is False
     assert result["summary"]["survived"] == result["summary"]["mutants"]
@@ -181,15 +179,7 @@ def test_survived_mutant_rejects(project: Path, tmp_path: Path) -> None:
 
 def test_full_matrix_no_stamp(project: Path, tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import mutate_runner as mr
-
-    def fake_run(*a, **k):
-        class R:
-            returncode = 1
-            stdout = "* test_s_000_00\n  [Failed]\n"
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_run
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
     result = run_mutate(project, "demo")
     assert result["summary"]["full_matrix"] is True
     # 每轮全量：mutant 轮数 = 全矩阵大小（本 feature 无 unchanged 槽：hp ±1 + left ±1 = 4）
@@ -199,15 +189,7 @@ def test_full_matrix_no_stamp(project: Path, tmp_path: Path) -> None:
 def test_sentinel_no_test_stream_is_run_error(project: Path, tmp_path: Path) -> None:
     """哨兵核对②：GUT 输出零测试流 = 执行链失真 → run_error 面失败。"""
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import mutate_runner as mr
-
-    def fake_run(*a, **k):
-        class R:
-            returncode = 0
-            stdout = "Godot Engine v4.6\n"  # 无任何测试流
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_run
+    _fake_gut(None, returncode=0, output="Godot Engine v4.6\n")  # 无任何测试流
     result = run_mutate(project, "demo")
     assert result["ok"] is False
     assert all("sentinel check failed" in f["reason"] for f in result["failures"])
@@ -229,24 +211,16 @@ def test_adversarial_tautology_assertion_still_caught(project: Path, tmp_path: P
     """恒真断言作弊：生成测试被换成恒真 → mutant 轮全绿 → survived 打回
     （变异门禁不信任测试内容，只信任'变异后必挂'这一判据）。"""
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import mutate_runner as mr
     # 攻击者把 generated 换成恒真（但哈希自洽——重算 manifest）
     gd_path = project / "acceptance/generated/test_demo.gd"
     tautology = "# tampered\nextends GutTest\nfunc test_tautology() -> void:\n\tassert_true(true)\n"
     gd_path.write_text(tautology, encoding="utf-8")
     man_path = project / "acceptance/generated/demo.manifest.json"
     manifest = json.loads(man_path.read_text(encoding="utf-8"))
-    manifest["generated_hash"] = __import__("godot_qa_toolkit.accept.compile",
-                                            fromlist=["sha256_of"]).sha256_of(tautology)
+    manifest["generated_hash"] = sha256_of(tautology)
     man_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    def fake_run(*a, **k):
-        class R:
-            returncode = 0
-            stdout = "* test_tautology\n  [Passed]\n"
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_run
+    _fake_gut(None, returncode=0, output="* test_tautology\n  [Passed]\n")
     result = run_mutate(project, "demo")
     assert result["ok"] is False, "恒真测试放行全部 mutant = 必打回"
 
@@ -275,18 +249,9 @@ def test_adversarial_missing_unchanged_slot_caught(project: Path, tmp_path: Path
 def test_worker_channel_differential_verdicts(project: Path, tmp_path: Path) -> None:
     """--worker 与批量式 verdict 一致（同一 fake 执行链，差分对照）。"""
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import mutate_runner as mr
-
-    # 交替 kill/survive 由 case 首名判断（fake 确定性）：全 kill 的执行链
-    def fake_run(*a, **k):
-        class R:
-            returncode = 1
-            stdout = "* test_s_000_00\n  [Failed]\n"
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_run
+    # 全 kill 的执行链（fake 确定性）
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
     batch = run_mutate(project, "demo", use_worker=False)
-    mr.subprocess.run = fake_run
     worker = run_mutate(project, "demo", use_worker=True)
     assert batch["ok"] == worker["ok"]
     assert batch["summary"]["mutants"] == worker["summary"]["mutants"]
@@ -295,14 +260,6 @@ def test_worker_channel_differential_verdicts(project: Path, tmp_path: Path) -> 
 
 def test_worker_flag_in_contract(project: Path, tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import mutate_runner as mr
-
-    def fake_run(*a, **k):
-        class R:
-            returncode = 1
-            stdout = "* test_s_000_00\n  [Failed]\n"
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_run
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
     result = run_mutate(project, "demo", use_worker=True)
     assert result["summary"]["worker"] is True

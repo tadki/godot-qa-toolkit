@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 
 from . import OPS_VERSION
-from .compile import GENERATED_DIR, IR_DIR, sha256_of
+from .compile import GENERATED_DIR, sha256_of
 from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
 from ..mutation.inject import godot_command
 from ..mutation.godot_gate import GlobalGodotGate
@@ -122,37 +122,38 @@ def run_suite(project_root: str | Path, feature_key: str,
     # §SPEC-1426-24 tests_executed 守卫：0 测试执行（如 GUT 目录扫描静默
     # 忽略生成文件、被测项目 .gutconfig 覆盖 dirs）= 判定失败，不是绿。
     if r.returncode == 0 and tests_executed == 0:
-        result: dict = {
+        return {
             "tool": "accept", "ok": False,
-            "summary": {"feature": manifest["feature"],
-                        "feature_key": feature_key,
-                        "ops_version": OPS_VERSION, "exit_code": 0,
-                        "ir_hash": manifest["ir_hash"],
-                        "replay_checked": True, "tests_executed": 0,
-                        "wrote": []},
+            "summary": _run_summary(manifest, feature_key, r.returncode,
+                                    tests_executed),
             "failures": [{"test": None, "scenario": None, "line": 0,
                           "reason": "tests_executed=0 — generated suite ran no "
                                     "tests (scan/config swallowed it); not a pass"}],
         }
-        return result
     result: dict = {
         "tool": "accept",
         "ok": r.returncode == 0,
-        "summary": {
-            "feature": manifest["feature"],
-            "feature_key": feature_key,
-            "ops_version": OPS_VERSION,
-            "exit_code": r.returncode,
-            "ir_hash": manifest["ir_hash"],
-            "replay_checked": True,
-            "tests_executed": tests_executed,
-            "wrote": [],
-        },
+        "summary": _run_summary(manifest, feature_key, r.returncode,
+                                tests_executed),
         "failures": [],
     }
     if r.returncode != 0:
         result["failures"] = _attribute_failures(output, manifest, r.returncode)
     return result
+
+
+def _run_summary(manifest: dict, feature_key: str, exit_code: int,
+                 tests_executed: int) -> dict:
+    return {
+        "feature": manifest["feature"],
+        "feature_key": feature_key,
+        "ops_version": OPS_VERSION,
+        "exit_code": exit_code,
+        "ir_hash": manifest["ir_hash"],
+        "replay_checked": True,
+        "tests_executed": tests_executed,
+        "wrote": [],
+    }
 
 
 # GUT 运行流证据：运行流 `* test_x` 行 / Run Summary 段 `- test_x` 行

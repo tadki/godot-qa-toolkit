@@ -81,18 +81,6 @@ def _enum_mutants(cell: str, domain: str) -> list[tuple[str, str]]:
     return out
 
 
-def _then_bound_placeholders(case: dict) -> list[str]:
-    """本 case 的 Then 步骤绑定的占位符名（变异只打期望值，不动 Given/When）。"""
-    names: list[str] = []
-    for step in case.get("steps", []):
-        if step.get("keyword") != "Then":
-            continue
-        for m in re.finditer(r"<([A-Za-z_]\w*)>", step.get("text", "")):
-            if m.group(1) not in names:
-                names.append(m.group(1))
-    return names
-
-
 def mutate_case(case: dict) -> list[Mutant]:
     """一个 IR case → mutants。期望值绑定面全矩阵 + unchanged 槽基线。
 

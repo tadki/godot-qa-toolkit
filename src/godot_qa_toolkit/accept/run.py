@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import OPS_VERSION
 from .compile import GENERATED_DIR, IR_DIR, sha256_of
-from ..mutation.gutrun import _looks_like_godot_launch_failure
+from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
 from ..mutation.inject import godot_command
 from ..mutation.godot_gate import GlobalGodotGate
 
@@ -100,27 +100,32 @@ def run_suite(project_root: str | Path, feature_key: str,
         "failures": [],
     }
     if r.returncode != 0:
-        # 归因回译：失败测试名经 manifest 对回 scenario。
-        from ..mutation.gutrun import _parse_failing_tests
-        failing = _parse_failing_tests(output)
-        by_test = {a["test_name"]: a for a in manifest["attribution"]}
-        for t in sorted(failing):
-            attr = by_test.get(t)
-            if attr is not None:
-                result["failures"].append({
-                    "test": t, "scenario": attr["scenario"],
-                    "line": attr["scenario_line"],
-                    "reason": "generated acceptance test failed",
-                })
-            else:
-                result["failures"].append({
-                    "test": t, "scenario": None, "line": 0,
-                    "reason": "failing test not attributable via manifest",
-                })
-        if not failing:
-            result["failures"].append({
-                "test": None, "scenario": None, "line": 0,
-                "reason": f"GUT exited {r.returncode} with no parseable failing tests "
-                          f"(tail: {' / '.join(output.splitlines()[-3:])})",
-            })
+        result["failures"] = _attribute_failures(output, manifest, r.returncode)
     return result
+
+
+def _attribute_failures(output: str, manifest: dict, returncode: int) -> list[dict]:
+    """归因回译：失败测试名经 manifest 对回 scenario；无归因显式披露。"""
+    failures: list[dict] = []
+    failing = _parse_failing_tests(output)
+    by_test = {a["test_name"]: a for a in manifest["attribution"]}
+    for t in sorted(failing):
+        attr = by_test.get(t)
+        if attr is not None:
+            failures.append({
+                "test": t, "scenario": attr["scenario"],
+                "line": attr["scenario_line"],
+                "reason": "generated acceptance test failed",
+            })
+        else:
+            failures.append({
+                "test": t, "scenario": None, "line": 0,
+                "reason": "failing test not attributable via manifest",
+            })
+    if not failing:
+        failures.append({
+            "test": None, "scenario": None, "line": 0,
+            "reason": f"GUT exited {returncode} with no parseable failing tests "
+                      f"(tail: {' / '.join(output.splitlines()[-3:])})",
+        })
+    return failures

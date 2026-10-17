@@ -114,8 +114,7 @@ def test_write_requires_gut(project: Path, tmp_path: Path) -> None:
 
 
 def test_unchanged_slot_flows_into_ir(project: Path, tmp_path: Path) -> None:
-    feature = FEATURE + ""
-    feature = feature.replace(
+    feature = FEATURE.replace(
         "    # types:", "    # unchanged: world.tick, player.gold\n    # types:")
     suite, error = _compile(project, tmp_path, feature, write=False)
     assert error is None

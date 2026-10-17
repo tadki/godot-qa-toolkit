@@ -24,7 +24,7 @@ def run_arch_gate(paths: list[str]) -> dict:
         "tool": "arch",
         "ok": not failures,
         "summary": {
-            "files": len({v.file for v in violations}) ,
+            "files": len({v.file for v in violations}),
             "violations": len(violations),
             "unparseable": len(unparseable),
             "by_rule": by_rule,

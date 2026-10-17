@@ -56,7 +56,7 @@ class CompiledSuite:
     manifest: dict
 
 
-def _scenario_ir(feature_name: str, scenario: Scenario, index: int,
+def _scenario_ir(scenario: Scenario, index: int,
                  expansions: list) -> list[dict]:
     """一个 parser Scenario → 若干 IR case（Outline 每行一个 case）。"""
     cases = []
@@ -80,8 +80,7 @@ def build_ir(feature_text: str, feature_path: str) -> dict:
     feature = parse(feature_text, path=feature_path)
     cases: list[dict] = []
     for idx, scenario in enumerate(feature.scenarios):
-        cases.extend(_scenario_ir(feature.name, scenario, idx,
-                                  scenario.expansions()))
+        cases.extend(_scenario_ir(scenario, idx, scenario.expansions()))
     ir = {
         "ops_version": OPS_VERSION,
         "feature": feature.name,
@@ -179,6 +178,30 @@ func _run_case(harness: Object, case: Dictionary) -> Array:
 """
 
 
+def _build_manifest(ir: dict, ir_json: str, gd: str, feature_key: str,
+                    source_path: str, ir_rel: str) -> tuple[dict, str]:
+    """scenario→test 归因 manifest + 三件 sha256 绑定（ir/generated）。"""
+    ir_hash = sha256_of(ir_json)
+    generated_hash = sha256_of(gd)
+    manifest = {
+        "ops_version": OPS_VERSION,
+        "feature": ir["feature"],
+        "feature_key": feature_key,
+        "source_path": source_path,
+        "ir_path": f"res://{ir_rel}",
+        "ir_hash": ir_hash,
+        "generated_hash": generated_hash,
+        "bindings": {"ir": ir_hash, "generated": generated_hash},
+        "attribution": [
+            {"test_name": c["test_name"], "scenario": c["scenario"],
+             "scenario_line": c["scenario_line"],
+             "example_row_line": c["example_row_line"]}
+            for c in ir["cases"]
+        ],
+    }
+    return manifest, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def compile_feature(feature_path: str | Path, project_root: str | Path,
                     *, write: bool = True,
                     clean: bool = True) -> tuple[CompiledSuite | None, dict]:
@@ -204,25 +227,8 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     # 以 test_ 开头。
     gd_rel = f"{GENERATED_DIR}/test_{feature_key}.gd"
     gd = _generated_gd_source(ir, "res://" + ir_rel)
-    ir_hash = sha256_of(ir_json)
-    generated_hash = sha256_of(gd)
-    manifest = {
-        "ops_version": OPS_VERSION,
-        "feature": ir["feature"],
-        "feature_key": feature_key,
-        "source_path": str(p),
-        "ir_path": f"res://{ir_rel}",
-        "ir_hash": ir_hash,
-        "generated_hash": generated_hash,
-        "bindings": {"ir": ir_hash, "generated": generated_hash},
-        "attribution": [
-            {"test_name": c["test_name"], "scenario": c["scenario"],
-             "scenario_line": c["scenario_line"],
-             "example_row_line": c["example_row_line"]}
-            for c in ir["cases"]
-        ],
-    }
-    manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+    manifest, manifest_json = _build_manifest(ir, ir_json, gd, feature_key,
+                                              str(p), ir_rel)
     suite = CompiledSuite(feature_key=feature_key, ir=ir, ir_json=ir_json,
                           generated_gd=gd, manifest=json.loads(manifest_json))
     if not write:

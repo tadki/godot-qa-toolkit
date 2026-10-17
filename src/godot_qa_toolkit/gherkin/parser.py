@@ -223,10 +223,11 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
     # 非 Outline 场景出现 <x> = parse error（编译轨只认 Outline 展开）。
     if not scenario.outline:
         for step in scenario.steps:
-            if _PLACEHOLDER_RE.search(step.text):
+            m = _PLACEHOLDER_RE.search(step.text)
+            if m:
                 raise GherkinSyntaxError(
                     path, step.line,
-                    f"placeholder <{_PLACEHOLDER_RE.search(step.text).group(1)}> in "
+                    f"placeholder <{m.group(1)}> in "
                     f"non-Outline scenario {scenario.name!r} — use a Scenario Outline")
         return
     if not scenario.examples:
@@ -356,8 +357,8 @@ def parse(text: str, path: str = "<feature>") -> Feature:
             body = stripped[len(UNCHANGED_PREFIX):].strip()
             if not body:
                 raise GherkinSyntaxError(path, line_no, "# unchanged: declares nothing")
-            for item in body.split(","):
-                item = item.strip()
+            items = [i.strip() for i in body.split(",")]
+            for item in items:
                 if not re.fullmatch(r"[A-Za-z_]\w*\.[A-Za-z_]\w*", item):
                     raise GherkinSyntaxError(
                         path, line_no,
@@ -366,8 +367,7 @@ def parse(text: str, path: str = "<feature>") -> Feature:
                 raise GherkinSyntaxError(
                     path, line_no,
                     "# unchanged: outside a Scenario — per-scenario slot only")
-            current_scenario.unchanged.extend(
-                i.strip() for i in body.split(","))
+            current_scenario.unchanged.extend(items)
             continue
 
         if stripped.startswith("Feature:"):
@@ -400,19 +400,10 @@ def parse(text: str, path: str = "<feature>") -> Feature:
         raise GherkinSyntaxError(path, 1, "no Feature: line found")
 
     # `# types:` 出现在无 Outline 的 Feature 内 = parse error（Revy 保留条款）。
-    if feature.types:
-        if not any(s.outline for s in feature.scenarios):
-            raise GherkinSyntaxError(
-                path, feature.line,
-                "# types: declared in a Feature with no Scenario Outline")
-        for s in feature.scenarios:
-            if s.outline and not s.examples:
-                for col in feature.types:
-                    pass
+    if feature.types and not any(s.outline for s in feature.scenarios):
+        raise GherkinSyntaxError(
+            path, feature.line,
+            "# types: declared in a Feature with no Scenario Outline")
     for s in feature.scenarios:
-        if not s.outline and s.types:
-            # feature 级 types 泄漏给普通 scenario 是装饰性的；仅当该
-            # scenario 真的引用了占位符时才拦（_validate_scenario 已拦）。
-            pass
         _validate_scenario(feature, s, path, s.line)
     return feature

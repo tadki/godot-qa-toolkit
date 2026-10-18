@@ -30,5 +30,8 @@ jobs:
       - name: Install pytest
         run: pip install pytest
 
-      - name: Run .dev/tests (repo-sync unit + integration)
-        run: python -m pytest .dev/tests -q
+      # SEE-1430b M1: repo-sync suites migrated to tadki/dev-forge tests/repo-sync/
+      # (run in dev-forge CI); this repo's .dev/tests tree is retired — collection
+      # is zero by design, step removed rather than left failing.
+      - name: Repo-sync suites migrated to dev-forge (no-op marker)
+        run: echo "repo-sync suites live in tadki/dev-forge tests/repo-sync/ (SEE-1430b M1)"

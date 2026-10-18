@@ -36,9 +36,11 @@ mkdir -p "$DEV_DIR/logs" "$(dirname "$DAEMON_LOG")"
 # repo-sync in the background. Detached subshell so it survives this script's
 # exec; the daemon writes its own pid file from repo_sync_config.json.
 echo "[start] Starting repo-sync daemon..."
-( cd "$DEV_DIR" && \
-  nohup python3 repo-sync/repo_sync_daemon.py --config repo-sync/repo_sync_config.json \
-    >> "$DEV_DIR/logs/repo-sync-daemon.log" 2>&1 & )
+# SEE-1430b: repo-sync 三件套并轨 dev-forge 同一套 infra（repo-sync/ + repos.d/gqt.json）；
+# 本仓 .dev/repo-sync/ 已退役。gqt 注册文件按其实际配置直写实值（哨兵废除）。
+( nohup python3 "$HOME/tools/dev-forge/repo-sync/repo_sync_daemon.py" \
+    --config "$HOME/tools/dev-forge/repo-sync/repos.d/gqt.json" \
+    >> /tmp/gqt-repo-sync-daemon.log 2>&1 & )
 
 # multica per-task routing affinity (same as 105 deployment): make the daemon
 # launch the wrapper instead of plain claude, so each task run stamps

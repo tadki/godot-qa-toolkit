@@ -21,9 +21,8 @@ REPO_ROOT="${GQT_REPO_ROOT:-$HOME/tools/godot-qa-toolkit}"
 DEV_DIR="$REPO_ROOT/.dev"
 DAEMON_LOG="${GQT_DAEMON_LOG:-$HOME/.multica/daemon.log}"
 
-# repo_sync_config.json uses the __GQT_REPO_ROOT__ sentinel; the daemon
-# resolves it from this env var at config-load time.
-export GQT_REPO_ROOT="$REPO_ROOT"
+# SEE-1430b: __GQT_REPO_ROOT__ sentinel retired — repos.d/gqt.json carries real
+# values; REPO_ROOT above is only used for log paths in this script.
 
 MULTICA="${MULTICA:-multica}"
 if ! command -v "$MULTICA" &>/dev/null; then

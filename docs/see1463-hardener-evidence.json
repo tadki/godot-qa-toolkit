@@ -1,0 +1,62 @@
+{
+  "issue": "SEE-1463",
+  "substep": "hardener",
+  "spec": "§SPEC-011 (Phase 6 增补) + §SPEC-008 绿守护",
+  "base_commit": "31ef28c",
+  "date": "2026-10-24",
+  "scope": "① test_spec016_reporting_1321.py TestLow4WslenvAppend 双用例判别力对抗验证；② 31ef28c parser.py 拆解行为等价变异注入（全部落在拆解产出函数）；③ 证据留档 + survivor 补刀对抗用例",
+  "method": "手工注入-kill-还原（gqt mutation 仅适用 .gd，Python 仓沿用 SEE-1416 范式）：逐个注入 → python3 -m pytest（① 判据命令=目标文件，② 判据命令=全量套件，非零退出即 kill）→ git checkout -- 还原；survivor 补 RED 验证过的对抗用例后全量复跑",
+  "host_premise": "本机 WSL2 + Linux godot：inject.detect_binary_kind() 实测返回 'linux'（§SPEC-001 修复前提的宿主口径）",
+  "pytest": {
+    "baseline_31ef28c": 854,
+    "after_hardening": 856,
+    "added": 2,
+    "added_file": "tests/unit/test_parser_adversarial_see1463.py",
+    "final_exit_code": 0,
+    "residual_mutation_check": "git diff --stat src/ 为空（全部变异 git checkout -- 还原，零残留）"
+  },
+  "spec011_1_wslenv_discrimination": {
+    "total": 2,
+    "killed": 2,
+    "survived": 0,
+    "mutants": [
+      {
+        "id": "MW1",
+        "site": "tests/unit/test_spec016_reporting_1321.py::TestLow4WslenvAppend::test_existing_wslenv_preserved_win64",
+        "change": "删除 monkeypatch.setattr(inject, 'detect_binary_kind', lambda: 'win64') 钉死行",
+        "result": "KILLED",
+        "evidence": "python3 -m pytest tests/unit/test_spec016_reporting_1321.py -q → exit 1，KeyError: 'WSLENV'（本机 linux 判型走 _linux_env 不设 WSLENV，与修复前红形态逐字节一致）",
+        "restored": "git checkout -- 还原后该文件用例随全量 856 passed 绿"
+      },
+      {
+        "id": "MW2",
+        "site": "tests/unit/test_spec016_reporting_1321.py::TestLow4WslenvAppend::test_linux_channel_omits_wslenv",
+        "change": "linux 钉死翻转为 detect_binary_kind→'win64'",
+        "result": "KILLED",
+        "evidence": "exit 1，assert \"WSLENV\" not in env 失败（win64 通道 env 泄入 WSLENV='USER_FLAG/w:GQT_MUTATION_CFG/w:...'）——linux 侧对称断言同样非恒真",
+        "restored": "git checkout -- 还原后该文件用例随全量 856 passed 绿"
+      }
+    ],
+    "conclusion": "两条平台分支的 monkeypatch/断言真实钉死各自通道：去钉必红、翻转必红、还原必绿，套件结论不再随宿主 godot 二进制类型翻转"
+  },
+  "spec011_2_parser_equivalence": {
+    "total": 6,
+    "first_round": {"killed": 4, "survived": 2},
+    "final_round": {"killed": 6, "survived": 0},
+    "kill_rate": 1.0,
+    "mutants": [
+      {"id": "P01", "site": "parser._validate_non_outline_steps（31ef28c 拆解产出）", "category": "校验顺序互换", "change": "{x} runtime 校验与 <x> 编译轨校验顺序互换", "round1": "SURVIVED", "final": "KILLED", "killed_by": "test_parser_adversarial_see1463.py::test_non_outline_mixed_placeholders_runtime_check_first"},
+      {"id": "P02", "site": "parser._validate_scenario（31ef28c 拆解产出）", "category": "错误信息篡改", "change": "no-Examples 错误信息 'has no Examples table'→'lacks an Examples table'", "round1": "KILLED", "final": "KILLED", "killed_by": "test_parser_schema_see1426.py::test_outline_without_examples_is_parse_error + test_parser_adversarial_see1426.py::test_examples_zero_data_rows_parse_error"},
+      {"id": "P03", "site": "parser._apply_examples_table_row（31ef28c 拆解产出）", "category": "丢弃校验", "change": "删除 §SPEC-1426-23 重复列名 parse-error 校验", "round1": "KILLED", "final": "KILLED", "killed_by": "test_mustfix_see1426.py::test_duplicate_examples_columns_is_parse_error"},
+      {"id": "P04", "site": "parser._require_examples_table（31ef28c 拆解产出）", "category": "弱化校验", "change": "outline 判定丢弃（只拒无场景，普通 Scenario 下 Examples 静默放行）", "round1": "SURVIVED", "final": "KILLED", "killed_by": "test_parser_adversarial_see1463.py::test_examples_under_plain_scenario_parse_error"},
+      {"id": "P05", "site": "parser._finalize_feature（31ef28c 拆解产出）", "category": "错误信息篡改", "change": "no-Outline types 错误信息 'with no Scenario Outline'→'lacking any Scenario Outline'", "round1": "KILLED", "final": "KILLED", "killed_by": "test_parser_schema_see1426.py::test_types_line_without_outline_is_parse_error"},
+      {"id": "P06", "site": "parser._validate_examples_rows（31ef28c 拆解产出）", "category": "丢弃校验", "change": "删除展开后 {x} 残留 parse-error 校验（_expand try/except 全移除）", "round1": "KILLED", "final": "KILLED", "killed_by": "test_parser_schema_see1426.py::test_runtime_placeholder_surviving_expansion_is_parse_error"}
+    ]
+  },
+  "test_face_weaknesses_found": [
+    "P01 存活根因：既有夹具无非 Outline 步骤文本同时含 {x} 与 <x> 的形态，_validate_non_outline_steps 两道校验的触发顺序未被钉死——补 mixed-placeholder 判别器",
+    "P04 存活根因：Examples 表 outside-Scenario 用例只覆盖 current_scenario is None 分支，普通（非 Outline）Scenario 下出现 Examples: 的 fail-fast 分支零守护，且该分支被击穿后 _validate_scenario 对 non-outline 提前 return、垃圾表静默进 IR——补 plain-scenario-Examples 判别器"
+  ],
+  "compatibility": "§SPEC-008 复核：全部变异已 git checkout -- 逐个还原，git diff --stat src/ 为空；还原后全量 856 passed（854 基线 + 2 补刀用例）exit=0；产品代码零改动（本轮仅新增 tests/unit/test_parser_adversarial_see1463.py 与本证据文件），31ef28c 拆解行为等价性由 kill 证据背书",
+  "provenance": "SEE-1416 手工注入-kill-还原范式；证据形态沿用 docs/see1416-hardener-evidence.json"
+}

@@ -358,7 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     acr = acsub.add_parser("run", help="replay-check + headless-run the generated suite")
     acr.add_argument("directory", nargs="?", default=None,
-                     help="acceptance dir (default: --project-root)")
+                     help="alternative project root (default: --project-root)")
     acr.add_argument("--project-root", required=True,
                      help="target Godot project root containing addons/gut/")
     acr.add_argument("--key", required=True,
@@ -369,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     acm = acsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
     acm.add_argument("directory", nargs="?", default=None,
-                     help="acceptance dir (default: --project-root)")
+                     help="alternative project root (default: --project-root)")
     acm.add_argument("--project-root", required=True,
                      help="target Godot project root containing addons/gut/")
     acm.add_argument("--key", required=True,

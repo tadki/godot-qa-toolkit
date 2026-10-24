@@ -122,13 +122,30 @@ class TestLow3StemWordBoundary:
 
 
 class TestLow4WslenvAppend:
-    def test_existing_wslenv_preserved(self, tmp_path, monkeypatch):
+    def test_existing_wslenv_preserved_win64(self, tmp_path, monkeypatch):
+        """win64 通道：调用方既有 WSLENV 保留并追加放行项（LOW-4）。
+
+        钉死 detect_binary_kind→win64——本机 WSL+linux godot 判 linux 会让
+        其走 _linux_env（不设 WSLENV），用例结论遂随宿主二进制类型翻转
+        （SEE-1463 §SPEC-001 测试环境敏感修复）。
+        """
+        from godot_qa_toolkit.mutation import inject
         from godot_qa_toolkit.mutation.inject import mutant_env
-        import os
+        monkeypatch.setattr(inject, "detect_binary_kind", lambda: "win64")
         monkeypatch.setenv("WSLENV", "USER_FLAG/w")
         env, _cfg = mutant_env("res://calc.gd", "x", str(tmp_path), 0)
         assert "USER_FLAG/w" in env["WSLENV"]
         assert "GQT_MUTATION_CFG/w" in env["WSLENV"]
+
+    def test_linux_channel_omits_wslenv(self, tmp_path, monkeypatch):
+        """linux 原生通道不设 WSLENV（Linux godot 原生继承 env，无需放行）。"""
+        from godot_qa_toolkit.mutation import inject
+        from godot_qa_toolkit.mutation.inject import mutant_env
+        monkeypatch.setattr(inject, "detect_binary_kind", lambda: "linux")
+        monkeypatch.setenv("WSLENV", "USER_FLAG/w")
+        env, _cfg = mutant_env("res://calc.gd", "x", str(tmp_path), 0)
+        assert "WSLENV" not in env
+        assert "APPDATA" not in env
 
 
 class TestLow5PrewarmDegrade:

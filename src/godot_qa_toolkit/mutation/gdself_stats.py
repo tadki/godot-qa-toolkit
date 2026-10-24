@@ -1,5 +1,10 @@
 """SEE-1405 §SPEC-002 — 动工前只读统计脚本（gdself 收益与成本实测）。
 
+**SEE-1463 §SPEC-004 状态登记（deferred）**：本模块（仅 `__main__` 统计
+脚本）与 `fsprobe.py` 当前生产零调用方，状态为 **deferred——未接线进
+mutation 报告链**。属一次性诊断脚本，仅经 `python -m ...gdself_stats`
+主动执行；触发条件/演进方向见 docs/contract.md §8「deferred 登记」。
+
 对目标 Godot 项目全库只读统计：
 1. 反查（SEE-1400 testscan）零命中生产文件集合（假 0 命中基线）；
 2. gdself 正向索引对每个零命中目标的消费者闭包——逐源累计消除份额

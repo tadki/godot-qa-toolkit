@@ -1,6 +1,16 @@
 """SEE-1405 定案第 7/8 条 — fsprobe：落盘位置探测 + 启动基线独立 store +
 迁移判定层（探测/判定/建议值输出；投影执行不在本模块）。
 
+**SEE-1463 §SPEC-004 状态登记（deferred）**：本模块 + `mutation/gdself_stats.py`
+当前生产零调用方（`src/` 无 import 接线），状态为 **deferred——未接线进
+mutation 报告链**。原 docstring 承诺的「报告中的 `fs_projection` 形态」为误导
+承诺，已撤回：读者不应预期当前任一报告 `summary` 出现该键。
+触发条件/演进方向见 docs/contract.md §8「deferred 登记」。
+
+接线方向（后续演进，本批不接线）：待 mutation 报告链决策是否采用时，将本
+模块的 `recommend_projection` 输出并入报告，并在
+cli/collector 层接线——届时需配套基线 store 与运行期探测的成套新功能。
+
 定案口径：
 - 独立 store：键 = fstype + 二进制标识 + 挂载点（**无 git_rev**——启动时间
   随 fs/二进制而非代码 rev 变化，rev 失效会让每提交重付双基线空跑），
@@ -11,8 +21,8 @@
   /proc/mounts 路径前缀匹配；再失败 fstype=None 诚实降级）+ WSL 标记
   （/proc/version 含 microsoft）+ 挂载点归属。
 - 判定式（§SPEC-011 Revy 校准初值）：同机实测基线差 ≥T（T≥2s）且
-  轮级税占比 ≥S（S≥10%）→ 建议投影/换二进制；输出建议值与量化依据，
-  报告 `summary.fs_projection` 形态，机器可审；不自动执行任何迁移。
+  轮级税占比 ≥S（S≥10%）→ 建议投影/换二进制；输出建议值与量化依据。
+  不自动执行任何迁移。
 """
 
 from __future__ import annotations

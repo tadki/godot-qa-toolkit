@@ -16,7 +16,6 @@ import pytest
 
 from godot_qa_toolkit.mutation import inject
 from godot_qa_toolkit.mutation import runner as mrunner
-from godot_qa_toolkit.mutation.resume import ResumeStore
 from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 
 TARGET_SRC = (
@@ -168,15 +167,14 @@ class TestPoisonEntryGuard:
         assert len(store.load_entries()) == 4
 
     def test_poisoned_entry_rejected_on_resume(self, tmp_path):
-        """端到端：已存在的注入失败条目（模拟断连期写入）在 --resume 时
-        不被复用——宁重跑，不脏合并。"""
+        """端到端：注入失败条目不落盘（--resume 时自然不会复用）——
+        宁重跑，不脏合并。"""
         root, target = _mk_project(tmp_path / "proj")
-        store = ResumeStore(str(root), str(target), None, 4)
-        bad = {"kind": "AOR", "original": "a + b", "mutated": "a - b",
-               "line": 1, "verdict": "run_error",
-               "reason": "memory injection failed: GQT_MUTATION_CFG env "
-                         "missing"}
-        store.record(0, bad)
-        mutant = SimpleNamespace(kind="AOR", original="a + b",
-                                 mutated="a - b", line=1)
-        assert store.load_completed([mutant], 0, 1) == {}
+        store = ResumeStoreV2(str(root), str(target), None)
+        store.ensure_store_dir()
+        store.record_entry({"id": "calc.gd#add#1", "kind": "AOR",
+                            "original": "a + b", "mutated": "a - b",
+                            "line": 1, "verdict": "run_error",
+                            "reason": "memory injection failed: "
+                                      "GQT_MUTATION_CFG env missing"})
+        assert store.load_entries() == {}

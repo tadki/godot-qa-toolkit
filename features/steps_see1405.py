@@ -12,7 +12,7 @@ from pathlib import Path
 
 from godot_qa_toolkit.gherkin.runner import Registry, StepFailure
 from godot_qa_toolkit.mutation.gdself import query_consumers
-from godot_qa_toolkit.mutation.resume import ResumeStore
+from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 from godot_qa_toolkit.mutation.testscan import derive_tests_glob
 from godot_qa_toolkit.timing import TimingStore
 
@@ -49,8 +49,8 @@ def register(registry: Registry) -> None:
     @registry.step("the resume keys of both checkouts are equal")
     def _then_resume_eq(_p: dict[str, str]) -> None:
         ra, rb = state["root_a"], state["root_b"]
-        ka = ResumeStore(str(ra), str(ra / "calc.gd"), "res://tests/", 50).key
-        kb = ResumeStore(str(rb), str(rb / "calc.gd"), "res://tests/", 50).key
+        ka = ResumeStoreV2(str(ra), str(ra / "calc.gd"), "res://tests/").key
+        kb = ResumeStoreV2(str(rb), str(rb / "calc.gd"), "res://tests/").key
         if ka != kb:
             _fail("resume keys diverge across identical checkouts",
                   f"{ka} != {kb}")
@@ -71,8 +71,8 @@ def register(registry: Registry) -> None:
         ra, rb = state["root_a"], state["root_b"]
         file_b = rb / "nested/calc.gd" if (rb / "nested").is_dir() \
             else rb / "calc.gd"
-        ka = ResumeStore(str(ra), str(ra / "calc.gd"), None, 50).key
-        kb = ResumeStore(str(rb), str(file_b), None, 50).key
+        ka = ResumeStoreV2(str(ra), str(ra / "calc.gd"), None).key
+        kb = ResumeStoreV2(str(rb), str(file_b), None).key
         if ka == kb:
             _fail("different relative layouts produced the same key", ka)
 
@@ -81,38 +81,34 @@ def register(registry: Registry) -> None:
         base = Path(tempfile.mkdtemp(prefix="see1405-keys-"))
         ra = _mk_checkout(base, "checkout_a")
         rb = _mk_checkout(base, "checkout_b")
-        store_a = ResumeStore(str(ra), str(ra / "calc.gd"), "res://tests/", 50)
-        rec = {"kind": "AOR", "original": "a + b", "mutated": "a - b",
-               "line": 1, "verdict": "killed", "failures": ["t"],
-               "elapsed_s": 0.1}
-        if store_a.record(0, rec) is not True:
+        store_a = ResumeStoreV2(str(ra), str(ra / "calc.gd"), "res://tests/")
+        rec = {"id": "calc.gd#add#1", "kind": "AOR", "original": "a + b",
+               "mutated": "a - b", "line": 1, "verdict": "killed"}
+        if store_a.record_entry(rec) is not True:
             _fail("resume store record failed at checkout A")
         state["root_b"] = rb
-        state["entry_text"] = (store_a.store_dir / "0.json").read_text(
+        state["entry_text"] = (store_a.entry_path("calc.gd#add#1")).read_text(
             encoding="utf-8")
 
     @registry.step("the store entry is placed at checkout B")
     def _when_place(_p: dict[str, str]) -> None:
         rb = state["root_b"]
-        store_b = ResumeStore(str(rb), str(rb / "calc.gd"), "res://tests/", 50)
+        store_b = ResumeStoreV2(str(rb), str(rb / "calc.gd"), "res://tests/")
         store_b.ensure_store_dir()
-        (store_b.store_dir / "0.json").write_text(state["entry_text"],
-                                                  encoding="utf-8")
+        (store_b.entry_path("calc.gd#add#1")).write_text(
+            state["entry_text"], encoding="utf-8")
 
     @registry.step("checkout B resumes the recorded verdict without rerunning")
     def _then_resume_hit(_p: dict[str, str]) -> None:
-        from types import SimpleNamespace
         rb = state["root_b"]
-        store_b = ResumeStore(str(rb), str(rb / "calc.gd"), "res://tests/", 50)
-        mutant = SimpleNamespace(kind="AOR", original="a + b",
-                                 mutated="a - b", line=1)
-        completed = store_b.load_completed([mutant], 0, 1)
-        if 0 not in completed:
+        store_b = ResumeStoreV2(str(rb), str(rb / "calc.gd"), "res://tests/")
+        completed = store_b.load_entries()
+        if "calc.gd#add#1" not in completed:
             _fail("recorded verdict not resumed at checkout B",
                   f"key={store_b.key}")
-        if completed[0].get("verdict") != "killed":
+        if completed["calc.gd#add#1"].get("verdict") != "killed":
             _fail("resumed verdict mismatch",
-                  str(completed[0].get("verdict")))
+                  str(completed["calc.gd#add#1"].get("verdict")))
 
     # ---- §SPEC-003 gdself -------------------------------------------------
 

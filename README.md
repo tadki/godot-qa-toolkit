@@ -6,7 +6,7 @@
 
 Every tool emits a machine-decidable verdict under one unified JSON contract —
 exit code `0` = pass, `1` = fail. No agent scoring, no heuristics inside tool
-code: judgments are deterministic by design (the P0' principle).
+code: judgments are deterministic by design.
 
 [![ci-pytest](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -42,13 +42,13 @@ source of truth.
 
 | Tool | Command | Status |
 |---|---|---|
-| **Gherkin runner** | `gqt gherkin <file.feature> [--steps <module.py or dir>] [--timeout S]` | shipped (M1) |
+| **Gherkin runner** | `gqt gherkin <file.feature> [--steps <module.py or dir>] [--timeout S]` | shipped |
 | **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
 | **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run <dir> --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run | shipped |
-| **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped (M1) |
-| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N]` | shipped (M2) |
-| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S]` | shipped (M2) |
-| **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp ① runtime addon | planned |
+| **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
+| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N]` | shipped |
+| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S]` | shipped |
+| **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp runtime addon | planned |
 
 `mutation` and `coverage` share three mandatory preconditions:
 
@@ -62,9 +62,9 @@ source of truth.
   under `user://`.
 
 > **Two-library split:** the godot-mcp control plane (launcher / proxy / shim /
-> port arbitration) belongs to the **godot-mcp runtime library** (①). This repo
-> is the tool-state half (②): *run-time driving* lives in ①, *test means* live
-> here.
+> port arbitration) belongs to the **godot-mcp runtime library**. This repo is
+> the tool-state half: *run-time driving* lives in the runtime library, *test
+> means* live here.
 
 ## Quick start
 
@@ -380,9 +380,9 @@ Two belts guard against this:
 <details>
 <summary><strong>Standalone install mode</strong></summary>
 
-gqt no longer lives under the tested project's `.dev/qa-toolkit` submodule — it is an
-independent CLI installed from a standalone checkout (e.g. a persistent
-`~/tools/godot-qa-toolkit` on WSL). `gqt doctor` works out of the box in
+gqt is an independent CLI installed from a standalone checkout (e.g. a
+persistent `~/tools/godot-qa-toolkit` on WSL), not a submodule of the tested
+project. `gqt doctor` works out of the box in
 standalone mode (skips the root comparison when it cannot resolve a target
 tree — exit 0, never a false report). To have doctor compare the editable
 install against a specific tree, point it there:
@@ -395,7 +395,7 @@ GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
 
 ## Design principles
 
-- **Deterministic verdicts** (P0' principle) — every tool's outcome is fully
+- **Deterministic verdicts** — every tool's outcome is fully
   reproducible; no agent or heuristic scoring inside tool code.
 - **One JSON contract** — uniform `{tool, ok, summary, failures}` output and
   `0`/`1` exit codes across the whole toolchain.

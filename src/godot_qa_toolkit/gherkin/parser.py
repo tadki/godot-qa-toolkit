@@ -221,31 +221,28 @@ def _append_step(
     return kind
 
 
-def _validate_scenario(feature: Feature, scenario: Scenario,
-                       path: str, line_no: int) -> None:
-    """Schema 冻结校验（parse 期 fail-fast，per-scenario 展开前后各一道）。"""
-    # 非 Outline 场景出现 <x> = parse error（编译轨只认 Outline 展开）。
-    if not scenario.outline:
-        for step in scenario.steps:
-            # §SPEC-1426-22：非 Outline 步骤文本的 {x} 残留同样 parse
-            # error——编译轨/IR 只认 <x>，{x} 是运行时 runner 私有语法，
-            # 不许带字面 {x} 静默进 IR。
-            bm = _RUNTIME_PLACEHOLDER_RE.search(step.text)
-            if bm:
-                raise GherkinSyntaxError(
-                    path, step.line,
-                    f"runtime placeholder {{{bm.group(1)}}} in non-Outline "
-                    f"scenario {scenario.name!r} — compile track only accepts <x>")
-            m = _PLACEHOLDER_RE.search(step.text)
-            if m:
-                raise GherkinSyntaxError(
-                    path, step.line,
-                    f"placeholder <{m.group(1)}> in "
-                    f"non-Outline scenario {scenario.name!r} — use a Scenario Outline")
-        return
-    if not scenario.examples:
-        raise GherkinSyntaxError(path, line_no,
-                                 f"Scenario Outline {scenario.name!r} has no Examples table")
+def _validate_non_outline_steps(scenario: Scenario, path: str) -> None:
+    """非 Outline 场景步骤文本不得含 <x> / {x}（编译轨只认 Outline 展开）。"""
+    for step in scenario.steps:
+        # §SPEC-1426-22：非 Outline 步骤文本的 {x} 残留同样 parse
+        # error——编译轨/IR 只认 <x>，{x} 是运行时 runner 私有语法，
+        # 不许带字面 {x} 静默进 IR。
+        bm = _RUNTIME_PLACEHOLDER_RE.search(step.text)
+        if bm:
+            raise GherkinSyntaxError(
+                path, step.line,
+                f"runtime placeholder {{{bm.group(1)}}} in non-Outline "
+                f"scenario {scenario.name!r} — compile track only accepts <x>")
+        m = _PLACEHOLDER_RE.search(step.text)
+        if m:
+            raise GherkinSyntaxError(
+                path, step.line,
+                f"placeholder <{m.group(1)}> in "
+                f"non-Outline scenario {scenario.name!r} — use a Scenario Outline")
+
+
+def _validate_examples_rows(scenario: Scenario, path: str) -> None:
+    """Outline 逐行校验：占位符须有对应 Examples 列；展开后不得残留 {x}。"""
     for row in scenario.examples:
         for step in scenario.steps:
             missing = [m.group(1) for m in _PLACEHOLDER_RE.finditer(step.text)
@@ -264,10 +261,14 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
                     path, step.line,
                     f"runtime placeholder {{x}} survives Examples expansion — "
                     f"compile track only accepts <x>: {step.text!r}") from None
-    # Then 绑定 numeric 形 / 枚举形态 cell 无类型声明 = parse error
-    # （rev2 §四：域未声明的 Then 绑定 = parse error，与 numeric 版对齐；
-    # 枚举形态 = 标识符形单词 cell——不声明域则该占位符面静默逃逸变异
-    # 门禁，fail-fast 拒绝）。
+
+
+def _validate_then_bindings(feature: Feature, scenario: Scenario,
+                            path: str) -> None:
+    """Then 绑定 numeric 形 / 枚举形态 cell 无类型声明 = parse error
+    （rev2 §四：域未声明的 Then 绑定 = parse error，与 numeric 版对齐；
+    枚举形态 = 标识符形单词 cell——不声明域则该占位符面静默逃逸变异
+    门禁，fail-fast 拒绝）。"""
     for row in scenario.examples:
         for step in scenario.steps:
             if step.keyword != "Then":
@@ -291,6 +292,67 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
                         f"the mutation gate")
 
 
+def _validate_scenario(feature: Feature, scenario: Scenario,
+                       path: str, line_no: int) -> None:
+    """Schema 冻结校验（parse 期 fail-fast，per-scenario 展开前后各一道）。"""
+    # 非 Outline 场景出现 <x> = parse error（编译轨只认 Outline 展开）。
+    if not scenario.outline:
+        _validate_non_outline_steps(scenario, path)
+        return
+    if not scenario.examples:
+        raise GherkinSyntaxError(path, line_no,
+                                 f"Scenario Outline {scenario.name!r} has no Examples table")
+    _validate_examples_rows(scenario, path)
+    _validate_then_bindings(feature, scenario, path)
+
+
+def _require_examples_table(current_scenario: Scenario | None,
+                            path: str, line_no: int) -> None:
+    if current_scenario is None or not current_scenario.outline:
+        raise GherkinSyntaxError(
+            path, line_no, "Examples: table outside a Scenario Outline")
+    if current_scenario.examples:
+        raise GherkinSyntaxError(
+            path, line_no,
+            f"duplicate Examples: table in scenario {current_scenario.name!r}")
+
+
+def _apply_examples_table_row(
+    stripped: str,
+    current_scenario: Scenario,
+    current_steps: list[Step] | None,
+    in_examples: bool,
+    pending_tags: list[str],
+    last_kind: str | None,
+    path: str,
+    line_no: int,
+) -> tuple[list[Step] | None, bool, list[str], str | None, Scenario | None]:
+    cells = _parse_table_row(stripped)
+    if not current_scenario.examples and not current_scenario.example_columns:
+        if any(not c for c in cells):
+            raise GherkinSyntaxError(path, line_no, "empty Examples column header")
+        # §SPEC-1426-23：重复列名 = parse error（dict(zip(...)) 会
+        # 静默让后列覆盖前列，禁止）。
+        if len(set(cells)) != len(cells):
+            dupes = sorted({c for c in cells if cells.count(c) > 1})
+            raise GherkinSyntaxError(
+                path, line_no,
+                f"duplicate Examples column(s) {dupes} in scenario "
+                f"{current_scenario.name!r} — later column would silently "
+                f"shadow the earlier one")
+        current_scenario.example_columns = cells
+    else:
+        if len(cells) != len(current_scenario.example_columns):
+            raise GherkinSyntaxError(
+                path, line_no,
+                f"Examples row width {len(cells)} != header width "
+                f"{len(current_scenario.example_columns)} (ragged table)")
+        current_scenario.examples.append(ExampleRow(
+            values=dict(zip(current_scenario.example_columns, cells)),
+            line=line_no))
+    return current_steps, in_examples, pending_tags, last_kind, current_scenario
+
+
 def _apply_block_line(
     feature: Feature,
     stripped: str,
@@ -312,46 +374,76 @@ def _apply_block_line(
         feature.scenarios.append(scenario)
         return scenario.steps, False, [], None, scenario
     if stripped == "Examples:":
-        if current_scenario is None or not current_scenario.outline:
-            raise GherkinSyntaxError(
-                path, line_no, "Examples: table outside a Scenario Outline")
-        if current_scenario.examples:
-            raise GherkinSyntaxError(
-                path, line_no,
-                f"duplicate Examples: table in scenario {current_scenario.name!r}")
+        _require_examples_table(current_scenario, path, line_no)
         return current_steps, True, pending_tags, last_kind, current_scenario
     if stripped.startswith("|"):
         if in_examples and current_scenario is not None:
-            cells = _parse_table_row(stripped)
-            if not current_scenario.examples and not current_scenario.example_columns:
-                if any(not c for c in cells):
-                    raise GherkinSyntaxError(path, line_no, "empty Examples column header")
-                # §SPEC-1426-23：重复列名 = parse error（dict(zip(...)) 会
-                # 静默让后列覆盖前列，禁止）。
-                if len(set(cells)) != len(cells):
-                    dupes = sorted({c for c in cells if cells.count(c) > 1})
-                    raise GherkinSyntaxError(
-                        path, line_no,
-                        f"duplicate Examples column(s) {dupes} in scenario "
-                        f"{current_scenario.name!r} — later column would silently "
-                        f"shadow the earlier one")
-                current_scenario.example_columns = cells
-            else:
-                if len(cells) != len(current_scenario.example_columns):
-                    raise GherkinSyntaxError(
-                        path, line_no,
-                        f"Examples row width {len(cells)} != header width "
-                        f"{len(current_scenario.example_columns)} (ragged table)")
-                current_scenario.examples.append(ExampleRow(
-                    values=dict(zip(current_scenario.example_columns, cells)),
-                    line=line_no))
-            return current_steps, in_examples, pending_tags, last_kind, current_scenario
+            return _apply_examples_table_row(
+                stripped, current_scenario, current_steps, in_examples,
+                pending_tags, last_kind, path, line_no)
         raise GherkinSyntaxError(path, line_no, f"table row outside Examples — {stripped!r}")
     first_word = stripped.split(None, 1)[0]
     if first_word in STEP_KEYWORDS:
         new_kind = _append_step(stripped, first_word, current_steps, last_kind, path, line_no)
         return current_steps, False, pending_tags, new_kind, current_scenario
     raise GherkinSyntaxError(path, line_no, f"unrecognized line — {stripped!r}")
+
+
+def _apply_types_directive(stripped: str, feature: Feature | None,
+                           current_scenario: Scenario | None,
+                           path: str, line_no: int) -> dict[str, str]:
+    """`# types:` 行落地：挂当前 scenario，否则并入 feature.types；返回本行
+    类型映射（scenario 未定时由调用方挂起为 pending，随下一个 scenario 落）。"""
+    types = _parse_types_line(stripped, path, line_no)
+    base = (current_scenario.types if current_scenario is not None
+            else feature.types if feature is not None else None)
+    if base is None:
+        raise GherkinSyntaxError(path, line_no, "# types: before Feature:")
+    _check_type_conflicts(base, types, path, line_no)
+    base.update(types)
+    return types
+
+
+def _apply_unchanged_directive(stripped: str, current_scenario: Scenario | None,
+                               path: str, line_no: int) -> None:
+    body = stripped[len(UNCHANGED_PREFIX):].strip()
+    if not body:
+        raise GherkinSyntaxError(path, line_no, "# unchanged: declares nothing")
+    items = [i.strip() for i in body.split(",")]
+    for item in items:
+        if not re.fullmatch(r"[A-Za-z_]\w*\.[A-Za-z_]\w*", item):
+            raise GherkinSyntaxError(
+                path, line_no,
+                f"malformed # unchanged: entry {item!r} (expected <entity>.<field>)")
+    if current_scenario is None:
+        raise GherkinSyntaxError(
+            path, line_no,
+            "# unchanged: outside a Scenario — per-scenario slot only")
+    current_scenario.unchanged.extend(items)
+
+
+def _apply_feature_header(stripped: str, feature: Feature | None,
+                          pending_tags: list[str], pending_types: dict[str, str],
+                          path: str, line_no: int) -> Feature:
+    if feature is not None:
+        raise GherkinSyntaxError(path, line_no, "duplicate Feature:")
+    return Feature(
+        name=stripped[len("Feature:"):].strip(),
+        line=line_no,
+        tags=pending_tags,
+        types=dict(pending_types),
+    )
+
+
+def _finalize_feature(feature: Feature, path: str) -> Feature:
+    # `# types:` 出现在无 Outline 的 Feature 内 = parse error（Revy 保留条款）。
+    if feature.types and not any(s.outline for s in feature.scenarios):
+        raise GherkinSyntaxError(
+            path, feature.line,
+            "# types: declared in a Feature with no Scenario Outline")
+    for s in feature.scenarios:
+        _validate_scenario(feature, s, path, s.line)
+    return feature
 
 
 def parse(text: str, path: str = "<feature>") -> Feature:
@@ -363,7 +455,6 @@ def parse(text: str, path: str = "<feature>") -> Feature:
     pending_tags: list[str] = []
     last_kind: str | None = None  # for And/But chaining
     pending_types: dict[str, str] = {}
-    pending_unchanged: list[str] = []
 
     for line_no, raw in enumerate(text.splitlines(), start=1):
         stripped = _strip_comment_keep_directives(raw).strip()
@@ -376,42 +467,18 @@ def parse(text: str, path: str = "<feature>") -> Feature:
 
         # gqt 指令注释：挂到当前（或下一个）scenario / feature。
         if stripped.startswith(TYPES_PREFIX):
-            types = _parse_types_line(stripped, path, line_no)
-            target = current_scenario if current_scenario is not None else None
-            base = target.types if target is not None else feature.types if feature else None
-            if base is None:
-                raise GherkinSyntaxError(path, line_no, "# types: before Feature:")
-            _check_type_conflicts(base, types, path, line_no)
-            base.update(types)
-            if target is None:
+            types = _apply_types_directive(stripped, feature, current_scenario,
+                                           path, line_no)
+            if current_scenario is None:
                 pending_types.update(types)
             continue
         if stripped.startswith(UNCHANGED_PREFIX):
-            body = stripped[len(UNCHANGED_PREFIX):].strip()
-            if not body:
-                raise GherkinSyntaxError(path, line_no, "# unchanged: declares nothing")
-            items = [i.strip() for i in body.split(",")]
-            for item in items:
-                if not re.fullmatch(r"[A-Za-z_]\w*\.[A-Za-z_]\w*", item):
-                    raise GherkinSyntaxError(
-                        path, line_no,
-                        f"malformed # unchanged: entry {item!r} (expected <entity>.<field>)")
-            if current_scenario is None:
-                raise GherkinSyntaxError(
-                    path, line_no,
-                    "# unchanged: outside a Scenario — per-scenario slot only")
-            current_scenario.unchanged.extend(items)
+            _apply_unchanged_directive(stripped, current_scenario, path, line_no)
             continue
 
         if stripped.startswith("Feature:"):
-            if feature is not None:
-                raise GherkinSyntaxError(path, line_no, "duplicate Feature:")
-            feature = Feature(
-                name=stripped[len("Feature:"):].strip(),
-                line=line_no,
-                tags=pending_tags,
-                types=dict(pending_types),
-            )
+            feature = _apply_feature_header(stripped, feature, pending_tags,
+                                            pending_types, path, line_no)
             pending_types = {}
             pending_tags = []
             continue
@@ -432,11 +499,4 @@ def parse(text: str, path: str = "<feature>") -> Feature:
     if feature is None:
         raise GherkinSyntaxError(path, 1, "no Feature: line found")
 
-    # `# types:` 出现在无 Outline 的 Feature 内 = parse error（Revy 保留条款）。
-    if feature.types and not any(s.outline for s in feature.scenarios):
-        raise GherkinSyntaxError(
-            path, feature.line,
-            "# types: declared in a Feature with no Scenario Outline")
-    for s in feature.scenarios:
-        _validate_scenario(feature, s, path, s.line)
-    return feature
+    return _finalize_feature(feature, path)

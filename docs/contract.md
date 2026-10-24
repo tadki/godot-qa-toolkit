@@ -27,11 +27,13 @@ gqt <subcommand> [args]        # console script（pyproject [project.scripts]）
 python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 ```
 
-六子命令：`gherkin` / `arch` / `accept` / `complexity` / `mutation` / `coverage`（SEE-1426 起）。
+七个子命令：`gherkin` / `arch` / `accept` / `complexity` / `mutation` / `coverage` / `doctor`（SEE-1426 起 doctor 随自检能力加入）。
 
 ## 3. 统一输出 JSON 契约
 
 所有子命令在 **stdout** 输出恰好一个 JSON 对象（`ensure_ascii=False`，缩进 2），带换行结尾：
+
+> **doctor 例外**（SEE-1463 登记）：`gqt doctor` 自检 JSON 打 **stderr**（不产出判据 JSON），stdout 恒空——它与其它子命令不同，不判被测对象而是判定「editable 安装 vs 当前 worktree gitlink」的安装一致性，结果属于诊断而非判据；错配时 exit 2（见 §5）。
 
 ```json
 {
@@ -123,7 +125,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
   - 落盘：`<root>/.qa-cache/gqt-mutation-resume-v2/<file-key>/manifest.json`（per-file 索引层：schema/header hash/含位点 scope hash 表；**收尾方单点写**）+ `<file-key>/<stable-id>.json`（per-mutant 条目：verdict + 全签名五元组 + scope_hash + `timeout_streak`；tmp+os.replace 原子写，各 worker 各写各 id，无跨 worker 竞态）。
   - file-key = sha1(项目内相对路径 | tests_glob | OPS_VERSION | binary_kind)。**无 budget**（D6：预算是每 run 执行上限，不是 verdict 身份成分）。
   - **resume key 负面清单（定案 D6/D5 红线）**：`--mutation-warning`、`--timeout-factor`、`timeout_streak` **绝不进任何 resume key**——调配置不得引发全库重跑。
-  - **v1 目录（`gqt-mutation-resume`）不读不写不删**；在场时 stderr 一次性显式披露。**CI 迁移点**：升级后首个 v2 run 全量重跑（一次性失效，不迁移不脏合并）。
+  - **v1 目录（`gqt-mutation-resume`）不读不写不删**；在场时 stderr 一次性显式披露。**CI 迁移点**：升级后首个 v2 run 全量重跑（一次性失效，不迁移不脏合并）。**SEE-1463 §SPEC-003**：v1 resume 生产路径（`mutation/resume.py`）已随本批物理删除，其专属用例与 `see1400_resume.feature` 一并退役——resume 落盘仅剩 v2（`resume2.py`），无 v1 目录披露逻辑残留。
 - **timeout_pinned（定案 D5，N=2）**：resume 条目增 `timeout_streak`（连续 timeout 跨 run 计数）。复用位点重判仍 timeout → +1；**streak ≥ 2 → 独立 verdict `timeout_pinned`**：永不并入 killed、**不计入 ok 门禁失败档**、报告持续可见并披露降级来源（failures reason 含 `timeout_pinned after N consecutive timeouts`）；任一后续 run 非超时（survived/killed 均合法）→ 解除清零。**毒 run 守卫**：单 run timeout ≥50% 且 ≥5 条 → 本窗口 timeout 不落 streak，报告披露（stderr `timeout streak suspended: suspected infra run`；守卫窗口=串行整 run / 并发 worker 分片）。
 - **budget-on-retry（定案 D6）**：budget 按**差分后 retry 数**计（截断保序，拒轮转）。差分在场 run 与 `--mutate-all` run 同键集披露 `summary.retry_total`（差分 retry 总数）/ `executed`（**实际执行数**——静态预检剔除 invalid_mutant 后真实跑 GUT 的位点数）/ `untouched_ranges`（未触达位点的行号区间列表 `[[a,b],...]`）+ `diff_skipped`（被跳过位点 id 全列；mutate-all 下为空列）。位点数 > budget 时同步披露 `total_sites`（截断前全量）。
 - 可选 flag（向后兼容——省略即既有行为，差分除外，见 CI 迁移点）：
@@ -180,13 +182,20 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 - 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent}` + SEE-1312 新增 `{probes_fired, branch_total, branch_covered, branch_coverage_percent}`；未达标时 `failures[0]` 附 `covered/total/uncovered_lines`（截断 20 行）。
 - `ok = coverage_percent >= min_percent`（probes_fired=0 与 run_error 时强制 ok=false）。
 
+### 4.5 `gqt doctor`（SEE-1463 契约登记）
+
+- 用途：自检「editable 安装的 godot-qa-toolkit 是否仍指向当前 worktree gitlink」的安装一致性，供消费方在插件升级/重排后核对。
+- 判定对象是**安装一致性**（诊断），非被测项目的判据——因此自检 JSON 打 **stderr**、stdout 恒空，与 §3「各子命令 stdout 恰好一个 JSON」的判据通道分叉（例外理由见 §3）。
+- 输出：stderr 一个 JSON（`{"status":"ok"|"mismatch", ...}`，mismatch 时附 `editable_location`/`toolkit_root`/`gitlink_head`/`fix_hint`）。
+- exit：一致 → 0；安装错配（self-check 判定 install mismatch）→ **exit 2**，stdout 无 JSON（§5 的「调用方/环境错」档，不判被测对象）。
+
 ## 5. exit code 语义
 
 | exit | 语义 | 触发 |
 |---|---|---|
 | 0 | 判定通过（`ok=true`） | 任意子命令 |
 | 1 | 判定失败（`ok=false`，stdout 有 JSON） | verdict fail / run_error 中止 / 目标文件或 GUT runner 不存在 |
-| 2 | 用法/装载错误，**stdout 无 JSON** | argparse 参数错误；`gherkin --steps` 模块加载失败（stderr 报 `cannot load steps module`） |
+| 2 | 用法/装载错误，**stdout 无 JSON** | argparse 参数错误；`gherkin --steps` 模块加载失败（stderr 报 `cannot load steps module`）；`doctor` 安装错配（自检 JSON 打 stderr、stdout 恒空） |
 
 约定：exit 2 是「调用方自己错了」，exit 1 是「被测对象判为失败」。消费方自动化只应区分 0 与非 0，并解析 stdout JSON 细分 1 的形态。
 
@@ -194,7 +203,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 
 - 必填于 `mutation` / `coverage`；必须指向含 `addons/gut/gut_cmdln.gd` 的 Godot 项目根。
 - 工具在该 root 下运行 `godot --headless --path <root> -s res://addons/gut/gut_cmdln.gd [-gdir=<tests_glob>] -gexit`（`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
-- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）、coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume v1 断点续跑【SEE-1420 起只读封存：不读不写不删，仅披露】、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目）、gqt-coverage 行级覆盖事实（SEE-1420 P2）、gqt-godot-slots 并发闸锁文件——均自含 .gitignore）。
+- 工具可能写入的路径仅限：目标 .gd（临时改写、必然恢复）、coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目；v1 目录 `gqt-mutation-resume` 已在 SEE-1463 随 v1 resume 物理删除，不再登记）、gqt-coverage 行级覆盖事实（SEE-1420 P2）、gqt-godot-slots 并发闸锁文件——均自含 .gitignore）。
 - **生成类持久写入档（SEE-1426，Owner 批准的 §6 首次扩张）**：`gqt accept compile --write` 可写 `<root>/acceptance/ir/` 与 `<root>/acceptance/generated/` 两目录（gitignored 一次性产物；先清空再生成；写入 opt-in，`summary.wrote` 逐文件披露；写入前置校验 `<root>/addons/gut/gut_cmdln.gd` 在场）。除此之外零写入。
 - timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = max(显式 timeout, baseline 实测耗时 × F)（SEE-1420 起 F 可由 `--timeout-factor` 覆盖，默认 2.0 不变；只放大不收紧，`summary.adaptive_timeout_s` 可查）。SEE-1400 起全部 godot 子进程（mutation baseline/per-mutant 与 coverage）经跨进程 flock 槽位闸（容量 env `GQT_GLOBAL_GODOT_SLOTS`，缺省 max(2,cpu//2)；等槽时间不计入 timeout；fcntl 缺失平台告警一次后放行不阻塞）。
 
@@ -208,3 +217,17 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 | **classification**（分类） | mutant `kind` 开放枚举扩展（TERNARY/GUARD_NOT/LOGICAL/MEMBERSHIP/IS_NOT）；`summary.suspect` / `summary.invalid_mutants` 计数 |
 | **capability**（能力） | coverage AST 语句级插桩 + ID-keyed 数据面 + user:// run 唯一 sink；`probes_fired` / `vacuous` 哨兵；mutation `--dry-run` / `--tests` / 自适应 timeout（`adaptive_timeout_s`） |
 | **comparability**（可比性） | coverage `branch_total` / `branch_covered` / `branch_coverage_percent`（v1 推导层，observational——不进 ok 判定；语义=「分支被执行」非「被断言守护」） |
+
+## 8. deferred 登记（SEE-1463 §SPEC-004）
+
+以下模块当前**生产零调用方**，状态显式为 **deferred**——未接线进任何判据
+报告链，消费方不得预期其输出出现在任一子命令 `summary` 中：
+
+| 模块 | 现状（唯一进入方式） | deferred 触发条件（演进方向） |
+|---|---|---|
+| `fsprobe.py`（FsBaselineStore / probe_environment / recommend_projection） | 零写盘、只读探测；本批不接线 | 待 mutation 报告链决策是否采用 fs 启动税投影时接线——届时将其 `recommend_projection` 输出并入报告的 `summary.fs_projection`，并在 cli/collector 层落地，需配套基线 store 与运行期探测的成套新功能 |
+| `mutation/gdself_stats.py` | 仅 `python -m godot_qa_toolkit.mutation.gdself_stats --project-root <KOL>` 主动执行的一次性诊断脚本 | 无日常接线义务；gdself 正向索引立项且需定期量化收益时重估为周期工具 |
+
+已撤回的误导性承诺：fsprobe docstring 原称「报告 `summary.fs_projection` 形态」，
+上文（§4.3 mutation 正常输出）**不包含** `fs_projection` 键——以本条为准，该接口属后续
+演进，不属于当前契约。

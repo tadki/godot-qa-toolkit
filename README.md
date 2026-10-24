@@ -9,7 +9,6 @@ exit code `0` = pass, `1` = fail. No agent scoring, no heuristics inside tool
 code: judgments are deterministic by design (the P0' principle).
 
 [![ci-pytest](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml)
-[![ci-devtests](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-devtests.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-devtests.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 
 </div>
@@ -318,6 +317,24 @@ Capability and sentinels (see `docs/contract.md` §4.4):
 bash scripts/install.sh     # pips this tree (PEP 668 retry included)
 pytest
 ```
+
+### Versioning & release tags (SEE-1463 §SPEC-006)
+
+The toolkit has no PyPI channel; consumers pin it by **git tag**:
+
+```bash
+pip install "git+https://github.com/tadki/godot-qa-toolkit.git@v0.1.0"
+```
+
+- `pyproject.toml` `version` is the single source of truth and **must equal the
+  tag** with a `v` prefix (currently `version = "0.1.0"` ↔ tag `v0.1.0`).
+- Versioning is semantic: bug-fix batch → patch (`v0.1.1`), backward-compatible
+  contract addition → minor (`v0.2.0`), breaking CLI/contract change → major.
+- A tag is cut on the merged commit of the release batch (never on an
+  unmerged branch tip), and consumers bump their install line to the new tag in
+  the same change that needs the new behavior.
+- `gqt doctor` catches the "editable install points elsewhere" failure mode;
+  tags are what CI and downstream repos consume.
 
 `scripts/install.sh` pins the system `gqt` editable install to **this**
 checkout. On a machine with several godot-qa-toolkit trees, a stale editable

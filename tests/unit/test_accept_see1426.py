@@ -75,6 +75,19 @@ def test_compile_generated_reads_ir_not_baked(project: Path, tmp_path: Path) -> 
     assert "10" not in body.split("var cases")[0].split("const IR_PATH")[1]
 
 
+def test_compile_generated_success_path_has_positive_assertion(
+        project: Path, tmp_path: Path) -> None:
+    # hollow-green 防线：成功路径零断言会被 GUT 判 [Risky] did not assert，
+    # run 的 ok:true 失去行为证据面——每 case 必须在 fail_test 循环之后
+    # 携带 errs 空正断言（顺序不可倒置：先逐条上报、再断言空集）。
+    suite, _ = _compile(project, tmp_path, write=False)
+    body = suite.generated_gd
+    assert "assert_true(errs.is_empty()" in body, \
+        "success path must carry a positive assertion (anti-Risky)"
+    assert body.index("for e in errs:") < body.index("assert_true(errs.is_empty()"), \
+        "error propagation must precede the positive assertion"
+
+
 def test_compile_manifest_hash_binding(project: Path, tmp_path: Path) -> None:
     import hashlib
     suite, _ = _compile(project, tmp_path, write=False)

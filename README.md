@@ -6,7 +6,7 @@
 
 Every tool emits a machine-decidable verdict under one unified JSON contract —
 exit code `0` = pass, `1` = fail. No agent scoring, no heuristics inside tool
-code: judgments are deterministic by design (the P0' principle).
+code: judgments are deterministic by design.
 
 [![ci-pytest](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -42,13 +42,13 @@ source of truth.
 
 | Tool | Command | Status |
 |---|---|---|
-| **Gherkin runner** | `gqt gherkin <file.feature> [--steps <module.py or dir>] [--timeout S]` | shipped (M1) |
-| **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard (SEE-1426 P1) | shipped |
-| **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run <dir> --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run (SEE-1426 P2) | shipped |
-| **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped (M1) |
-| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N]` | shipped (M2 + SEE-1321) |
-| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S]` | shipped (M2 + SEE-1312) |
-| **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp ① runtime addon | planned |
+| **Gherkin runner** | `gqt gherkin <file.feature> [--steps <module.py or dir>] [--timeout S]` | shipped |
+| **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
+| **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
+| **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
+| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N]` | shipped |
+| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S]` | shipped |
+| **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp runtime addon | planned |
 
 `mutation` and `coverage` share three mandatory preconditions:
 
@@ -62,9 +62,9 @@ source of truth.
   under `user://`.
 
 > **Two-library split:** the godot-mcp control plane (launcher / proxy / shim /
-> port arbitration) belongs to the **godot-mcp runtime library** (①). This repo
-> is the tool-state half (②): *run-time driving* lives in ①, *test means* live
-> here.
+> port arbitration) belongs to the **godot-mcp runtime library**. This repo is
+> the tool-state half: *run-time driving* lives in the runtime library, *test
+> means* live here.
 
 ## Quick start
 
@@ -137,7 +137,7 @@ failing); unparseable file → failure. Lowering `--max` below `--warn`
 collapses warn into max. `ok = no violation AND no unparseable` — warnings
 alone still pass.
 
-## Mutation runner (SEE-1400 / SEE-1413 / SEE-1420)
+## Mutation runner
 
 Runs baseline GUT on the untouched source (always measured — it is the
 verdict anchor), plans the execution face differentially, then per-mutant
@@ -173,7 +173,7 @@ contract):
 - `ok = survived == 0 AND timeout == 0 AND run_errors == 0 AND suspect == 0`
   (`suspect` = cannot prove the mutant was killed — gated same as survived).
 
-### Differential mutation core (SEE-1420, on by default)
+### Differential mutation core (on by default)
 
 Once a v2 resume manifest exists, runs are **differential by default**
 (scope manifests per top-level func / inner class / module + header hash;
@@ -206,7 +206,7 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   `--mutation-warning` / `--timeout-factor` / `timeout_streak` never enter
   any resume key.
 
-### Survivor location in the report (SEE-1416)
+### Survivor location in the report
 
 Every verdict record (in `failures`, killed records included) now carries
 `column`, `operator`, and `line_text` (the exact source line that was
@@ -240,7 +240,7 @@ gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . \
     --tests res://tests/unit/ui/ --jobs 8
 ```
 
-**Single files go parallel too (SEE-1413).** `--jobs` slices a single file
+**Single files go parallel too.** `--jobs` slices a single file
 per-mutant as well, and it is on by default (`max(2, cpu//2)`):
 
 ```bash
@@ -274,14 +274,14 @@ always forces serial.
   (re-run, never dirty-merged). A corrupt or unreadable store degrades
   honestly to "no history". `--dry-run` stays zero-IO.
 
-Auto-scan note (SEE-1400 §SPEC-005): when a mutation target is referenced by
+Auto-scan note: when a mutation target is referenced by
 exactly one test file, the scanner now scopes to that file (GUT `-gselect`)
 instead of its directory — same conservative direction (narrower can only
 over-report survivors, never fake kills), cheaper per round.
 
 </details>
 
-## Coverage runner (SEE-1312)
+## Coverage runner
 
 AST statement-level instrumentation of a single `.gd` file: probe calls
 inserted per executable statement (ID-keyed data plane: integer probe id →
@@ -318,7 +318,7 @@ bash scripts/install.sh     # pips this tree (PEP 668 retry included)
 pytest
 ```
 
-### Versioning & release tags (SEE-1463 §SPEC-006)
+### Versioning & release tags
 
 The toolkit has no PyPI channel; consumers pin it by **git tag**:
 
@@ -344,9 +344,9 @@ against the current tree and reports mismatches with a repair hint; re-run
 `install.sh` after every checkout switch.
 
 <details>
-<summary><strong>PYTHONPATH convention (multi-workdir safety, SEE-1308 §SPEC-003)</strong></summary>
+<summary><strong>PYTHONPATH convention (multi-workdir safety)</strong></summary>
 
-When several KOL worktrees live on the same machine and share one Python
+When several worktrees live on the same machine and share one Python
 site-packages, a `pip install -e .` from an older checkout leaves an
 `__editable__.godot_qa_toolkit-0.1.0.pth` egg-link that points at that old
 tree. pytest then resolves `import godot_qa_toolkit` against the stale source
@@ -378,11 +378,11 @@ Two belts guard against this:
 </details>
 
 <details>
-<summary><strong>Standalone install mode (SEE-1396)</strong></summary>
+<summary><strong>Standalone install mode</strong></summary>
 
-gqt no longer lives under a KOL `.dev/qa-toolkit` submodule — it is an
-independent CLI installed from a standalone checkout (e.g. a persistent
-`~/tools/godot-qa-toolkit` on WSL). `gqt doctor` works out of the box in
+gqt is an independent CLI installed from a standalone checkout (e.g. a
+persistent `~/tools/godot-qa-toolkit` on WSL), not a submodule of the tested
+project. `gqt doctor` works out of the box in
 standalone mode (skips the root comparison when it cannot resolve a target
 tree — exit 0, never a false report). To have doctor compare the editable
 install against a specific tree, point it there:
@@ -395,7 +395,7 @@ GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
 
 ## Design principles
 
-- **Deterministic verdicts** (P0' principle) — every tool's outcome is fully
+- **Deterministic verdicts** — every tool's outcome is fully
   reproducible; no agent or heuristic scoring inside tool code.
 - **One JSON contract** — uniform `{tool, ok, summary, failures}` output and
   `0`/`1` exit codes across the whole toolchain.

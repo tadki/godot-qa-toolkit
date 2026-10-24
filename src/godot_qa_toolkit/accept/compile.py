@@ -97,7 +97,8 @@ def _generated_gd_source(ir: dict, ir_path_res: str) -> str:
 
     harness 约定（被测项目侧须提供 res://addons/gqt_accept/harness.gd，
     遵循 testing_api 模板 init/execute/apply/query 连招）；生成脚本本身
-    零业务逻辑，只有 IR 驱动循环——数字全部来自 IR。
+    零业务逻辑，只有 IR 驱动循环——数字全部来自 IR。成功路径每 case 携带
+    errs 空正断言（GUT 零断言测试判 [Risky]，hollow-green 防线）。
     """
     test_names = [c["test_name"] for c in ir["cases"]]
     methods = "\n\n".join(
@@ -148,6 +149,10 @@ func _run_case_by_name(case_name: String) -> void:
 \tvar errs: Array = _run_case(_harness, case)
 \tfor e in errs:
 \t\tfail_test(String(e))
+\t# 成功路径正断言（非装饰）：GUT 对零断言测试判 [Risky] did not assert，
+\t# run 的 ok:true 将失去行为证据面（hollow-green）——每 case 必须真实
+\t# 断言 errs 为空（附步骤数与 unchanged 槽数的逐 case 证据明细）。
+\tassert_true(errs.is_empty(), "case '%s' verified: %d step(s) executed, %d unchanged slot(s) checked, %d error(s)" % [case_name, case.get("steps", []).size(), case.get("then_unchanged", []).size(), errs.size()])
 \t_harness.reset()
 
 {methods}

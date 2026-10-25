@@ -38,10 +38,24 @@ jobs:
             pip-${{ runner.os }}-py3.12-
 
       - name: Install
-        run: pip install -e . pytest
+        run: pip install -e '.[test]'
 
-      - name: Run unit tests
-        run: python -m pytest tests/ -q
+      - name: Run unit and pytest-bdd tests with BDD reports
+        run: >-
+          python -m pytest tests/ -q
+          --bdd-step-report=build/bdd-step-resolution.json
+          --json-report --json-report-file=build/pytest-run.json
+
+      - name: Upload BDD migration reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdd-migration-reports
+          path: |
+            build/bdd-step-resolution.json
+            build/pytest-run.json
+          if-no-files-found: warn
+          retention-days: 30
 
       # Complexity gate（SEE-1309 SPEC-006）：gqt 消费自家工具作质量门。
       # 判据：tests/fixtures/complex.gd（max cc=6）在 --warn 10 --max 15 下 exit 0。

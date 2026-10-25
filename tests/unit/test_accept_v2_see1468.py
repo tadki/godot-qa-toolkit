@@ -19,9 +19,8 @@ import pytest
 from godot_qa_toolkit.accept import OPS_VERSION
 from godot_qa_toolkit.accept.compile import compile_feature
 from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
-from godot_qa_toolkit.accept.mutate_runner import AcceptRunError, run_mutate
-from godot_qa_toolkit.accept.run import AcceptRunError as RunAcceptRunError
-from godot_qa_toolkit.accept.run import replay_check
+from godot_qa_toolkit.accept.mutate_runner import run_mutate
+from godot_qa_toolkit.accept.run import AcceptRunError, replay_check
 from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
 
 FEATURE = """Feature: F
@@ -32,6 +31,13 @@ FEATURE = """Feature: F
       | hp | left |
       | 10 | 7    |
 """
+
+
+def _exempt_feature() -> str:
+    """FEATURE 场景头插入一行 `# mutation: exempt` 指令。"""
+    return FEATURE.replace(
+        "  Scenario Outline: s",
+        "  Scenario Outline: s\n    # mutation: exempt", 1)
 
 
 @pytest.fixture(autouse=True)
@@ -66,16 +72,12 @@ def _compile(project: Path, tmp_path: Path, feature: str = FEATURE,
 def _fake_gut(output: str, returncode: int = 0) -> None:
     import godot_qa_toolkit.accept.mutate_runner as mr
 
-    calls = {"n": 0}
-
     def fake_run(*a, **k):
         class R:
             def __init__(self):
                 self.returncode = returncode
                 self.stdout = output
                 self.stderr = ""
-        calls["n"] += 1
-        R.calls = calls  # type: ignore[attr-defined]
         return R()
     mr.subprocess.run = fake_run
 
@@ -83,10 +85,7 @@ def _fake_gut(output: str, returncode: int = 0) -> None:
 # ---------- parser：# mutation: exempt ----------
 
 def test_exempt_directive_flows_into_ir(project: Path, tmp_path: Path) -> None:
-    feature = FEATURE.replace(
-        "  Scenario Outline: s",
-        "  Scenario Outline: s\n    # mutation: exempt", 1)
-    suite = _compile(project, tmp_path, feature)
+    suite = _compile(project, tmp_path, _exempt_feature())
     assert suite.ir["cases"][0]["mutation_exempt"] is True
 
 
@@ -243,10 +242,7 @@ def test_exempt_case_skips_typed_keeps_unchanged() -> None:
 
 def test_exempt_ir_end_to_end_no_typed_mutants(project: Path,
                                                tmp_path: Path) -> None:
-    feature = FEATURE.replace(
-        "  Scenario Outline: s",
-        "  Scenario Outline: s\n    # mutation: exempt", 1)
-    suite = _compile(project, tmp_path, feature)
+    suite = _compile(project, tmp_path, _exempt_feature())
     mutants = mutate_ir(suite.ir)
     assert [m.kind for m in mutants] == []
 
@@ -285,7 +281,7 @@ def test_old_major_manifest_run_side_rejected(project: Path,
     manifest = json.loads(man_path.read_text(encoding="utf-8"))
     manifest["ops_version"] = "see1426-accept/1"
     man_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(RunAcceptRunError, match="ops_version"):
+    with pytest.raises(AcceptRunError, match="ops_version"):
         replay_check(project, suite.feature_key)
 
 
@@ -354,9 +350,8 @@ def test_pure_exempt_feature_runs_baseline_not_error(project: Path,
 def test_exempt_cases_matches_grep_count(project: Path, tmp_path: Path) -> None:
     """V4 机器判据：summary.exempt_cases == 源 .feature 指令行 grep 计数。"""
     suite = _compile(project, tmp_path, MIXED_FEATURE, name="mixed")
-    grep_count = (suite.ir["source_path"] and
-                  Path(suite.ir["source_path"]).read_text(encoding="utf-8")
-                  .count("# mutation: exempt"))
+    source = Path(suite.ir["source_path"]).read_text(encoding="utf-8")
+    grep_count = source.count("# mutation: exempt")
     _fake_gut("* test_everything\n  [Passed]\n", returncode=0)
     result = run_mutate(project, suite.feature_key)
     assert result["summary"]["exempt_cases"] == grep_count == 1
@@ -459,9 +454,8 @@ def test_non_exempt_no_mutants_still_run_error(project: Path,
 class _FakeBaselineWorkerIO:
     """豁免基线 worker 假进程：读请求行，回指定 verdict。"""
 
-    def __init__(self, verdict: dict, total_cases: int):
+    def __init__(self, verdict: dict):
         self.verdict = verdict
-        self.total_cases = total_cases
         self.stdin = self
         self.stdout = self
 
@@ -482,7 +476,7 @@ def _arm_worker_baseline(monkeypatch, verdict: dict) -> None:
     import godot_qa_toolkit.accept.mutate_runner as mr
     monkeypatch.setattr(
         mr.subprocess, "Popen",
-        lambda *a, **k: _FakeBaselineWorkerIO(verdict, 0))
+        lambda *a, **k: _FakeBaselineWorkerIO(verdict))
 
 
 def test_worker_pure_exempt_baseline_verified(project: Path, tmp_path: Path,

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import re
+import select
 import shutil
 import subprocess
 from pathlib import Path
@@ -53,10 +54,6 @@ from ..mutation.gutrun import (_looks_like_godot_launch_failure,
                                _parse_failing_tests)
 from ..mutation.inject import godot_command, register_temp
 from ..mutation.godot_gate import GlobalGodotGate
-
-# 变异 IR 的防伪层③数据协议：mutated_unchanged 列表里的槽取"基线污染"
-# 形态（生成测试与 worker 共用），比对块在位则必挂。
-MUTANT_BASELINE_MARKER = "gqt-mutant-polluted"
 
 
 def _mutated_ir(ir: dict, mutant: Mutant) -> dict:
@@ -135,15 +132,8 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
     exempt_results: list[dict] = []
     baseline_failed: list[dict] = []
     if exempt:
-        if use_worker:
-            failing, executed = _worker_exempt_baseline(root, ir, exempt,
-                                                        timeout_s)
-            exempt_results, baseline_failed = _exempt_accounting(
-                ir, exempt, failing, executed, worker_count_guard=True)
-        else:
-            failing, executed = _batch_exempt_baseline(root, timeout_s)
-            exempt_results, baseline_failed = _exempt_accounting(
-                ir, exempt, failing, executed)
+        exempt_results, baseline_failed = _run_exempt_baseline(
+            root, ir, exempt, timeout_s, use_worker)
     if not mutants:
         if exempt:
             # 纯豁免特性（结构面）：exempt_verified 基线执行收口，不再
@@ -177,6 +167,19 @@ def _exempt_scenario_count(ir: dict) -> int:
                 for c in ir.get("cases", []) if c.get("mutation_exempt")})
 
 
+def _run_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
+                         timeout_s: int,
+                         use_worker: bool) -> tuple[list[dict], list[dict]]:
+    """豁免基线轮双通道分流 + 逐 case 记账（exempt ≠ skip）。"""
+    if use_worker:
+        failing, executed = _worker_exempt_baseline(root, ir, exempt,
+                                                    timeout_s)
+        return _exempt_accounting(ir, exempt, failing, executed,
+                                  worker_count_guard=True)
+    failing, executed = _batch_exempt_baseline(root, timeout_s)
+    return _exempt_accounting(ir, exempt, failing, executed)
+
+
 def _batch_exempt_baseline(root: Path,
                            timeout_s: int) -> tuple[set[str], set[str]]:
     """batch 通道未变异基线轮：直接跑一次 GUT。返回 (failing, executed)。"""
@@ -193,11 +196,10 @@ def _batch_exempt_baseline(root: Path,
     return set(_parse_failing_tests(output)), executed
 
 
-def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
-                            timeout_s: int) -> tuple[set[str], set[str]]:
-    """worker 通道豁免基线轮：短命常驻进程送一请求（mutant_id=
-    exempt_baseline，IR 为未变异原文），判完即弃——与 mutant 轮长驻通道
-    分离，保持差分对照路径互不干扰。返回 (failing, executed)。"""
+def _spawn_worker(root: Path) -> tuple[subprocess.Popen, Path]:
+    """常驻 worker 进程生成前奏（豁免基线轮与 mutant 轮共用）：生成物
+    在位校验 + scratch 目录准备 + Popen（OSError = caller 错误面，
+    不产 verdict 契约）。返回 (proc, scratch_dir)。"""
     worker_res = f"res://{GENERATED_DIR}/accept_worker.gd"
     if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
         raise AcceptRunError(
@@ -213,6 +215,29 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
             text=True, cwd=str(root))
     except OSError as e:
         raise AcceptRunError(f"worker process spawn failed: {e}") from e
+    return proc, scratch
+
+
+def _exchange_verdict_line(proc, request: str,  # noqa: ANN001 — Popen/fake 双形态
+                           timeout_s: float) -> str:
+    """写一行请求并读回首个 "{" 开头的 verdict 行（Godot 启动横幅/引擎
+    告警与 verdict 同走 stdout——噪声行跳过，EOF 返回空串）。IO 异常由
+    调用方按各自通道语义转译（mutant 轮 → _WorkerDead，豁免基线轮 →
+    AcceptRunError）。"""
+    proc.stdin.write(request + "\n")
+    proc.stdin.flush()
+    line = _readline_with_timeout(proc, timeout_s)
+    while line and not line.lstrip().startswith("{"):
+        line = _readline_with_timeout(proc, timeout_s)
+    return line
+
+
+def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
+                            timeout_s: int) -> tuple[set[str], set[str]]:
+    """worker 通道豁免基线轮：短命常驻进程送一请求（mutant_id=
+    exempt_baseline，IR 为未变异原文），判完即弃——与 mutant 轮长驻通道
+    分离，保持差分对照路径互不干扰。返回 (failing, executed)。"""
+    proc, scratch = _spawn_worker(root)
     try:
         ir_file = scratch / "exempt_baseline.json"
         ir_file.write_text(json.dumps(ir, ensure_ascii=False),
@@ -221,11 +246,7 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
         ir_file_res = "res://" + ir_file.relative_to(Path(root)).as_posix()
         request = json.dumps({"mutant_id": "exempt_baseline",
                               "ir_file": ir_file_res}, ensure_ascii=False)
-        proc.stdin.write(request + "\n")
-        proc.stdin.flush()
-        line = _readline_with_timeout(proc, timeout_s)
-        while line and not line.lstrip().startswith("{"):
-            line = _readline_with_timeout(proc, timeout_s)
+        line = _exchange_verdict_line(proc, request, timeout_s)
         if not line:
             raise _WorkerDead("worker exited before exempt baseline verdict")
         verdict = json.loads(line)
@@ -452,21 +473,7 @@ def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
     `--timeout` 语义：每轮 verdict 等待上限 = timeout_s，超时即
     _WorkerDead → 剩余 mutant 记 run_error。
     """
-    worker_res = f"res://{GENERATED_DIR}/accept_worker.gd"
-    if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
-        raise AcceptRunError(
-            f"worker artifact missing: {worker_res} — recompile with "
-            f"gqt accept compile --write")
-    scratch = Path(root) / ".qa-cache" / "gqt-accept-worker"
-    scratch.mkdir(parents=True, exist_ok=True)
-    try:
-        proc = subprocess.Popen(
-            [godot_command(), "--headless", "--path", str(root),
-             "-s", worker_res],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, cwd=str(root))
-    except OSError as e:
-        raise AcceptRunError(f"worker process spawn failed: {e}") from e
+    proc, scratch = _spawn_worker(root)
     verdicts: list[tuple[Mutant, str, str]] = []
     try:
         for idx, mutant in enumerate(mutants):
@@ -496,7 +503,6 @@ def _readline_with_timeout(proc, timeout_s: float) -> str:  # noqa: ANN001
     """带超时的行读（MEDIUM-1）：select/poll 不可用的假 fd 直接走阻塞
     readline（测试 fake 恒即时回包，不受影响）；真进程超时抛
     _WorkerDead——挂死是通道级失败，不是可等待的慢。"""
-    import select
     fd = proc.stdout
     raw = getattr(fd, "fileno", None)
     if raw is None:
@@ -521,19 +527,14 @@ def _worker_round(proc, ir_file: Path,  # noqa: ANN001 — Popen/fake 双形态
     QA-1：请求行 = {mutant_id, ir_file}（恒 <1024B，行缓冲安全）；verdict
     行本身仍是小 JSON，带内回传。MEDIUM-1：verdict 等待上限 = timeout_s。
     """
-    ir_file_res = "res://" + ir_file.relative_to(_worker_root_of(proc)).as_posix() \
-        if _worker_root_of(proc) in ir_file.parents else str(ir_file)
+    root = _worker_root_of(proc)
+    ir_file_res = ("res://" + ir_file.relative_to(root).as_posix()
+                   if root in ir_file.parents else str(ir_file))
     request = json.dumps({"mutant_id": mutant.mutant_id,
                           "ir_file": ir_file_res},
                          ensure_ascii=False)
     try:
-        proc.stdin.write(request + "\n")
-        proc.stdin.flush()
-        line = _readline_with_timeout(proc, timeout_s)
-        # Godot 启动横幅/引擎告警与 worker verdict 同走 stdout——跳过一切
-        # 非 "{" 开头的噪声行（verdict 恒为 JSON 对象），EOF 即通道死亡。
-        while line and not line.lstrip().startswith("{"):
-            line = _readline_with_timeout(proc, timeout_s)
+        line = _exchange_verdict_line(proc, request, timeout_s)
     except (OSError, ValueError) as e:
         raise _WorkerDead(f"worker IO failed: {e}") from e
     if not line:

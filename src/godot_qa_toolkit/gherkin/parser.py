@@ -324,9 +324,10 @@ def _typed_cell_error(name: str, spec: str, cell: str) -> str | None:
         return f"<{name}>:not_contains cell must be a non-empty needle"
     if spec == "in_set":
         # 成员分隔用逗号——`|` 是 Gherkin 表格 cell 分隔符，
-        # 管道形态在 Examples 表里不可表达。
+        # 管道形态在 Examples 表里不可表达。空 cell 分裂为 [""]，
+        # 空串/全空白成员在此一并拒绝。
         members = [m.strip() for m in cell.split(",")]
-        if not cell.strip() or any(not m for m in members):
+        if any(not m for m in members):
             return (f"<{name}>:in_set cell {cell!r} must be comma-separated "
                     f"non-empty members (a,b,c)")
     if spec.startswith("float_near:"):

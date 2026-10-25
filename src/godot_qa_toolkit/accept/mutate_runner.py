@@ -1,16 +1,29 @@
-"""accept mutate runner（SEE-1426 P3，§SPEC-1426-12/13/14）。
+"""accept mutate runner（SEE-1426 P3，§SPEC-1426-12/13/14；SEE-1468 /2 豁免轮）。
 
 闭环：对 IR 全量产 mutants → 逐 mutant 变异 IR → 同一套生成测试判定
 kill/survived。v1 无 stamp：每轮全量、exit 非 0 即打回。
+
+豁免轮（/2，定案 §4——exempt ≠ skip）：`# mutation: exempt` 场景的
+typed 矩阵不产 mutants，但其 case 在 mutate 侧仍执行一次**未变异基线轮**
+（任何在场豁免 case 都触发，先于 mutant 轮）：绿 → 逐 case 记
+`exempt_verified`；挂 → 逐 case 记 run_error 计入门禁；未变异基线任何
+case 挂 = 特性先于变异就红了 → fail-fast 跳过 mutant 轮（verdict 无意义）。
+纯豁免特性（零 mutants + 有豁免 case）不再触发 `no mutants generated`
+run_error，改走豁免基线轮收口（结构面走 exempt_verified 基线执行）。
+summary 机器导出：`exempt_cases` == 源 .feature 内 `# mutation: exempt`
+指令行数（per-scenario 去重），`exempt_results` 逐 case 具名披露（V4）。
 
 双通道（差分对照验收，§SPEC-1426-14）：
 - batch（缺省）：逐 mutant 写临时变异 IR（磁盘 IR 每轮恢复）→ 一次性
   headless GUT 子进程，跑完即弃。
 - --worker：真常驻通道——compile 产出的 worker 生成物
   （acceptance/generated/accept_worker.gd，受先清空再生成管辖）以
-  stdin NDJSON 循环消费变异 IR（IR 走 stdin 带内传递，磁盘零改写），
+  stdin NDJSON 循环消费变异 IR（IR 走文件通道传递，磁盘零改写），
   每 mutant 结束硬纪律：释放全部 testing_api 实例 + 重建（reload）+
   自检探针断言复位，不符即 run_error。
+  /2：run_step await 化后 worker 循环协程化（_drive fire-and-forget），
+  协议不变——读侧一请求一 verdict 串行，无异步消费竞争面（契约评审
+  收口结论，见 worker 生成物头注）。
 
 kill 判定（DEF-2，与 gqt mutation 的 kill=失败差集语义同构）：mutant 轮
 rc≠0 时必须核对失败测试集合确含该 mutant 的 case 测试名——恒挂毒测试
@@ -36,7 +49,8 @@ from . import OPS_VERSION
 from .compile import GENERATED_DIR
 from .mutate import Mutant, mutate_ir
 from .run import AcceptRunError, replay_check
-from ..mutation.gutrun import _looks_like_godot_launch_failure
+from ..mutation.gutrun import (_looks_like_godot_launch_failure,
+                               _parse_failing_tests)
 from ..mutation.inject import godot_command, register_temp
 from ..mutation.godot_gate import GlobalGodotGate
 
@@ -103,7 +117,11 @@ def _mutant_round_error(mutant: Mutant, output: str) -> str | None:
 
 def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 120,
                use_worker: bool = False) -> dict:
-    """全量契约变异闭环。返回统一 JSON 契约（ok=false 即打回）。"""
+    """全量契约变异闭环。返回统一 JSON 契约（ok=false 即打回）。
+
+    /2：在场豁免 case 先跑未变异基线轮（exempt ≠ skip）；基线挂 =
+    fail-fast 跳过 mutant 轮（未变异就红的特性没有变异 verdict 可言）。
+    """
     root = Path(project_root)
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
@@ -112,16 +130,209 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
     ir_path = root / manifest["ir_path"].removeprefix("res://")
     ir = json.loads(ir_path.read_text(encoding="utf-8"))
     mutants = mutate_ir(ir)
+    exempt = [c for c in ir.get("cases", []) if c.get("mutation_exempt")]
+    exempt_count = _exempt_scenario_count(ir)
+    exempt_results: list[dict] = []
+    baseline_failed: list[dict] = []
+    if exempt:
+        if use_worker:
+            failing, executed = _worker_exempt_baseline(root, ir, exempt,
+                                                        timeout_s)
+            exempt_results, baseline_failed = _exempt_accounting(
+                ir, exempt, failing, executed, worker_count_guard=True)
+        else:
+            failing, executed = _batch_exempt_baseline(root, timeout_s)
+            exempt_results, baseline_failed = _exempt_accounting(
+                ir, exempt, failing, executed)
     if not mutants:
+        if exempt:
+            # 纯豁免特性（结构面）：exempt_verified 基线执行收口，不再
+            # 触发 no-mutants run_error（定案 §4 no-mutation-face 语义）。
+            return _exempt_only_contract(manifest, exempt_count,
+                                         exempt_results, baseline_failed,
+                                         use_worker)
         raise AcceptRunError(
             "no mutants generated — IR has no typed Then bindings and no "
             "unchanged slots; mutation gate cannot run (nothing to verify)")
+    if baseline_failed:
+        # 未变异基线红 = 特性本身坏了：fail-fast，mutant 轮 skip。
+        return _baseline_failed_contract(manifest, mutants, exempt_count,
+                                         exempt_results, baseline_failed,
+                                         use_worker)
     if use_worker:
         verdicts = _run_worker_channel(root, ir, mutants,
                                        timeout_s=timeout_s)
     else:
         verdicts = _run_batch_channel(root, ir_path, ir, mutants, timeout_s)
-    return _aggregate_verdicts(manifest, mutants, verdicts, use_worker)
+    return _aggregate_verdicts(manifest, mutants, verdicts, use_worker,
+                               exempt_count, exempt_results)
+
+
+# ---------- /2 豁免基线轮（exempt ≠ skip） ----------
+
+def _exempt_scenario_count(ir: dict) -> int:
+    """豁免 scenario 数 == 源 .feature 内 `# mutation: exempt` 指令行数
+    （V4 机器判据：每 scenario 恰好一行，重复行 parse 期已拒）。"""
+    return len({c.get("scenario_line")
+                for c in ir.get("cases", []) if c.get("mutation_exempt")})
+
+
+def _batch_exempt_baseline(root: Path,
+                           timeout_s: int) -> tuple[set[str], set[str]]:
+    """batch 通道未变异基线轮：直接跑一次 GUT。返回 (failing, executed)。"""
+    rc, output = _run_gut(root, timeout_s)
+    if _looks_like_godot_launch_failure(output):
+        raise AcceptRunError(
+            "godot launch failed on exempt baseline round: "
+            f"{' / '.join(output.splitlines()[-3:])}")
+    executed = set(_TEST_STREAM_RE.findall(output))
+    if not executed:
+        raise AcceptRunError(
+            "sentinel check failed — no test stream in exempt baseline "
+            "round; execution chain untrusted")
+    return set(_parse_failing_tests(output)), executed
+
+
+def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
+                            timeout_s: int) -> tuple[set[str], set[str]]:
+    """worker 通道豁免基线轮：短命常驻进程送一请求（mutant_id=
+    exempt_baseline，IR 为未变异原文），判完即弃——与 mutant 轮长驻通道
+    分离，保持差分对照路径互不干扰。返回 (failing, executed)。"""
+    worker_res = f"res://{GENERATED_DIR}/accept_worker.gd"
+    if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
+        raise AcceptRunError(
+            f"worker artifact missing: {worker_res} — recompile with "
+            f"gqt accept compile --write")
+    scratch = Path(root) / ".qa-cache" / "gqt-accept-worker"
+    scratch.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            [godot_command(), "--headless", "--path", str(root),
+             "-s", worker_res],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, cwd=str(root))
+    except OSError as e:
+        raise AcceptRunError(f"worker process spawn failed: {e}") from e
+    try:
+        ir_file = scratch / "exempt_baseline.json"
+        ir_file.write_text(json.dumps(ir, ensure_ascii=False),
+                           encoding="utf-8")
+        register_temp(ir_file)
+        ir_file_res = "res://" + ir_file.relative_to(Path(root)).as_posix()
+        request = json.dumps({"mutant_id": "exempt_baseline",
+                              "ir_file": ir_file_res}, ensure_ascii=False)
+        proc.stdin.write(request + "\n")
+        proc.stdin.flush()
+        line = _readline_with_timeout(proc, timeout_s)
+        while line and not line.lstrip().startswith("{"):
+            line = _readline_with_timeout(proc, timeout_s)
+        if not line:
+            raise _WorkerDead("worker exited before exempt baseline verdict")
+        verdict = json.loads(line)
+    except (_WorkerDead, OSError, ValueError) as e:
+        # 通道级失败 = 执行链不可信，与 batch 哨兵同档：raise（caller
+        # 错误面，不产 verdict 契约）。
+        raise AcceptRunError(
+            f"exempt baseline worker channel failed: {e}") from e
+    finally:
+        _shutdown_worker(proc)
+        shutil.rmtree(scratch, ignore_errors=True)
+    total = len(ir.get("cases", []))
+    err = verdict.get("run_error")
+    executed_n = int(verdict.get("executed", 0))
+    failing = {str(x) for x in verdict.get("failing", [])}
+    if err is not None:
+        raise AcceptRunError(f"exempt baseline worker run_error: {err}")
+    if verdict.get("ops_version") != OPS_VERSION:
+        raise AcceptRunError(
+            f"exempt baseline worker ops_version mismatch: "
+            f"{verdict.get('ops_version')!r} != {OPS_VERSION!r}")
+    if executed_n != total:
+        # executed 计数与 case 总数失配 = 执行链失真（哨兵②同构）。
+        raise AcceptRunError(
+            f"exempt baseline executed {executed_n} of {total} cases; "
+            "execution chain untrusted")
+    # executed 集合形态仅 batch 需要（逐 case 在场校验）；worker 侧已由
+    # executed 计数守卫兜底，空集传入 _exempt_accounting 的 worker 分支。
+    return failing, set()
+
+
+def _exempt_accounting(ir: dict, exempt: list[dict],
+                       failing: set[str], executed: set[str],
+                       worker_count_guard: bool = False,
+                       ) -> tuple[list[dict], list[dict]]:
+    """基线轮逐 case 记账（V4 具名披露）。batch 通道 executed 为实测
+    测试名集合（逐 case 校验在场）；worker 通道以计数守卫代之（上游
+    executed==total 校验已确保全量执行，worker_count_guard=True 跳过
+    逐 case 在场检查）。返回 (exempt_results, baseline_failed)。"""
+    results: list[dict] = []
+    for c in exempt:
+        name = c.get("test_name", "?")
+        if name in failing:
+            status = "run_error: exempt case failed the unmutated baseline"
+        elif not worker_count_guard and name not in executed:
+            status = "run_error: exempt case absent from executed test stream"
+        else:
+            status = "exempt_verified"
+        results.append({"test_name": name, "scenario": c.get("scenario"),
+                        "status": status})
+    baseline_failed = [
+        {"mutant_id": "exempt_baseline",
+         "reason": f"unmutated baseline round failed on case {name!r} — "
+                   f"mutant rounds skipped (feature red before mutation)"}
+        for name in sorted(failing)
+    ]
+    return results, baseline_failed
+
+
+def _exempt_only_contract(manifest: dict, exempt_count: int,
+                          exempt_results: list[dict],
+                          baseline_failed: list[dict],
+                          use_worker: bool) -> dict:
+    """纯豁免特性（零 mutants）：豁免基线执行收口。"""
+    run_errors = [
+        {"mutant_id": "exempt_baseline", "reason": r["status"]}
+        for r in exempt_results if r["status"] != "exempt_verified"
+    ] + baseline_failed
+    ok = not run_errors
+    return {
+        "tool": "accept",
+        "ok": ok,
+        "summary": {
+            "feature": manifest["feature"],
+            "feature_key": manifest["feature_key"],
+            "ops_version": OPS_VERSION,
+            "mutants": 0, "killed": 0, "survived": 0,
+            "run_errors": len(run_errors),
+            "full_matrix": True, "worker": use_worker,
+            "exempt_cases": exempt_count,
+            "exempt_results": exempt_results,
+        },
+        "failures": run_errors,
+    }
+
+
+def _baseline_failed_contract(manifest: dict, mutants: list[Mutant],
+                              exempt_count: int, exempt_results: list[dict],
+                              baseline_failed: list[dict],
+                              use_worker: bool) -> dict:
+    """未变异基线红 → fail-fast：mutant 轮不跑，run_errors 计入门禁。"""
+    return {
+        "tool": "accept",
+        "ok": False,
+        "summary": {
+            "feature": manifest["feature"],
+            "feature_key": manifest["feature_key"],
+            "ops_version": OPS_VERSION,
+            "mutants": len(mutants), "killed": 0, "survived": 0,
+            "run_errors": len(baseline_failed),
+            "full_matrix": False, "worker": use_worker,
+            "exempt_cases": exempt_count,
+            "exempt_results": exempt_results,
+            "exempt_baseline_failed": True,
+        },
+        "failures": baseline_failed,
+    }
 
 
 def _run_batch_channel(root: Path, ir_path: Path, ir: dict,
@@ -151,7 +362,9 @@ def _run_batch_channel(root: Path, ir_path: Path, ir: dict,
 
 def _aggregate_verdicts(manifest: dict, mutants: list[Mutant],
                         verdicts: list[tuple[Mutant, str, str]],
-                        use_worker: bool) -> dict:
+                        use_worker: bool,
+                        exempt_count: int = 0,
+                        exempt_results: list[dict] | None = None) -> dict:
     """verdict 归并统一契约：survived 明细 + run_errors + 计数汇总。"""
     killed = 0
     survived: list[dict] = []
@@ -185,6 +398,8 @@ def _aggregate_verdicts(manifest: dict, mutants: list[Mutant],
             "run_errors": len(run_errors),
             "full_matrix": True,       # v1 无 stamp：每轮全量
             "worker": use_worker,
+            "exempt_cases": exempt_count,
+            "exempt_results": exempt_results or [],
         },
         "failures": survived + run_errors,
     }
@@ -196,7 +411,6 @@ def _kill_attribution_error(mutant: Mutant, output: str) -> str | None:
     与 gqt mutation 的 kill=失败差集语义同构——恒挂毒测试（失败集合不
     含 case 测试）不能替 mutant 顶罪，归执行链失真 → run_error。
     """
-    from ..mutation.gutrun import _parse_failing_tests
     failing = _parse_failing_tests(output)
     if mutant.case_test_name in failing:
         return None

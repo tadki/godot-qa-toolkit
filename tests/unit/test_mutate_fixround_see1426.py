@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from godot_qa_toolkit.accept import OPS_VERSION
 from godot_qa_toolkit.accept.compile import compile_feature
 from godot_qa_toolkit.accept.mutate import Mutant, mutate_case, mutate_ir
 from godot_qa_toolkit.accept.mutate_runner import (
@@ -74,7 +75,7 @@ def _compile(project: Path, tmp_path: Path, feature: str = FEATURE_UNCHANGED):
 
 def test_def1_unchanged_mutant_alters_ir() -> None:
     ir = json.loads(json.dumps(
-        {"ops_version": "see1426-accept/1", "feature": "F", "source_path": "s",
+        {"ops_version": OPS_VERSION, "feature": "F", "source_path": "s",
          "cases": [{"test_name": "test_s_000_00", "values": {"left": "7"},
                     "types": {"left": "numeric"}, "steps": [],
                     "then_unchanged": ["world.tick"]}]}))
@@ -205,7 +206,7 @@ def test_def2_worker_kill_attribution_same_guard(project: Path,
     import godot_qa_toolkit.accept.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 1, "executed": 1, "failing": ["test_poison"],
-        "ops_version": "see1426-accept/1"})
+        "ops_version": OPS_VERSION})
     result = run_mutate(project, "demo", use_worker=True)
     assert result["ok"] is False and result["summary"]["killed"] == 0
     assert all("kill attribution failed" in f["reason"]
@@ -221,7 +222,7 @@ def test_def2_worker_probe_reset_failure_is_run_error(project: Path,
         "rc": 0, "executed": 1, "failing": [],
         "run_error": "harness unavailable or smoke_check failed after "
                      "instance release/rebuild",
-        "ops_version": "see1426-accept/1"})
+        "ops_version": OPS_VERSION})
     result = run_mutate(project, "demo", use_worker=True)
     assert result["ok"] is False
     assert all("smoke_check failed" in f["reason"] for f in result["failures"])
@@ -357,7 +358,7 @@ class _DeadWorkerIO:
             return ""  # worker 提前退出
         return json.dumps({"mutant_id": "x", "rc": 1, "executed": 1,
                            "failing": ["test_s_000_00"],
-                           "ops_version": "see1426-accept/1"}) + "\n"
+                           "ops_version": OPS_VERSION}) + "\n"
 
     def close(self) -> None:
         pass
@@ -396,7 +397,7 @@ def test_worker_zero_executed_is_sentinel_error(project: Path,
     import godot_qa_toolkit.accept.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 0, "executed": 0, "failing": [],
-        "ops_version": "see1426-accept/1"})
+        "ops_version": OPS_VERSION})
     result = run_mutate(project, "demo", use_worker=True)
     assert result["ok"] is False
     assert all("executed 0 cases" in f["reason"] for f in result["failures"])
@@ -441,7 +442,7 @@ def _big_ir_bytes(min_size: int = 1600) -> tuple[dict, int]:
                        "line": i + 2}],
             "then_unchanged": ["probe.alive", "world.tick"],
         })
-    ir = {"ops_version": "see1426-accept/1", "feature": "大矩阵",
+    ir = {"ops_version": OPS_VERSION, "feature": "大矩阵",
           "source_path": "big.feature", "cases": cases}
     size = len(json.dumps(ir, ensure_ascii=False).encode())
     assert size >= min_size, f"fixture IR too small: {size}"
@@ -498,7 +499,7 @@ def test_qa1_worker_request_carries_no_inline_ir(project: Path,
             return json.dumps({"mutant_id": req.get("mutant_id", "?"),
                                "rc": 1, "executed": 1,
                                "failing": [req.get("mutant_id", "?")],
-                               "ops_version": "see1426-accept/1"}) + "\n"
+                               "ops_version": OPS_VERSION}) + "\n"
 
         def close(self) -> None:
             pass
@@ -521,7 +522,7 @@ def test_qa1_worker_scratch_dir_cleaned(project: Path, tmp_path: Path) -> None:
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 1, "executed": 1,
         "failing": ["test_s_000_00", "test_s_000_01"],
-        "ops_version": "see1426-accept/1"})
+        "ops_version": OPS_VERSION})
     run_mutate(project, "demo", use_worker=True)
     scratch = project / ".qa-cache" / "gqt-accept-worker"
     assert not scratch.exists() or not any(scratch.iterdir()), \
@@ -636,7 +637,7 @@ def test_medium1_no_fileno_fake_degrades_to_blocking_read(
     mr.subprocess.Popen = lambda *a, **k: _NoFilenoWorkerIO({
         "rc": 1, "executed": 1,
         "failing": ["test_s_000_00", "test_s_000_01"],
-        "ops_version": "see1426-accept/1"})
+        "ops_version": OPS_VERSION})
     result = run_mutate(project, "demo", use_worker=True, timeout_s=5)
     assert result["ok"] is True
     assert result["summary"]["killed"] == result["summary"]["mutants"]
@@ -663,7 +664,7 @@ def test_medium1_fileno_raising_fake_degrades(project: Path,
     mr.subprocess.Popen = lambda *a, **k: _RaisingFilenoWorkerIO({
         "rc": 1, "executed": 1,
         "failing": ["test_s_000_00", "test_s_000_01"],
-        "ops_version": "see1426-accept/1"})
+        "ops_version": OPS_VERSION})
     result = run_mutate(project, "demo", use_worker=True, timeout_s=5)
     assert result["ok"] is True
     assert result["summary"]["killed"] == result["summary"]["mutants"]

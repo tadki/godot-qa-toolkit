@@ -124,30 +124,39 @@ func check_expectations(case: Dictionary) -> String:
 | `float_near:<tol>` | `abs(actual - expected) <= tol` | ±max(1, 2×tol) |
 | `bool` | 布尔字面相等 | 翻转 |
 | `enum{a,b,c}` | 精确相等且 ∈ 域 | 域内邻值 |
-| `in_set` | cell 为逗号分隔成员表（`a,b,c`），actual ∈ 成员集 | 退化坍缩集 "" |
-| `not_contains` | actual 不含 cell 子串——**实现惯用法钉死：`actual.find(needle) != -1` 判包含**（`find("") == 0` → 退化 mutant "" 恒被判包含 = 恒失败 = 确定性 kill）。**禁用 `String.contains` 惯用法**：GDScript `"x".contains("") == false`（与 Python `in` 相反），`not actual.contains(needle)` 会让退化 mutant 恒存活、算子失效 | 退化空串 ""（对钉死惯用法恒失败） |
+| `in_set` | cell 为逗号分隔成员表（`a,b,c`；**周边空白由 compile 期归一化剥离**，成员内含逗号不可表达），actual ∈ 成员集 | 退化坍缩集 ""（模板 `split(",", false)` 下 `"" → []` 空集 → 必挂） |
+| `not_contains` | actual 不含 cell 子串——检查惯用法统一用 `actual.find(needle) != -1` 判包含（见下方参考实现）。**kill 依据与惯用法无关**：变异走**断言语义翻转**（not_contains → contains，经 `mutated_not_contains` 通道），基线绿 ⇒ actual 真不含 needle ⇒ 翻转断言必假 = 确定性 kill，find / contains 惯用法下同等成立（QA F1 裁定；原退化空串算子废弃——4.6.2 实机 `find("") == -1`、`contains("") == false`，恒存活） | **语义翻转**（载荷不变，翻转发 cell 断言极性；Uncle Bob 谱系「变语义、不变数据载荷」） |
 | `signal_count` | `signal:<sig>.count` == cell（整数） | ±1 |
 | `str` | 字符串相等 | **零变异（默认豁免，Owner 裁决 3）**——「str 恒豁免」为可接受正常结局；启用 str ±1 须 per-suite 显式声明 |
 
-### not_contains / in_set 的 check_expectations 参考实现（惯用法钉死）
+### not_contains / in_set 的 check_expectations 参考实现（翻转通道接线）
 
 ```gdscript
-# not_contains：包含判定只允许 find 惯用法（退化 mutant "" 必挂）。
+# 翻转通道：mutant 轮把被翻转的 not_contains cell 名列在
+# case.mutated_not_contains——这些 cell 的断言极性反转为 contains。
+var flipped: Array = case.get("mutated_not_contains", [])
+
+# not_contains（或被翻转的 contains）：包含判定统一 find 惯用法
+# （非空 needle 下与 contains 同判；kill 依据在翻转语义，不在惯用法）。
 var actual := String(query_state(String(EXPECTATION_MAP[cell])))
-if actual.find(needle) != -1:
+var contains := actual.find(needle) != -1
+if flipped.has(cell):
+    if not contains:
+        return "%s: flipped contains violated — %r not found in %r" % [cell, needle, actual]
+elif contains:
     return "%s: not_contains violated — found %r in %r" % [cell, needle, actual]
 
-# in_set：cell 逗号拆成员，actual 必须命中其一（退化 mutant "" 拆出 {""}，
-# 非空 actual 恒不命中 → 必挂）。
+# in_set：cell 逗号拆成员（compile 期已 strip 归一，运行时 naive split
+# 即可；空串坍缩变异 split(",", false) → [] → 非空 actual 恒不命中）。
 var members := expected.split(",", false)
 if not members.has(actual):
     return "%s: %r not in declared set %s" % [cell, actual, members]
 ```
 
-> 变异闭环依据：退化 mutant 把期望 cell 改成 ""。find 惯用法下
-> `find("") == 0 != -1` → not_contains 断言必挂（kill 成立）；若改用
-> `not actual.contains("")`，GDScript 求值为 `not false == true` →
-> 断言通过 → mutant 恒 survived。接线时照抄上方参考实现，勿自造惯用法。
+> 变异闭环依据（F1 裁定形态）：not_contains 的 mutant **不改 cell 值**，
+> 只把 cell 名写进 `case.mutated_not_contains`。未实现翻转通道的 harness
+> 会放行该 mutant（survived → 变异门禁打回，fail-loud）——接线时必须
+> 消费该通道。
 
 `# mutation: exempt`（scenario 级，每 scenario 恰好一行）：豁免本场景 typed
 变异矩阵；**exempt ≠ skip**——mutate 轮仍执行未变异基线，绿记

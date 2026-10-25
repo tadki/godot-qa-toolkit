@@ -20,7 +20,7 @@ from godot_qa_toolkit.accept import OPS_VERSION
 from godot_qa_toolkit.accept.compile import compile_feature
 from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.accept.mutate_runner import run_mutate
-from godot_qa_toolkit.accept.run import AcceptRunError, replay_check
+from godot_qa_toolkit.accept.run import AcceptRunError, replay_check, run_suite
 from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
 
 FEATURE = """Feature: F
@@ -157,6 +157,26 @@ def test_in_set_members_may_contain_spaces_around_comma() -> None:
     assert f.scenarios[0].types["m"] == "in_set"
 
 
+def test_in_set_members_normalized_into_ir(project: Path,
+                                           tmp_path: Path) -> None:
+    """F2：parse 期逐成员 strip，IR 存归一化 cell——与模板参考实现的
+    naive split 同源，带空格成员表不再依赖 harness 自行 strip。"""
+    suite = _compile(project, tmp_path,
+                     "Feature: F\n  Scenario Outline: s\n    Then m is <m>\n"
+                     "    # types: <m>:in_set\n"
+                     "    Examples:\n      | m |\n      | normal, stun |\n",
+                     name="ins")
+    assert suite.ir["cases"][0]["values"]["m"] == "normal,stun"
+
+
+def test_in_set_blank_after_strip_member_rejected() -> None:
+    # F2：strip 后空成员 = parse error（" ,b" 形态在归一化点拒绝）。
+    with pytest.raises(GherkinSyntaxError, match="comma-separated"):
+        parse("Feature: F\n  Scenario Outline: s\n    Then m is <m>\n"
+              "    # types: <m>:in_set\n"
+              "    Examples:\n      | m |\n      |  ,b |\n")
+
+
 def test_not_contains_cell_must_be_non_empty() -> None:
     with pytest.raises(GherkinSyntaxError, match="non-empty needle"):
         parse("Feature: F\n  Scenario Outline: s\n    Then l is <l>\n"
@@ -212,11 +232,37 @@ def test_float_near_non_numeric_cell_yields_nothing() -> None:
     assert [x for x in m if x.target == "x"] == []
 
 
-def test_not_contains_degenerates_to_empty_needle() -> None:
+def test_not_contains_flips_to_contains() -> None:
+    # F1 裁定（QA 反例：4.6.2 find("")==-1，退化空串算子恒存活）：
+    # 语义翻转算子——载荷不变（original==mutated），kind=not_contains_flip
+    # 经 _mutated_ir 落 mutated_not_contains 通道，基线绿 ⇒ actual 真不含
+    # needle ⇒ 翻转 contains 断言必假 = 确定性 kill（与检查惯用法无关）。
     m = mutate_case(_case({"frag": "deleted"}, {"frag": "not_contains"}))
     assert len(m) == 1
-    assert m[0].mutated == "" and m[0].kind == "not_contains"
-    assert m[0].original == "deleted"
+    assert m[0].kind == "not_contains_flip"
+    assert m[0].original == m[0].mutated == "deleted"
+    assert "flip" in m[0].rationale
+
+
+def test_mutated_ir_flip_channel_scoped_and_payload_free() -> None:
+    """F1 翻转通道：mutated_not_contains 只落指名 case、载荷逐字段不变
+    （变语义不变载荷；通道被剥离 = survived 打回，不静默）。"""
+    from godot_qa_toolkit.accept.mutate_runner import _mutated_ir
+    ir = {"ops_version": OPS_VERSION, "feature": "F", "source_path": "s",
+          "cases": [
+              {"test_name": "test_a_000_00", "values": {"frag": "x"},
+               "types": {"frag": "not_contains"}, "steps": [],
+               "then_unchanged": []},
+              {"test_name": "test_b_000_00", "values": {"frag": "y"},
+               "types": {"frag": "not_contains"}, "steps": [],
+               "then_unchanged": []},
+          ]}
+    (mutant,) = [m for m in mutate_ir(ir)
+                 if m.case_test_name == "test_a_000_00"]
+    out = _mutated_ir(ir, mutant)
+    assert out["cases"][0]["mutated_not_contains"] == ["frag"]
+    assert "mutated_not_contains" not in out["cases"][1], "只动指名 case"
+    assert out["cases"][0]["values"]["frag"] == "x", "翻转不动载荷"
 
 
 def test_in_set_degenerates_to_collapsed_set() -> None:
@@ -724,3 +770,27 @@ def test_worker_real_popen_shape_resolves_ir_file_against_root(
             f"res:// 后不得拼绝对路径（旧缺陷形态）：{ir_file}"
         assert (root / ir_file.removeprefix("res://")).resolve().is_relative_to(root), \
             f"res:// 相对形态必须锚定项目根：{ir_file}"
+
+
+def test_run_failure_reason_carries_fail_test_message(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    """F3：fail_test 明细接进 reason（docstring 与行为一致），detail 字段
+    并行保留——不再出现通用 reason + 明细只在 detail 的分裂形态。"""
+    suite = _compile(project, tmp_path)
+    from godot_qa_toolkit.accept import run as run_mod
+    (tn,) = _manifest_test_names(project, suite.feature_key)
+
+    def fake_run(*a, **k):
+        class R:
+            returncode = 1
+            stdout = (f"* {tn}\n  [Failed]: expectation check failed: "
+                      "left: expected 8, actual 7\n")
+            stderr = ""
+        return R()
+    monkeypatch.setattr(run_mod.subprocess, "run", fake_run)
+    result = run_suite(project, suite.feature_key)
+    (f,) = result["failures"]
+    assert f["reason"] == ("generated acceptance test failed: expectation "
+                           "check failed: left: expected 8, actual 7")
+    assert f["detail"] == ("expectation check failed: left: expected 8, "
+                           "actual 7")

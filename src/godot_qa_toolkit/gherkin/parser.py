@@ -314,7 +314,8 @@ def _validate_then_bindings(feature: Feature, scenario: Scenario,
 
 def _typed_cell_error(name: str, spec: str, cell: str) -> str | None:
     """/2 声明类型 cell 形态校验（单 cell）：声明与 cell 失配在 parse 期
-    拒绝，不留到变异器/运行时静默降档。返回错误描述或 None。"""
+    拒绝，不留到变异器/运行时静默降档。返回错误描述或 None。
+    （in_set 不在此校验——它由 _validate_typed_cells 做归一化单点处理。）"""
     if spec == "bool" and not _BOOL_CELL_RE.match(cell.strip()):
         return f"<{name}>:bool cell {cell!r} is not a true/false literal"
     if spec == "signal_count" and not _SIGNAL_COUNT_CELL_RE.match(cell.strip()):
@@ -322,14 +323,6 @@ def _typed_cell_error(name: str, spec: str, cell: str) -> str | None:
                 f"integer")
     if spec == "not_contains" and not cell.strip():
         return f"<{name}>:not_contains cell must be a non-empty needle"
-    if spec == "in_set":
-        # 成员分隔用逗号——`|` 是 Gherkin 表格 cell 分隔符，
-        # 管道形态在 Examples 表里不可表达。空 cell 分裂为 [""]，
-        # 空串/全空白成员在此一并拒绝。
-        members = [m.strip() for m in cell.split(",")]
-        if any(not m for m in members):
-            return (f"<{name}>:in_set cell {cell!r} must be comma-separated "
-                    f"non-empty members (a,b,c)")
     if spec.startswith("float_near:"):
         tol = spec.split(":", 1)[1]
         try:
@@ -342,10 +335,29 @@ def _typed_cell_error(name: str, spec: str, cell: str) -> str | None:
 
 
 def _validate_typed_cells(scenario: Scenario, path: str) -> None:
-    """/2 声明类型 cell 形态校验（fail-fast，逐行逐声明）。"""
+    """/2 声明类型 cell 形态校验（fail-fast，逐行逐声明）。
+
+    F2（QA 裁定）：in_set 在此做归一化单点——成员逐个 strip，strip 后空
+    成员 = parse error，归一化后的成员集直接写回 values（IR 存归一化
+    cell）。parse 面与模板参考实现的 naive split 自此同源：运行时拿到的
+    成员已无周边空白，带空格作者意图不再依赖 harness 自行 strip。
+    """
     for row in scenario.examples:
         for name, spec in scenario.types.items():
-            error = _typed_cell_error(name, spec, row.values.get(name, ""))
+            cell = row.values.get(name, "")
+            if spec == "in_set":
+                # 成员分隔用逗号——`|` 是 Gherkin 表格 cell 分隔符，
+                # 管道形态在 Examples 表里不可表达（成员内含逗号同样
+                # 不可表达，contract §4.2a 备案）。
+                members = [m.strip() for m in cell.split(",")]
+                if not cell.strip() or any(not m for m in members):
+                    raise GherkinSyntaxError(
+                        path, row.line,
+                        f"<{name}>:in_set cell {cell!r} must be comma-separated "
+                        f"non-empty members (a,b,c)")
+                row.values[name] = ",".join(members)
+                continue
+            error = _typed_cell_error(name, spec, cell)
             if error is not None:
                 raise GherkinSyntaxError(path, row.line, error)
 

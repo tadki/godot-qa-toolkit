@@ -6,7 +6,10 @@
 - 状态枚举：声明域内邻值切换（b→a / b→c）；域外从不生成；域未声明的
   Then 绑定在 parse 期已被拒（parser fail-fast）
 - /2 float_near:<tol>：±max(1, 2×tol)（容差数值步长，定案 §2）
-- /2 not_contains：退化空串（"" 被一切串包含 → 断言必挂 = 确定性 kill）
+- /2 not_contains：退化空串（"对一切串恒被判包含" → 断言必挂 = 确定性
+  kill；判包含惯用法由契约钉死为 `find(needle) != -1`——GDScript
+  `String.contains("")` 恒 false，该惯用法下退化 mutant 会恒存活，
+  禁用，见 testing_api.gd.md）
 - /2 in_set：退化坍缩集（空集不含任何成员 → 断言必挂 = 确定性 kill）
 - /2 signal_count：整数 ±1
 - /2 str：零变异——默认豁免（Owner 裁决 3：证明有判别力才 per-suite
@@ -134,7 +137,9 @@ def _declared_mutants(cell: str, spec: str) -> list[tuple[str, str, str]]:
         return [(m, "float_near", r)
                 for m, r in _float_near_mutants(cell, float(fn_m.group(1)))]
     if spec == "not_contains":
-        # 退化空串：正确实现的 contains 断言对 "" 恒失败 → 确定性 kill。
+        # 退化空串：契约钉死的 find 惯用法下 `find("") == 0 != -1` 恒判
+        # 包含 → not_contains 断言必挂 = 确定性 kill（GDScript
+        # `contains("")` 恒 false，该惯用法会反向放行，已禁用）。
         return [("", "not_contains", "degenerate-empty-needle")]
     if spec == "in_set":
         # 退化坍缩集："" 分裂为 {""}，非空 actual 不为其成员 → 确定性 kill。

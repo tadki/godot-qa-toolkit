@@ -267,6 +267,8 @@ def test_worker_awaits_run_step_with_drive_loop(project: Path,
     assert "await _run_case(harness, case, baselines)" in worker
     assert "func _drive() -> void:" in worker, \
         "_init 不可 await：NDJSON 循环迁入 fire-and-forget 协程"
+    assert "\n\t_drive()" in worker, \
+        "_init 必须真正起驱 _drive 循环（def 在场 ≠ 调用在场）"
     assert "await _run_mutant(harness, req)" in worker
 
 
@@ -515,3 +517,152 @@ def test_worker_exempt_baseline_failing_case_recorded(
     assert result["summary"]["exempt_baseline_failed"] is True
     assert result["summary"]["exempt_results"][0]["status"].startswith(
         "run_error:")
+
+
+# ---------- hardener 加固（SEE-1468 硬化面：注入变异实测后的补钉） ----------
+
+MULTI_ROW_EXEMPT_FEATURE = """Feature: multi row exempt
+  Scenario Outline: probe <n>
+    Given a node <n>
+    Then the node exists <n>
+
+    # mutation: exempt
+    # types: <n>:str
+    Examples:
+      | n |
+      | 1 |
+      | 2 |
+      | 3 |
+"""
+
+
+def test_str_numeric_shaped_cell_stays_exempt() -> None:
+    """str 豁免不分 cell 形态：数字形 label 不得落入 untyped 数值算子
+    （Owner 裁决 3 完整语义——str 恒零变异，与 cell 内容形态无关）。"""
+    m = mutate_case(_case({"label": "123"}, {"label": "str"}))
+    assert [x for x in m if x.target == "label"] == []
+
+
+def test_str_cell_value_still_delivered_to_assertion_face(
+        project: Path, tmp_path: Path) -> None:
+    """str 在场性探针（/2 残差③）：豁免变异 ≠ 豁除断言——str cell 值
+    仍在 IR values 断言数据面（check_expectations 输入）上，交付轮照常
+    核对；豁免基线轮执行的就是这份 case。"""
+    suite = _compile(
+        project, tmp_path,
+        "Feature: F\n  Scenario Outline: s\n    Then label is <label>\n"
+        "    # types: <label>:str\n    Examples:\n      | label |\n"
+        "      | King |\n", name="str_face")
+    case = suite.ir["cases"][0]
+    assert case["values"]["label"] == "King"
+    assert case["types"]["label"] == "str"
+
+
+def test_exempt_cases_dedup_across_outline_rows(project: Path,
+                                                tmp_path: Path) -> None:
+    """V4 判据语义：exempt_cases 按 scenario 去重——Outline 多行展开不
+    放大计数，恒等于源文件指令行 grep 计数。"""
+    suite = _compile(project, tmp_path, MULTI_ROW_EXEMPT_FEATURE,
+                     name="multi_row")
+    names = _manifest_test_names(project, suite.feature_key)
+    source = Path(suite.ir["source_path"]).read_text(encoding="utf-8")
+    _fake_gut("".join(f"* {n}\n  [Passed]\n" for n in names), returncode=0)
+    result = run_mutate(project, suite.feature_key)
+    assert result["summary"]["exempt_cases"] == source.count(
+        "# mutation: exempt") == 1
+
+
+@pytest.mark.parametrize("literal", ["True", "FALSE"])
+def test_bool_literal_case_insensitive_accepted(literal: str) -> None:
+    f = parse("Feature: F\n  Scenario Outline: s\n    Then ok is <ok>\n"
+              "    # types: <ok>:bool\n"
+              f"    Examples:\n      | ok |\n      | {literal} |\n")
+    assert f.scenarios[0].types["ok"] == "bool"
+
+
+def test_signal_count_negative_cell_rejected() -> None:
+    with pytest.raises(GherkinSyntaxError, match="non-negative"):
+        parse("Feature: F\n  Scenario Outline: s\n    Then n is <n>\n"
+              "    # types: <n>:signal_count\n"
+              "    Examples:\n      | n |\n      | -1 |\n")
+
+
+def test_exempt_baseline_empty_stream_is_run_error(project: Path,
+                                                   tmp_path: Path) -> None:
+    """基线轮 rc=0 但无测试流 = 执行链不可信（哨兵同构）→ AcceptRunError。"""
+    _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
+    _fake_gut("Godot Engine v4.6.2.stable.official banner only\n",
+              returncode=0)
+    with pytest.raises(AcceptRunError,
+                       match="no test stream in exempt baseline"):
+        run_mutate(project, "pure_exempt")
+
+
+def test_exempt_baseline_launch_failure_raises(project: Path,
+                                               tmp_path: Path) -> None:
+    """基线轮 Godot 启动失败特征在场且无测试流 → AcceptRunError（不静默
+    落入 baseline_failed 契约面）。"""
+    _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
+    _fake_gut("ERROR: Attempt to open script 'res://x.gd' resulted in "
+              "error 'File not found'.\n", returncode=1)
+    with pytest.raises(AcceptRunError,
+                       match="launch failed on exempt baseline"):
+        run_mutate(project, "pure_exempt")
+
+
+class _NoisyBaselineWorkerIO(_FakeBaselineWorkerIO):
+    """verdict 前回多行 Godot 启动横幅噪声（实机形态：横幅与 verdict 同走
+    stdout）——读侧必须循环跳过至 "{" 行，单次跳过不足。"""
+
+    def __init__(self, verdict: dict):
+        super().__init__(verdict)
+        self._noise_left = 2
+
+    def readline(self) -> str:
+        if self._noise_left > 0:
+            self._noise_left -= 1
+            return f"Godot Engine banner line {self._noise_left}\n"
+        return super().readline()
+
+
+def _arm_worker_baseline_io(monkeypatch, fake) -> None:
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    monkeypatch.setattr(mr.subprocess, "Popen", lambda *a, **k: fake)
+
+
+def test_worker_exempt_baseline_skips_multi_noise_lines(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    suite = _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
+    _arm_worker_baseline_io(monkeypatch, _NoisyBaselineWorkerIO({
+        "mutant_id": "exempt_baseline", "rc": 0, "executed": 1,
+        "failing": [], "ops_version": OPS_VERSION}))
+    result = run_mutate(project, suite.feature_key, use_worker=True)
+    assert result["ok"] is True
+    assert result["summary"]["exempt_results"][0]["status"] == "exempt_verified"
+
+
+def test_worker_exempt_baseline_ops_version_mismatch_raises(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    """基线 verdict ops_version ≠ 本侧 = 通道失真 → AcceptRunError（与
+    mutant 轮同档哨兵）。"""
+    suite = _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
+    _arm_worker_baseline(monkeypatch, {
+        "mutant_id": "exempt_baseline", "rc": 0, "executed": 1,
+        "failing": [], "ops_version": "see1426-accept/1"})
+    with pytest.raises(AcceptRunError, match="ops_version mismatch"):
+        run_mutate(project, suite.feature_key, use_worker=True)
+
+
+def test_worker_exempt_baseline_run_error_raises(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    """基线 verdict 自带 run_error = 执行链失败 → AcceptRunError，不落
+    exempt_verified。"""
+    suite = _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
+    _arm_worker_baseline(monkeypatch, {
+        "mutant_id": "exempt_baseline", "rc": 1, "executed": 1,
+        "failing": [],
+        "run_error": "harness unavailable or smoke_check failed",
+        "ops_version": OPS_VERSION})
+    with pytest.raises(AcceptRunError,
+                       match="exempt baseline worker run_error"):
+        run_mutate(project, suite.feature_key, use_worker=True)

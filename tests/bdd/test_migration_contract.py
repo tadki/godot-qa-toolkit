@@ -136,6 +136,71 @@ def test_dual_source_scenario_count_is_17(request: pytest.FixtureRequest) -> Non
         assert sum(nodeid.startswith(prefix) for nodeid in collection.items) == expected
 
 
+def test_source_feature_scenario_counts_match_the_ledger() -> None:
+    """Dual-source ledger, unguarded source half: scenario-count drift in a
+    .feature must RED on its own, even when the drift simultaneously trips
+    the full-collection skip guard of the guarded collection half (an added
+    or removed scenario turns the guarded ledger tests into skips and the
+    suite would stay green without this unconditional source-side gate)."""
+    for name, expected in EXPECTED_SCENARIO_COUNTS.items():
+        assert _source_scenario_count(name) == expected, name
+
+
+def test_no_tests_collected_maps_to_caller_error(tmp_path: Path) -> None:
+    """Exit-status discipline: nothing-collected (pytest native 5) is a
+    caller error and must surface as exit 2 under the plugin, not as a
+    successful no-op — the 3/4/5 -> 2 mapping branch of sessionfinish."""
+    result = _run_nested(tmp_path)
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_support_run_mutation_engine_policy_is_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_support.run_mutation`` passes a fixed engine policy to the
+    mutation runner; drift in budget/timeout/tests_glob/resume must RED —
+    the launch-guard scenarios fake the GUT layer and cannot observe these
+    kwargs, so without this pin the helper policy is mutation-invisible."""
+    import godot_qa_toolkit.mutation.runner as mrunner
+
+    from tests.bdd import _support
+
+    captured: dict = {}
+
+    def fake_run(target: str, root: str, **kwargs: object) -> dict:
+        captured["target"] = target
+        captured["root"] = root
+        captured.update(kwargs)
+        return {"ok": True, "summary": {"mutants": 1, "killed": 1}}
+
+    monkeypatch.setattr(mrunner, "run_mutation", fake_run)
+    target = _support.make_gut_project(tmp_path)
+    _support.run_mutation({"root": tmp_path, "target": target})
+    assert captured == {
+        "target": str(target),
+        "root": str(tmp_path),
+        "budget": 4,
+        "timeout_s": 60,
+        "tests_glob": "res://tests/",
+        "resume": False,
+    }
+
+
+def test_support_make_gut_project_writes_save_ref_fixture(tmp_path: Path) -> None:
+    """``make_gut_project(save_test_ref=True)`` must materialise the
+    preload-ref fixture file — the see1413 consumers fake the engine layer,
+    so without this pin the branch is mutation-invisible."""
+    from tests.bdd import _support
+
+    root = tmp_path / "sp2"
+    _support.make_gut_project(root, save_test_ref=True)
+    save_ref = root / "tests" / "unit" / "save" / "test_save.gd"
+    assert save_ref.is_file()
+    assert "preload" in save_ref.read_text("utf-8")
+    assert not (tmp_path / "plain" / "tests").exists()
+    _support.make_gut_project(tmp_path / "plain")
+
+
 def test_every_step_resolves_to_exactly_one_definition(
     request: pytest.FixtureRequest,
 ) -> None:

@@ -121,6 +121,35 @@ gqt gherkin features/leaderboard.feature --steps steps.py
   missing game-side import cache) is a **caller error, exit 2** — the CLI
   never misreports "environment not ready" as "code regressed".
 
+## Accept pipeline
+
+`gqt accept` turns a `.feature` into a versioned IR plus data-driven GUT
+tests, then runs and contract-mutates them inside the target project:
+
+```bash
+gqt accept compile acceptance/foo.feature --project-root . --write
+gqt accept run    --project-root . --key foo
+gqt accept mutate --project-root . --key foo
+```
+
+**Wiring prerequisite (one-time, per project).** `run` and `mutate` drive the
+suite through a thin adapter layer that the tool never discovers on its own:
+it must exist at the fixed path `res://addons/gqt_accept/harness.gd` and
+implement the interface documented in
+[`docs/templates/testing_api.gd.md`](docs/templates/testing_api.gd.md). The
+adapter maps the four-step combo (`smoke_check`, `init_case`, `run_step`,
+`query_state`) plus `check_expectations` onto the project's real testing API
+— detection, inference and tag-based routing are deliberately absent. Without
+this file every generated test fails explicitly with
+`accept harness unavailable`: run goes red, nothing is skipped silently.
+
+`compile` needs no wiring (it only writes `acceptance/ir` and
+`acceptance/generated`), so a project can adopt the pipeline incrementally.
+[`docs/templates/accept_gauntlet.sh`](docs/templates/accept_gauntlet.sh)
+bundles compile → run → mutate → arch into one gate;
+[`docs/templates/adoption_spec.md`](docs/templates/adoption_spec.md) is the
+wiring checklist.
+
 ## Complexity gate (via gdtoolkit)
 
 Function-level cyclomatic complexity through gdtoolkit's parser + radon.

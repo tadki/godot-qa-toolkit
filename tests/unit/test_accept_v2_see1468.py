@@ -774,8 +774,8 @@ def test_worker_real_popen_shape_resolves_ir_file_against_root(
 
 def test_run_failure_reason_carries_fail_test_message(
         project: Path, tmp_path: Path, monkeypatch) -> None:
-    """F3：fail_test 明细接进 reason（docstring 与行为一致），detail 字段
-    并行保留——不再出现通用 reason + 明细只在 detail 的分裂形态。"""
+    """F3'/F3：真机 ANSI 色码形态（含 KOL 本体的 [Failed] 明细行带色码）下
+    fail_test 明细接进 reason——解析入口统一剥 ANSI，^ 锚正则不放宽。"""
     suite = _compile(project, tmp_path)
     from godot_qa_toolkit.accept import run as run_mod
     (tn,) = _manifest_test_names(project, suite.feature_key)
@@ -783,8 +783,9 @@ def test_run_failure_reason_carries_fail_test_message(
     def fake_run(*a, **k):
         class R:
             returncode = 1
-            stdout = (f"* {tn}\n  [Failed]: expectation check failed: "
-                      "left: expected 8, actual 7\n")
+            # 真机形态（Revy F3' 实证 repr）：明细行首 \x1b[31m、消息前 \x1b[0m。
+            stdout = (f"* {tn}\n\x1b[31m    [Failed]:  \x1b[0m"
+                      "expectation check failed: left: expected 8, actual 7\n")
             stderr = ""
         return R()
     monkeypatch.setattr(run_mod.subprocess, "run", fake_run)
@@ -794,3 +795,19 @@ def test_run_failure_reason_carries_fail_test_message(
                            "check failed: left: expected 8, actual 7")
     assert f["detail"] == ("expectation check failed: left: expected 8, "
                            "actual 7")
+
+
+def test_ansi_strip_dual_form_before_never_after_always() -> None:
+    """F3' 双形态钉：剥前 ^ 锚正则恒不命中（提取空/计数 0），剥后完整
+    命中——证明修复生效于净化入口而非正则放宽。"""
+    from godot_qa_toolkit.accept.run import (_count_executed_tests,
+                                             _failure_details, _strip_ansi)
+    raw = ("\x1b[0m* test_s_000_00\n"
+           "\x1b[31m    [Failed]:  \x1b[0mno harness binding for step: x\n")
+    assert _failure_details(raw) == {}, "剥前 detail 提取必须为空（反例形态）"
+    assert _count_executed_tests(raw) == 0, "剥前计数必须为 0（反例形态）"
+    clean = _strip_ansi(raw)
+    assert _failure_details(clean) == {
+        "test_s_000_00": "no harness binding for step: x"}
+    assert _count_executed_tests(clean) == 1
+    assert "\x1b" not in clean

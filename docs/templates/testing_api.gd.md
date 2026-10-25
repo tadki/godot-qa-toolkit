@@ -142,15 +142,15 @@ var actual := String(query_state(String(EXPECTATION_MAP[cell])))
 var contains := actual.find(needle) != -1
 if flipped.has(cell):
     if not contains:
-        return "%s: flipped contains violated — %r not found in %r" % [cell, needle, actual]
+        return "%s: flipped contains violated — %s not found in %s" % [cell, needle, actual]
 elif contains:
-    return "%s: not_contains violated — found %r in %r" % [cell, needle, actual]
+    return "%s: not_contains violated — found %s in %s" % [cell, needle, actual]
 
 # in_set：cell 逗号拆成员（compile 期已 strip 归一，运行时 naive split
 # 即可；空串坍缩变异 split(",", false) → [] → 非空 actual 恒不命中）。
 var members := expected.split(",", false)
 if not members.has(actual):
-    return "%s: %r not in declared set %s" % [cell, actual, members]
+    return "%s: %s not in declared set %s" % [cell, actual, members]
 ```
 
 > 变异闭环依据（F1 裁定形态）：not_contains 的 mutant **不改 cell 值**，

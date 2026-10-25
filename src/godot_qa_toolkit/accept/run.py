@@ -123,7 +123,7 @@ def run_suite(project_root: str | Path, feature_key: str,
     except subprocess.TimeoutExpired as e:
         raise AcceptRunError(
             f"GUT timed out after {timeout_s}s on generated suite") from e
-    output = (r.stdout or "") + "\n" + (r.stderr or "")
+    output = _strip_ansi((r.stdout or "") + "\n" + (r.stderr or ""))
     if _looks_like_godot_launch_failure(output):
         tail = "\n".join(output.splitlines()[-10:])
         raise AcceptRunError(f"godot launch failed on generated suite: {tail}")
@@ -168,6 +168,17 @@ def _run_summary(manifest: dict, feature_key: str, exit_code: int,
 # GUT 运行流证据：运行流 `* test_x` 行 / Run Summary 段 `- test_x` 行
 # （与 mutation gutrun 的运行流证据同族 token；只为计数，不做 kill 判定）。
 _EXECUTED_TEST_RE = re.compile(r"(?mi)^[*-]\s+test_\S+")
+
+# F3'（QA 复验轮）：真机 GUT 输出（含 KOL 本体）的 [Failed] 明细行、裸项目
+# 运行流行均带 ANSI 色码前缀——^ 锚定正则永不命中，detail 提取形同虚设、
+# tests_executed 计数假红。GUT 输出解析入口统一剥除转义序列，两消费面共用
+# 同一净化视图（正则不放宽，裁定修法）；启动失败 marker 为子串匹配，剥除
+# 对其无影响。
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def _count_executed_tests(gut_output: str) -> int:

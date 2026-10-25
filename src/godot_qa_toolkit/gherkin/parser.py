@@ -17,8 +17,16 @@ SEE-1426 schema 冻结五件套（§3.3，全部 fail-fast parse error）：
   声明占位符类型；同名两处冲突 = parse error；出现在无 Outline 的
   Feature 内 / 列名与 Examples 表头不匹配 = parse error；Then 绑定处
   numeric 形 cell 无类型声明 = parse error。
+  SEE-1468 /2 类型族扩展：`str`（默认豁免变异，Owner 裁决 3）、`bool`、
+  `float_near:<tol>`（容差数值）、`not_contains`、`in_set`、`signal_count`；
+  声明类型与 cell 形态失配 = parse error（fail-fast）。
 - unchanged 反向断言槽：`# unchanged: <e>.<f>, ...` 注释行声明本场景
-  不可被污染的状态路径（harness 基线快照比对）。
+  不可被污染的状态路径（harness 基线快照比对）；/2 放宽为多段点路径
+  （`a.b.c` ≥2 段）。
+- `# mutation: exempt` 注释行（/2）：scenario 级指令，豁免本场景 typed
+  cell 变异矩阵（unchanged 槽基线污染探针照跑）；重复声明 = parse
+  error——V4 机器判据 `summary.exempt_cases == grep -c '# mutation: exempt'`
+  依赖每 scenario 恰好一行。
 
 Not a general BDD engine: unknown keywords are a parse ERROR (fail fast,
 P0' — a spec that only parses "mostly" is not machine-checkable).
@@ -34,10 +42,19 @@ BLOCK_KEYWORDS = ("Feature:", "Background:", "Scenario:", "Scenario Outline:")
 
 TYPES_PREFIX = "# types:"
 UNCHANGED_PREFIX = "# unchanged:"
+MUTATION_EXEMPT_PREFIX = "# mutation:"
 
 # 编译轨唯一占位符形态：<name>（{x} 属运行时 runner 私有语法）。
 _PLACEHOLDER_RE = re.compile(r"<([A-Za-z_]\w*)>")
 _RUNTIME_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+# /2 类型语法：`<name>:spec`，spec 含带参形态 float_near:<tol>（tol 为正数，
+# 变异步长 = max(1, 2×tol)）。enum{...} 域在 _parse_types_line 内先行原子提取。
+_TYPED_SPEC_RE = re.compile(r"<(\w+)>:(float_near:[+-]?(?:\d+\.?\d*|\.\d+)|[A-Za-z_]\w*)")
+
+# /2 声明类型 cell 形态校验（fail-fast）：bool 字面 / signal_count 整数。
+_BOOL_CELL_RE = re.compile(r"^(?i:true|false)$")
+_SIGNAL_COUNT_CELL_RE = re.compile(r"^\d+$")
 
 # Then 步骤里数值形 cell 的判定：纯整数/小数（含负号）视为 numeric 绑定，
 # 无 `# types:` 声明即 parse error（fail-fast，非披露档）。
@@ -81,6 +98,7 @@ class Scenario:
     example_columns: list[str] = field(default_factory=list)
     types: dict[str, str] = field(default_factory=dict)  # <name> -> type spec
     unchanged: list[str] = field(default_factory=list)   # "<entity>.<field>"
+    mutation_exempt: bool = False  # `# mutation: exempt` 场景指令（/2）
 
     def expansions(self) -> list[tuple[int, dict[str, str], list[Step], dict[str, str]]]:
         """Outline → 具体场景列表：(row_line, values, expanded_steps, types)。
@@ -111,11 +129,12 @@ class Feature:
 
 
 def _strip_comment_keep_directives(line: str) -> str:
-    """去普通注释，但保留 gqt 指令注释行（# types: / # unchanged:）原样
-    返回（调用方按指令解析）；标准 Gherkin 工具链把两行都当普通注释，
-    零干扰。"""
+    """去普通注释，但保留 gqt 指令注释行（# types: / # unchanged: /
+    # mutation:）原样返回（调用方按指令解析）；标准 Gherkin 工具链把
+    这些行都当普通注释，零干扰。"""
     s = line.strip()
-    if s.startswith(TYPES_PREFIX) or s.startswith(UNCHANGED_PREFIX):
+    if (s.startswith(TYPES_PREFIX) or s.startswith(UNCHANGED_PREFIX)
+            or s.startswith(MUTATION_EXEMPT_PREFIX)):
         return s
     if s.startswith("#"):
         return ""
@@ -181,11 +200,12 @@ def _parse_types_line(stripped: str, path: str, line_no: int) -> dict[str, str]:
         piece = piece.strip()
         if not piece:
             continue
-        m = re.fullmatch(r"<(\w+)>:(\w+)", piece)
+        m = _TYPED_SPEC_RE.fullmatch(piece)
         if m is None:
             raise GherkinSyntaxError(path, line_no,
                                      f"malformed # types: declaration {piece!r} "
-                                     "(expected <name>:type or <name>:enum{...})")
+                                     "(expected <name>:type, <name>:enum{...} or "
+                                     "<name>:float_near:<tol>)")
         types[m.group(1)] = m.group(2)
     return types
 
@@ -292,6 +312,43 @@ def _validate_then_bindings(feature: Feature, scenario: Scenario,
                         f"the mutation gate")
 
 
+def _typed_cell_error(name: str, spec: str, cell: str) -> str | None:
+    """/2 声明类型 cell 形态校验（单 cell）：声明与 cell 失配在 parse 期
+    拒绝，不留到变异器/运行时静默降档。返回错误描述或 None。"""
+    if spec == "bool" and not _BOOL_CELL_RE.match(cell.strip()):
+        return f"<{name}>:bool cell {cell!r} is not a true/false literal"
+    if spec == "signal_count" and not _SIGNAL_COUNT_CELL_RE.match(cell.strip()):
+        return (f"<{name}>:signal_count cell {cell!r} is not a non-negative "
+                f"integer")
+    if spec == "not_contains" and not cell.strip():
+        return f"<{name}>:not_contains cell must be a non-empty needle"
+    if spec == "in_set":
+        # 成员分隔用逗号——`|` 是 Gherkin 表格 cell 分隔符，
+        # 管道形态在 Examples 表里不可表达。
+        members = [m.strip() for m in cell.split(",")]
+        if not cell.strip() or any(not m for m in members):
+            return (f"<{name}>:in_set cell {cell!r} must be comma-separated "
+                    f"non-empty members (a,b,c)")
+    if spec.startswith("float_near:"):
+        tol = spec.split(":", 1)[1]
+        try:
+            tol_v = float(tol)
+        except ValueError:
+            return f"<{name}> float_near tolerance {tol!r} is not a number"
+        if tol_v <= 0:
+            return f"<{name}> float_near tolerance must be > 0, got {tol!r}"
+    return None
+
+
+def _validate_typed_cells(scenario: Scenario, path: str) -> None:
+    """/2 声明类型 cell 形态校验（fail-fast，逐行逐声明）。"""
+    for row in scenario.examples:
+        for name, spec in scenario.types.items():
+            error = _typed_cell_error(name, spec, row.values.get(name, ""))
+            if error is not None:
+                raise GherkinSyntaxError(path, row.line, error)
+
+
 def _validate_scenario(feature: Feature, scenario: Scenario,
                        path: str, line_no: int) -> None:
     """Schema 冻结校验（parse 期 fail-fast，per-scenario 展开前后各一道）。"""
@@ -304,6 +361,7 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
                                  f"Scenario Outline {scenario.name!r} has no Examples table")
     _validate_examples_rows(scenario, path)
     _validate_then_bindings(feature, scenario, path)
+    _validate_typed_cells(scenario, path)
 
 
 def _require_examples_table(current_scenario: Scenario | None,
@@ -411,15 +469,41 @@ def _apply_unchanged_directive(stripped: str, current_scenario: Scenario | None,
         raise GherkinSyntaxError(path, line_no, "# unchanged: declares nothing")
     items = [i.strip() for i in body.split(",")]
     for item in items:
-        if not re.fullmatch(r"[A-Za-z_]\w*\.[A-Za-z_]\w*", item):
+        # /2 放宽：多段点路径（≥2 段，a.b.c 形）——深层状态槽直接表达。
+        if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", item):
             raise GherkinSyntaxError(
                 path, line_no,
-                f"malformed # unchanged: entry {item!r} (expected <entity>.<field>)")
+                f"malformed # unchanged: entry {item!r} (expected multi-segment "
+                f"dot path like <entity>.<field>)")
     if current_scenario is None:
         raise GherkinSyntaxError(
             path, line_no,
             "# unchanged: outside a Scenario — per-scenario slot only")
     current_scenario.unchanged.extend(items)
+
+
+def _apply_mutation_exempt_directive(stripped: str,
+                                     current_scenario: Scenario | None,
+                                     path: str, line_no: int) -> None:
+    """`# mutation: exempt`（/2）：scenario 级豁免指令。body 恒为 'exempt'
+    （未知子指令 fail-fast）；重复声明 = parse error——V4 机器判据
+    `summary.exempt_cases == grep -c '# mutation: exempt'` 依赖每 scenario
+    恰好一行指令，重复行会让 grep 计数与 IR 计数分叉。"""
+    body = stripped[len(MUTATION_EXEMPT_PREFIX):].strip()
+    if body != "exempt":
+        raise GherkinSyntaxError(
+            path, line_no,
+            f"unknown # mutation: directive {body!r} (only 'exempt' is defined)")
+    if current_scenario is None:
+        raise GherkinSyntaxError(
+            path, line_no,
+            "# mutation: exempt outside a Scenario — scenario-level directive only")
+    if current_scenario.mutation_exempt:
+        raise GherkinSyntaxError(
+            path, line_no,
+            f"duplicate # mutation: exempt in scenario {current_scenario.name!r} "
+            "— exactly one directive line per scenario")
+    current_scenario.mutation_exempt = True
 
 
 def _apply_feature_header(stripped: str, feature: Feature | None,
@@ -474,6 +558,10 @@ def parse(text: str, path: str = "<feature>") -> Feature:
             continue
         if stripped.startswith(UNCHANGED_PREFIX):
             _apply_unchanged_directive(stripped, current_scenario, path, line_no)
+            continue
+        if stripped.startswith(MUTATION_EXEMPT_PREFIX):
+            _apply_mutation_exempt_directive(stripped, current_scenario,
+                                             path, line_no)
             continue
 
         if stripped.startswith("Feature:"):

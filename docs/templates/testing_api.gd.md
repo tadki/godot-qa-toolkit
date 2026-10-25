@@ -1,8 +1,14 @@
-# testing_api.gd 接口模板（SEE-1426 P4，决策 rev1 §3.4）
+# testing_api.gd 接口模板（SEE-1426 P4，决策 rev1 §3.4；SEE-1468 /2 扩展）
 
 > 复制到被测项目 `res://addons/gqt_accept/harness.gd`。这是 `gqt accept
 > compile` 生成测试消费的**唯一约定接口**——gqt 不嗅探、不发现、不推断
 > 接口实现；轨道映射由人按本模板接线。
+>
+> **/2（ops_version `see1468-accept/2`）**：核心五/六方法语义不动；
+> 新增**可选方法族**（场景生命周期 / 输入注入 / 信号观测 / 探针通道）
+> 与**查询路径扩展**——未实现方法被步骤触达时 run_step 必须返回
+> `"no harness binding for ..."` 显式失败（禁止静默忽略）。
+> 参考：`probe_library.gd.md`（探针库 GD 参考模板，含可选族参考实现）。
 
 ## 接口契约（生成测试按此调用，缺一即 run_error 面）
 
@@ -30,10 +36,14 @@ func run_step(step: Dictionary, case: Dictionary) -> String:
     ## 执行单步：step 含 {keyword, text, line}。Given/When 驱动
     ## execute_tick/apply_player_action；行为无绑定的步骤返回非空
     ## 错误字符串（"no harness binding for step: ..."）。
+    ## **/2 调用约定**：生成测试与 mutate worker 对本方法一律 `await`——
+    ## 同步实现返回值被 await 透传（零破坏）；本方法**可以**实现为协程
+    ## （场景生命周期步骤：advance_frames / settle_until 内部 await 帧信号）。
 
 func query_state(path: String):
     ## 状态快照查询："entity.field" 点路径。Then 断言与 unchanged
     ## 基线快照都经此读取；未知路径返回 null（比对必挂，fail-safe）。
+    ## **/2 查询路径扩展**（见下节）。
 
 > **typed cell 双重语义（Revy QA LOW 澄清）**：`case.values` 里的
 > typed cell 同时是**执行输入与期望值的唯一数据面**——变异轮改的就是
@@ -59,9 +69,73 @@ func check_expectations(case: Dictionary) -> String:
 |---|---|---|
 | `smoke_check` | init/tick/query 连招 | 首个 case 前，一次 |
 | `init_case` | init_battle_state(case) | 每 case 开始 |
-| `run_step` | execute_tick / apply_player_action | 每 Given/When 步 |
+| `run_step` | execute_tick / apply_player_action | 每 Given/When 步（/2 起被 `await` 调用） |
 | `query_state` | query_entity_state(path) | Then 断言 + unchanged 基线 |
 | `reset` | 实例释放 + 状态复位 | 每 case 结束（worker 纪律） |
+
+## /2 可选方法族（按需接线；未实现而步骤触达 = "no harness binding" 显式失败）
+
+### 场景生命周期族
+
+| 方法 | 语义 | 消费方 |
+|---|---|---|
+| `mount_scene(path: String) -> String` | 实例化并挂载场景到树（装配面 Given）；返回 ""=成功 | 步骤路由 |
+| `advance_frames(n: int) -> String` | 确定性帧步进（如 see1403 冻结 30 帧）。**仅用于确定性场景输入**——帧参数入台账、豁免变异（变异帧数改变测量窗口而非期望） | 步骤路由 |
+| `settle_until(cond: Callable, max_frames: int) -> String` | liveness 到达态等待（时序面）；cond 取静息定义（如连续 2 帧几何不变） | 步骤路由（协程形态） |
+| `current_scene_name() -> String` | 当前场景名读取（挂载验证） | 步骤路由 / query |
+
+### 输入注入族（边界：只收逻辑触发等价物；像素/命中测试/hover 归 godot-mcp，不进契约）
+
+| 方法 | 语义 |
+|---|---|
+| `inject_gui_input(node_path: String, event: InputEvent) -> String` | 向指定 Control 注入 GUI 事件 |
+| `press_button(node_path: String) -> String` | 逻辑等价按下按钮（emit pressed） |
+| `emit_signal_path(node_path: String, sig: String, args: Array) -> String` | 沿节点路径发射信号（typed emit helper 优先，同桥 emit_signal 形态） |
+
+### 信号观测族
+
+| 方法 / 查询 | 语义 |
+|---|---|
+| `watch_signal(node_path: String, sig: String) -> String` | 武装计数器（SigCounter 形态），返回 watcher key |
+| `query_state("signal:<sig>.count")` | 读该信号发射次数（未武装 → null = 比对必挂） |
+
+### 探针通道
+
+| 方法 | 语义 |
+|---|---|
+| `run_probe(op: Dictionary) -> Variant` | **op 词表驱动**（非自由函数调用）：收编四桥实证 op——世界面 18 op 平移 + 交互 12-op 超集（call / call_with_resource / call_with_prior_arg / call_ref / get_ref / get / watch_signal / watch_signal_capture / signal_last_args / signal_count / make_signal_stub / emit_signal）。未知 op = "no harness binding for op: <op>" |
+
+## /2 查询路径扩展（query_state path 语法 /2）
+
+| 形态 | 语义 |
+|---|---|
+| `a.b.c`（多段点路径） | 深层属性链读 |
+| `node:<NodePath>:<property>` | 节点属性读 |
+| `ref:<action_id>:<prop链>` | RefCounted 链读（call_with_prior_arg/ref 家族的读侧） |
+| `exists:<NodePath>` | 节点在场性（bool） |
+| `count:<NodePath>` | 同名实例计数（泄漏/实例数） |
+| `signal:<name>.count` | 信号发射计数（需先 watch_signal） |
+
+## /2 typed cell 类型族与变异豁免
+
+| `# types:` 声明 | 断言语义（harness 按 check_expectations 实现） | 变异 |
+|---|---|---|
+| `int` / `numeric` | 数值精确相等 | ±1 / 边界外推 |
+| `float_near:<tol>` | `abs(actual - expected) <= tol` | ±max(1, 2×tol) |
+| `bool` | 布尔字面相等 | 翻转 |
+| `enum{a,b,c}` | 精确相等且 ∈ 域 | 域内邻值 |
+| `in_set` | cell 为逗号分隔成员表（`a,b,c`），actual ∈ 成员集 | 退化坍缩集 "" |
+| `not_contains` | actual 不含 cell 子串 | 退化空串 ""（对正确实现恒失败） |
+| `signal_count` | `signal:<sig>.count` == cell（整数） | ±1 |
+| `str` | 字符串相等 | **零变异（默认豁免，Owner 裁决 3）**——「str 恒豁免」为可接受正常结局；启用 str ±1 须 per-suite 显式声明 |
+
+`# mutation: exempt`（scenario 级，每 scenario 恰好一行）：豁免本场景 typed
+变异矩阵；**exempt ≠ skip**——mutate 轮仍执行未变异基线，绿记
+`exempt_verified`、挂记 run_error；unchanged 槽基线污染探针照跑。
+`summary.exempt_cases == grep -c '# mutation: exempt' <feature>`（V4）。
+
+typed cell 双重语义纪律不变：按钮文本等断言必须走 values→query_state
+数据面，**禁止 harness 内硬编码期望**（否则该 cell 变异恒 survived）。
 
 ## 纪律
 

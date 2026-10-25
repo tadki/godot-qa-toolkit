@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from godot_qa_toolkit.accept import OPS_VERSION
 from godot_qa_toolkit.accept.compile import compile_feature, sha256_of
 from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.accept.mutate_runner import AcceptRunError, run_mutate
@@ -270,7 +271,7 @@ class _FakeWorkerIO:
             "mutant_id": req["mutant_id"], "rc": self.rc,
             "executed": len(self.case_names),
             "failing": self.case_names if self.rc != 0 else [],
-            "ops_version": "see1426-accept/1"}) + "\n"
+            "ops_version": OPS_VERSION}) + "\n"
 
     def close(self) -> None:
         pass

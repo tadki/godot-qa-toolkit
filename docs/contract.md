@@ -88,11 +88,12 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - 输出：`summary: {files, violations, unparseable, by_rule}`；`failures` = violations（file/line/rule/message）+ unparseable（不可解析 = fail signal）。`ok` = 无违规且无 unparseable。
 - exit 0/1，统一 JSON 契约。
 
-### 4.2a `gqt accept compile <feature> --project-root <root> [--write] [--no-clean]`（SEE-1426 P2）
+### 4.2a `gqt accept compile <feature> --project-root <root> [--write] [--no-clean]`（SEE-1426 P2；SEE-1468 /2）
 
-- `.feature` → 版本化 IR（`ops_version = "see1426-accept/1"`）→ 数据驱动 GUT 测试（运行时读 IR，逐 case 一个 GUT 测试方法）→ 归因 manifest（scenario→test_name，非 ASCII 场景名标识符化 + 序号保障唯一）。
-- IR schema：`{ops_version, feature, source_path, cases:[{scenario, scenario_line, example_row_line, values, steps, types, then_unchanged, test_name}]}`。schema 冻结五件套（Examples 表一等公民、占位符 `<x>` 归一化、`# types:` 类型声明含 `enum{...}` 域、`# unchanged:` 反向断言槽、manifest 哈希绑定）全部在 parse 期 fail-fast（违规 = GherkinSyntaxError → JSON 契约 ok:false）。
-- 产物三件：`acceptance/ir/<key>.json` + `acceptance/generated/test_<key>.gd`（GUT 目录扫描按 `test_` 前缀过滤——非 test_ 前缀脚本被忽略）+ `acceptance/generated/<key>.manifest.json`（含 ir_hash/generated_hash sha256 绑定 + attribution 表）。
+- `.feature` → 版本化 IR（`ops_version = "see1468-accept/2"`）→ 数据驱动 GUT 测试（运行时读 IR，逐 case 一个 GUT 测试方法）→ 归因 manifest（scenario→test_name，非 ASCII 场景名标识符化 + 序号保障唯一）。
+- **ops_version major bump 纪律（/2）**：schema 键集或调用约定变更 = major bump；旧版本 manifest 在 run 侧 replay_check 严格相等校验下 run_error（fail-fast，零新增机制代码）。
+- IR schema（/2）：`{ops_version, feature, source_path, cases:[{scenario, scenario_line, example_row_line, values, steps, types, then_unchanged, mutation_exempt, test_name}]}`。schema 冻结五件套（Examples 表一等公民、占位符 `<x>` 归一化、`# types:` 类型声明含 `enum{...}`/`float_near:<tol>` 域与 `str`/`bool`/`not_contains`/`in_set`/`signal_count` 族（声明类型与 cell 形态失配 = parse error）、`# unchanged:` 反向断言槽（/2 放宽多段点路径 `a.b.c`）、manifest 哈希绑定）+ `# mutation: exempt` scenario 级指令（每 scenario 恰好一行，重复 = parse error）全部在 parse 期 fail-fast（违规 = GherkinSyntaxError → JSON 契约 ok:false）。
+- 产物三件：`acceptance/ir/<key>.json` + `acceptance/generated/test_<key>.gd`（GUT 目录扫描按 `test_` 前缀过滤——非 test_ 前缀脚本被忽略；**/2 起 run_step 全量 await 化**——GDScript await 对非协程返回值透传，同步 harness 零破坏，场景生命周期步骤可为协程）+ `acceptance/generated/<key>.manifest.json`（含 ir_hash/generated_hash/worker_hash sha256 绑定 + attribution 表）。worker 生成物（`accept_worker.gd`）NDJSON 循环协程化（`_drive()` fire-and-forget，协议不变）。
 - 写入仅限 §6 白名单两目录；先清空再生成（`--no-clean` 退路）；写入 opt-in（`--write`），`summary.wrote` 逐文件披露；GUT runner 缺失 = JSON 契约 ok:false。
 
 ### 4.2b `gqt accept run <dir> --project-root <root> --key <feature-key> [--timeout 120]`（SEE-1426 P2）
@@ -104,10 +105,11 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 ### 4.2c `gqt accept mutate <dir> --project-root <root> --key <feature-key> [--timeout 120] [--worker]`（SEE-1426 P3）
 
 - 全量契约变异闭环（v1 无 stamp，每轮全量、无增量跳过）：对 IR 全量产 mutants → 逐 mutant 写临时变异 IR（磁盘 IR 每轮后恢复原样）→ headless 跑同一套生成测试 → 挂 = kill；活 = survived 即打回（`ok=false` + survived 明细）。
-- 变异矩阵（§SPEC-1426-11）：数值 ±1 + 边界外推（0→-1）、布尔翻转、枚举声明域内邻值切换（域外从不生成；域未声明的 Then 绑定在 parse 期已被拒）；unchanged 槽纳入矩阵（基线污染探针）。
-- 三层防伪（§SPEC-1426-12）：① 变异器对抗性金测（70/71 fixture 恰好 ±1/边界/邻值，单测面）；② 哨兵核对——GUT 输出零测试流 = 执行链失真 = run_error 面失败；③ unchanged 槽变异必挂（挂不掉 = survived 打回）。零 Then 绑定且零 unchanged 的 IR = run_error（`no mutants generated`）。
+- 变异矩阵（§SPEC-1426-11；/2 扩展）：数值 ±1 + 边界外推（0→-1）、布尔翻转、枚举声明域内邻值切换（域外从不生成；域未声明的 Then 绑定在 parse 期已被拒）、`float_near:<tol>` ±max(1, 2×tol)、`not_contains` 退化空串、`in_set` 退化坍缩集、`signal_count` ±1；**`str` 零变异 = 默认豁免**（Owner 裁决 3：启用 str ±1 须 per-suite 显式声明，未启用前「str 恒豁免」为正常结局）；unchanged 槽纳入矩阵（基线污染探针）。
+- **豁免轮（/2，exempt ≠ skip）**：`# mutation: exempt` 场景的 typed 矩阵不产 mutants，但其 case 在 mutate 侧执行一次未变异基线轮（先于 mutant 轮）：绿 = 逐 case `exempt_verified`、挂 = 逐 case run_error 计入门禁；未变异基线任何 case 挂 = fail-fast 跳过 mutant 轮（`summary.exempt_baseline_failed: true`）。纯豁免特性（零 mutants + 有豁免 case）走基线轮收口，不触发 `no mutants generated`。
+- 三层防伪（§SPEC-1426-12）：① 变异器对抗性金测（70/71 fixture 恰好 ±1/边界/邻值，单测面）；② 哨兵核对——GUT 输出零测试流 = 执行链失真 = run_error 面失败；③ unchanged 槽变异必挂（挂不掉 = survived 打回）。零 Then 绑定且零 unchanged 且零豁免的 IR = run_error（`no mutants generated`）。
 - `--worker`（§SPEC-1426-14）：opt-in **真常驻通道**——compile 产出的 worker 生成物（`acceptance/generated/accept_worker.gd`，受先清空再生成管辖 + `worker_hash` 哈希绑定）以单个 godot 进程服务全矩阵：stdin NDJSON 请求行（`{mutant_id, ir_file}` 小载荷，恒 <1024B——`OS.read_string_from_stdin()` 行缓冲上限 1024B，QA-1 实证）+ 变异 IR 经 `.qa-cache/gqt-accept-worker/` 轮转临时文件（FileAccess 读，零行缓冲限制，用后即删、通道结束清目录）；每 mutant 结束硬纪律 = 释放全部 testing_api 实例 + 重建（reload）+ 自检探针断言复位，不符即 run_error verdict。读侧带超时（复用 `--timeout` 为每轮 verdict 等待上限，超时 = _WorkerDead → 剩余 mutant 记 run_error，MEDIUM-1 修复）。验收 = batch 与 worker 两条真实代码路径的差分对照 verdict 一致性（实机口径：IR ≥1678B 量级、非挂死、ok/killed/survived 三项相等）。
-- 输出：`summary.{feature, feature_key, ops_version, mutants, killed, survived, run_errors, full_matrix, worker}`；`failures` = survived（含 target/kind/original/mutated/rationale）+ run_errors。
+- 输出：`summary.{feature, feature_key, ops_version, mutants, killed, survived, run_errors, full_matrix, worker, exempt_cases, exempt_results}`；`failures` = survived（含 target/kind/original/mutated/rationale）+ run_errors。`exempt_cases` == 源 .feature 内 `# mutation: exempt` 指令行数（V4 机器判据），`exempt_results` 逐 case 具名披露（`exempt_verified` / `run_error: ...`）。
 
 ### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--dry-run] [--resume] [--mutation-warning N] [--timeout-factor F] [--mutate-all] [--mutation <id>] [--lines N] [--reuse-coverage]`
 

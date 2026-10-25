@@ -21,6 +21,7 @@ scenarios("features/see1413_default_parallel.feature")
 
 GD_4_SITES = "func f(a, b):\n\tif a > 0:\n\t\treturn a + b\n\treturn a - b and a * b\n"
 GD_2_SITES = "func f(a, b):\n\treturn a + b\n"
+SIMULATED_CPU_COUNT = 16
 _ORIGINALS = (
     executor._worker_pool,
     executor._run_baseline_snapshot,
@@ -97,14 +98,17 @@ def when_default_jobs(bdd_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:
         ]
     )
     output = io.StringIO()
-    monkeypatch.setattr(executor.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(executor.os, "cpu_count", lambda: SIMULATED_CPU_COUNT)
     with redirect_stdout(output):
         cli_mod.cmd_mutation(args)
     bdd_state["result"] = cli_mod.json.loads(output.getvalue())
 
 
 @when(parsers.re(r"gqt mutation runs the single file with jobs (?P<n>\d+)$"))
-def when_explicit_jobs(bdd_state: dict, n: str) -> None:
+def when_explicit_jobs(
+    bdd_state: dict, monkeypatch: pytest.MonkeyPatch, n: str
+) -> None:
+    monkeypatch.setattr(executor.os, "cpu_count", lambda: SIMULATED_CPU_COUNT)
     bdd_state["result"] = executor.run_mutation_files(
         [bdd_state["target"]],
         bdd_state["root"],
@@ -162,9 +166,7 @@ def then_summary_keys(bdd_state: dict) -> None:
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")
     if summary["mutants"] != bdd_state["expected_mutants"]:
-        _fail(
-            f"merged mutants={summary['mutants']} != {bdd_state['expected_mutants']}"
-        )
+        _fail(f"merged mutants={summary['mutants']} != {bdd_state['expected_mutants']}")
 
 
 @then(parsers.parse("the report falls back to serial with jobs {n:d}"))

@@ -666,3 +666,61 @@ def test_worker_exempt_baseline_run_error_raises(
     with pytest.raises(AcceptRunError,
                        match="exempt baseline worker run_error"):
         run_mutate(project, suite.feature_key, use_worker=True)
+
+
+# ---------- 缺陷 2 钉住：真 Popen 形态（无 cwd 属性）+ 请求行 ir_file 形态 ----------
+
+class _RealPopenShapeWorkerIO:
+    """真 `subprocess.Popen` 形态 fake：**无 cwd / _cwd 属性**（真进程不
+    记录工作目录——SEE-1468 M0a 缺陷 2 根因），逐请求回 kill verdict，
+    并记录全部请求行供 ir_file 形态断言。"""
+
+    def __init__(self, case_name: str):
+        self.case_name = case_name
+        self.requests: list[str] = []
+        self.stdin = self
+        self.stdout = self
+        # 故意不设 cwd/_cwd：与真实 subprocess.Popen 对象同形
+        assert not hasattr(self, "cwd") and not hasattr(self, "_cwd")
+
+    def write(self, line: str) -> None:
+        self.requests.append(line)
+
+    def flush(self) -> None:
+        pass
+
+    def readline(self) -> str:
+        req = json.loads(self.requests[-1])
+        return json.dumps({
+            "mutant_id": req["mutant_id"], "rc": 1,
+            "executed": 1, "failing": [self.case_name],
+            "ops_version": OPS_VERSION}) + "\n"
+
+    def close(self) -> None:
+        pass
+
+
+def test_worker_real_popen_shape_resolves_ir_file_against_root(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    """缺陷 2 回归钉：真 Popen 形态（无 cwd 属性）下，请求行 ir_file 必须
+    是 res://<项目根相对> 形态——旧嗅探实现落 Path("/") 把绝对 ir_file
+    拼成 res://home/...（worker FileAccess 不可读 → 全量 run_error，
+    实机 33 run_errors 形态）。"""
+    suite = _compile(project, tmp_path)
+    (case_name,) = _manifest_test_names(project, suite.feature_key)
+    fake = _RealPopenShapeWorkerIO(case_name)
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    monkeypatch.setattr(mr.subprocess, "Popen", lambda *a, **k: fake)
+    result = run_mutate(project, suite.feature_key, use_worker=True)
+    assert result["ok"] is True, "全 kill 判定链不应有 run_error"
+    assert result["summary"]["run_errors"] == 0
+    assert fake.requests, "worker 必须真实收到请求行"
+    root = project.resolve()
+    for line in fake.requests:
+        ir_file = json.loads(line)["ir_file"]
+        assert ir_file.startswith("res://"), \
+            f"ir_file 必须走 res:// 形态（项目根锚定）：{ir_file}"
+        assert "res://home/" not in ir_file and "res://tmp" not in ir_file, \
+            f"res:// 后不得拼绝对路径（旧缺陷形态）：{ir_file}"
+        assert (root / ir_file.removeprefix("res://")).resolve().is_relative_to(root), \
+            f"res:// 相对形态必须锚定项目根：{ir_file}"

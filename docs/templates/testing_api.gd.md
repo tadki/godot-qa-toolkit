@@ -125,9 +125,29 @@ func check_expectations(case: Dictionary) -> String:
 | `bool` | 布尔字面相等 | 翻转 |
 | `enum{a,b,c}` | 精确相等且 ∈ 域 | 域内邻值 |
 | `in_set` | cell 为逗号分隔成员表（`a,b,c`），actual ∈ 成员集 | 退化坍缩集 "" |
-| `not_contains` | actual 不含 cell 子串 | 退化空串 ""（对正确实现恒失败） |
+| `not_contains` | actual 不含 cell 子串——**实现惯用法钉死：`actual.find(needle) != -1` 判包含**（`find("") == 0` → 退化 mutant "" 恒被判包含 = 恒失败 = 确定性 kill）。**禁用 `String.contains` 惯用法**：GDScript `"x".contains("") == false`（与 Python `in` 相反），`not actual.contains(needle)` 会让退化 mutant 恒存活、算子失效 | 退化空串 ""（对钉死惯用法恒失败） |
 | `signal_count` | `signal:<sig>.count` == cell（整数） | ±1 |
 | `str` | 字符串相等 | **零变异（默认豁免，Owner 裁决 3）**——「str 恒豁免」为可接受正常结局；启用 str ±1 须 per-suite 显式声明 |
+
+### not_contains / in_set 的 check_expectations 参考实现（惯用法钉死）
+
+```gdscript
+# not_contains：包含判定只允许 find 惯用法（退化 mutant "" 必挂）。
+var actual := String(query_state(String(EXPECTATION_MAP[cell])))
+if actual.find(needle) != -1:
+    return "%s: not_contains violated — found %r in %r" % [cell, needle, actual]
+
+# in_set：cell 逗号拆成员，actual 必须命中其一（退化 mutant "" 拆出 {""}，
+# 非空 actual 恒不命中 → 必挂）。
+var members := expected.split(",", false)
+if not members.has(actual):
+    return "%s: %r not in declared set %s" % [cell, actual, members]
+```
+
+> 变异闭环依据：退化 mutant 把期望 cell 改成 ""。find 惯用法下
+> `find("") == 0 != -1` → not_contains 断言必挂（kill 成立）；若改用
+> `not actual.contains("")`，GDScript 求值为 `not false == true` →
+> 断言通过 → mutant 恒 survived。接线时照抄上方参考实现，勿自造惯用法。
 
 `# mutation: exempt`（scenario 级，每 scenario 恰好一行）：豁免本场景 typed
 变异矩阵；**exempt ≠ skip**——mutate 轮仍执行未变异基线，绿记

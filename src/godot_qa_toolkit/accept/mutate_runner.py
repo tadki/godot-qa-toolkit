@@ -484,7 +484,7 @@ def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
                     encoding="utf-8")
                 register_temp(ir_file)
                 verdicts.append(_worker_round(proc, ir_file, mutant,
-                                              timeout_s=timeout_s))
+                                              timeout_s=timeout_s, root=root))
             finally:
                 # 用后即删（白名单目录内的轮转临时文件，防残留）。
                 ir_file.unlink(missing_ok=True)
@@ -521,15 +521,24 @@ def _readline_with_timeout(proc, timeout_s: float) -> str:  # noqa: ANN001
 
 def _worker_round(proc, ir_file: Path,  # noqa: ANN001 — Popen/fake 双形态
                   mutant: Mutant, timeout_s: int = 120,
+                  root: Path | None = None,
                   ) -> tuple[Mutant, str, str]:
     """单 mutant 的 worker 往返 + 判定（哨兵②/DEF-2 worker 侧同构核对）。
 
     QA-1：请求行 = {mutant_id, ir_file}（恒 <1024B，行缓冲安全）；verdict
     行本身仍是小 JSON，带内回传。MEDIUM-1：verdict 等待上限 = timeout_s。
+
+    ir_file 的 res:// 解析锚 = 调用方显式传入的项目根（与 `_spawn_worker`
+    的 cwd 同源）——**不嗅探 proc.cwd**：真实 `subprocess.Popen` 不记录
+    cwd，嗅探必然落 `Path("/")`，使绝对 ir_file 误走 res:// 分支拼出
+    `res://home/...`（worker 侧 FileAccess 不可读 → 全量 run_error，
+    SEE-1468 M0a 缺陷 2 根因）。root=None 仅为旧调用形态兜底（绝对路径
+    直传，不经 res://）。
     """
-    root = _worker_root_of(proc)
-    ir_file_res = ("res://" + ir_file.relative_to(root).as_posix()
-                   if root in ir_file.parents else str(ir_file))
+    if root is not None and root in ir_file.parents:
+        ir_file_res = "res://" + ir_file.relative_to(root).as_posix()
+    else:
+        ir_file_res = str(ir_file)
     request = json.dumps({"mutant_id": mutant.mutant_id,
                           "ir_file": ir_file_res},
                          ensure_ascii=False)
@@ -572,16 +581,6 @@ def _worker_kill_attribution_error(verdict: dict, rc: int,
             f"{sorted(failing)} does not name the mutated case "
             f"test {mutant.case_test_name!r}; execution chain "
             f"untrusted")
-
-
-def _worker_root_of(proc) -> Path:  # noqa: ANN001 — Popen/fake 双形态
-    """worker 的项目根（res:// 解析锚）：真进程取 cwd，fake 无 cwd 时
-    退化为根目录（ir_file 直接走绝对路径形态，worker 侧 FileAccess 一样
-    可读）。"""
-    cwd = getattr(proc, "cwd", None) or getattr(proc, "_cwd", None)
-    if cwd:
-        return Path(cwd)
-    return Path("/")
 
 
 def _shutdown_worker(proc) -> None:  # noqa: ANN001

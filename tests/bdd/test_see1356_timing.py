@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from godot_qa_toolkit.gherkin.runner import StepFailure
 from godot_qa_toolkit.mutation import runner as mut
 from godot_qa_toolkit.timing import TimingStore
 
+from ._support import fail_step as _fail
 from ._support import make_gut_project
 
 scenarios("features/see1356_timing.feature")
@@ -64,31 +64,24 @@ def then_anchor(bdd_state: dict) -> None:
     expected = int(bdd_state["seconds"] * 2.0) + 1
     actual = bdd_state["calls"]["last_timeout"]
     if actual != expected:
-        raise StepFailure(
-            reason="budget anchor did not come from the cache",
-            detail=f"expected baseline timeout {expected}, got {actual}",
+        _fail(
+            "budget anchor did not come from the cache",
+            f"expected baseline timeout {expected}, got {actual}",
         )
     result = bdd_state["result"]
     if result["summary"]["timing_source"] != "store":
-        raise StepFailure(
-            reason="timing_source not store", detail=str(result["summary"])
-        )
+        _fail("timing_source not store", str(result["summary"]))
 
 
 @then("the baseline GUT run still executes as the kill-diff control")
 def then_baseline_measured(bdd_state: dict) -> None:
     if bdd_state["calls"]["runs"] < 1:
-        raise StepFailure(
-            reason="baseline GUT never ran (cache must feed the anchor only, "
+        _fail(
+            "baseline GUT never ran (cache must feed the anchor only, "
             "never the baseline)"
         )
     summary = bdd_state["result"]["summary"]
     if summary["baseline_reused"] is not False:
-        raise StepFailure(
-            reason="baseline_reused is not False — the control run was skipped"
-        )
+        _fail("baseline_reused is not False — the control run was skipped")
     if summary["samples_n"] < 2:
-        raise StepFailure(
-            reason="this run's measured sample was not recorded",
-            detail=str(summary),
-        )
+        _fail("this run's measured sample was not recorded", str(summary))

@@ -181,9 +181,11 @@ def _count_executed_tests(gut_output: str) -> int:
 def _attribute_failures(output: str, manifest: dict, returncode: int) -> list[dict]:
     """归因回译：失败测试名经 manifest 对回 scenario；无归因显式披露。
 
-    §SPEC-1426-25：GUT 输出里 unchanged slot / harness 冒烟失败自带明细
-    文本（fail_test 的 message），原样带进 reason——不再统一压缩成一句
-    'generated acceptance test failed'。
+    §SPEC-1426-25（F3 修正）：GUT 输出里 unchanged slot / harness 冒烟
+    失败自带明细文本（fail_test 的 message），**原样接进 reason**
+    （reason = 'generated acceptance test failed: <fail_test message>'），
+    detail 字段并行保留——docstring 声称与行为自此一致，不再出现通用
+    reason + 明细只在 detail 的分裂形态。
     """
     failures: list[dict] = []
     failing = _parse_failing_tests(output)
@@ -193,10 +195,13 @@ def _attribute_failures(output: str, manifest: dict, returncode: int) -> list[di
         attr = by_test.get(t)
         detail = detail_by_test.get(t)
         if attr is not None:
+            reason = "generated acceptance test failed"
+            if detail:
+                reason = f"{reason}: {detail}"
             failures.append({
                 "test": t, "scenario": attr["scenario"],
                 "line": attr["scenario_line"],
-                "reason": "generated acceptance test failed",
+                "reason": reason,
                 **({"detail": detail} if detail else {}),
             })
         else:

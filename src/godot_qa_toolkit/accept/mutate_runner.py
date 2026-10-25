@@ -69,6 +69,13 @@ def _mutated_ir(ir: dict, mutant: Mutant) -> dict:
             mutated: list = case.setdefault("mutated_unchanged", [])
             if mutant.target not in mutated:
                 mutated.append(mutant.target)
+        elif mutant.kind == "not_contains_flip":
+            # F1：语义翻转与 DEF-1 同构——载荷不动，翻转极性走 case 内
+            # 侧通道，harness check_expectations 按契约反转该 cell 断言
+            # （通道被剥离则 mutant survived 打回，fail-loud 不静默）。
+            flipped: list = case.setdefault("mutated_not_contains", [])
+            if mutant.target not in flipped:
+                flipped.append(mutant.target)
         else:
             case.setdefault("values", {})[mutant.target] = mutant.mutated
     return m

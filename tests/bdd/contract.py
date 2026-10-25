@@ -77,6 +77,18 @@ def _scenario_metadata(config: pytest.Config, nodeid: str) -> dict:
     return scenarios.get(nodeid, {})
 
 
+def _gate_failure(nodeid: str, metadata: dict, reason: str) -> dict:
+    """Unstructured gate failure: no step context, scenario-level text only."""
+
+    return {
+        "scenario": metadata.get("scenario", nodeid),
+        "line": metadata.get("line", 0),
+        "keyword": "",
+        "text": metadata.get("scenario", nodeid),
+        "reason": reason,
+    }
+
+
 def _scenario_failure(
     nodeid: str, config: pytest.Config, metadata: dict
 ) -> dict | None:
@@ -91,21 +103,9 @@ def _scenario_failure(
     for phase in ("setup", "call", "teardown"):
         report = reports.get(phase)
         if report is not None and report.skipped:
-            return {
-                "scenario": metadata.get("scenario", nodeid),
-                "line": metadata.get("line", 0),
-                "keyword": "",
-                "text": metadata.get("scenario", nodeid),
-                "reason": "Scenario skipped",
-            }
+            return _gate_failure(nodeid, metadata, "Scenario skipped")
     if any(reports.get(phase) is None for phase in ("setup", "call", "teardown")):
-        return {
-            "scenario": metadata.get("scenario", nodeid),
-            "line": metadata.get("line", 0),
-            "keyword": "",
-            "text": metadata.get("scenario", nodeid),
-            "reason": "Incomplete pytest reports",
-        }
+        return _gate_failure(nodeid, metadata, "Incomplete pytest reports")
     return None
 
 

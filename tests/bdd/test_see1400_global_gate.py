@@ -20,6 +20,12 @@ from ._support import make_gut_project as make_project
 scenarios("features/see1400_global_gate.feature")
 
 
+class _FakeProc:
+    returncode = 0
+    stdout = "ok"
+    stderr = ""
+
+
 @pytest.fixture(autouse=True)
 def reset_gate_warning_state() -> Iterator[None]:
     godot_gate.reset_warn_state()
@@ -42,19 +48,14 @@ def when_two_workers(bdd_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     concurrent = {"cur": 0, "max": 0}
     lock = threading.Lock()
 
-    class FakeProc:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
-    def fake_run(*args: object, **kwargs: object) -> FakeProc:
+    def fake_run(*args: object, **kwargs: object) -> _FakeProc:
         with lock:
             concurrent["cur"] += 1
             concurrent["max"] = max(concurrent["max"], concurrent["cur"])
         time.sleep(0.1)
         with lock:
             concurrent["cur"] -= 1
-        return FakeProc()
+        return _FakeProc()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     errors: list[Exception] = []
@@ -115,12 +116,7 @@ def given_no_fcntl(
 
 @when("a gated GUT run executes")
 def when_gated_run(bdd_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeProc:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: _FakeProc())
     returncode, _ = mrunner._run_gut_on_project(str(bdd_state["root"]))
     bdd_state["rc"] = returncode
 

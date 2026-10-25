@@ -23,6 +23,7 @@ from godot_qa_toolkit.gherkin.runner import StepFailure
 from tests.bdd._support import fail_step
 from tests.bdd.collection import (
     BddCollection,
+    SCENARIO_TIMEOUT_S,
     _scenario_template,
     write_resolution_report,
 )
@@ -44,7 +45,6 @@ EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
 EXPECTED_STEPS = 53
 EXPECTED_DEFINITIONS = 49
-SCENARIO_TIMEOUT_S = 60
 CONTRACT_MARKER = '{\n  "tool": "gherkin"'
 
 

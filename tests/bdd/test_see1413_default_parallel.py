@@ -11,10 +11,10 @@ import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 from typing_extensions import Self
 
-from godot_qa_toolkit.gherkin.runner import StepFailure
 from godot_qa_toolkit.mutation import executor
 from godot_qa_toolkit.mutation import runner as runner_mod
 
+from ._support import fail_step as _fail
 from ._support import make_gut_project
 
 scenarios("features/see1413_default_parallel.feature")
@@ -131,10 +131,10 @@ def when_jobs_help(bdd_state: dict) -> None:
 def then_flat_report(bdd_state: dict, n: int) -> None:
     result = bdd_state["result"]
     if set(result) != {"tool", "ok", "summary", "failures"}:
-        raise StepFailure(f"top-level shape not flat: {sorted(result)}")
+        _fail(f"top-level shape not flat: {sorted(result)}")
     jobs = result["summary"].get("jobs")
     if jobs is None or not jobs > n:
-        raise StepFailure(f"summary.jobs={jobs} not > {n}")
+        _fail(f"summary.jobs={jobs} not > {n}")
 
 
 @then("the flat summary keeps existing keys and adds jobs")
@@ -160,9 +160,9 @@ def then_summary_keys(bdd_state: dict) -> None:
         "jobs",
     }
     if set(summary) != expected:
-        raise StepFailure(f"summary keys changed: {sorted(summary)}")
+        _fail(f"summary keys changed: {sorted(summary)}")
     if summary["mutants"] != bdd_state["expected_mutants"]:
-        raise StepFailure(
+        _fail(
             f"merged mutants={summary['mutants']} != {bdd_state['expected_mutants']}"
         )
 
@@ -171,38 +171,38 @@ def then_summary_keys(bdd_state: dict) -> None:
 def then_serial_fallback(bdd_state: dict, n: int) -> None:
     result = bdd_state["result"]
     if result["jobs"] != n:
-        raise StepFailure(f"expected serial jobs={n}, got {result['jobs']}")
+        _fail(f"expected serial jobs={n}, got {result['jobs']}")
     if result["results"][0]["summary"].get("jobs") != n:
-        raise StepFailure("serial result summary.jobs mismatch")
+        _fail("serial result summary.jobs mismatch")
 
 
 @then("zero prewarm imports were performed")
 def then_no_prewarm(bdd_state: dict) -> None:
     if bdd_state["prewarm"]["n"] != 0:
-        raise StepFailure(f"prewarm ran {bdd_state['prewarm']['n']} time(s)")
+        _fail(f"prewarm ran {bdd_state['prewarm']['n']} time(s)")
 
 
 @then(parsers.parse("the report reports jobs {n:d} with a single result"))
 def then_single_result(bdd_state: dict, n: int) -> None:
     result = bdd_state["result"]
     if result["jobs"] != n or len(result["results"]) != 1:
-        raise StepFailure(f"jobs={result['jobs']} results={len(result['results'])}")
+        _fail(f"jobs={result['jobs']} results={len(result['results'])}")
     if result["results"][0]["summary"].get("jobs") != n:
-        raise StepFailure("jobs=1 result summary.jobs mismatch")
+        _fail("jobs=1 result summary.jobs mismatch")
     if bdd_state["prewarm"]["n"] != 0:
-        raise StepFailure("jobs=1 unexpectedly prewarmed")
+        _fail("jobs=1 unexpectedly prewarmed")
 
 
 @then("the text mentions per-file AND per-mutant slicing")
 def then_help_levels(bdd_state: dict) -> None:
     if "per-file AND per-mutant" not in bdd_state["help_text"]:
-        raise StepFailure("help text missing per-file AND per-mutant")
+        _fail("help text missing per-file AND per-mutant")
 
 
 @then("the text mentions single file support")
 def then_help_single_file(bdd_state: dict) -> None:
     if "single file" not in bdd_state["help_text"]:
-        raise StepFailure("help text missing single file note")
+        _fail("help text missing single file note")
 
 
 def test_module_patches_restored_after_scenarios() -> None:

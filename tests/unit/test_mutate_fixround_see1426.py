@@ -114,26 +114,26 @@ def test_def1_unchanged_round_judged(project: Path, tmp_path: Path) -> None:
     import godot_qa_toolkit.accept.mutate_runner as mr
 
     # 全绿链：unchanged mutant 不挂 = survived（探针被剥离的作弊形态）
-    def fake_pass(*a, **k):
+    calls = {"n": 0}
+
+    def fake_stateful(*a, **k):
+        calls["n"] += 1
+        kill_after_baseline = kills_at >= 2  # F-C：n=1 恒基线绿
         class R:
-            returncode = 0
-            stdout = PASS_ONE
+            returncode = (1 if calls["n"] >= kills_at else 0)
+            stdout = (KILL_BOTH if calls["n"] >= kills_at else PASS_ONE)
             stderr = ""
         return R()
-    mr.subprocess.run = fake_pass
+    mr.subprocess.run = fake_stateful
+    kills_at = 99  # 全绿形态：基线后全绿
     result = run_mutate(project, "demo")
     unchanged = [f for f in result["failures"]
                  if f.get("kind") == "unchanged"]
     assert len(unchanged) == 1 and result["ok"] is False
 
     # 挂链：unchanged mutant 被 kill（污染探针在位必挂）
-    def fake_fail(*a, **k):
-        class R:
-            returncode = 1
-            stdout = KILL_BOTH
-            stderr = ""
-        return R()
-    mr.subprocess.run = fake_fail
+    calls["n"] = 0
+    kills_at = 2  # F-C：基线（n=1）绿，mutant 轮（n>=2）挂
     result = run_mutate(project, "demo")
     assert result["ok"] is True
     assert result["summary"]["killed"] == result["summary"]["mutants"]
@@ -155,10 +155,15 @@ def test_def2_poison_test_cannot_inflate_kills(project: Path,
 """)
     import godot_qa_toolkit.accept.mutate_runner as mr
 
+    calls = {"n": 0}
+
     def fake_poison(*a, **k):
+        calls["n"] += 1
         class R:
-            returncode = 1
-            stdout = "* test_poison\n  [Failed]\n"  # 毒测试恒挂
+            # F-C：n=1 基线绿（真实判据流），毒测试落在 mutant 轮
+            returncode = 0 if calls["n"] == 1 else 1
+            stdout = ("* test_s_000_00\n  [Passed]\n"
+                      if calls["n"] == 1 else "* test_poison\n  [Failed]\n")
             stderr = ""
         return R()
     mr.subprocess.run = fake_poison
@@ -184,7 +189,13 @@ class _FakeWorkerIO:
         pass
 
     def readline(self) -> str:
-        v = dict(self.verdicts)
+        # F-C：基线请求回绿 verdict（executed 沿用脚本值满足计数守卫），
+        # mutant 请求走脚本化 verdict。
+        if self._mid == "exempt_baseline":
+            v = {"rc": 0, "executed": 1, "failing": [],
+                 "ops_version": OPS_VERSION}
+        else:
+            v = dict(self.verdicts)
         v.setdefault("mutant_id", self._mid)
         return json.dumps(v) + "\n"
 
@@ -341,7 +352,8 @@ def test_disclosure3_worker_in_clean_then_generate(project: Path,
 # ---------- worker 通道失败路径（覆盖率/对抗补强） ----------
 
 class _DeadWorkerIO:
-    def __init__(self, die_on: int = 1):
+    def __init__(self, die_on: int = 2):
+        # die_on 以请求序计（1 = F-C 基线请求），基线请求恒回绿 verdict。
         self.die_on = die_on
         self.n = 0
         self.stdin = self
@@ -356,6 +368,10 @@ class _DeadWorkerIO:
     def readline(self) -> str:
         if self.n > self.die_on:
             return ""  # worker 提前退出
+        if self.n == 1:  # F-C 基线请求：绿 verdict
+            return json.dumps({"mutant_id": "exempt_baseline", "rc": 0,
+                               "executed": 1, "failing": [],
+                               "ops_version": OPS_VERSION}) + "\n"
         return json.dumps({"mutant_id": "x", "rc": 1, "executed": 1,
                            "failing": ["test_s_000_00"],
                            "ops_version": OPS_VERSION}) + "\n"
@@ -398,6 +414,8 @@ def test_worker_zero_executed_is_sentinel_error(project: Path,
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 0, "executed": 0, "failing": [],
         "ops_version": OPS_VERSION})
+    # 基线请求由 _FakeWorkerIO 回绿（executed=1 单 case 合规），零执行
+    # 落在 mutant 轮（哨兵② mutant 侧语义保持）。
     result = run_mutate(project, "demo", use_worker=True)
     assert result["ok"] is False
     assert all("executed 0 cases" in f["reason"] for f in result["failures"])
@@ -542,7 +560,10 @@ class _HungWorkerIO:
         self.stdout = _HungReader()
 
     def write(self, line: str) -> None:
-        pass
+        # F-C：基线请求回绿 verdict（autoload 就绪形态），挂死落在 mutant 轮
+        import json as _json
+        if _json.loads(line).get("mutant_id") == "exempt_baseline":
+            self.stdout.feed_baseline()
 
     def flush(self) -> None:
         pass
@@ -566,6 +587,16 @@ class _HungReader:
 
     def fileno(self) -> int:
         return self._r
+
+    def feed_baseline(self) -> None:
+        # F-C：基线请求回绿 verdict（写后即回，mutant 请求恢复挂死）
+        import json as _json
+        import os
+        os.set_blocking(self._w, True)
+        os.write(self._w, (_json.dumps({
+            "mutant_id": "exempt_baseline", "rc": 0, "executed": 1,
+            "failing": [], "ops_version": OPS_VERSION}) + "\n").encode())
+        os.close(self._w)  # 后续 mutant 请求 read 到 EOF → 挂死超时面
 
 
 def test_medium1_hung_worker_times_out_into_run_errors(project: Path,
@@ -607,8 +638,13 @@ class _NoFilenoWorkerIO:
     def write(self, line: str) -> None:
         import json as _json
         self._mid = _json.loads(line).get("mutant_id", "?")
-        v = dict(self._v)
-        v.setdefault("mutant_id", self._mid)
+        if self._mid == "exempt_baseline":
+            # F-C 基线请求：绿 verdict（executed=1 对齐单 case fixture）
+            v = {"rc": 0, "executed": 1, "failing": [],
+                 "ops_version": OPS_VERSION}
+        else:
+            v = dict(self._v)
+            v.setdefault("mutant_id", self._mid)
         self._lines.append(_json.dumps(v) + "\n")
 
     def readline(self) -> str:

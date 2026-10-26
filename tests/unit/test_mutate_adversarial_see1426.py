@@ -50,14 +50,24 @@ def _restore_subprocess():
     mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
-def _fake_gut(returncode: int, output: str) -> None:
+def _fake_gut(returncode: int, output: str,
+              baseline: tuple[int, str] | None = None) -> None:
+    """F-C：baseline=(rc, output) 时首调用（未变异基线轮）单独供给。"""
     import godot_qa_toolkit.accept.mutate_runner as mr
 
+    calls = {"n": 0}
+
     def fake_run(*a, **k):
+        calls["n"] += 1
+        if baseline is not None and calls["n"] == 1:
+            rc, out = baseline
+        else:
+            rc, out = returncode, output
+
         class R:
             def __init__(self):
-                self.returncode = returncode
-                self.stdout = output
+                self.returncode = rc
+                self.stdout = out
                 self.stderr = ""
         return R()
     mr.subprocess.run = fake_run
@@ -188,6 +198,12 @@ class _FakeWorkerIO:
     def readline(self) -> str:
         import json as _json
         req = _json.loads(self._last)
+        if req["mutant_id"] == "exempt_baseline":
+            # F-C 基线请求：绿 verdict（执行链健康形态）
+            return _json.dumps({
+                "mutant_id": req["mutant_id"], "rc": 0,
+                "executed": len(self.case_names), "failing": [],
+                "ops_version": OPS_VERSION}) + "\n"
         return _json.dumps({
             "mutant_id": req["mutant_id"], "rc": self.rc,
             "executed": len(self.case_names),
@@ -257,16 +273,18 @@ def test_mutant_rounds_isolated_no_accumulation(project: Path,
                     diffs.add((case["test_name"], key, val))
         snapshots.append(diffs)
         class R:
-            returncode = 1
-            stdout = KILL_OUTPUT
+            # F-C：首调用为未变异基线轮（零差异快照 + 绿），mutant 轮 kill
+            returncode = 0 if len(snapshots) == 1 else 1
+            stdout = PASS_OUTPUT if len(snapshots) == 1 else KILL_OUTPUT
             stderr = ""
         return R()
     mr.subprocess.run = fake_run
     result = run_mutate(project, "demo")
     assert result["summary"]["mutants"] == len(expected)
-    assert all(len(d) == 1 for d in snapshots), \
-        f"each round must carry exactly one mutation, got {snapshots}"
-    union = set().union(*snapshots)
+    mutant_snapshots = snapshots[1:]  # 首快照 = F-C 基线轮（未变异）
+    assert all(len(d) == 1 for d in mutant_snapshots), \
+        f"each round must carry exactly one mutation, got {mutant_snapshots}"
+    union = set().union(*mutant_snapshots)
     assert union == expected, "rounds must cover the full matrix exactly"
 
 
@@ -320,7 +338,9 @@ def test_mutant_round_launch_failure_sentinel(project: Path,
     """mutant 轮 godot 启动失败：执行链失真 → run_error 面失败（不产
     kill verdict），整轮打回。"""
     _compile(project, tmp_path)
-    _fake_gut(1, "Godot Engine v4.6\nAttempt to open script file not found")
+    # F-C：基线绿先行，启动失败落在 mutant 轮（per-mutant run_error 面）
+    _fake_gut(1, "Godot Engine v4.6\nAttempt to open script file not found",
+              baseline=(0, PASS_OUTPUT))
     result = run_mutate(project, "demo")
     assert result["ok"] is False
     assert result["summary"]["run_errors"] == result["summary"]["mutants"]
@@ -338,8 +358,9 @@ def test_sentinel_partial_kill_does_not_shortcircuit(project: Path,
     def fake_run(*a, **k):
         calls["n"] += 1
         class R:
-            returncode = 1 if calls["n"] == 1 else 0
-            stdout = KILL_OUTPUT if calls["n"] == 1 else PASS_OUTPUT
+            # F-C：n=1 基线绿，n=2 首 mutant kill，其余绿
+            returncode = 1 if calls["n"] == 2 else 0
+            stdout = KILL_OUTPUT if calls["n"] == 2 else PASS_OUTPUT
             stderr = ""
         return R()
     mr.subprocess.run = fake_run
@@ -365,7 +386,7 @@ def test_mutants_count_equals_full_matrix(project: Path,
     """全量门禁（v1 无 stamp）：runner 的 mutants 计数恒等于变异器对
     磁盘 IR 的全矩阵产出，killed == mutants（无静默过滤/跳过）。"""
     _compile(project, tmp_path)
-    _fake_gut(1, KILL_OUTPUT)
+    _fake_gut(1, KILL_OUTPUT, baseline=(0, PASS_OUTPUT))
     result = run_mutate(project, "demo")
     expected = len(mutate_ir(_disk_ir(project)))
     assert result["summary"]["mutants"] == expected

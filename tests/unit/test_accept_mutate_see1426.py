@@ -35,14 +35,25 @@ def _restore_subprocess():
     mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
-def _fake_gut(monkeypatch, *, returncode: int, output: str) -> None:
+def _fake_gut(monkeypatch, *, returncode: int, output: str,
+              baseline: tuple[int, str] | None = None) -> None:
+    """F-C：baseline=(rc, output) 时首调用（未变异基线轮）单独供给，
+    其余调用走主脚本；基线缺省沿用主脚本（适用绿基线形态的测试）。"""
     import godot_qa_toolkit.accept.mutate_runner as mr
 
+    calls = {"n": 0}
+
     def fake_run(*a, **k):
+        calls["n"] += 1
+        if baseline is not None and calls["n"] == 1:
+            rc, out = baseline
+        else:
+            rc, out = returncode, output
+
         class R:
             def __init__(self):
-                self.returncode = returncode
-                self.stdout = output
+                self.returncode = rc
+                self.stdout = out
                 self.stderr = ""
         return R()
     mr.subprocess.run = fake_run
@@ -162,7 +173,8 @@ def _compile(project: Path, tmp_path: Path) -> Path:
 def test_mutant_ir_is_temporary_copy(project: Path, tmp_path: Path) -> None:
     """变异只落临时副本：跑完磁盘 IR 恢复原样（三件哈希仍自洽）。"""
     _compile(project, tmp_path)
-    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT,
+              baseline=(0, _CASE_PASS_OUTPUT))
     result = run_mutate(project, "demo")
     ir_disk = (project / "acceptance/ir/demo.json").read_text(encoding="utf-8")
     ir = json.loads(ir_disk)
@@ -182,7 +194,8 @@ def test_survived_mutant_rejects(project: Path, tmp_path: Path) -> None:
 
 def test_full_matrix_no_stamp(project: Path, tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT,
+              baseline=(0, _CASE_PASS_OUTPUT))
     result = run_mutate(project, "demo")
     assert result["summary"]["full_matrix"] is True
     # 每轮全量：mutant 轮数 = 全矩阵大小（本 feature 无 unchanged 槽：hp ±1 + left ±1 = 4）
@@ -193,9 +206,9 @@ def test_sentinel_no_test_stream_is_run_error(project: Path, tmp_path: Path) -> 
     """哨兵核对②：GUT 输出零测试流 = 执行链失真 → run_error 面失败。"""
     _compile(project, tmp_path)
     _fake_gut(None, returncode=0, output="Godot Engine v4.6\n")  # 无任何测试流
-    result = run_mutate(project, "demo")
-    assert result["ok"] is False
-    assert all("sentinel check failed" in f["reason"] for f in result["failures"])
+    # F-C：基线轮先跑，无测试流在基线哨兵处即 raise（caller 错误面）。
+    with pytest.raises(AcceptRunError, match="no test stream in baseline"):
+        run_mutate(project, "demo")
 
 
 def test_no_mutants_is_run_error(project: Path, tmp_path: Path) -> None:
@@ -267,6 +280,13 @@ class _FakeWorkerIO:
 
     def readline(self) -> str:
         req = json.loads(self._last)
+        if req["mutant_id"] == "exempt_baseline":
+            # F-C 基线请求：绿 verdict（本文件 fixture 单 case，executed=1
+            # 满足计数守卫；case_names 仅服务 mutant 轮 failing 面）
+            return json.dumps({
+                "mutant_id": req["mutant_id"], "rc": 0,
+                "executed": 1, "failing": [],
+                "ops_version": OPS_VERSION}) + "\n"
         return json.dumps({
             "mutant_id": req["mutant_id"], "rc": self.rc,
             "executed": len(self.case_names),
@@ -281,8 +301,9 @@ def test_worker_channel_differential_verdicts(project: Path, tmp_path: Path) -> 
     """--worker 差分对照：batch 与 worker 两条真实代码路径 verdict 一致
     （披露③：worker 走 Popen NDJSON 带内路径，非 summary 披露假通道）。"""
     _compile(project, tmp_path)
-    # 全 kill 的执行链（fake 确定性）
-    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT)
+    # 全 kill 的执行链（fake 确定性；F-C 首调用为基线绿）
+    _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT,
+              baseline=(0, _CASE_PASS_OUTPUT))
     batch = run_mutate(project, "demo", use_worker=False)
     import godot_qa_toolkit.accept.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(

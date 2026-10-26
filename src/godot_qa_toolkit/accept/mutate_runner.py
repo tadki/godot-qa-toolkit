@@ -123,8 +123,10 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
                use_worker: bool = False) -> dict:
     """全量契约变异闭环。返回统一 JSON 契约（ok=false 即打回）。
 
-    /2：在场豁免 case 先跑未变异基线轮（exempt ≠ skip）；基线挂 =
-    fail-fast 跳过 mutant 轮（未变异就红的特性没有变异 verdict 可言）。
+    /2：先跑未变异基线轮（F-C 基线绿哨兵 + exempt ≠ skip）——基线挂 =
+    fail-fast 以 run_error 合同跳过 mutant 轮（未变异就红/执行链失真的
+    特性没有变异 verdict 可言；harness 缺失形态的 hollow all-killed 由
+    此收口），基线绿才进 mutant 判定。
     """
     root = Path(project_root)
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
@@ -138,8 +140,10 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
     exempt_count = _exempt_scenario_count(ir)
     exempt_results: list[dict] = []
     baseline_failed: list[dict] = []
-    if exempt:
-        exempt_results, baseline_failed = _run_exempt_baseline(
+    if exempt or mutants:
+        # F-C：基线绿哨兵对非豁免特性同样生效（harness 缺失 → 基线全红 →
+        # run_error 合同，而非 kill 归因恒满足的 hollow all-killed）。
+        exempt_results, baseline_failed = _run_baseline_round(
             root, ir, exempt, timeout_s, use_worker)
     if not mutants:
         if exempt:
@@ -165,7 +169,7 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
                                exempt_count, exempt_results)
 
 
-# ---------- /2 豁免基线轮（exempt ≠ skip） ----------
+# ---------- /2 基线轮（exempt ≠ skip + F-C 基线绿哨兵） ----------
 
 def _exempt_scenario_count(ir: dict) -> int:
     """豁免 scenario 数 == 源 .feature 内 `# mutation: exempt` 指令行数
@@ -174,10 +178,10 @@ def _exempt_scenario_count(ir: dict) -> int:
                 for c in ir.get("cases", []) if c.get("mutation_exempt")})
 
 
-def _run_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
-                         timeout_s: int,
-                         use_worker: bool) -> tuple[list[dict], list[dict]]:
-    """豁免基线轮双通道分流 + 逐 case 记账（exempt ≠ skip）。"""
+def _run_baseline_round(root: Path, ir: dict, exempt: list[dict],
+                        timeout_s: int,
+                        use_worker: bool) -> tuple[list[dict], list[dict]]:
+    """未变异基线轮双通道分流 + 逐 case 记账（exempt ≠ skip；F-C 哨兵）。"""
     if use_worker:
         failing, executed = _worker_exempt_baseline(root, ir, exempt,
                                                     timeout_s)
@@ -193,12 +197,12 @@ def _batch_exempt_baseline(root: Path,
     rc, output = _run_gut(root, timeout_s)
     if _looks_like_godot_launch_failure(output):
         raise AcceptRunError(
-            "godot launch failed on exempt baseline round: "
+            "godot launch failed on baseline round: "
             f"{' / '.join(output.splitlines()[-3:])}")
     executed = set(_TEST_STREAM_RE.findall(output))
     if not executed:
         raise AcceptRunError(
-            "sentinel check failed — no test stream in exempt baseline "
+            "sentinel check failed — no test stream in baseline "
             "round; execution chain untrusted")
     return set(_parse_failing_tests(output)), executed
 
@@ -241,7 +245,7 @@ def _exchange_verdict_line(proc, request: str,  # noqa: ANN001 — Popen/fake �
 
 def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
                             timeout_s: int) -> tuple[set[str], set[str]]:
-    """worker 通道豁免基线轮：短命常驻进程送一请求（mutant_id=
+    """worker 通道未变异基线轮：短命常驻进程送一请求（mutant_id=
     exempt_baseline，IR 为未变异原文），判完即弃——与 mutant 轮长驻通道
     分离，保持差分对照路径互不干扰。返回 (failing, executed)。"""
     proc, scratch = _spawn_worker(root)

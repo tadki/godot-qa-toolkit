@@ -334,14 +334,27 @@ def _typed_cell_error(name: str, spec: str, cell: str) -> str | None:
     return None
 
 
-def _validate_typed_cells(scenario: Scenario, path: str) -> None:
+def _validate_typed_cells(scenario: Scenario, feature: Feature,
+                          path: str) -> None:
     """/2 声明类型 cell 形态校验（fail-fast，逐行逐声明）。
 
     F2（QA 裁定）：in_set 在此做归一化单点——成员逐个 strip，strip 后空
     成员 = parse error，归一化后的成员集直接写回 values（IR 存归一化
     cell）。parse 面与模板参考实现的 naive split 自此同源：运行时拿到的
     成员已无周边空白，带空格作者意图不再依赖 harness 自行 strip。
+
+    F-E（QA 裁定）：`# types:` 每个声明名必须恰为本 scenario 的 Examples
+    列——幽灵声明（无列）compile 过、run 静默绿（dispatch 遍历 values
+    面，无值永不触达），parse 期 fail-fast 收口。
     """
+    declared = set(scenario.types) | set(feature.types)
+    unknown = sorted(declared - set(scenario.example_columns))
+    if unknown:
+        names = ", ".join(f"<{n}>" for n in unknown)
+        raise GherkinSyntaxError(
+            path, scenario.line,
+            f"# types: declares {names} with no matching Examples column "
+            f"in scenario {scenario.name!r}")
     for row in scenario.examples:
         for name, spec in scenario.types.items():
             cell = row.values.get(name, "")
@@ -374,7 +387,7 @@ def _validate_scenario(feature: Feature, scenario: Scenario,
                                  f"Scenario Outline {scenario.name!r} has no Examples table")
     _validate_examples_rows(scenario, path)
     _validate_then_bindings(feature, scenario, path)
-    _validate_typed_cells(scenario, path)
+    _validate_typed_cells(scenario, feature, path)
 
 
 def _require_examples_table(current_scenario: Scenario | None,

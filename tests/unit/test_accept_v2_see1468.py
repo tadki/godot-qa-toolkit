@@ -656,7 +656,7 @@ def test_exempt_baseline_empty_stream_is_run_error(project: Path,
     _fake_gut("Godot Engine v4.6.2.stable.official banner only\n",
               returncode=0)
     with pytest.raises(AcceptRunError,
-                       match="no test stream in exempt baseline"):
+                       match="no test stream in baseline"):
         run_mutate(project, "pure_exempt")
 
 
@@ -668,7 +668,7 @@ def test_exempt_baseline_launch_failure_raises(project: Path,
     _fake_gut("ERROR: Attempt to open script 'res://x.gd' resulted in "
               "error 'File not found'.\n", returncode=1)
     with pytest.raises(AcceptRunError,
-                       match="launch failed on exempt baseline"):
+                       match="launch failed on baseline"):
         run_mutate(project, "pure_exempt")
 
 
@@ -753,6 +753,11 @@ class _RealPopenShapeWorkerIO:
 
     def readline(self) -> str:
         req = json.loads(self.requests[-1])
+        if req["mutant_id"] == "exempt_baseline":
+            # F-C 基线请求：绿 verdict（单 case fixture，executed=1 守卫）
+            return json.dumps({
+                "mutant_id": req["mutant_id"], "rc": 0, "executed": 1,
+                "failing": [], "ops_version": OPS_VERSION}) + "\n"
         return json.dumps({
             "mutant_id": req["mutant_id"], "rc": 1,
             "executed": 1, "failing": [self.case_name],
@@ -827,3 +832,97 @@ def test_ansi_strip_dual_form_before_never_after_always() -> None:
         "test_s_000_00": "no harness binding for step: x"}
     assert _count_executed_tests(clean) == 1
     assert "\x1b" not in clean
+
+
+# ---------- F-C：mutate 基线绿哨兵（harness 缺失形态） ----------
+
+def test_mutate_harness_missing_baseline_red_is_run_error(
+        project: Path, tmp_path: Path) -> None:
+    """F-C 对抗：harness 缺失 → 未变异基线全红 → run_error 合同（killed 0），
+    不得落 kill 归因恒满足的 hollow all-killed 形态。"""
+    suite = _compile(project, tmp_path)  # fixture 无 addons/gqt_accept 接线
+    (tn,) = _manifest_test_names(project, suite.feature_key)
+    import godot_qa_toolkit.accept.mutate_runner as mr
+
+    def fake_run(*a, **k):
+        class R:
+            returncode = 1
+            stdout = (f"* {tn}\n  [Failed]: accept harness unavailable "
+                      "(res://addons/gqt_accept/harness.gd missing)\n")
+            stderr = ""
+        return R()
+    mr.subprocess.run = fake_run
+    result = run_mutate(project, suite.feature_key)
+    assert result["ok"] is False
+    assert result["summary"]["killed"] == 0, "基线红必须压掉全部 kill 判定"
+    assert result["summary"]["run_errors"] >= 1, \
+        "基线红必须以 run_error 显式失败（逐挂 case 具名）"
+    assert result["summary"]["survived"] == 0
+    assert all("unmutated baseline round failed" in f["reason"]
+               for f in result["failures"])
+
+
+def test_mutate_baseline_green_runs_mutant_rounds_once(
+        project: Path, tmp_path: Path) -> None:
+    """F-C 性能形态：基线轮每 key 恰一次（非每 mutant 一次）——GUT 调用数
+    = 1 基线 + mutants 轮数。"""
+    suite = _compile(project, tmp_path)
+    import godot_qa_toolkit.accept.mutate_runner as mr
+    calls = {"n": 0}
+
+    def fake_run(*a, **k):
+        calls["n"] += 1
+
+        class R:
+            pass
+        R.returncode = 1 if calls["n"] > 1 else 0  # 基线绿，mutant 全挂
+        R.stdout = ("* test_s_000_00\n  [Passed]\n" if calls["n"] == 1
+                    else "* test_s_000_00\n  [Failed]\n")
+        R.stderr = ""
+        return R()
+    mr.subprocess.run = fake_run
+    result = run_mutate(project, suite.feature_key)
+    assert result["ok"] is True and result["summary"]["killed"] >= 1
+    assert calls["n"] == 1 + result["summary"]["mutants"]
+
+
+# ---------- F-E：types↔Examples 列对齐 parse 门 ----------
+
+def test_ghost_types_declaration_is_parse_error() -> None:
+    """F-E 对抗：`# types:` 声明了 Examples 没有的列 = parse error（编译
+    面收口 run 静默绿的 fail-open 形态）。"""
+    with pytest.raises(GherkinSyntaxError,
+                       match="no matching Examples column"):
+        parse("Feature: F\n  Scenario Outline: s\n    Then hp is <hp>\n"
+              "    # types: <hp>:int, <ghost>:float_near:0.0001\n"
+              "    Examples:\n      | hp |\n      | 7 |\n")
+
+
+def test_ghost_types_declaration_compile_contract() -> None:
+    """F-E 端到端：ghost 声明经 CLI compile → ok:false（JSON 契约面）。"""
+    project2 = None
+    suite, error = compile_feature(
+        _tmp_feature("Feature: F\n  Scenario Outline: s\n    Then hp is <hp>\n"
+                     "    # types: <hp>:int, <ghost>:int\n"
+                     "    Examples:\n      | hp |\n      | 7 |\n"),
+        _tmp_project(), write=False)
+    assert suite is None and error is not None
+    assert "no matching Examples column" in error["reason"]
+
+
+def _tmp_feature(text: str):
+    from pathlib import Path
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    f = d / "ghost.feature"
+    f.write_text(text, encoding="utf-8")
+    return f
+
+
+def _tmp_project():
+    from pathlib import Path
+    import tempfile
+    root = Path(tempfile.mkdtemp()) / "proj"
+    (root / "addons" / "gut").mkdir(parents=True)
+    (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
+    return root

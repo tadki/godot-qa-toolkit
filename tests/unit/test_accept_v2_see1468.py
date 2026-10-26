@@ -318,6 +318,22 @@ def test_worker_awaits_run_step_with_drive_loop(project: Path,
     assert "await _run_mutant(harness, req)" in worker
 
 
+def test_worker_drive_has_first_frame_barrier(project: Path,
+                                              tmp_path: Path) -> None:
+    """F-D：-s 裸 SceneTree 中 autoload 首帧后才挂载——_drive() 入口必须先
+    经首帧屏障（await process_frame）再做 smoke_check，否则依赖 autoload
+    的 harness 恒 false → 每 mutant run_error（worker 通道唯一已知时序面）。"""
+    suite = _compile(project, tmp_path)
+    worker = suite.worker_gd
+    drive_head = worker.split("func _drive() -> void:", 1)[1]
+    # 屏障必须是 _drive 的首个语句（注释行允许在前）。
+    first_stmt = next(
+        ln.strip() for ln in drive_head.splitlines()
+        if ln.strip() and not ln.strip().startswith("#"))
+    assert first_stmt == "await process_frame", \
+        f"_drive() 首语句必须是首帧屏障，实际: {first_stmt!r}"
+
+
 # ---------- run：ops_version major bump 纪律 ----------
 
 def test_old_major_manifest_run_side_rejected(project: Path,

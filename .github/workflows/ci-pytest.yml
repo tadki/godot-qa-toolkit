@@ -24,18 +24,24 @@ jobs:
   pytest-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # 跨仓只读凭据（fine-grained PAT，KOL read）——缺省空：fork_cli 4 场景
+      # 模块级 skip（跳过非红）；secret 配置后 CI 自动升级为无条件实跑。
+      KOL_TOKEN: ${{ secrets.KOL_CHECKOUT_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       # SEE-1468 M5-a HIGH-1：fork_cli pytest-bdd 断言 KOL launcher/proxy 面
       #（SEE1288_REPO 指向此检出；submodules 拉 godot_mcp 子模块含 launch/）。
       - name: Checkout KOL repo (fork_cli BDD subject)
+        if: env.KOL_TOKEN != ''
         uses: actions/checkout@v4
         with:
           repository: tadki/KingOfLikes-Godot
           ref: master
           path: KingOfLikes-Godot
           submodules: recursive
+          token: ${{ secrets.KOL_CHECKOUT_TOKEN }}
 
       - name: Setup Node (fork CLI build fallback / execution probe)
         uses: actions/setup-node@v4
@@ -61,6 +67,7 @@ jobs:
       - name: Run unit and pytest-bdd tests with BDD reports
         env:
           SEE1288_REPO: ${{ github.workspace }}/KingOfLikes-Godot
+          SEE1288_SKIP_KOL: ${{ env.KOL_TOKEN == '' && '1' || '' }}
         run: >-
           python -m pytest tests/ -q
           --bdd-step-report=build/bdd-step-resolution.json

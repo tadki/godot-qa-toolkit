@@ -8,7 +8,7 @@ import pytest
 from _pytest.outcomes import Failed
 from pytest_bdd.parser import Scenario, Step
 
-from godot_qa_toolkit.gherkin.runner import StepFailure
+from ._support import StepFailure
 
 
 def initialize(config: pytest.Config) -> None:

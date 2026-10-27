@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from godot_qa_toolkit.accept.compile import build_ir
-from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
 
 
 # ---------- fail-fast 盲区补齐（必 parse error） ----------

@@ -42,7 +42,6 @@ source of truth.
 
 | Tool | Command | Status |
 |---|---|---|
-| **Gherkin runner** | `gqt gherkin …` — retired (SEE-1468 M5-a alias): stderr pointer + exit 2; use `gqt accept` / pytest-bdd (tests/bdd) | retired-alias |
 | **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
 | **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
 | **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
@@ -90,11 +89,6 @@ gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . --jobs 8
 
 ---
 
-## Gherkin runner (retired — SEE-1468 M5-a alias period)
-
-> `gqt gherkin` now prints a migration pointer to stderr and exits 2.
-> Judgement faces moved to `gqt accept` (acceptance /2) and pytest-bdd
-> (`tests/bdd`); physical deletion of runner/expectations lands in M5-b.
 
 A minimal, **strict** Gherkin subset: `Feature`, `Background`, `Scenario`,
 `Scenario Outline`, tags (`@tag`), and `Given/When/Then/And/But` steps.

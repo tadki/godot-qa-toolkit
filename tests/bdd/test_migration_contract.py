@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from pytest_bdd.feature import get_features
 
-from godot_qa_toolkit.gherkin.runner import StepFailure
+from tests.bdd._support import StepFailure
 from tests.bdd._support import fail_step
 from tests.bdd.collection import (
     BddCollection,
@@ -112,7 +112,7 @@ def _write_contract_case(tmp_path: Path) -> None:
     )
     (tmp_path / "test_contract_case.py").write_text(
         "from pytest_bdd import given, scenarios\n"
-        "from godot_qa_toolkit.gherkin.runner import StepFailure\n"
+        "from tests.bdd._support import StepFailure\n"
         "\n"
         'scenarios("contract.feature")\n'
         "\n"
@@ -249,10 +249,12 @@ def test_every_feature_is_explicitly_bound_by_scenarios_call() -> None:
         assert len(re.findall(pattern, module)) == 1, name
 
 
-def test_legacy_glue_removed_and_runner_tests_retained() -> None:
+def test_legacy_glue_and_runner_tests_retired() -> None:
+    """SEE-1468 M5-b 物理删除收口：旧 register(registry) 胶水与 runner 单测
+    随 runner/expectations 物理删除一并不再在库。"""
     assert list(FEATURES.glob("steps_*.py")) == []
-    assert (REPO / "tests" / "unit" / "test_runner.py").is_file()
-    assert (REPO / "tests" / "unit" / "test_runner_p0.py").is_file()
+    assert not (REPO / "tests" / "unit" / "test_runner.py").exists()
+    assert not (REPO / "tests" / "unit" / "test_runner_p0.py").exists()
 
 
 def test_every_bdd_scenario_has_a_per_scenario_timeout(

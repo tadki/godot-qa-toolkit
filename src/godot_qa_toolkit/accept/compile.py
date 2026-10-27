@@ -21,7 +21,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..gherkin.parser import GherkinSyntaxError, Scenario, parse
+from .parser import GherkinSyntaxError, Scenario, parse
 from . import OPS_VERSION
 
 IR_DIR = "acceptance/ir"

@@ -4,8 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from godot_qa_toolkit.gherkin.runner import StepFailure
 from godot_qa_toolkit.mutation import runner as mrunner
+
+
+class StepFailure(Exception):
+    """pytest-bdd 步骤失败载体（SEE-1468 M5-b：gherkin runner 物理删除后，
+    bdd 套件自持该异常——reason/detail/stderr_tail 三字段与原 runner 同形）。"""
+
+    def __init__(self, reason: str, detail: str | None = None,
+                 stderr_tail: str | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+        self.stderr_tail = stderr_tail
 
 TARGET_SRC = "func add(a, b):\n\tif a < b:\n\t\treturn a + b\n\treturn b\n"
 

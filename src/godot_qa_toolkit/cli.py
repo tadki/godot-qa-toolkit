@@ -1,12 +1,12 @@
 """Unified CLI for godot-qa-toolkit (SEE-1268 M1).
 
-Every subcommand (except the retired `gherkin` alias) emits the unified JSON
-contract:
+Every subcommand emits the unified JSON contract:
     {"tool": ..., "ok": bool, "summary": {...}, "failures": [...]}
 
 Exit code is 0 on ok, 1 on any failure — the machine verdict consumers rely on.
-The retired `gherkin` alias (SEE-1468 M5-a) prints a migration pointer to
-stderr and exits 2."""
+The `gherkin` command was retired in SEE-1468 M5-b (runner/expectations
+physically deleted; parser promoted to accept.parser; judgement faces live
+in `gqt accept` and pytest-bdd)."""
 
 from __future__ import annotations
 
@@ -18,27 +18,13 @@ from pathlib import Path
 from .doctor import cmd_doctor
 # complexity/coverage/mutation are imported lazily inside their cmd_* handlers:
 # they pull in gdtoolkit, so a gdtoolkit-less environment (e.g. a minimal CI
-# runner that only needs `gqt gherkin`) must still start the CLI (§SPEC-114,
-# SEE-1367).
+# runner) must still start the CLI (§SPEC-114, SEE-1367).
 
 
 def _emit(result: dict) -> int:
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0 if result["ok"] else 1
-
-
-def cmd_gherkin(args: argparse.Namespace) -> int:
-    # SEE-1468 M5-a 退役别名期（三段式第二段）：`gqt gherkin` 判定面已由
-    # `gqt accept`（acceptance /2）与 gqt tests/bdd pytest-bdd 承接——本入口
-    # 仅保留迁移指引横幅并 exit 2；runner/expectations 物理删除在 M5-b。
-    print(
-        "gqt gherkin retired (SEE-1468 M5-a): migrate to `gqt accept` "
-        "(acceptance /2) or pytest-bdd (tests/bdd) — parser stays via "
-        "`gqt accept compile`",
-        file=sys.stderr,
-    )
-    return 2
 
 
 def cmd_accept(args: argparse.Namespace) -> int:
@@ -114,7 +100,7 @@ def cmd_mutation(args: argparse.Namespace) -> int:
 
     # §SPEC-012（定案 C 项 a+b）：GQT_GODOT_BIN 覆写限 mutation 子命令——
     # dispatch 前钉死二进制类型（平台分支与 key 二进制成分共用判定）；
-    # coverage/gherkin 子命令不触碰该 env，行为面冻结。
+    # coverage 子命令不触碰该 env，行为面冻结。
     try:
         binary_kind = detect_binary_kind(refresh=True)
     except BinaryConfigError as e:
@@ -257,13 +243,6 @@ def cmd_coverage(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gqt", description="godot-qa-toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    g = sub.add_parser("gherkin", help="run a .feature file")
-    g.add_argument("feature", help="path to the .feature file")
-    g.add_argument("--steps", help="python module path, or directory of steps modules")
-    g.add_argument("--timeout", type=float, default=None,
-                   help="per-scenario wall-clock budget in seconds")
-    g.set_defaults(func=cmd_gherkin)
 
     ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")
     acsub = ac.add_subparsers(dest="accept_command", required=True)

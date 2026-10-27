@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
 
 
 def test_non_outline_mixed_placeholders_runtime_check_first() -> None:

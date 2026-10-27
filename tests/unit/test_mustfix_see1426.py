@@ -16,7 +16,7 @@ import pytest
 from godot_qa_toolkit.accept.compile import compile_feature
 from godot_qa_toolkit.accept.run import AcceptRunError, replay_check, run_suite
 from godot_qa_toolkit.arch.collector import collect_file
-from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
 
 
 # ---------- §SPEC-1426-22 ----------

@@ -55,8 +55,10 @@ class TestGherkinCli:
     def test_gherkin_subcommand_is_physically_removed(self):
         rc, err = self._run_gherkin(str(FIXTURES / "sample.feature"))
         assert rc == 2
+        # argparse 的 choices 文案随 Python 小版本变化（带/不带引号）——
+        # 只钉「invalid choice: gherkin」这一稳定核心。
         assert "invalid choice" in err
-        assert "(choose from accept, arch, complexity, mutation, coverage, doctor)" in err
+        assert "gherkin" in err
 
 
 class TestMutationCliSurface:

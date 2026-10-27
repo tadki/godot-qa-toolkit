@@ -23,7 +23,7 @@
    `reason`；输出经 `_emit` 走 stdout JSON（`ensure_ascii=False`、缩进 2、换行结尾）。
 3. **cli 必须 lazy import**（`§SPEC-114` 最小 CI 面）：检查器通常拉 gdtoolkit 等
    heavy 依赖，`cmd_*` 处理器内部才 `from .<tool>.gate import ...`——保证无该依赖的
-   环境（如只需 `gqt gherkin` 的极简 runner）也能启动 CLI。
+   环境（如只需 `gqt accept` 的极简 runner）也能启动 CLI。
 4. 规则 id / verdict 枚举保持**开放集合**（契约 §7 加法演进）：消费方过滤时须容忍
    未知值，新增规则只加不减。
 

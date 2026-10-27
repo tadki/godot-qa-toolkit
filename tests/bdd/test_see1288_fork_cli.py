@@ -32,7 +32,7 @@ def _kol_repo() -> Path:
         return sibling
     pytest.skip(
         "KOL checkout not found (set SEE1288_REPO to run these "
-        "KOL-tree assertions)", allow_module_level=True,
+        "KOL-tree assertions)"
     )
 
 

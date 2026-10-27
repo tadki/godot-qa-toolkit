@@ -40,19 +40,30 @@ class TestComplexityCli:
 
 
 class TestGherkinCli:
-    def test_missing_steps_module_reports_unmatched(self):
-        rc, out = _run_cli("gherkin", str(FIXTURES / "sample.feature"))
-        # Steps module not provided -> every step unmatched -> fail verdict.
-        assert rc == 1
-        assert out["ok"] is False
-        assert out["failures"][0]["reason"] == "no matching step definition"
+    """SEE-1468 M5-a 退役别名期：`gqt gherkin` 仅保留迁移指引横幅
+    （stderr 一行 + exit 2）；判定面已由 `gqt accept` / pytest-bdd 承接。"""
 
-    def test_feature_without_feature_line_fails(self, tmp_path):
+    def _run_gherkin_banner(self, *argv: str) -> tuple[int, str]:
+        # 别名期横幅走 stderr（stdout 无 JSON 契约），独立于 _run_cli。
+        proc = subprocess.run(
+            [sys.executable, "-m", "godot_qa_toolkit.cli", "gherkin", *argv],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO / "src"),
+        )
+        return proc.returncode, proc.stderr
+
+    def test_missing_steps_module_still_exits_with_banner(self):
+        rc, err = self._run_gherkin_banner(str(FIXTURES / "sample.feature"))
+        assert rc == 2
+        assert "retired" in err and "gqt accept" in err
+
+    def test_feature_without_feature_line_still_exits_with_banner(self, tmp_path):
         bad = tmp_path / "bad.feature"
         bad.write_text("Scenario: orphan\n", encoding="utf-8")
-        rc, out = _run_cli("gherkin", str(bad))
-        assert rc == 1
-        assert ":1:" in out["failures"][0]["reason"]
+        rc, err = self._run_gherkin_banner(str(bad))
+        assert rc == 2
+        assert "retired" in err
 
 
 class TestMutationCliSurface:

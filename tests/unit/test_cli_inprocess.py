@@ -104,120 +104,32 @@ class TestCmdGherkinInProcess:
         )
         return steps
 
-    def test_pass_path_emits_json_and_exit_zero(self, tmp_path, capsys):
-        feature = self._feature(tmp_path)
-        args = _args("gherkin", str(feature), "--steps", str(self._steps(tmp_path)),
-                     "--timeout", "10")
-        rc = cli_mod.cmd_gherkin(args)
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 0
-        assert out["ok"] is True
-        assert out["summary"]["passed"] == 1
-
-    def test_syntax_error_emits_feature_null_contract(self, tmp_path, capsys):
-        feature = self._feature(tmp_path, "Scenario: orphan\n")
-        args = _args("gherkin", str(feature))
-        rc = cli_mod.cmd_gherkin(args)
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 1
-        assert out["feature"] is None
-        assert out["summary"] == {"total": 0, "passed": 0, "failed": 1}
-        assert ":1:" in out["failures"][0]["reason"]
-
-    def test_directory_steps_aggregate_in_process(self, tmp_path, capsys):
-        lib = tmp_path / "kol"
-        lib.mkdir()
-        (lib / "_shared.py").write_text("X = 1\n", encoding="utf-8")
-        (lib / "steps_ok.py").write_text(
-            "def register(r):\n"
-            "    @r.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        pass\n",
-            encoding="utf-8",
-        )
-        args = _args("gherkin", str(self._feature(tmp_path)), "--steps", str(lib))
-        rc = cli_mod.cmd_gherkin(args)
-        assert rc == 0
-        assert json.loads(capsys.readouterr().out)["ok"] is True
-
-    def test_empty_directory_is_caller_error(self, tmp_path, capsys):
-        empty = tmp_path / "empty"
-        empty.mkdir()
-        args = _args("gherkin", str(self._feature(tmp_path)), "--steps", str(empty))
+    def test_gherkin_banner_exits_two_with_stderr_pointer(self, capsys):
+        # SEE-1468 M5-a 退役别名期：任意参数组合一律横幅 + exit 2。
+        args = _args("gherkin", "whatever.feature", "--steps", "missing.py")
         rc = cli_mod.cmd_gherkin(args)
         captured = capsys.readouterr()
         assert rc == 2
-        assert "no steps modules" in captured.err
-        assert captured.out == ""
+        assert "retired" in captured.err
+        assert "gqt accept" in captured.err
 
-    def test_missing_steps_is_caller_error(self, tmp_path, capsys):
-        args = _args("gherkin", str(self._feature(tmp_path)),
-                     "--steps", str(tmp_path / "nope"))
+    def test_gherkin_banner_ignores_timeout_flag(self, capsys):
+        args = _args("gherkin", "whatever.feature", "--timeout", "30")
         rc = cli_mod.cmd_gherkin(args)
         captured = capsys.readouterr()
         assert rc == 2
-        assert "cannot load steps module" in captured.err
+        assert "retired" in captured.err
 
-    def test_steps_file_without_register_is_caller_error(self, tmp_path, capsys):
-        # A steps module that cannot even satisfy its contract is an
-        # environment/caller problem (exit 2), never a fake test verdict.
-        bad = tmp_path / "steps_bad.py"
-        bad.write_text("X = 1\n", encoding="utf-8")
-        args = _args("gherkin", str(self._feature(tmp_path)), "--steps", str(bad))
+    def test_gherkin_banner_registry_unreachable_after_retirement(self, capsys):
+        # runner 判定面已退役：横幅路径不再构造 Registry（行为面收口证据）。
+        import godot_qa_toolkit.gherkin.runner as runner_mod
+
+        args = _args("gherkin", "whatever.feature")
         rc = cli_mod.cmd_gherkin(args)
-        captured = capsys.readouterr()
         assert rc == 2
-        assert "cannot load steps module" in captured.err
-
-    def test_steps_file_with_missing_import_is_caller_error(self, tmp_path, capsys):
-        # Mirrors the no-import-cache scenario (SEE-1306 D2): the steps module
-        # raises ImportError at exec time — environment not ready, not a red
-        # run. CI must see exit 2, not a false regression.
-        bad = tmp_path / "steps_dep.py"
-        bad.write_text("import no_such_module_xyz\n", encoding="utf-8")
-        args = _args("gherkin", str(self._feature(tmp_path)), "--steps", str(bad))
-        rc = cli_mod.cmd_gherkin(args)
+        assert runner_mod.Registry is not None  # 模块保留（M5-b 物理删除），判定面不再触达
         captured = capsys.readouterr()
-        assert rc == 2
-        assert "cannot load steps module" in captured.err
-        assert captured.out == ""
-
-    def test_failing_step_emits_failure_with_context(self, tmp_path, capsys):
-        steps = tmp_path / "steps_fail.py"
-        steps.write_text(
-            "from godot_qa_toolkit.gherkin.runner import StepFailure\n"
-            "def register(r):\n"
-            "    @r.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        raise StepFailure('boom', detail='why', stderr_tail='tail')\n",
-            encoding="utf-8",
-        )
-        args = _args("gherkin", str(self._feature(tmp_path).with_name("in.feature")),
-                     "--steps", str(steps), "--timeout", "10")
-        rc = cli_mod.cmd_gherkin(args)
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 1
-        f = out["failures"][0]
-        assert "StepFailure: boom" in f["reason"]
-        assert f["detail"] == "why"
-        assert f["stderr_tail"] == "tail"
-
-    def test_timeout_flag_reaches_the_runner(self, tmp_path, capsys):
-        steps = tmp_path / "steps_slow.py"
-        steps.write_text(
-            "import time\n"
-            "def register(r):\n"
-            "    @r.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        time.sleep(5)\n",
-            encoding="utf-8",
-        )
-        args = _args("gherkin", str(self._feature(tmp_path)),
-                     "--steps", str(steps), "--timeout", "1")
-        rc = cli_mod.cmd_gherkin(args)
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 1
-        assert out["failures"][0]["reason"].startswith("ScenarioTimeout")
+        assert "retired" in captured.err
 
 
 class TestOtherSubcommandsInProcess:

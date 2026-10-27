@@ -60,7 +60,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 
 ## 4. 各子命令契约
 
-### 4.1 `gqt gherkin <feature> [--steps <module.py>]`
+### 4.1 `gqt gherkin <feature> [--steps <module.py>]`（SEE-1468 M5-a 起退役：stderr 指引 + exit 2；判定面移至 `gqt accept` / pytest-bdd）
 
 - 输入：`.feature` 文件路径；可选 steps 模块路径（模块须暴露 `register(registry)`，registry 来自 `godot_qa_toolkit.gherkin.runner.Registry`）。
 - 不给 `--steps`：每个 step 都 unmatched → 整体 fail 判定（合法行为，非错误）。

@@ -1,176 +1,48 @@
-"""CLI `--steps` directory/package loading (SEE-1306 BL-8, §SPEC-006).
+"""Steps-dir CLI arguments under the M5-a retirement alias period.
 
-The library form of the KOL step-defs is a directory of per-domain modules
-(`steps_economy.py`, `steps_save.py`, ...). The M1 loader used
-`spec_from_file_location` without `submodule_search_locations`, which cannot
-import a package and cannot aggregate a directory — so a library-shaped
-`--steps` failed with exit 2. These tests pin the new contract.
+SEE-1468 M5-a：`gqt gherkin` 退役为横幅 + exit 2——目录聚合 loader
+（_try_load_steps）随入口退役；本文件钉住「任意 steps 组合仍走横幅」
+的收口面，防参数路径残留旧行为。
 """
 
-import json
-import subprocess
-import sys
+from __future__ import annotations
+
 from pathlib import Path
 
-REPO = Path(__file__).parent.parent.parent
-
-FEATURE = """\
-Feature: steps loader
-  Scenario: aggregated
-    Given a domain step
-"""
+from godot_qa_toolkit import cli as cli_mod
+from godot_qa_toolkit.cli import build_parser
 
 
-def _run_cli(*argv: str, cwd: Path) -> tuple[int, dict]:
-    proc = subprocess.run(
-        [sys.executable, "-m", "godot_qa_toolkit.cli", *argv],
-        capture_output=True,
-        text=True,
-        cwd=str(cwd),
-    )
-    # Caller errors (exit 2) print on stderr without a JSON contract, matching
-    # the M1 convention; only verdict paths emit JSON on stdout.
-    if proc.returncode == 2:
-        return 2, {"stderr": proc.stderr}
-    start = proc.stdout.index("{")
-    return proc.returncode, json.loads(proc.stdout[start:])
+def _args(*argv: str):
+    return build_parser().parse_args(list(argv))
 
 
-def _write_feature(tmp_path: Path) -> Path:
-    feature = tmp_path / "dir.feature"
-    feature.write_text(FEATURE, encoding="utf-8")
-    return feature
+def test_steps_dir_argument_still_exits_with_banner(tmp_path, capsys):
+    args = _args("gherkin", "whatever.feature", "--steps", str(tmp_path))
+    rc = cli_mod.cmd_gherkin(args)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "retired" in captured.err
 
 
-def _write_steps(dir_path: Path, name: str, body: str) -> None:
-    (dir_path / name).write_text(body, encoding="utf-8")
+def test_steps_file_argument_still_exits_with_banner(tmp_path, capsys):
+    steps = tmp_path / "steps.py"
+    steps.write_text("def register(r):\n    pass\n", encoding="utf-8")
+    args = _args("gherkin", "whatever.feature", "--steps", str(steps))
+    rc = cli_mod.cmd_gherkin(args)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "retired" in captured.err
 
 
-class TestDirectorySteps:
-    def test_module_with_dataclass_execs(self, tmp_path):
-        # SEE-1309: dataclass creation reads sys.modules[cls.__module__]; an
-        # exec'd-but-unregistered module made that None and blew up with
-        # AttributeError. Trigger needs `from __future__ import annotations`
-        # (stringified annotations send dataclasses into the _is_type lookup) —
-        # the real KOL probe library has it, plain fixtures do not.
-        steps = tmp_path / "kol"
-        steps.mkdir()
-        _write_steps(
-            steps,
-            "steps_probe.py",
-            "from __future__ import annotations\n"
-            "from dataclasses import dataclass, field\n"
-            "@dataclass\n"
-            "class Outcome:\n"
-            "    ok: bool\n"
-            "    meta: dict = field(default_factory=dict)\n"
-            "def register(registry):\n"
-            "    @registry.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        ctx['outcome'] = Outcome(ok=True).ok\n",
-        )
-        rc, out = _run_cli(
-            "gherkin", str(_write_feature(tmp_path)), "--steps", str(steps), cwd=REPO / "src"
-        )
-        assert rc == 0, out
-        assert out["ok"] is True
+def test_missing_steps_argument_still_exits_with_banner(capsys):
+    args = _args("gherkin", "whatever.feature", "--steps", "no/such/dir")
+    rc = cli_mod.cmd_gherkin(args)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "retired" in captured.err
 
-    def test_directory_aggregates_every_domain_module(self, tmp_path):
-        steps = tmp_path / "kol"
-        steps.mkdir()
-        _write_steps(
-            steps,
-            "steps_economy.py",
-            "def register(registry):\n"
-            "    @registry.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        ctx['economy'] = True\n",
-        )
-        _write_steps(
-            steps,
-            "steps_save.py",
-            "def register(registry):\n"
-            "    pass\n",
-        )
-        rc, out = _run_cli(
-            "gherkin", str(_write_feature(tmp_path)), "--steps", str(steps), cwd=REPO / "src"
-        )
-        assert rc == 0, out
-        assert out["ok"] is True
 
-    def test_private_helpers_are_skipped(self, tmp_path):
-        steps = tmp_path / "kol"
-        steps.mkdir()
-        _write_steps(
-            steps,
-            "steps_economy.py",
-            "def register(registry):\n"
-            "    @registry.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        pass\n",
-        )
-        # A shared helper is not a steps module: it must not be auto-registered
-        # (importing it is fine, calling register() on it is not the contract).
-        _write_steps(steps, "_bridge.py", "SHARED = 1\n")
-        rc, out = _run_cli(
-            "gherkin", str(_write_feature(tmp_path)), "--steps", str(steps), cwd=REPO / "src"
-        )
-        assert rc == 0, out
-
-    def test_directory_without_register_module_is_a_caller_error(self, tmp_path):
-        steps = tmp_path / "empty"
-        steps.mkdir()
-        rc, out = _run_cli(
-            "gherkin", str(_write_feature(tmp_path)), "--steps", str(steps), cwd=REPO / "src"
-        )
-        assert rc == 2
-        assert "no steps modules" in out["stderr"]
-
-    def test_missing_steps_path_is_a_caller_error(self, tmp_path):
-        rc, out = _run_cli(
-            "gherkin",
-            str(_write_feature(tmp_path)),
-            "--steps",
-            str(tmp_path / "nope"),
-            cwd=REPO / "src",
-        )
-        assert rc == 2
-        assert "cannot load steps module" in out["stderr"]
-
-    def test_single_file_still_works(self, tmp_path):
-        steps = tmp_path / "single.py"
-        _write_steps(
-            tmp_path,
-            "single.py",
-            "def register(registry):\n"
-            "    @registry.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        pass\n",
-        )
-        rc, out = _run_cli(
-            "gherkin", str(_write_feature(tmp_path)), "--steps", str(steps), cwd=REPO / "src"
-        )
-        assert rc == 0, out
-
-    def test_feature_level_scenario_timeout_flag(self, tmp_path):
-        steps = tmp_path / "slow.py"
-        _write_steps(
-            tmp_path,
-            "slow.py",
-            "import time\n"
-            "def register(registry):\n"
-            "    @registry.step('a domain step', keyword='Given')\n"
-            "    def _s(ctx):\n"
-            "        time.sleep(5)\n",
-        )
-        rc, out = _run_cli(
-            "gherkin",
-            str(_write_feature(tmp_path)),
-            "--steps",
-            str(steps),
-            "--timeout",
-            "1",
-            cwd=REPO / "src",
-        )
-        assert rc == 1
-        assert out["failures"][0]["reason"].startswith("ScenarioTimeout")
+def test_directory_loader_is_retired_with_the_entry():
+    # _try_load_steps 随入口退役删除（M5-b 物理删除 runner/expectations）。
+    assert not hasattr(cli_mod, "_try_load_steps")

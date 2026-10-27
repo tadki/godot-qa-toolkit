@@ -60,62 +60,17 @@ def _load_steps_module(path: Path, registry: "Registry") -> None:
             sys.path.remove(steps_dir)
 
 
-def _try_load_steps(path: Path, registry: "Registry", *, label: str) -> bool:
-    """Load one steps module; on failure report as caller error (exit 2).
-
-    A steps module that cannot even import (missing sibling helper, missing
-    dependency, missing prerequisite like the game-side import cache) is an
-    environment/caller problem, NOT a test verdict: returning False lets the
-    CLI exit 2 with a stderr-only message instead of fabricating a red run
-    (SEE-1306 D2: `gqt gherkin` must not misreport "env not ready" as
-    "code regressed").
-    """
-    try:
-        _load_steps_module(path, registry)
-    except (ImportError, AttributeError, OSError, ValueError) as exc:
-        print(f"cannot load steps module: {label} ({type(exc).__name__}: {exc})",
-              file=sys.stderr)
-        return False
-    return True
-
-
 def cmd_gherkin(args: argparse.Namespace) -> int:
-    feature_path = Path(args.feature)
-    registry = Registry()
-    if args.steps:
-        steps_path = Path(args.steps)
-        if steps_path.is_dir():
-            # Library form (SEE-1306): every public module in the directory is
-            # a steps module; underscore-prefixed files are shared helpers and
-            # are skipped so their absence of register() is not an error.
-            modules = sorted(
-                p for p in steps_path.glob("*.py")
-                if not p.name.startswith("_")
-            )
-            if not modules:
-                print(f"no steps modules found in directory: {args.steps}", file=sys.stderr)
-                return 2
-            for mod_path in modules:
-                if not _try_load_steps(mod_path, registry, label=args.steps):
-                    return 2
-        elif steps_path.is_file():
-            if not _try_load_steps(steps_path, registry, label=args.steps):
-                return 2
-        else:
-            print(f"cannot load steps module: {args.steps}", file=sys.stderr)
-            return 2
-    try:
-        feature = parse(feature_path.read_text(encoding="utf-8"), path=str(feature_path))
-    except GherkinSyntaxError as e:
-        result = {
-            "tool": "gherkin",
-            "ok": False,
-            "feature": None,
-            "summary": {"total": 0, "passed": 0, "failed": 1},
-            "failures": [{"reason": str(e)}],
-        }
-        return _emit(result)
-    return _emit(run_feature(feature, registry, scenario_timeout_s=args.timeout))
+    # SEE-1468 M5-a 退役别名期（三段式第二段）：`gqt gherkin` 判定面已由
+    # `gqt accept`（acceptance /2）与 gqt tests/bdd pytest-bdd 承接——本入口
+    # 仅保留迁移指引横幅并 exit 2；runner/expectations 物理删除在 M5-b。
+    print(
+        "gqt gherkin retired (SEE-1468 M5-a): migrate to `gqt accept` "
+        "(acceptance /2) or pytest-bdd (tests/bdd) — parser stays via "
+        "`gqt accept compile`",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def cmd_accept(args: argparse.Namespace) -> int:

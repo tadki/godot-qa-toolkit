@@ -42,7 +42,7 @@ source of truth.
 
 | Tool | Command | Status |
 |---|---|---|
-| **Gherkin runner** | `gqt gherkin <file.feature> [--steps <module.py or dir>] [--timeout S]` | shipped |
+| **Gherkin runner** | `gqt gherkin …` — retired (SEE-1468 M5-a alias): stderr pointer + exit 2; use `gqt accept` / pytest-bdd (tests/bdd) | retired-alias |
 | **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
 | **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
 | **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
@@ -77,8 +77,9 @@ gqt doctor                  # verify your install + toolchain wiring
 Then pick a tool:
 
 ```bash
-# 1. Run a Gherkin feature against a Python step registry
-gqt gherkin features/leaderboard.feature --steps steps.py
+# 1. Gherkin acceptance pipeline (replaces the retired gherkin runner)
+gqt accept compile features/leaderboard.feature --project-root . --write
+gqt accept run --project-root . --key leaderboard
 
 # 2. Gate cyclomatic complexity
 gqt complexity src/systems --warn 8 --max 12
@@ -89,7 +90,11 @@ gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . --jobs 8
 
 ---
 
-## Gherkin runner (self-authored)
+## Gherkin runner (retired — SEE-1468 M5-a alias period)
+
+> `gqt gherkin` now prints a migration pointer to stderr and exits 2.
+> Judgement faces moved to `gqt accept` (acceptance /2) and pytest-bdd
+> (`tests/bdd`); physical deletion of runner/expectations lands in M5-b.
 
 A minimal, **strict** Gherkin subset: `Feature`, `Background`, `Scenario`,
 `Scenario Outline`, tags (`@tag`), and `Given/When/Then/And/But` steps.
@@ -110,7 +115,7 @@ def register(r: Registry):
 ```
 
 ```bash
-gqt gherkin features/leaderboard.feature --steps steps.py
+gqt accept compile features/leaderboard.feature --project-root . --write
 ```
 
 - `--steps` accepts **one module file or a directory**: for a directory,

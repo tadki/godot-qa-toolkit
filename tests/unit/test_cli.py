@@ -56,7 +56,7 @@ class TestGherkinCli:
         rc, err = self._run_gherkin(str(FIXTURES / "sample.feature"))
         assert rc == 2
         assert "invalid choice" in err
-        assert "'accept', 'arch', 'complexity', 'mutation', 'coverage', 'doctor'" in err
+        assert "(choose from accept, arch, complexity, mutation, coverage, doctor)" in err
 
 
 class TestMutationCliSurface:

@@ -1,10 +1,12 @@
 """Unified CLI for godot-qa-toolkit (SEE-1268 M1).
 
-Every subcommand emits the unified JSON contract:
+Every subcommand (except the retired `gherkin` alias) emits the unified JSON
+contract:
     {"tool": ..., "ok": bool, "summary": {...}, "failures": [...]}
 
 Exit code is 0 on ok, 1 on any failure — the machine verdict consumers rely on.
-"""
+The retired `gherkin` alias (SEE-1468 M5-a) prints a migration pointer to
+stderr and exits 2."""
 
 from __future__ import annotations
 
@@ -14,9 +16,6 @@ import sys
 from pathlib import Path
 
 from .doctor import cmd_doctor
-from .gherkin.parser import GherkinSyntaxError, parse
-from .gherkin.runner import Registry, run_feature
-
 # complexity/coverage/mutation are imported lazily inside their cmd_* handlers:
 # they pull in gdtoolkit, so a gdtoolkit-less environment (e.g. a minimal CI
 # runner that only needs `gqt gherkin`) must still start the CLI (§SPEC-114,
@@ -27,37 +26,6 @@ def _emit(result: dict) -> int:
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0 if result["ok"] else 1
-
-
-def _load_steps_module(path: Path, registry: "Registry") -> None:
-    """Exec one steps file and call its register(). Caller validates existence."""
-    import importlib.util
-    import sys
-
-    spec = importlib.util.spec_from_file_location(f"gqt_steps_{path.stem}", str(path))
-    if spec is None or spec.loader is None:
-        raise ValueError(f"cannot build import spec for {path}")
-    module = importlib.util.module_from_spec(spec)
-    # dataclasses' KW_ONLY sniff reads sys.modules[cls.__module__] during class
-    # creation — an exec'd-but-unregistered module makes that lookup None and
-    # any @dataclass in the steps file (e.g. a probe result DTO) dies with
-    # AttributeError. Register before exec; del afterwards keeps the namespace
-    # clean (SEE-1309: real KOL library hits this, toy fixtures do not).
-    sys.modules[spec.name] = module
-    # spec_from_file_location does not put the module's directory on sys.path;
-    # a steps library that imports sibling helpers needs it there for the
-    # duration of the exec.
-    steps_dir = str(path.parent)
-    added = steps_dir not in sys.path
-    if added:
-        sys.path.insert(0, steps_dir)
-    try:
-        spec.loader.exec_module(module)
-        module.register(registry)
-    finally:
-        sys.modules.pop(spec.name, None)
-        if added:
-            sys.path.remove(steps_dir)
 
 
 def cmd_gherkin(args: argparse.Namespace) -> int:

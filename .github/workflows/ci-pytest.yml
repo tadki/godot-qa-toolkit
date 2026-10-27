@@ -2,6 +2,9 @@
 # 纯 Python 工具自测（用例数以 tests/ 目录为准），零 Godot 依赖（mutation/
 # coverage 的 GUT 路径在单测里全部 mock）。见 docs/ci-cache-matrix.md 的归属
 # 判据与缓存矩阵。
+# SEE-1468 M5-a HIGH-1 修复：tests/bdd/test_see1288_fork_cli.py 的 4 场景
+# 断言 KOL launcher/proxy/doctor 面——CI 增 KOL 稳定检出（含 godot_mcp
+# submodule）+ node（build fallback / 真执行探针），无条件实跑非 skip。
 name: ci-pytest
 
 concurrency:
@@ -20,9 +23,24 @@ permissions:
 jobs:
   pytest-unit:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      # SEE-1468 M5-a HIGH-1：fork_cli pytest-bdd 断言 KOL launcher/proxy 面
+      #（SEE1288_REPO 指向此检出；submodules 拉 godot_mcp 子模块含 launch/）。
+      - name: Checkout KOL repo (fork_cli BDD subject)
+        uses: actions/checkout@v4
+        with:
+          repository: tadki/KingOfLikes-Godot
+          ref: master
+          path: KingOfLikes-Godot
+          submodules: recursive
+
+      - name: Setup Node (fork CLI build fallback / execution probe)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -41,6 +59,8 @@ jobs:
         run: pip install -e '.[test]'
 
       - name: Run unit and pytest-bdd tests with BDD reports
+        env:
+          SEE1288_REPO: ${{ github.workspace }}/KingOfLikes-Godot
         run: >-
           python -m pytest tests/ -q
           --bdd-step-report=build/bdd-step-resolution.json

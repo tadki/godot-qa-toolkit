@@ -30,18 +30,19 @@ def _args(*argv: str) -> pytest.MonkeyPatch:
     return build_parser().parse_args(list(argv))
 
 
-class TestLoadStepsModuleRetired:
-    """SEE-1468 M5-a：目录/单文件 loader（_load_steps_module）随 `gqt gherkin`
-    入口退役删除——横幅路径对 steps 参数仍 exit 2，且 loader 不再存在。"""
+class TestGherkinSubcommandRemoved:
+    """SEE-1468 M5-b 物理删除收口：gherkin 子命令与 loader 均已自 CLI
+    移除（build_parser 不再注册；cmd_gherkin 不复存在）。"""
 
-    def test_loader_removed_from_cli_module(self):
-        assert not hasattr(cli_mod, "_load_steps_module")
+    def test_gherkin_subcommand_unregistered(self):
+        parser = build_parser()
+        choices = parser._subparsers._group_actions[0].choices
+        assert "gherkin" not in choices
 
-    def test_steps_arguments_route_to_banner(self, tmp_path, capsys):
-        steps = tmp_path / "steps.py"
-        steps.write_text("def register(r):\n    pass\n", encoding="utf-8")
-        args = _args("gherkin", "whatever.feature", "--steps", str(steps))
-        rc = cli_mod.cmd_gherkin(args)
-        captured = capsys.readouterr()
-        assert rc == 2
-        assert "retired" in captured.err
+    def test_cmd_gherkin_removed_from_cli_module(self):
+        assert not hasattr(cli_mod, "cmd_gherkin")
+
+    def test_gherkin_args_rejected_at_parse(self):
+        with pytest.raises(SystemExit) as exc:
+            build_parser().parse_args(["gherkin", "whatever.feature"])
+        assert exc.value.code == 2

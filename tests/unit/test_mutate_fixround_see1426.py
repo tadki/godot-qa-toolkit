@@ -28,7 +28,7 @@ from godot_qa_toolkit.accept.mutate_runner import (
 )
 from godot_qa_toolkit.accept.run import replay_check
 from godot_qa_toolkit.arch.collector import collect_file
-from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
 
 @pytest.fixture(autouse=True)
 def _restore_subprocess():

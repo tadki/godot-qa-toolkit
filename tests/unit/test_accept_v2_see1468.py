@@ -21,7 +21,7 @@ from godot_qa_toolkit.accept.compile import compile_feature
 from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.accept.mutate_runner import run_mutate
 from godot_qa_toolkit.accept.run import AcceptRunError, replay_check, run_suite
-from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
 
 FEATURE = """Feature: F
   Scenario Outline: s

@@ -2,7 +2,7 @@
 
 import pytest
 
-from godot_qa_toolkit.gherkin.parser import (
+from godot_qa_toolkit.accept.parser import (
     Feature,
     GherkinSyntaxError,
     parse,

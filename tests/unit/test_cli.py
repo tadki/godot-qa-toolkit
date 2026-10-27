@@ -40,11 +40,10 @@ class TestComplexityCli:
 
 
 class TestGherkinCli:
-    """SEE-1468 M5-a 退役别名期：`gqt gherkin` 仅保留迁移指引横幅
-    （stderr 一行 + exit 2）；判定面已由 `gqt accept` / pytest-bdd 承接。"""
+    """SEE-1468 M5-b 物理删除收口：gherkin 子命令已自 CLI 移除。"""
 
-    def _run_gherkin_banner(self, *argv: str) -> tuple[int, str]:
-        # 别名期横幅走 stderr（stdout 无 JSON 契约），独立于 _run_cli。
+    def _run_gherkin(self, *argv: str) -> tuple[int, str]:
+        # SEE-1468 M5-b 物理删除：gherkin 子命令已移除，argparse 拒绝并 exit 2。
         proc = subprocess.run(
             [sys.executable, "-m", "godot_qa_toolkit.cli", "gherkin", *argv],
             capture_output=True,
@@ -53,17 +52,11 @@ class TestGherkinCli:
         )
         return proc.returncode, proc.stderr
 
-    def test_missing_steps_module_still_exits_with_banner(self):
-        rc, err = self._run_gherkin_banner(str(FIXTURES / "sample.feature"))
+    def test_gherkin_subcommand_is_physically_removed(self):
+        rc, err = self._run_gherkin(str(FIXTURES / "sample.feature"))
         assert rc == 2
-        assert "retired" in err and "gqt accept" in err
-
-    def test_feature_without_feature_line_still_exits_with_banner(self, tmp_path):
-        bad = tmp_path / "bad.feature"
-        bad.write_text("Scenario: orphan\n", encoding="utf-8")
-        rc, err = self._run_gherkin_banner(str(bad))
-        assert rc == 2
-        assert "retired" in err
+        assert "invalid choice" in err
+        assert "'accept', 'arch', 'complexity', 'mutation', 'coverage', 'doctor'" in err
 
 
 class TestMutationCliSurface:

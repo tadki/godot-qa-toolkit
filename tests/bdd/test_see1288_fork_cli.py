@@ -15,10 +15,6 @@ from pathlib import Path
 import pytest
 from pytest_bdd import given, scenarios, then, when
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("SEE1288_SKIP_KOL", "") == "1", reason="KOL-dependent BDD disabled"
-)
-
 scenarios("features/see1288_fork_cli.feature")
 
 
@@ -27,12 +23,18 @@ def _kol_repo() -> Path:
     if env:
         return Path(env)
     # 本工作区双仓并排布局：gqt/../KingOfLikes-Godot
-    sibling = Path(__file__).resolve().parents[3] / "KingOfLikes-Godot"
-    if (sibling / "addons" / "godot_mcp" / "launch").is_dir():
-        return sibling
+    return Path(__file__).resolve().parents[3] / "KingOfLikes-Godot"
+
+
+# 模块级守卫（collection 时整模块 skip）：gqt CI 无 KOL 检出——fixture 内
+# pytest.skip 会被 pytest-bdd 记为 scenario failed（CI 实测），collection
+# 时 allow_module_level skip 才是干净的「无 KOL = 跳过非红」形态。
+_KOL_TREE = _kol_repo()
+if not (_KOL_TREE / "addons" / "godot_mcp" / "launch").is_dir():
     pytest.skip(
         "KOL checkout not found (set SEE1288_REPO to run these "
-        "KOL-tree assertions)"
+        "KOL-tree assertions)",
+        allow_module_level=True,
     )
 
 

@@ -76,49 +76,31 @@ gqt doctor                  # verify your install + toolchain wiring
 Then pick a tool:
 
 ```bash
-# 1. Gherkin acceptance pipeline (replaces the retired gherkin runner)
-gqt accept compile features/leaderboard.feature --project-root . --write
-gqt accept run --project-root . --key leaderboard
+# 1. Gherkin acceptance pipeline（承接退役 gherkin runner 的场景判定）
+gqt accept compile acceptance/foo.feature --project-root . --write
+gqt accept run    --project-root . --key foo
+gqt accept mutate --project-root . --key foo
 
 # 2. Gate cyclomatic complexity
 gqt complexity src/systems --warn 8 --max 12
 
-# 3. Mutation-test two scenes in one process, 8 workers
+# 3. Pure-core arch guard
+gqt arch src/systems --warn 8 --max 12
+
+# 4. Mutation-test two scenes in one process, 8 workers
 gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . --jobs 8
 ```
 
 ---
 
-
-A minimal, **strict** Gherkin subset: `Feature`, `Background`, `Scenario`,
-`Scenario Outline`, tags (`@tag`), and `Given/When/Then/And/But` steps.
-`And`/`But` inherit the previous keyword. Anything unparseable is an error
-with `path:line` context — a spec that only "mostly" parses is not
-machine-checkable.
-
-Steps bind to a Python registry:
-
-```python
-# steps.py
-from godot_qa_toolkit.gherkin.runner import Registry
-
-def register(r: Registry):
-    @r.step("{n} hearts")
-    def hearts(ctx, n):
-        ctx["hearts"] = int(n)
-```
-
-```bash
-gqt accept compile features/leaderboard.feature --project-root . --write
-```
-
-- `--steps` accepts **one module file or a directory**: for a directory,
-  every public `*.py` (underscore-prefixed files are treated as shared
-  helpers and skipped) is loaded as a steps module.
-- `--timeout S` puts a per-scenario wall-clock budget on step execution.
-- A steps module that cannot import (missing helper, missing dependency,
-  missing game-side import cache) is a **caller error, exit 2** — the CLI
-  never misreports "environment not ready" as "code regressed".
+`gqt accept` accepts a strict Gherkin subset (`Feature`/`Background`/
+`Scenario`/`Scenario Outline`/tags/steps). The standalone `gherkin` command
+and the `godot_qa_toolkit.gherkin` module were **physically retired in
+SEE-1468 M5-b**: the parser was promoted to `accept/parser.py` and judgement
+moved into `gqt accept` (see the Accept pipeline below). The old steps
+registry (`gherkin.runner.Registry`) and the `--steps` / per-scenario
+`--timeout` flags no longer exist — generated tests are driven by the
+target project's `testing_api.gd` adapter instead.
 
 ## Accept pipeline
 

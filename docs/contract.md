@@ -4,7 +4,9 @@
 
 ## 1. 插件定位声明
 
-godot-qa-toolkit 是一个**Godot 项目专用的确定性 QA 测试工具插件**（五阶段工具链：Gherkin runner、complexity gate、mutation runner、coverage runner、Godot determinism 逻辑）。
+godot-qa-toolkit 是一个**Godot 项目专用的确定性 QA 测试工具插件**（工具链：Gherkin acceptance pipeline、complexity gate、mutation runner、coverage runner、arch guard、doctor 自检）。
+
+> **gherkin 命令退役注记（SEE-1468 M5-b）**：独立 `gherkin` runner / expectations / cli 已物理删除（parser 晋升为 `accept.parser`，判定面迁入 `gqt accept` 与 pytest-bdd）。本契约不再含 `gherkin` 子命令；原 gherkin 场景判定能力由 `gqt accept compile/run/mutate`（见 §4.2a-c）承接。
 
 与 godot-mcp 运行时库的分层边界（Owner 2026-09-09 两库拆分裁定）：
 
@@ -27,7 +29,7 @@ gqt <subcommand> [args]        # console script（pyproject [project.scripts]）
 python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 ```
 
-七个子命令：`gherkin` / `arch` / `accept` / `complexity` / `mutation` / `coverage` / `doctor`（SEE-1426 起 doctor 随自检能力加入）。
+六个子命令：`accept` / `arch` / `complexity` / `mutation` / `coverage` / `doctor`（SEE-1426 起 doctor 随自检能力加入）。原第七个子命令 `gherkin` 已于 SEE-1468 M5-b 物理退役（判定能力由 `gqt accept` 承接，见 §1 退役注记）。
 
 ## 3. 统一输出 JSON 契约
 
@@ -37,7 +39,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 
 ```json
 {
-  "tool": "<gherkin|complexity|mutation|coverage>",
+  "tool": "<accept|arch|complexity|mutation|coverage>",
   "ok": true,
   "summary": { },
   "failures": [ ]
@@ -53,7 +55,6 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 
 | 工具 | 额外字段 | 说明 |
 |---|---|---|
-| gherkin | `feature` | Feature 名；语法解析失败时为 `null` |
 | complexity | `config`、`warnings` | 生效阈值 `{warn_complexity, max_complexity}`；仅告警项（不进 failures） |
 
 错误兜底：stdout 无 JSON（JSON 解析失败）= 工具实现 bug 或进程级崩溃，消费方按「不可信」处理，而非按 fail。
@@ -184,7 +185,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 |---|---|---|
 | 0 | 判定通过（`ok=true`） | 任意子命令 |
 | 1 | 判定失败（`ok=false`，stdout 有 JSON） | verdict fail / run_error 中止 / 目标文件或 GUT runner 不存在 |
-| 2 | 用法/装载错误，**stdout 无 JSON** | argparse 参数错误；`gherkin --steps` 模块加载失败（stderr 报 `cannot load steps module`）；`doctor` 安装错配（自检 JSON 打 stderr、stdout 恒空） |
+| 2 | 用法/装载错误，**stdout 无 JSON** | argparse 参数错误；`doctor` 安装错配（自检 JSON 打 stderr、stdout 恒空） |
 
 约定：exit 2 是「调用方自己错了」，exit 1 是「被测对象判为失败」。消费方自动化只应区分 0 与非 0，并解析 stdout JSON 细分 1 的形态。
 

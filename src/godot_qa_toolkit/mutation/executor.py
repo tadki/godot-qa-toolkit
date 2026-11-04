@@ -18,6 +18,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from .inject import godot_command
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
@@ -60,8 +61,12 @@ def prewarm_import(project_root: str) -> None:
     if not os.path.isfile(os.path.join(project_root, "project.godot")):
         return
     try:
+        # §SPEC-1525-002：预热启动点同源 godot_command()——原字面量 "godot"
+        # 使显式 env（Linux ELF）下预热仍走 PATH 首匹配，判定与预热双引擎。
+        # --path 保持原样直传（既有语义：win64 下预热失败本就降级放行，
+        # 未设变量路径不得在此引入新转换）。
         subprocess.run(
-            ["godot", "--headless", "--import", "--path", project_root],
+            [godot_command(), "--headless", "--import", "--path", project_root],
             capture_output=True, text=True, timeout=_PREWARM_TIMEOUT_S,
             cwd=project_root,
         )

@@ -27,6 +27,24 @@ def _emit(result: dict) -> int:
     return 0 if result["ok"] else 1
 
 
+def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | None:
+    """§SPEC-1525-002：--godot-bin 命令级覆盖注入（> GQT_GODOT_BIN > PATH），
+    显式配置错误 → 统一 JSON 错误契约（ok:false，与既有 BinaryConfigError
+    出口同形态）。返回 None 表示继续派发；返回 int 为已完成的错误响应。"""
+    from .mutation.inject import BinaryConfigError, apply_godot_bin_override
+
+    try:
+        apply_godot_bin_override(getattr(args, "godot_bin", None))
+    except BinaryConfigError as e:
+        return _emit({
+            "tool": tool,
+            "ok": False,
+            "summary": {"error": str(e)},
+            "failures": [{"reason": str(e)}],
+        })
+    return None
+
+
 def cmd_accept(args: argparse.Namespace) -> int:
     from .accept.compile import compile_feature
     from .accept.run import AcceptRunError, run_suite
@@ -61,6 +79,9 @@ def cmd_accept(args: argparse.Namespace) -> int:
             "failures": [],
         })
     # run / mutate
+    early = _apply_godot_bin_or_contract("accept", args)
+    if early is not None:
+        return early
     try:
         if args.accept_command == "mutate":
             from .accept.mutate_runner import run_mutate
@@ -98,9 +119,14 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import BinaryConfigError, detect_binary_kind
 
-    # §SPEC-012（定案 C 项 a+b）：GQT_GODOT_BIN 覆写限 mutation 子命令——
-    # dispatch 前钉死二进制类型（平台分支与 key 二进制成分共用判定）；
-    # coverage 子命令不触碰该 env，行为面冻结。
+    # §SPEC-1525-002：--godot-bin 命令级覆盖先行注入（经 os.environ 进同源
+    # 解析链），其后的 detect(refresh=True) 判定的就是覆盖后的二进制。
+    early = _apply_godot_bin_or_contract("mutation", args)
+    if early is not None:
+        return early
+    # §SPEC-012（定案 C 项 a+b，SEE-1525 起放宽为全局默认 + 命令级覆盖）：
+    # GQT_GODOT_BIN 覆写 dispatch 前钉死二进制类型（平台分支与 key 二进制
+    # 成分共用判定）。
     try:
         binary_kind = detect_binary_kind(refresh=True)
     except BinaryConfigError as e:
@@ -220,6 +246,11 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage.runner import run_coverage
     from .timing import TimingStore
 
+    # §SPEC-1525-001/002：覆盖注入先行——TimingStore 的 key 二进制成分与
+    # 启动 argv 解析同源（构造器内 detect_binary_kind 实时解析）。
+    early = _apply_godot_bin_or_contract("coverage", args)
+    if early is not None:
+        return early
     try:
         result = run_coverage(
             file_path=args.file,
@@ -267,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="feature key the suite was compiled under")
     acr.add_argument("--timeout", type=int, default=120,
                      help="GUT timeout seconds (default 120)")
+    acr.add_argument("--godot-bin", default=None,
+                     help="per-command Godot binary override; priority: "
+                          "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
     acr.set_defaults(func=cmd_accept)
 
     acm = acsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
@@ -285,6 +319,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "transfer, with per-mutant hard discipline "
                           "(release+rebuild+smoke probe, failure = run_error) "
                           "and a per-round verdict timeout (SEE-1426 §SPEC-14)")
+    acm.add_argument("--godot-bin", default=None,
+                     help="per-command Godot binary override; priority: "
+                          "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
     acm.set_defaults(func=cmd_accept)
 
     a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
@@ -343,6 +380,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "last `gqt coverage` run for this file (SEE-1420 P2; "
                         "provenance-checked: source/tests/binary must match; "
                         "uncovered sites are marked 'uncovered' and skipped)")
+    m.add_argument("--godot-bin", default=None,
+                   help="per-command Godot binary override; priority: "
+                        "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
@@ -354,6 +394,9 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--tests", default=None,
                    help="scoped GUT dir or single .gd path for per-suite attribution, "
                         "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
+    v.add_argument("--godot-bin", default=None,
+                   help="per-command Godot binary override; priority: "
+                        "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
     v.set_defaults(func=cmd_coverage)
 
     d = sub.add_parser("doctor", help="self-check editable install vs current worktree gitlink")

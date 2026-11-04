@@ -296,21 +296,18 @@ class TestH10CoverageGodotPathFix:
     mutation 侧的 wslpath 修复，/mnt/ 绝对路径 → 'Invalid project path' 0.1s 静默失败）。"""
 
     def test_godot_project_path_converts_wsl_mount(self, monkeypatch):
+        # SEE-1525 §SPEC-002：转换原语统一进 inject.godot_project_path（不得
+        # 各写一套）——H10 契约（win64 通道 /mnt/ 转 Windows 形式）不变，
+        # mock 点随实现迁移到共享 wslpath_win；缺省二进制（无 env）恒 win64。
         import godot_qa_toolkit.coverage.runner as c
+        from godot_qa_toolkit.mutation import inject
 
-        calls = []
-
-        def fake_wslpath(args, **kw):
-            calls.append(args)
-            class R:
-                returncode = 0
-                stdout = "D:\\GodotProjects\\king-of-likes\n"
-            return R()
-
-        monkeypatch.setattr(c.subprocess, "run", fake_wslpath)
+        monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+        inject.reset_binary_kind_cache()
+        monkeypatch.setattr(inject, "wslpath_win",
+                            lambda p: "D:\\GodotProjects\\king-of-likes")
         out = c._godot_project_path("/mnt/d/GodotProjects/king-of-likes")
         assert out == "D:\\GodotProjects\\king-of-likes"
-        assert calls and calls[0][:1] == ["wslpath"]
 
     def test_relative_path_passthrough(self):
         from godot_qa_toolkit.coverage.runner import _godot_project_path

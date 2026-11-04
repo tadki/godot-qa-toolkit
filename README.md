@@ -45,8 +45,8 @@ source of truth.
 | **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
 | **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
 | **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
-| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N]` | shipped |
-| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S]` | shipped |
+| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N] [--godot-bin <path>]` | shipped |
+| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S] [--godot-bin <path>]` | shipped |
 | **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp runtime addon | planned |
 
 `mutation` and `coverage` share three mandatory preconditions:
@@ -54,7 +54,11 @@ source of truth.
 - `--project-root` must point at a Godot project root containing
   `addons/gut/gut_cmdln.gd` — the tools consume the **tested project's own
   GUT**, they ship zero Godot assets of their own;
-- a `godot` executable must be on `PATH`;
+- a resolvable Godot binary: per-command `--godot-bin <path>` wins, then the
+  `GQT_GODOT_BIN` env var, then the first `godot` on `PATH` (SEE-1525;
+  omitting both keeps the historical PATH-only behavior byte-for-byte). The
+  `--path` argument handed to godot follows the detected binary kind — win64
+  builds get WSL paths converted via `wslpath`, Linux builds get them as-is;
 - `--project-root` is the *only* channel through which the test subject
   enters the tool: zero discovery, zero environment guessing, zero writes
   outside the target `.gd` (always restored) and the coverage probe sink
@@ -266,6 +270,11 @@ always forces serial.
 <summary><strong>Concurrency knobs & resume semantics</strong></summary>
 
 - `--jobs N` — per-process worker pool, clamped to `max(2, cpu//2)`.
+- `GQT_GODOT_BIN` — global default Godot binary for every subcommand that
+  launches godot (`mutation` / `coverage` / `accept run|mutate`); each of
+  them also takes a per-command `--godot-bin <path>` override (priority:
+  flag > env > PATH, SEE-1525). An invalid explicit path fails loudly with
+  the unified JSON error contract instead of silently falling back.
 - `GQT_GLOBAL_GODOT_SLOTS` — **cross-process** cap on live godot subprocesses
   (default `max(2, cpu//2)`). Every GUT run (baseline + per-mutant, and
   coverage) takes a flock slot under `.qa-cache/gqt-godot-slots/`; slots are

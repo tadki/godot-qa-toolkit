@@ -45,7 +45,7 @@ from .ops import (  # noqa: F401
 from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
                      _impl_fs_path, _interrupt_guard, make_sigterm_restore_handler,
                      godot_project_path as _unified_godot_project_path,
-                     mutant_env, seed_host_script, wslpath_win)  # noqa: F401
+                     mutant_env, seed_host_script)  # noqa: F401
 # 统一 mutant 明细记录形态（SEE-1416 扩列）与结果塑形契约在 reporting.py
 # （<800 行纪律拆分）；re-export 保持既有 import / monkeypatch 名称空间稳定。
 from .reporting import (  # noqa: F401

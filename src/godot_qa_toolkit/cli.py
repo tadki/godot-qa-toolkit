@@ -45,39 +45,50 @@ def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | N
     return None
 
 
-def cmd_accept(args: argparse.Namespace) -> int:
+def _add_godot_bin_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--godot-bin", default=None,
+                        help="per-command Godot binary override; priority: "
+                             "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
+
+
+def _accept_compile(args: argparse.Namespace) -> int:
     from .accept.compile import compile_feature
+
+    suite, error = compile_feature(
+        args.feature, args.project_root,
+        write=args.write, clean=not args.no_clean)
+    if error is not None:
+        return _emit({
+            "tool": "accept", "ok": False,
+            "summary": {"error": error["reason"]},
+            "failures": [error],
+        })
+    wrote = []
+    if args.write:
+        wrote = [
+            f"acceptance/ir/{suite.feature_key}.json",
+            f"acceptance/generated/test_{suite.feature_key}.gd",
+            "acceptance/generated/accept_worker.gd",
+            f"acceptance/generated/{suite.feature_key}.manifest.json",
+        ]
+    return _emit({
+        "tool": "accept", "ok": True,
+        "summary": {
+            "feature": suite.ir["feature"],
+            "feature_key": suite.feature_key,
+            "cases": len(suite.ir["cases"]),
+            "ir_hash": suite.manifest["ir_hash"],
+            "wrote": wrote,
+        },
+        "failures": [],
+    })
+
+
+def cmd_accept(args: argparse.Namespace) -> int:
     from .accept.run import AcceptRunError, run_suite
 
     if args.accept_command == "compile":
-        suite, error = compile_feature(
-            args.feature, args.project_root,
-            write=args.write, clean=not args.no_clean)
-        if error is not None:
-            return _emit({
-                "tool": "accept", "ok": False,
-                "summary": {"error": error["reason"]},
-                "failures": [error],
-            })
-        wrote = []
-        if args.write:
-            wrote = [
-                f"acceptance/ir/{suite.feature_key}.json",
-                f"acceptance/generated/test_{suite.feature_key}.gd",
-                "acceptance/generated/accept_worker.gd",
-                f"acceptance/generated/{suite.feature_key}.manifest.json",
-            ]
-        return _emit({
-            "tool": "accept", "ok": True,
-            "summary": {
-                "feature": suite.ir["feature"],
-                "feature_key": suite.feature_key,
-                "cases": len(suite.ir["cases"]),
-                "ir_hash": suite.manifest["ir_hash"],
-                "wrote": wrote,
-            },
-            "failures": [],
-        })
+        return _accept_compile(args)
     # run / mutate
     early = _apply_godot_bin_or_contract("accept", args)
     if early is not None:
@@ -298,9 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="feature key the suite was compiled under")
     acr.add_argument("--timeout", type=int, default=120,
                      help="GUT timeout seconds (default 120)")
-    acr.add_argument("--godot-bin", default=None,
-                     help="per-command Godot binary override; priority: "
-                          "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
+    _add_godot_bin_arg(acr)
     acr.set_defaults(func=cmd_accept)
 
     acm = acsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
@@ -319,9 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "transfer, with per-mutant hard discipline "
                           "(release+rebuild+smoke probe, failure = run_error) "
                           "and a per-round verdict timeout (SEE-1426 §SPEC-14)")
-    acm.add_argument("--godot-bin", default=None,
-                     help="per-command Godot binary override; priority: "
-                          "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
+    _add_godot_bin_arg(acm)
     acm.set_defaults(func=cmd_accept)
 
     a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
@@ -380,9 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "last `gqt coverage` run for this file (SEE-1420 P2; "
                         "provenance-checked: source/tests/binary must match; "
                         "uncovered sites are marked 'uncovered' and skipped)")
-    m.add_argument("--godot-bin", default=None,
-                   help="per-command Godot binary override; priority: "
-                        "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
+    _add_godot_bin_arg(m)
     m.set_defaults(func=cmd_mutation)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
@@ -394,9 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--tests", default=None,
                    help="scoped GUT dir or single .gd path for per-suite attribution, "
                         "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
-    v.add_argument("--godot-bin", default=None,
-                   help="per-command Godot binary override; priority: "
-                        "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
+    _add_godot_bin_arg(v)
     v.set_defaults(func=cmd_coverage)
 
     d = sub.add_parser("doctor", help="self-check editable install vs current worktree gitlink")

@@ -30,11 +30,19 @@ def _emit(result: dict) -> int:
 def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | None:
     """§SPEC-1525-002：--godot-bin 命令级覆盖注入（> GQT_GODOT_BIN > PATH），
     显式配置错误 → 统一 JSON 错误契约（ok:false，与既有 BinaryConfigError
-    出口同形态）。返回 None 表示继续派发；返回 int 为已完成的错误响应。"""
-    from .mutation.inject import BinaryConfigError, apply_godot_bin_override
+    出口同形态）。返回 None 表示继续派发；返回 int 为已完成的错误响应。
+
+    修复轮 F-1/F-2（hardener 上报）：注入后立即 refresh 重判——(a) 显式 env
+    非法路径在此早验证并转契约，先于 coverage/accept 的 GUT/重放等任何其他
+    校验（不得被掩盖、不得裸 traceback，与 mutation 同形态）；(b) 同进程切换
+    二进制后 binary kind 必须重钉，--path 形态与 timing 键成分取覆盖后真实
+    类型（与 mutation 既有 refresh 语义对齐）。"""
+    from .mutation.inject import BinaryConfigError, apply_godot_bin_override, \
+        detect_binary_kind
 
     try:
         apply_godot_bin_override(getattr(args, "godot_bin", None))
+        detect_binary_kind(refresh=True)
     except BinaryConfigError as e:
         return _emit({
             "tool": tool,
@@ -128,27 +136,15 @@ def cmd_complexity(args: argparse.Namespace) -> int:
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:
-    from .mutation.inject import BinaryConfigError, detect_binary_kind
+    from .mutation.inject import detect_binary_kind
 
-    # §SPEC-1525-002：--godot-bin 命令级覆盖先行注入（经 os.environ 进同源
-    # 解析链），其后的 detect(refresh=True) 判定的就是覆盖后的二进制。
+    # §SPEC-1525-002 + 修复轮 F-1/F-2：覆盖注入与二进制早验证/重判统一在
+    # _apply_godot_bin_or_contract（三子命令同源同形态）——此处取已重钉的
+    # 判定结果即可（平台分支与 key 二进制成分共用判定）。
     early = _apply_godot_bin_or_contract("mutation", args)
     if early is not None:
         return early
-    # §SPEC-012（定案 C 项 a+b，SEE-1525 起放宽为全局默认 + 命令级覆盖）：
-    # GQT_GODOT_BIN 覆写 dispatch 前钉死二进制类型（平台分支与 key 二进制
-    # 成分共用判定）。
-    try:
-        binary_kind = detect_binary_kind(refresh=True)
-    except BinaryConfigError as e:
-        # LOW-1：显式配置错误统一 JSON 错误契约（ok:false + 明确 error），
-        # 不裸抛 traceback——与「目标文件不存在」一类响亮性/形态对齐。
-        return _emit({
-            "tool": "mutation",
-            "ok": False,
-            "summary": {"error": str(e)},
-            "failures": [{"reason": str(e)}],
-        })
+    binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
     except FileNotFoundError as e:

@@ -374,3 +374,150 @@ class TestFreezeUnset:
         rc = main(["coverage", str(target), "--project-root", str(tmp_path)])
         assert rc == 0
         assert captured["had_env"] is False
+
+
+class TestFixRoundF1F2:
+    """修复轮 F-1/F-2（hardener 上报，Leader 复现确认）回归钉子。
+
+    F-1：coverage / accept run|mutate 的显式二进制配置错误（env 或 flag 非法
+    路径）必须走统一 JSON 错误契约（ok:false + summary.error + failures），且
+    先于任何其他校验（GUT runner 缺失不得掩盖二进制配置错误）。
+    F-2：命令级覆盖注入后 binary kind 必须重新判定——coverage / accept 不得
+    沿用同进程旧缓存；--path 形态与 timing 键成分取覆盖后真实类型。
+    """
+
+    def _run_main(self, argv, capsys):
+        from godot_qa_toolkit.cli import main
+        rc = main(argv)
+        out = capsys.readouterr().out
+        return rc, json.loads(out)
+
+    def _mk_target(self, tmp_path: Path) -> Path:
+        target = tmp_path / "f.gd"
+        target.write_text("func a():\n\tpass\n", encoding="utf-8")
+        return target
+
+    def test_coverage_invalid_env_contract_not_traceback(self, tmp_path,
+                                                         capsys, monkeypatch):
+        monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
+        target = self._mk_target(tmp_path)
+        rc, payload = self._run_main(
+            ["coverage", str(target), "--project-root", str(tmp_path)], capsys)
+        assert rc == 1
+        assert payload["tool"] == "coverage"
+        assert payload["ok"] is False
+        assert "GQT_GODOT_BIN" in payload["summary"]["error"]
+        assert "GQT_GODOT_BIN" in payload["failures"][0]["reason"]
+
+    def test_accept_run_invalid_env_contract(self, tmp_path, capsys,
+                                             monkeypatch):
+        monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
+        rc, payload = self._run_main(
+            ["accept", "run", "--project-root", str(tmp_path), "--key", "k"],
+            capsys)
+        assert rc == 1
+        assert payload["tool"] == "accept"
+        assert payload["ok"] is False
+        assert "GQT_GODOT_BIN" in payload["summary"]["error"]
+
+    def test_accept_mutate_invalid_env_contract(self, tmp_path, capsys,
+                                                monkeypatch):
+        monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
+        rc, payload = self._run_main(
+            ["accept", "mutate", "--project-root", str(tmp_path), "--key", "k"],
+            capsys)
+        assert rc == 1
+        assert payload["tool"] == "accept"
+        assert payload["ok"] is False
+        assert "GQT_GODOT_BIN" in payload["summary"]["error"]
+
+    def test_accept_binary_config_precedes_gut_check(self, tmp_path, capsys,
+                                                     monkeypatch):
+        # 项目根无 addons/gut：若 GUT 校验先行会以 "GUT runner not found"
+        # 掩盖二进制配置错误——二进制契约必须先行。
+        monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
+        rc, payload = self._run_main(
+            ["accept", "run", "--project-root", str(tmp_path), "--key", "k"],
+            capsys)
+        assert "GQT_GODOT_BIN" in payload["summary"]["error"]
+        assert "GUT runner" not in payload["summary"]["error"]
+
+    def test_mutation_invalid_env_contract_unchanged(self, tmp_path, capsys,
+                                                     monkeypatch):
+        # 行为不退化钉子：mutation env 通道契约形态保持（修复轮重构不得动它）。
+        monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
+        target = self._mk_target(tmp_path)
+        rc, payload = self._run_main(
+            ["mutation", str(target), "--project-root", str(tmp_path)], capsys)
+        assert rc == 1
+        assert payload["tool"] == "mutation"
+        assert payload["ok"] is False
+        assert "GQT_GODOT_BIN" in payload["summary"]["error"]
+
+    def test_kind_repinned_after_flag_switch_same_process(self, tmp_path,
+                                                          monkeypatch):
+        elf = _mk_binary(tmp_path, "godot_lin")
+        exe = _mk_binary(tmp_path, "Godot_w64.exe", b"MZ\x90\x00")
+        monkeypatch.setattr(inject, "wslpath_win", lambda p: "D:\\proj")
+        monkeypatch.setenv("GQT_GODOT_BIN", str(elf))
+        assert inject.detect_binary_kind() == "linux"
+        from godot_qa_toolkit.cli import _apply_godot_bin_or_contract
+        ns = SimpleNamespace(godot_bin=str(exe))
+        assert _apply_godot_bin_or_contract("coverage", ns) is None
+        # F-2 主断言：无手动 reset，缓存已随覆盖重判
+        assert inject.detect_binary_kind() == "win64"
+        assert inject.godot_project_path("/mnt/d/proj") == "D:\\proj"
+
+    def test_kind_repinned_after_env_switch_same_process(self, tmp_path,
+                                                         monkeypatch):
+        elf = _mk_binary(tmp_path, "godot_lin")
+        exe = _mk_binary(tmp_path, "Godot_w64.exe", b"MZ\x90\x00")
+        monkeypatch.setenv("GQT_GODOT_BIN", str(elf))
+        assert inject.detect_binary_kind() == "linux"
+        monkeypatch.setenv("GQT_GODOT_BIN", str(exe))
+        from godot_qa_toolkit.cli import _apply_godot_bin_or_contract
+        assert _apply_godot_bin_or_contract(
+            "accept", SimpleNamespace(godot_bin=None)) is None
+        assert inject.detect_binary_kind() == "win64"
+
+    def test_cli_coverage_flag_switch_repins_kind(self, tmp_path, capsys,
+                                                  monkeypatch):
+        elf = _mk_binary(tmp_path, "godot_lin")
+        exe = _mk_binary(tmp_path, "Godot_w64.exe", b"MZ\x90\x00")
+        target = self._mk_target(tmp_path)
+        captured: dict = {}
+
+        def fake_run_coverage(**kwargs):
+            captured["kind"] = inject.detect_binary_kind()
+            return {"tool": "coverage", "ok": True, "summary": {},
+                    "failures": []}
+
+        monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
+        rc1, _ = self._run_main(
+            ["coverage", str(target), "--project-root", str(tmp_path),
+             "--godot-bin", str(elf)], capsys)
+        rc2, _ = self._run_main(
+            ["coverage", str(target), "--project-root", str(tmp_path),
+             "--godot-bin", str(exe)], capsys)
+        assert rc1 == 0 and rc2 == 0
+        assert captured["kind"] == "win64"
+
+    def test_unset_env_dispatch_proceeds_after_pin(self, tmp_path, capsys,
+                                                   monkeypatch):
+        # 冻结面：unset + 无 flag 时重判不抛错，派发照常（PATH 空解析兜底）。
+        monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        inject.reset_binary_kind_cache()
+        target = self._mk_target(tmp_path)
+        captured: dict = {}
+
+        def fake_run_coverage(**kwargs):
+            captured["called"] = True
+            return {"tool": "coverage", "ok": True, "summary": {},
+                    "failures": []}
+
+        monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
+        rc, payload = self._run_main(
+            ["coverage", str(target), "--project-root", str(tmp_path)], capsys)
+        assert rc == 0
+        assert captured["called"] is True

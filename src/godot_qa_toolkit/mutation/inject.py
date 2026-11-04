@@ -133,6 +133,19 @@ class BinaryConfigError(Exception):
     探测操作与输入路径上下文。"""
 
 
+def _require_usable_binary(path: str, source_label: str) -> str:
+    """显式二进制路径校验（env 与 --godot-bin 两通道同款契约）：不存在/
+    不可读/不可执行 → BinaryConfigError，消息含来源标签与输入路径——
+    静默回退会把配置错误藏进 verdict（LOW-1 契约）。"""
+    if not os.path.isfile(path):
+        raise BinaryConfigError(f"{source_label} path does not exist: {path}")
+    if not os.access(path, os.R_OK):
+        raise BinaryConfigError(f"{source_label} path is not readable: {path}")
+    if not os.access(path, os.X_OK):
+        raise BinaryConfigError(f"{source_label} path is not executable: {path}")
+    return path
+
+
 def _resolved_godot_path() -> str | None:
     """目标二进制的解析路径：GQT_GODOT_BIN 显式优先，否则 PATH 首匹配。
 
@@ -141,16 +154,7 @@ def _resolved_godot_path() -> str | None:
     """
     explicit = os.environ.get(ENV_GODOT_BIN, "").strip()
     if explicit:
-        if not os.path.isfile(explicit):
-            raise BinaryConfigError(
-                f"{ENV_GODOT_BIN} path does not exist: {explicit}")
-        if not os.access(explicit, os.R_OK):
-            raise BinaryConfigError(
-                f"{ENV_GODOT_BIN} path is not readable: {explicit}")
-        if not os.access(explicit, os.X_OK):
-            raise BinaryConfigError(
-                f"{ENV_GODOT_BIN} path is not executable: {explicit}")
-        return explicit
+        return _require_usable_binary(explicit, ENV_GODOT_BIN)
     for d in os.environ.get("PATH", "").split(os.pathsep):
         if not d:
             continue
@@ -158,6 +162,40 @@ def _resolved_godot_path() -> str | None:
         if os.access(cand, os.X_OK) and os.path.isfile(cand):
             return cand
     return None
+
+
+def apply_godot_bin_override(explicit_path: str | None) -> None:
+    """§SPEC-1525-002 per-component 覆盖：--godot-bin > GQT_GODOT_BIN > PATH。
+
+    命令级覆盖经 os.environ 写回同源解析链——detect_binary_kind() /
+    godot_command() / _godot_project_path 单一出处，各子命令不得另写一套
+    解析；校验复用 _require_usable_binary（标签 --godot-bin）。flag 未传
+    时零动作（§SPEC-1525-006 冻结红线：不触碰解析面任何字节）。
+    """
+    if explicit_path is None:
+        return
+    stripped = explicit_path.strip()
+    if not stripped:
+        raise BinaryConfigError(
+            "--godot-bin requires a non-empty path to a godot binary")
+    os.environ[ENV_GODOT_BIN] = _require_usable_binary(stripped, "--godot-bin")
+
+
+def godot_project_path(project_root: str, kind: str | None = None) -> str:
+    """--path 形态与二进制类型同源（§SPEC-1525-002 HIGH 风险面统一原语）。
+
+    win64 通道保留既有语义：/mnt/ 绝对路径经 wslpath -w 转 Windows 形式
+    （不可转换原样）——行为与 af728f5 逐字节一致；linux 通道不转换（Linux
+    godot 直接读 /mnt/... 原生路径，翻转成 D:\\... 反而不可读）。kind 缺省
+    经 detect_binary_kind() 实时解析（同一解析源，不得各写一套）。
+    """
+    if kind is None:
+        kind = detect_binary_kind()
+    if kind != "win64":
+        return project_root
+    if os.path.isabs(project_root) and project_root.startswith("/mnt/"):
+        return wslpath_win(project_root) or project_root
+    return project_root
 
 
 def _kind_of_executable(path: str) -> str:

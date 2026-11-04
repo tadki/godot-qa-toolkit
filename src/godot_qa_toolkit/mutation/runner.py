@@ -44,6 +44,7 @@ from .ops import (  # noqa: F401
 
 from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
                      _impl_fs_path, _interrupt_guard, make_sigterm_restore_handler,
+                     godot_project_path as _unified_godot_project_path,
                      mutant_env, seed_host_script, wslpath_win)  # noqa: F401
 # 统一 mutant 明细记录形态（SEE-1416 扩列）与结果塑形契约在 reporting.py
 # （<800 行纪律拆分）；re-export 保持既有 import / monkeypatch 名称空间稳定。
@@ -81,17 +82,11 @@ from .gutrun import (  # noqa: F401,E402
 
 
 def _godot_project_path(project_root: str) -> str:
-    """win64 godot 的 --path 语义：/mnt/... 形式的 WSL 绝对路径会被拒
-    （'Invalid project path'，硬化 实机实证——0.1s 静默 rc≠0、零测试执行）。
-
-    相对路径由 godot 自行解析（CWD 契约：调用方必须已 cd 到项目根）；
-    绝对路径走 wslpath 转 Windows 形式（不可用时原样返回）。
-    """
-    if os.path.isabs(project_root):
-        if project_root.startswith("/mnt/"):
-            return wslpath_win(project_root) or project_root
-        return project_root
-    return project_root
+    """--path 语义随 detect_binary_kind() 同源（§SPEC-1525-002）：委托
+    inject.godot_project_path 统一原语——win64 通道 /mnt/ 转 Windows 形式
+    （行为与 af728f5 逐字节一致）、linux 通道原生不转换，转换子进程行为
+    与 coverage 共用一份，勿在此模块再分叉。"""
+    return _unified_godot_project_path(project_root)
 
 
 def _run_gut_on_project(project_root: str, timeout_s: int = 60,

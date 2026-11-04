@@ -26,6 +26,11 @@ from pathlib import Path
 from gdtoolkit.parser import parser as gdtoolkit_parser
 
 from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggested_action
+# §SPEC-1525-001/002：coverage 启动点与 --path 形态接入 mutation.inject
+# 单一解析源（godot_command / godot_project_path）——原硬编码 "godot" 使
+# GQT_GODOT_BIN 对 coverage 无效，且路径转换与二进制类型脱钩。
+from ..mutation.inject import godot_command
+from ..mutation.inject import godot_project_path as _unified_godot_project_path
 
 # 与 mutation runner 同一套判定：godot 进程级失败（-s 脚本没加载起来）≠
 # 测试结果。res:// 是唯一可靠的 -s 形式（Revy QA FAIL 实证）。
@@ -59,21 +64,11 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
 
 
 def _godot_project_path(project_root: str) -> str:
-    """win64 godot 的 --path 语义：/mnt/... 形式的 WSL 绝对路径会被拒
-    （'Invalid project path'，QA ④ 实机实证——GUT 零测试执行且 rc≠0）。
-
-    与 mutation runner 同源修复：相对路径由 godot 自行解析（cwd 契约）；
-    绝对 /mnt/ 路径走 wslpath 转 Windows 形式（不可用时原样返回）。
-    """
-    if project_root.startswith("/mnt/"):
-        try:
-            r = subprocess.run(["wslpath", "-w", project_root],
-                               capture_output=True, text=True, timeout=10)
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return project_root
+    """--path 语义随 detect_binary_kind() 同源（§SPEC-1525-002）：委托
+    inject.godot_project_path 统一原语——win64 通道保留既有 /mnt/→Windows
+    转换（af728f5 行为逐字节不变）、linux 通道原生不转换；与 mutation
+    runner 共用同一份转换原语，勿在此模块再分叉。"""
+    return _unified_godot_project_path(project_root)
 
 
 # user:// 优先：win64@WSL 下项目 res:// 走 UNC 映射（//wsl.localhost/...），
@@ -491,7 +486,7 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
                 from ..mutation.godot_gate import GlobalGodotGate
                 with GlobalGodotGate(project_root):
                     r = subprocess.run(
-                        ["godot", "--headless", "--path", _godot_project_path(project_root),
+                        [godot_command(), "--headless", "--path", _godot_project_path(project_root),
                          "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
                         capture_output=True,
                         text=True,

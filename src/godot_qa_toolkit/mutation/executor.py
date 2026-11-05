@@ -23,6 +23,7 @@ from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
 from .coverlink import load_instrumentable_lines, load_reusable_coverage
+from .progress import new_run_id
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
@@ -260,7 +261,8 @@ def _chunk_worker(payload: dict) -> dict:
             timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
             resume=resume, binary_kind=binary_kind,
             timeout_factor=timeout_factor,
-            mutate_all=bool(payload.get("mutate_all")))
+            mutate_all=bool(payload.get("mutate_all")),
+            progress=payload.get("progress"))
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -268,6 +270,7 @@ def _chunk_worker(payload: dict) -> dict:
         retry_ids=payload["retry_ids"],
         resume=resume, binary_kind=binary_kind,
         timeout_factor=timeout_factor,
+        progress=payload.get("progress"),
     )
 
 
@@ -396,9 +399,12 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     层只允许收尾方写）。
     settled 是收集异常（error 契约）与零变异（no_sites 契约）的定终态文件
     ——SPEC-016：任何输入文件都不得从报告消失。
+    run_id（SEE-1525）是本 run 的进度面标识，随 chunk 穿透到各 worker（同一
+    run 的 per-worker 分片聚合在同一个目录下）。
     """
-    baselines = _precompute_baselines(files, project_root, timeout_s,
-                                      tests_glob)
+    baselines, baseline_failures = _precompute_baselines(
+        files, project_root, timeout_s, tests_glob)
+    run_id = new_run_id()
     chunks: list[dict] = []
     settled: list[dict] = []
     v2ctx: dict = {}
@@ -406,7 +412,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         file_chunks, file_ctx, file_settled = _plan_file_chunks(
             f, project_root, budget, timeout_s, tests_glob, jobs, resume,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
-            reuse_coverage, baselines)
+            reuse_coverage, baselines, baseline_failures, run_id)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
@@ -417,7 +423,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
 
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       resume, binary_kind, mutation_warning, timeout_factor,
-                      mutate_all, reuse_coverage, baselines):
+                      mutate_all, reuse_coverage, baselines,
+                      baseline_failures=None, run_id=None):
     """单文件规划：收集 → 差分 plan → P2 覆盖过滤 → budget → 分片。
 
     返回 (chunks_for_file, v2ctx_entry_or_None, settled_or_None)。
@@ -465,20 +472,29 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                          resume=False, binary_kind=binary_kind,
                          mutation_warning=None, timeout_factor=timeout_factor,
                          mutate_all=mutate_all,
-                         precomputed_baseline=baseline)
+                         precomputed_baseline=baseline,
+                         progress={"run_id": run_id, "worker": "serial",
+                                   "total": 0})
         r["summary"].setdefault("jobs", 1)
         return [], None, r
     ids = [m.stable_id for m in executed_list]
     if baseline is None:
         # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
         # 串行单任务（worker 自跑 baseline 并自建差分报告——父层不注入，
-        # 防重复计数）
+        # 防重复计数）。
+        # SEE-1525：此前该降级零提示——执行人只看到「这个文件莫名在串行跑」。
+        # 现显式告警（目标文件 + 失败原因摘要 + falls back to serial），
+        # 不改行为、不失败；未尝试预跑（glob=None 的全量面）不在此列。
+        if glob is not None:
+            _warn_serial_fallback(f, (baseline_failures or {}).get(glob))
         chunk = {
             "file": f, "project_root": project_root, "budget": budget,
             "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
             "resume": resume, "binary_kind": binary_kind,
             "timeout_factor": timeout_factor, "total_sites": raw_total,
             "attention": attention, "mutate_all": mutate_all,
+            "progress": {"run_id": run_id, "worker": "serial",
+                         "total": len(executed_list)},
         }
         return [chunk], None, None
     ctx = {
@@ -489,8 +505,21 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     }
     chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
                               binary_kind, ids, baseline, resume,
-                              timeout_factor, raw_total, attention, jobs)
+                              timeout_factor, raw_total, attention, jobs,
+                              run_id=run_id)
     return chunks, ctx, None
+
+
+def _warn_serial_fallback(file: str, reason: str | None) -> None:
+    """基线快照失败 → 整文件退单 worker 串行：stderr 显式告警（不失败）。
+
+    风格对齐既有 `prewarm import failed … — continuing`：只披露降级与其
+    原因摘要，判定行为零变化（进度与失败语义都不受影响）。
+    """
+    detail = reason or "no baseline snapshot returned"
+    print(f"mutation: baseline snapshot failed for {file}: {detail} — this "
+          f"file falls back to serial single-worker execution (continuing)",
+          file=sys.stderr)
 
 
 def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
@@ -526,8 +555,13 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
 
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
                      ids, baseline, resume, timeout_factor, raw_total,
-                     attention, jobs):
-    """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。"""
+                     attention, jobs, run_id=None):
+    """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。
+
+    progress（SEE-1525）：各分片共用同一 run_id 与**全局分母** `len(ids)`，
+    worker 槽位名进进度行尾与分片文件名——每分片只写自己的进度分片，聚合
+    在读侧完成（无共享写者，故无并行写竞争）。
+    """
     n_chunks = min(jobs, len(ids))
     size = (len(ids) + n_chunks - 1) // n_chunks
     chunks = []
@@ -548,10 +582,20 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
             "timeout_factor": timeout_factor,
             "total_sites": raw_total,
             "attention": attention,
+            "progress": {"run_id": run_id, "worker": f"w{i}",
+                         "total": len(ids)},
         })
     return chunks
 
 
+# 基线预跑失败原因（SEE-1525）：_run_baseline_snapshot 的返回契约
+# （dict|None）被既有测试替身钉死，故失败原因经此旁路表透出，供
+# _precompute_baselines 组降级告警文案。键 = (project_root, tests_glob)。
+_BASELINE_FAILURE_REASONS: dict[tuple[str, str], str] = {}
+
+
+def _baseline_key(project_root: str, tests_glob: str | None) -> tuple[str, str]:
+    return (str(Path(project_root).resolve()), tests_glob or "")
 
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob):
@@ -560,6 +604,9 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob):
     复用条件（SPEC-008）：同一 tests_glob（显式相同 / 全部退回全量 /
     自动扫描推导出同一目录）跨文件共享一份；代码状态 = 目标文件此刻都
     是仓库原始态，快照不落盘，禁止跨 mtime 复用。
+
+    返回 (baselines, failures)：failures 只含**尝试过且失败**的 glob →
+    原因摘要（SEE-1525 降级告警用）；glob=None（全量面未预跑）不在其中。
     """
     from .runner import _auto_scan_tests_glob
 
@@ -568,13 +615,17 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob):
         g = tests_glob if tests_glob else _auto_scan_tests_glob(f, project_root)
         globs[f] = g
     baselines: dict = {}
+    failures: dict[str, str] = {}
     for g in set(globs.values()):
         if g is None:
             continue
         baseline = _run_baseline_snapshot(project_root, g, timeout_s)
         if baseline and baseline.get("rc") == 0:
             baselines[g] = baseline
-    return baselines
+        else:
+            failures[g] = _BASELINE_FAILURE_REASONS.pop(
+                _baseline_key(project_root, g), "no baseline snapshot returned")
+    return baselines, failures
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
@@ -585,14 +636,25 @@ def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
 
 def _run_baseline_snapshot(project_root: str, tests_glob: str | None,
                            timeout_s: int) -> dict | None:
+    """父层基线预跑快照；失败返回 None（契约被既有替身钉死）。
+
+    失败原因（异常类型 + 摘要 / 非零 rc）记入 _BASELINE_FAILURE_REASONS，
+    由 _precompute_baselines 取出生成降级告警——快照与原因同源，避免二次
+    推断。
+    """
     from .runner import _run_baseline
 
+    key = _baseline_key(project_root, tests_glob)
     try:
         rc, tail, elapsed = _run_baseline(project_root, tests_glob, timeout_s)
-    except Exception:
+    except Exception as e:
+        _BASELINE_FAILURE_REASONS[key] = f"{type(e).__name__}: {e}"[:200]
         return None
     if rc != 0:
+        _BASELINE_FAILURE_REASONS[key] = f"baseline GUT exited rc={rc}"
         return None
+    # 成功即清掉上一次的失败原因——原因表绝不跨 run 漂移到别的降级文案上。
+    _BASELINE_FAILURE_REASONS.pop(key, None)
     return {"rc": rc, "tail": tail, "elapsed": elapsed}
 
 

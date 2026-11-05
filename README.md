@@ -283,6 +283,24 @@ always forces serial.
   two un-capped processes at 8 workers each = 16 godot instances fighting
   over 16 cores. On platforms without `fcntl` the gate warns once and steps
   aside (never blocks).
+- **Progress (SEE-1525)** — every mutant verdict prints one line to
+  **stderr** (`[12/361] killed L123 calc.gd#func:add#1 2.3s`, plus
+  `worker=wN` on parallel shards; `total` is the whole run's execution face).
+  The same counter atomically maintains a machine-readable shard under
+  `<root>/.qa-cache/gqt-mutation-progress/<run-id>/` (one file **per worker
+  process**, aggregated on read — no shared writer, so no write race). Any
+  session can poll it without holding the terminal:
+
+  ```bash
+  python -c "import json,sys; from godot_qa_toolkit.mutation.progress import read_progress; print(json.dumps(read_progress(sys.argv[1]), ensure_ascii=False, indent=2))" <root>
+  ```
+
+  Fields: `done / total / killed / survived / timeout / run_errors / suspect /
+  invalid_mutants / elapsed_s / started_at / updated_at`. stdout still carries
+  exactly one JSON; progress never touches it. If the parent's shared baseline
+  snapshot fails, the file falls back to serial execution and says so on
+  stderr (`baseline snapshot failed … falls back to serial …`) instead of
+  degrading silently.
 - `--resume` — every run already writes each mutant's verdict to
   `.qa-cache/gqt-mutation-resume/<fingerprint>/` as it lands. If a run is
   cancelled, rerun the same command with `--resume`: completed mutants are

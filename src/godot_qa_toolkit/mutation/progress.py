@@ -22,6 +22,7 @@ runner._run_mutant_loop），串行与并行路径都经过它；两者都只写
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -105,12 +106,13 @@ class ProgressReporter:
     """单进程内单文件（或单分片）的进度写者。
 
     total 为**整 run 的分母**（并行分片由父层注入全局执行面；串行为本 worker
-    自己的执行面）。worker 标识只在并行分片路径出现（进度行尾 `worker=wN`）。
+    自己的执行面）。worker 标识恒在的路径：并行分片 `worker=wN`、基线降级
+    的串行分片 `worker=serial`；`--jobs 1` / 单点寻址的自建 reporter 不带。
     """
 
     def __init__(self, project_root: str, file_path: str,
                  total: int | None = None, run_id: str | None = None,
-                 worker: str | None = None):
+                 worker: str | None = None, resolved_before: int = 0):
         from ..timing import project_relative
 
         self.project_root = str(Path(project_root).resolve())
@@ -119,8 +121,12 @@ class ProgressReporter:
         self.worker = worker
         self.pid = os.getpid()
         self.total = int(total) if total is not None else 0
-        self.done = 0
+        # 已判定但从未进 GUT 的位点（静态 invalid 预检剔除）：分母含它们，
+        # done 也从它们起算，每个 worker 才不会永远停在 [n-1/n]。同步记入
+        # invalid_mutants 计数，保证恒等式 done == 各 verdict 计数之和。
+        self.done = int(resolved_before)
         self.counts = {key: 0 for key in _COUNT_KEYS}
+        self.counts["invalid_mutants"] = int(resolved_before)
         self.started_at = _now_iso()
         self.t0 = time.monotonic()
         self._shard = self._shard_path()
@@ -181,7 +187,11 @@ class ProgressReporter:
                                       indent=2), encoding="utf-8")
             os.replace(tmp, path)
         except OSError as e:
-            tmp.unlink(missing_ok=True)
+            # 清理本身也可能抛（Windows 上杀软/索引器持有刚建的 tmp 文件：
+            # PermissionError 是 OSError 子类，missing_ok 只兜 FileNotFound）——
+            # 进度面绝不允许把异常带回变异体循环（那会让整 run 无 JSON 崩掉）。
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
             if not self._warned:
                 self._warned = True
                 print(f"mutation progress: shard write failed for {path}: "
@@ -190,18 +200,25 @@ class ProgressReporter:
 
 
 def make_reporter(project_root: str, file_path: str, progress: dict | None,
-                  fallback_total: int | None = None) -> ProgressReporter:
+                  fallback_total: int | None = None,
+                  invalid_count: int = 0) -> ProgressReporter:
     """按父层注入的 progress 上下文建 reporter（缺省自建 run_id/串行槽位）。
+
+    invalid_count：本 worker 静态 invalid 预检剔除的位点数。父层注入全局
+    分母（progress["total"] 在场，含这些位点）时 done 从它们起算，逐 worker
+    才不会永远差一截；串行路径的分母自身已扣掉 invalid，故不计。
 
     建 reporter 失败（只读盘 / `.qa-cache` 被文件占位）→ None：进度是观测
     增强面，绝不能因其建不起来而中断判定主流程。
     """
     ctx = progress or {}
+    worker_total = ctx.get("total")
     try:
         return ProgressReporter(
             project_root, file_path,
-            total=ctx.get("total", fallback_total),
-            run_id=ctx.get("run_id"), worker=ctx.get("worker"))
+            total=worker_total if worker_total is not None else fallback_total,
+            run_id=ctx.get("run_id"), worker=ctx.get("worker"),
+            resolved_before=invalid_count if worker_total is not None else 0)
     except OSError as e:
         print(f"mutation progress: disabled for {file_path}: {e} — continuing",
               file=sys.stderr)

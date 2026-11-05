@@ -343,9 +343,12 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
         timing_store, timeout_s, precomputed_baseline)
 
     # SEE-1525 进度面：分母 = 本 worker 真实 GUT 执行面（invalid 预检剔除后）；
-    # 并行分片由父层注入全局分母（progress["total"]）。
+    # 并行分片由父层注入全局分母（progress["total"]，含 invalid 位点），此时
+    # done 从本 worker 已判定的 invalid 数起算（判定在 make_reporter 内），
+    # 双路径都不会停在 [n-1/n]。
     reporter = make_reporter(project_root, str(path), progress,
-                             len(executed_list) - invalid_count)
+                             len(executed_list) - invalid_count,
+                             invalid_count)
 
     # 缺陷1 兜底恢复守卫（SEE-1319 与 SEE-1321 内存注入共存）：内存注入路径
     # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。

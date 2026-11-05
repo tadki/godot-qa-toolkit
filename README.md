@@ -285,7 +285,8 @@ always forces serial.
   aside (never blocks).
 - **Progress (SEE-1525)** — every mutant verdict prints one line to
   **stderr** (`[12/361] killed L123 calc.gd#func:add#1 2.3s`, plus
-  `worker=wN` on parallel shards; `total` is the whole run's execution face).
+  `worker=wN` on parallel shards or `worker=serial` on the baseline-fallback
+  serial path; `total` is the whole run's execution face).
   The same counter atomically maintains a machine-readable shard under
   `<root>/.qa-cache/gqt-mutation-progress/<run-id>/` (one file **per worker
   process**, aggregated on read — no shared writer, so no write race). Any

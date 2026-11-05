@@ -170,6 +170,23 @@ class TestBaselineFallbackWarning:
         assert "baseline snapshot failed" not in err
         assert "falls back to serial" not in err
 
+    def test_full_suite_glob_never_precomputed_is_not_a_failure(
+            self, tmp_path, monkeypatch, capsys):
+        """glob=None（全量面不预跑 baseline）不是「快照失败」——不得误报。"""
+        proj, target = _write_project(tmp_path)
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+        monkeypatch.setattr(executor, "_auto_scan_tests_glob",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+
+        executor.run_mutation_files([target], proj, budget=50, timeout_s=60,
+                                    jobs=2)
+        err = capsys.readouterr().err
+        assert "baseline snapshot failed" not in err
+
 
 # ============================================================================
 # 目标 2：人眼进度行（stderr；串行 + 并行；stdout 契约零污染）
@@ -317,3 +334,82 @@ class TestProgressFile:
         run_mutation(target, proj, budget=50, tests_glob=TESTS_GLOB,
                      dry_run=True)
         assert progress.read_progress(proj) is None
+
+    def test_invalid_precheck_does_not_strand_done_below_total(
+            self, tmp_path, monkeypatch):
+        """静态 invalid 位点计入分母 → 每个 worker 的 done 都能走到 n/n。
+
+        回归反例：分母用 len(retry_ids)（含 invalid）而 done 只数真正进 GUT
+        的位点 → 并行 run 永远停在 done < total，轮询方无法分辨「跑完了」
+        与「卡住了」。
+        """
+        from godot_qa_toolkit.mutation import reporting as _rep
+
+        proj, target = _write_project(tmp_path)
+        orig_split = _rep._split_invalid_mutants
+
+        def split_with_one_invalid(src_text, mutants):
+            valid, invalid = orig_split(src_text, mutants)
+            victim = next((m for m in valid if m.stable_id.endswith("#1")),
+                          None)
+            if victim is None:
+                return valid, invalid
+            return ([m for m in valid if m is not victim], invalid + [victim])
+
+        monkeypatch.setattr(_rep, "_split_invalid_mutants",
+                            split_with_one_invalid)
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+        monkeypatch.setattr(executor, "_run_baseline_snapshot",
+                            lambda *a, **k: {"rc": 0, "tail": "pass",
+                                             "elapsed": 5.0})
+        monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None:
+                (1, "* test_probe\n\t[Failed]\n")
+            if runner_mod._ACTIVE_ENV is not None else (0, "pass"))
+
+        executor.run_mutation_files([target], proj, budget=50, timeout_s=60,
+                                    tests_glob=TESTS_GLOB, jobs=2)
+
+        snap = progress.read_progress(proj)
+        assert snap["invalid_mutants"] == 1
+        assert snap["done"] == snap["total"], snap
+        assert snap["done"] == sum(snap[k] for k in (
+            "killed", "survived", "timeout", "run_errors", "suspect",
+            "invalid_mutants"))
+
+    def test_corrupt_shard_is_treated_as_absent(self, tmp_path, killing_gut):
+        """原子写被外力打断留下半截文件 → 聚合按缺该分片处理，不得抛。"""
+        proj, target = _write_project(tmp_path)
+        run_mutation(target, proj, budget=2, tests_glob=TESTS_GLOB)
+        good = progress.read_progress(proj)
+        run_dir = next(d for d in progress.progress_root(proj).iterdir()
+                       if d.is_dir())
+        (run_dir / "deadbeef.w9.1.json").write_text('{"done": 3',
+                                                    encoding="utf-8")
+        assert progress.read_progress(proj) == good
+
+    def test_cleanup_failure_after_failed_replace_cannot_crash_run(
+            self, tmp_path, monkeypatch, killing_gut):
+        """replace 失败 + 清理也失败（Windows 杀软持 tmp）→ 只告警，不冒泡。"""
+        proj, target = _write_project(tmp_path)
+        real_replace = progress.os.replace
+        real_unlink = Path.unlink
+
+        def bad_replace(src, dst):
+            raise OSError("reader holds destination")
+
+        def bad_unlink(self, *a, **k):
+            if ".tmp" in self.name:  # 只打断进度分片的 tmp 清理
+                raise PermissionError("tmp held by indexer")
+            return real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(progress.os, "replace", bad_replace)
+        monkeypatch.setattr(progress.Path, "unlink", bad_unlink, raising=False)
+        try:
+            r = run_mutation(target, proj, budget=50, tests_glob=TESTS_GLOB)
+        finally:
+            monkeypatch.setattr(progress.os, "replace", real_replace)
+
+        assert r["summary"]["mutants"] == _TEST_MUTANTS  # 判定零影响

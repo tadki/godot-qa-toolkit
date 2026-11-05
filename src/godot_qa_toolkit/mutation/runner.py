@@ -65,6 +65,7 @@ from .godot_gate import GlobalGodotGate
 from .diffengine import apply_timeout_streaks, make_entry, streak_for
 from .planner import dry_run_estimate, plan_execution
 from .coverlink import load_reusable_coverage
+from .progress import make_reporter
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
 from ..timing import (BUDGET_CAP_S, explicit_timing_meta, project_relative,
@@ -186,6 +187,7 @@ def run_mutation(    file_path: str,
     select_ids: list[str] | None = None,
     select_lines: list[int] | None = None,
     reuse_coverage: bool = False,
+    progress: dict | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -211,6 +213,9 @@ def run_mutation(    file_path: str,
     （默认 50）——超阈值 stderr 告警 + summary.attention 建议拆分。
     timeout_factor（§SPEC-1420-02）：覆盖 _TIMEOUT_SCALE 的自适应倍数
     （默认 None=2.0 不动）；两者均不进任何 resume key（定案 D6 负面清单）。
+    progress（SEE-1525）：父层注入的进度上下文 {run_id,total,worker}；缺省
+    自建（串行 / 单点寻址路径）。进度只写 stderr 与 `.qa-cache`，绝不影响
+    stdout 单 JSON 契约。
     返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
     所有 mutant 均被测试杀死。
     """
@@ -286,7 +291,7 @@ def run_mutation(    file_path: str,
         reused, results_uncovered, prior_entries, scope_hashes, disclosures,
         budget, tests_glob, timing_store, timeout_s, precomputed_baseline,
         store2, timeout_factor, header_hash, retry_ids, resume, scoped,
-        total_sites)
+        total_sites, progress=progress)
 
 
 def _execute_planned(path, project_root, original_src, backup, mutants,
@@ -294,7 +299,7 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      scope_hashes, disclosures, budget, tests_glob,
                      timing_store, timeout_s, precomputed_baseline, store2,
                      timeout_factor, header_hash, retry_ids, resume, scoped,
-                     total_sites):
+                     total_sites, progress=None):
     """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
@@ -337,13 +342,19 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
     effective_timeout, timing_meta = _negotiate_budget(
         timing_store, timeout_s, precomputed_baseline)
 
+    # SEE-1525 进度面：分母 = 本 worker 真实 GUT 执行面（invalid 预检剔除后）；
+    # 并行分片由父层注入全局分母（progress["total"]）。
+    reporter = make_reporter(project_root, str(path), progress,
+                             len(executed_list) - invalid_count)
+
     # 缺陷1 兜底恢复守卫（SEE-1319 与 SEE-1321 内存注入共存）：内存注入路径
     # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。
     with _interrupt_guard(path, backup):
         outcome = _run_mutant_loop_with_aborts(
             path, project_root, original_src, backup, executed_list,
             tests_glob, effective_timeout, precomputed_baseline,
-            store2, prior_entries, scope_hashes, timeout_factor)
+            store2, prior_entries, scope_hashes, timeout_factor,
+            reporter=reporter)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
@@ -444,14 +455,15 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  precomputed_baseline=None,
                                  store2=None, prior_entries=None,
                                  scopes=None,
-                                 timeout_factor: float | None = None):
+                                 timeout_factor: float | None = None,
+                                 reporter=None):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
             path, project_root, original_src, backup,
             _valid_mutants(original_src, executed_list), tests_glob, timeout_s,
             precomputed_baseline, store2, prior_entries, scopes,
-            timeout_factor,
+            timeout_factor, reporter=reporter,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -548,7 +560,7 @@ def _run_mutant_loop(
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
     precomputed_baseline: dict | None = None,
     store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
-    timeout_factor: float | None = None,
+    timeout_factor: float | None = None, reporter=None,
 ) -> tuple[list, bool, float]:
     """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused, baseline_elapsed)。
 
@@ -596,11 +608,16 @@ def _run_mutant_loop(
         host = seed_host_script(str(Path(project_root)))
         try:
             for seq, m in enumerate(mutants):
+                t_mutant = time.monotonic()
                 verdict = _run_single_mutant(m, path, project_root,
                                              original_src, backup, tests_glob,
                                              seq, baseline_failures,
                                              baseline_dirty)
                 raw_pairs.append((m, verdict))
+                # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
+                if reporter is not None:
+                    reporter.record(m, verdict,
+                                    time.monotonic() - t_mutant)
                 # 中断安全增量落盘：乐观 streak（毒窗口收尾修正）。
                 # SEE-1405 发现三毒条目防护由 resume2.record_entry 承接
                 # （启动失败类 run_error 拒收——verdict 零信息量）。

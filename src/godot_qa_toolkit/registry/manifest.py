@@ -13,8 +13,6 @@ entries in the same file are never poisoned.
 
 from __future__ import annotations
 
-import re
-
 from gdtoolkit.parser import parser as gdtoolkit_parser
 from lark import Tree
 
@@ -28,28 +26,18 @@ from ..coverage.runner import (
 MANIFEST_VERSION = "probe-manifest/2"
 
 
-def _entry_statement_lines(node: Tree, depths: list[int]) -> tuple[int, ...]:
+def _statement_lines(
+    root: Tree, depths: list[int], skip_subtrees: tuple[str, ...] = ()
+) -> tuple[int, ...]:
+    """Statement census per entry: executable nodes at paren-depth 0 under
+    `root`. Hosts pass skip_subtrees=("lambda",) — the lambda body belongs to
+    the lambda entry; lambda entries traverse their own subtree directly."""
     found: list[int] = []
-    stack = [node]
+    stack = [root]
     while stack:
         current = stack.pop()
-        if current.data == "lambda":
+        if current.data in skip_subtrees:
             continue
-        if current.data in _EXECUTABLE_NODE_NAMES:
-            line = _node_line(current)
-            if line and line <= len(depths) and depths[line - 1] == 0:
-                found.append(line)
-        stack.extend(
-            c for c in getattr(current, "children", []) if isinstance(c, Tree)
-        )
-    return tuple(sorted(set(found)))
-
-
-def _lambda_statement_lines(lambda_node: Tree, depths: list[int]) -> tuple[int, ...]:
-    found: list[int] = []
-    stack = [lambda_node]
-    while stack:
-        current = stack.pop()
         if current.data in _EXECUTABLE_NODE_NAMES:
             line = _node_line(current)
             if line and line <= len(depths) and depths[line - 1] == 0:
@@ -135,7 +123,7 @@ def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
         if not entry["instrumentable"]:
             ast_node = _node_by_span(tree, entry["start_line"])
             t_ids = (
-                _entry_statement_lines(ast_node, depths)
+                _statement_lines(ast_node, depths, skip_subtrees=("lambda",))
                 if ast_node is not None
                 else ()
             )
@@ -160,18 +148,15 @@ def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
             )
             continue
         ast_node = _node_by_span(tree, entry["start_line"])
-        if entry["kind"] == "lambda":
-            t_ids = (
-                _lambda_statement_lines(ast_node, depths)
-                if ast_node is not None
-                else ()
+        t_ids = (
+            _statement_lines(
+                ast_node,
+                depths,
+                skip_subtrees=("lambda",) if entry["kind"] != "lambda" else (),
             )
-        else:
-            t_ids = (
-                _entry_statement_lines(ast_node, depths)
-                if ast_node is not None
-                else ()
-            )
+            if ast_node is not None
+            else ()
+        )
         i_lines = i_by_fid.get(entry["fid"], 0)
         per_function.append(
             {

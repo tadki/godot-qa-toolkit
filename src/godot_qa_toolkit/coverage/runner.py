@@ -377,12 +377,17 @@ def run_coverage(
     # SEE-1420 P2（L3/D7）：成功 run 的行级事实落盘（自家 JSON 超集，
     # stdout 契约不动）——mutation --reuse-coverage 的唯一数据源。
     from ..mutation.coverlink import save_coverage
+    from ..mutation.identity import identity_pack
+    from ..mutation.inject import detect_binary_kind
     covered_pct = 100.0 * len(hits) / total_lines if total_lines else 100.0
     # D3：可插桩行集随行级事实同盘落盘——mutation 前置过滤的唯一合法跳过
     # 锚（不可插桩行 ≠ uncovered）。
+    # SEE-1550 L1：身份包随行级事实入档——mutation prefilter 要求
+    # store fresh ∧ 身份包全匹配。
     save_coverage(hits, total_lines, project_root, str(path), tests_glob,
                   coverage_percent=round(covered_pct, 2),
-                  instrumentable_lines={l.line for l in executable_lines})
+                  instrumentable_lines={l.line for l in executable_lines},
+                  identity=identity_pack(project_root, detect_binary_kind()))
 
     return _coverage_report(str(path), original_src, executable_lines, hits,
                             probes_fired, min_percent, timing_meta)

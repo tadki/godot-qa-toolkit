@@ -42,10 +42,16 @@ from .ops import (  # noqa: F401
     mk_guard_not,
 )
 
-from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
-                     _impl_fs_path, _interrupt_guard, make_sigterm_restore_handler,
+from .inject import (cleanup_temp_files, forget_temp, godot_command,
+                     detect_binary_kind,
                      godot_project_path as _unified_godot_project_path,
-                     mutant_env, seed_host_script)  # noqa: F401
+                     make_user_dir, mutant_env, register_temp)  # noqa: F401
+from . import beacon
+from . import shadow
+from . import shadowpool
+from .shadow import SlotProvisionError
+from .identity import (INJECT_SCHEME, TestOwnershipIndex, identity_pack,
+                       killer_certificate, suspected_orphan)
 # 统一 mutant 明细记录形态（SEE-1416 扩列）与结果塑形契约在 reporting.py
 # （<800 行纪律拆分）；re-export 保持既有 import / monkeypatch 名称空间稳定。
 from .reporting import (  # noqa: F401
@@ -101,6 +107,9 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     SEE-1321 SPEC-006/007：子进程 env 注入（XDG_DATA_HOME / GQT_MUTATION_CFG）
     与入口脚本切换经模块级 _ACTIVE_ENV/_ACTIVE_SCRIPT 传递——保持函数签名
     向后兼容（既有令牌测试以 3 参 fake 替换本函数）。
+    SEE-1550：mutant 轮的 project_root 是影子槽，跨进程槽位闸必须仍锚真实仓
+    （"GlobalGodotGate 锚真实仓"既有语义）——闸锚经模块级 _ACTIVE_GATE_ROOT
+    传递（缺省回落 project_root，3 参 fake 契约零变化）。
     """
     gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
     if not os.path.isfile(gut_fs):
@@ -123,7 +132,7 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
         env.update(_ACTIVE_ENV)
     # SEE-1400 §SPEC-003：跨进程槽位闸包裹真实 godot 子进程（等槽时间不计
     # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
-    with GlobalGodotGate(project_root):
+    with GlobalGodotGate(_ACTIVE_GATE_ROOT or project_root):
         r = subprocess.run(
             [godot_command(), "--headless", "--path",
              _godot_project_path(project_root),
@@ -150,6 +159,9 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
 # 子进程环境/入口脚本的活动状态（mutant 循环内动态切换，见 _run_single_mutant）
 _ACTIVE_ENV: dict | None = None
 _ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
+# 槽位闸锚（SEE-1550）：mutant 轮指向真实仓根（闸必须跨 worker 全局计数，
+# 不能锚到各 worker 各自的影子槽）；baseline 轮为 None → 回落 project_root。
+_ACTIVE_GATE_ROOT: str | None = None
 
 
 # 自适应 timeout 倍数：per-mutant 上限 = baseline 实测耗时 × 该倍数。
@@ -166,6 +178,30 @@ def adaptive_timeout_for(baseline_elapsed: float, timeout_s: int,
     k = _TIMEOUT_SCALE if factor is None else float(factor)
     return max(timeout_s, int(baseline_elapsed * k) + 1)
 
+
+
+def _require_baseline_snapshot(mutant_slice, retry_ids,
+                               precomputed_baseline) -> None:
+    """worker 注入契约：分片/重试面必须携带共享 baseline 快照（各自跑
+    baseline 会 N 倍放大启动税且污染 timeout 锚）。"""
+    if ((mutant_slice is not None or retry_ids is not None)
+            and precomputed_baseline is None):
+        raise ValueError(
+            "slice/retry_ids workers require a precomputed baseline snapshot — "
+            "each worker running its own baseline would multiply the startup "
+            f"tax N-fold and pollute the adaptive timeout anchor: {mutant_slice}")
+
+
+def _attention_note(mutation_warning: int | None, total_sites: int,
+                    file_label: str) -> str | None:
+    """§SPEC-1420-01：按截断前全量位点数的告警（stderr + summary.attention）。"""
+    if mutation_warning is None or total_sites <= mutation_warning:
+        return None
+    note = (f"{total_sites} mutation sites exceed "
+            f"--mutation-warning {mutation_warning} — consider "
+            f"splitting this file")
+    print(f"mutation-warning: {note} in {file_label}", file=sys.stderr)
+    return note
 
 
 def run_mutation(    file_path: str,
@@ -186,8 +222,9 @@ def run_mutation(    file_path: str,
     resume2_store=None,
     select_ids: list[str] | None = None,
     select_lines: list[int] | None = None,
-    reuse_coverage: bool = False,
+    reuse_coverage: bool = True,
     progress: dict | None = None,
+    identity: dict | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -216,6 +253,13 @@ def run_mutation(    file_path: str,
     progress（SEE-1525）：父层注入的进度上下文 {run_id,total,worker}；缺省
     自建（串行 / 单点寻址路径）。进度只写 stderr 与 `.qa-cache`，绝不影响
     stdout 单 JSON 契约。
+    reuse_coverage（SEE-1550 L1）：coverage prefilter **默认自动启用**
+    （store fresh ∧ 身份包全匹配才生效，任一漂移禁用并披露；uncovered 不进
+    ok 门禁、不跑 GUT）；--no-reuse-coverage 显式关断。
+    identity（SEE-1550）：缓存身份包（executor 父层计算后随 chunk 注入，
+    保证多 worker 同 key）；缺省自建（含 godot --version，按 path+mtime 缓存）。
+    注入机制 = 磁盘影子注入（disk-farm/1，终案 §3）：mutant 经 os.replace
+    写影子内目标 `.gd`，引擎启动前从磁盘读到变异体。
     返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
     所有 mutant 均被测试杀死。
     """
@@ -223,12 +267,7 @@ def run_mutation(    file_path: str,
     if not path.is_file():
         raise FileNotFoundError(f"mutation target not found: {file_path}")
 
-    if ((mutant_slice is not None or retry_ids is not None)
-            and precomputed_baseline is None):
-        raise ValueError(
-            "slice/retry_ids workers require a precomputed baseline snapshot — "
-            "each worker running its own baseline would multiply the startup "
-            f"tax N-fold and pollute the adaptive timeout anchor: {mutant_slice}")
+    _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
 
     if tests_glob is None:
         tests_glob = _auto_scan_tests_glob(str(path), project_root)
@@ -236,6 +275,10 @@ def run_mutation(    file_path: str,
 
     original_src = path.read_text(encoding="utf-8")
     backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
+
+    if identity is None:
+        kind = binary_kind or detect_binary_kind()
+        identity = identity_pack(project_root, kind)
 
     try:
         raw_mutants = _collect_mutations(original_src, str(path))
@@ -247,20 +290,14 @@ def run_mutation(    file_path: str,
     header_hash, spans, mutants, scope_hashes = build_manifest(
         original_src, str(path), raw_mutants)
     total_sites = len(mutants)
-    attention: str | None = None
-    if mutation_warning is not None and total_sites > mutation_warning:
-        attention = (f"{total_sites} mutation sites exceed "
-                     f"--mutation-warning {mutation_warning} — consider "
-                     f"splitting this file")
-        print(f"mutation-warning: {total_sites} mutation sites exceed "
-              f"--mutation-warning {mutation_warning} in {path} — consider "
-              f"splitting this file", file=sys.stderr)
+    attention = _attention_note(mutation_warning, total_sites, str(path))
 
     if dry_run:
         return dry_run_estimate(
             str(path), mutants, budget, scoped, total_sites,
             project_root, tests_glob, binary_kind, resume2_store,
-            mutate_all, header_hash, scope_hashes, attention=attention)
+            mutate_all, header_hash, scope_hashes, attention=attention,
+            identity=identity)
 
     if not mutants:
         return _no_sites_result(str(path), scoped)
@@ -268,13 +305,14 @@ def run_mutation(    file_path: str,
     # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行 retry_ids；
     # 显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分复用。
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
-        project_root, str(path), tests_glob, binary_kind=binary_kind)
+        project_root, str(path), tests_glob, binary_kind=binary_kind,
+        identity=identity)
     prior_entries, reused, untouched, disclosures, executed_list, \
         results_uncovered = plan_execution(
             path, project_root, mutants, header_hash, scope_hashes, budget,
             tests_glob, binary_kind, resume2_store, mutate_all, retry_ids,
             select_ids, select_lines, reuse_coverage, attention,
-            mutant_slice, original_src)
+            mutant_slice, original_src, identity=identity)
 
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
@@ -291,7 +329,8 @@ def run_mutation(    file_path: str,
         reused, results_uncovered, prior_entries, scope_hashes, disclosures,
         budget, tests_glob, timing_store, timeout_s, precomputed_baseline,
         store2, timeout_factor, header_hash, retry_ids, resume, scoped,
-        total_sites, progress=progress)
+        total_sites, progress=progress, identity=identity,
+        targeted_only=bool(select_ids or select_lines))
 
 
 def _execute_planned(path, project_root, original_src, backup, mutants,
@@ -299,7 +338,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      scope_hashes, disclosures, budget, tests_glob,
                      timing_store, timeout_s, precomputed_baseline, store2,
                      timeout_factor, header_hash, retry_ids, resume, scoped,
-                     total_sites, progress=None):
+                     total_sites, progress=None, identity=None,
+                     targeted_only=False):
     """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
@@ -350,18 +390,18 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                              len(executed_list) - invalid_count,
                              invalid_count)
 
-    # 缺陷1 兜底恢复守卫（SEE-1319 与 SEE-1321 内存注入共存）：内存注入路径
-    # 磁盘目标文件本就不写变异；守卫保留以覆盖 interrupt/未知异常路径幂等恢复。
-    with _interrupt_guard(path, backup):
-        outcome = _run_mutant_loop_with_aborts(
-            path, project_root, original_src, backup, executed_list,
-            tests_glob, effective_timeout, precomputed_baseline,
-            store2, prior_entries, scope_hashes, timeout_factor,
-            reporter=reporter)
+    # 磁盘影子注入（SEE-1550 M0）：目标文件写入全部发生在影子槽内，真实仓
+    # 目标文件零写入——中断/硬杀不可能留变异残留进 git（守卫语义由槽归还
+    # 断言与下轮定向三向承接，不再需要真实仓恢复守卫）。
+    outcome = _run_mutant_loop_with_aborts(
+        path, project_root, original_src, backup, executed_list,
+        tests_glob, effective_timeout, precomputed_baseline,
+        store2, prior_entries, scope_hashes, timeout_factor,
+        reporter=reporter, identity=identity, targeted_only=targeted_only)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
-    raw_pairs, baseline_reused, baseline_elapsed = outcome
+    raw_pairs, baseline_reused, baseline_elapsed, slot_info = outcome
     resumed_count = len(reused)
 
     # D5 落定（权威口径）：streak/pinned 转化 + 毒 run 修正——循环内乐观
@@ -383,7 +423,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                             timing_meta,
                             resumed_count if (resumed_count or resume) else None,
                             disclosures=disclosures or None,
-                            pinned_count=len(streaks.pinned_ids))
+                            pinned_count=len(streaks.pinned_ids),
+                            slot_info=slot_info, original_src=original_src)
 
 
 def _negotiate_budget(timing_store, timeout_s: int,
@@ -459,14 +500,16 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  store2=None, prior_entries=None,
                                  scopes=None,
                                  timeout_factor: float | None = None,
-                                 reporter=None):
+                                 reporter=None, identity=None,
+                                 targeted_only: bool = False):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
             path, project_root, original_src, backup,
             _valid_mutants(original_src, executed_list), tests_glob, timeout_s,
             precomputed_baseline, store2, prior_entries, scopes,
-            timeout_factor, reporter=reporter,
+            timeout_factor, reporter=reporter, identity=identity,
+            targeted_only=targeted_only,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -483,6 +526,14 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             "godot launch failed on baseline — mutation data untrustworthy",
             f"godot launch failed on baseline run: {e.tail.strip()[:200]}",
         )
+    except SlotProvisionError as e:
+        # 影子槽制备失败（.gitignore fail-loud / 磁盘不足）——数据不可信，
+        # 中止契约转统一 JSON（与 baseline 启动失败同档）。
+        return _run_error_result(
+            str(path),
+            "shadow slot provisioning failed — mutation data untrustworthy",
+            f"shadow slot provisioning failed: {e}",
+        )
 
 
 def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
@@ -492,7 +543,9 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      timing_meta: dict | None = None,
                      resumed: int | None = None,
                      disclosures: dict | None = None,
-                     pinned_count: int = 0) -> dict:
+                     pinned_count: int = 0,
+                     slot_info: dict | None = None,
+                     original_src: str | None = None) -> dict:
     total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
@@ -515,6 +568,7 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
         "scoped": scoped,
         "baseline_reused": baseline_reused,
     }
+    _apply_mechanism_disclosures(summary, results, slot_info, original_src)
     # SEE-1400 §SPEC-002：仅在 resume 跳过语义在场的 run 报 skipped 数——
     # 常规 run 的 summary 与升级前逐字节同构（既有消费方零感知）。
     if resumed is not None:
@@ -546,6 +600,38 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     }
 
 
+def _apply_mechanism_disclosures(summary: dict, results: list[dict],
+                                 slot_info: dict | None,
+                                 original_src: str | None) -> None:
+    """SEE-1550 stdout 只加不改披露面：注入机制标签、槽位/新鲜度、killed
+    证书、疑似孤儿诊断（unreachable 不进 verdict——只披露）。
+
+    - killed_by_certificates：每个 killed 条目的完整失败集证书（撤除旧
+      [:3] 截断；reason 仍保留短预览供人读）。
+    - suspected_orphan：目标脚本零静态引用 ∧ 存在 survived → 幸存记录逐条
+      打 ``suspected_orphan`` 标记 + summary 名单——静态不可判定面（动态
+      load/uid 间接引用）只披露不判定、不 skip。
+    """
+    info = slot_info or {}
+    summary["inject_scheme"] = info.get("inject_scheme", INJECT_SCHEME)
+    if info.get("slot_mode"):
+        summary["slot_mode"] = info["slot_mode"]
+    if info.get("freshness"):
+        summary["freshness"] = info["freshness"]
+    certs = [{"id": r["id"], "killed_by": r["killed_by"]}
+             for r in results
+             if r.get("verdict") == "killed" and r.get("killed_by")]
+    if certs:
+        summary["killed_by_certificates"] = certs
+    if info.get("suspected_orphan") and any(
+            r.get("verdict") == "survived" for r in results):
+        for r in results:
+            if r.get("verdict") == "survived":
+                r["suspected_orphan"] = True
+        summary["suspected_orphans"] = [r["id"] for r in results
+                                        if r.get("verdict") == "survived"]
+
+
 # per-mutant 自适应上限（baseline 耗时决定，_run_mutant_loop 内写入）
 _adaptive_timeout = 0
 
@@ -564,8 +650,10 @@ def _run_mutant_loop(
     precomputed_baseline: dict | None = None,
     store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
     timeout_factor: float | None = None, reporter=None,
-) -> tuple[list, bool, float]:
-    """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused, baseline_elapsed)。
+    identity: dict | None = None, targeted_only: bool = False,
+) -> tuple[list, bool, float, dict]:
+    """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
+    baseline_elapsed, slot_info)。
 
     mutants = 已过差分/预算的【执行面】（串行：budget_on_retry 产物；worker：
     父层注入的 retry_ids 子集）。verdict 记录不在此处进 results——D5 streak
@@ -574,10 +662,13 @@ def _run_mutant_loop(
     毒 run 守卫在窗口收尾修正（apply_timeout_streaks + 调用方改写）。
     baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。
     timeout_factor（§SPEC-1420-02）：None = 模块默认 _TIMEOUT_SCALE。
+    注入 = 磁盘影子槽（SEE-1550 M0）：每 worker 一个槽，mutant 经
+    os.replace 写影子内目标，真实仓零写入；槽归还原并断言。
     """
     global _adaptive_timeout
     raw_pairs: list[tuple] = []
     prior_entries = prior_entries or {}
+    slot_info: dict = {}
 
     with tempfile.TemporaryDirectory() as workdir:
         backup_path = os.path.join(workdir, "original.gd")
@@ -608,14 +699,35 @@ def _run_mutant_loop(
         baseline_failures = _parse_failing_tests(baseline_tail)
         baseline_dirty = bool(baseline_failures)
 
-        host = seed_host_script(str(Path(project_root)))
+        kind = detect_binary_kind()
+        idpack = identity if identity is not None else \
+            identity_pack(project_root, kind)
+        target_rel = project_relative(project_root, str(path))
+        target_res = _res_path_of(str(path), str(Path(project_root)))
+        auto_name = beacon.autoload_name_for(project_root, target_res)
+        slot = shadowpool.acquire_slot(project_root, kind, [target_rel],
+                                       idpack.get("boot_wiring_hash", ""),
+                                       targeted_only=targeted_only)
+        # killed 证书的归属索引懒构建（零 killed 的 run 零支付）
+        ownership_holder: list = []
+
+        def _ownership() -> TestOwnershipIndex:
+            if not ownership_holder:
+                ownership_holder.append(TestOwnershipIndex(project_root))
+            return ownership_holder[0]
+
         try:
+            beacon.seed_beacon_script(slot.root)
             for seq, m in enumerate(mutants):
                 t_mutant = time.monotonic()
                 verdict = _run_single_mutant(m, path, project_root,
                                              original_src, backup, tests_glob,
                                              seq, baseline_failures,
-                                             baseline_dirty)
+                                             baseline_dirty, slot=slot,
+                                             auto_name=auto_name,
+                                             ownership_fn=_ownership,
+                                             target_rel=target_rel,
+                                             target_res=target_res)
                 raw_pairs.append((m, verdict))
                 # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
                 if reporter is not None:
@@ -632,53 +744,96 @@ def _run_mutant_loop(
                                                    streak, scopes or {},
                                                    time.time()))
         finally:
-            host.unlink(missing_ok=True)
-            forget_temp(host)
+            release_problems = shadowpool.release_slot(slot)
+            if release_problems:
+                slot_info["release_problems"] = release_problems
 
-    return raw_pairs, baseline_reused, baseline_elapsed
+        slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
+        slot_info["slot_mode"] = slot.mode
+        slot_info["freshness"] = list(slot.freshness)
+        if any(v["verdict"] == "survived" for _, v in raw_pairs):
+            # unreachable 不进 verdict、不 skip——静态零引用只做疑似孤儿披露
+            try:
+                slot_info["suspected_orphan"] = suspected_orphan(
+                    project_root, target_res)
+            except OSError as e:
+                print(f"orphan scan failed for {target_res}: {e}",
+                      file=sys.stderr)
+                slot_info["suspected_orphan"] = False
+
+    return raw_pairs, baseline_reused, baseline_elapsed, slot_info
 
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
-                       baseline_failures: set[str], baseline_dirty: bool) -> dict:
-    """内存变异注入 → 跑 GUT → 分类；磁盘目标文件全程保持原始内容（SPEC-007）。"""
+                       baseline_failures: set[str], baseline_dirty: bool,
+                       slot=None, auto_name: str = "",
+                       ownership_fn=None, target_rel: str = "",
+                       target_res: str = "") -> dict:
+    """磁盘影子注入 → 跑 GUT → 分类；真实仓目标文件全程零写入（SEE-1550）。
+
+    - 注入：mutant 经「临时文件 + os.replace」写影子槽内目标 `.gd`（引擎
+      启动前落盘）——每 mutant 一次 replace，无恢复步，下一个 mutant 直接
+      覆盖上一个；写失败上抛转 run_error（绝不让引擎读到原码假 survived）。
+    - 四级 beacon（beacon.py）：磁盘哈希 / load 编译 / autoload 同源 /
+      GUT 运行证据——任何一级失败都不得产出 killed/survived。
+    """
     global _ACTIVE_ENV, _ACTIVE_SCRIPT
     mutated_src = _apply_mutation(original_src, m)
-    env_extra, cfg_path = mutant_env(_res_path_of(str(path), str(Path(project_root))),
-                                     mutated_src, str(Path(project_root)), seq)
+    if target_res == "":
+        target_res = _res_path_of(str(path), str(Path(project_root)))
+    if target_rel == "":
+        target_rel = project_relative(project_root, str(path))
+    try:
+        mutant_sha = shadow.inject_mutant(slot.root, target_rel, mutated_src)
+    except (OSError, SlotProvisionError) as e:
+        return _mutant_record(
+            m, "run_error",
+            f"disk injection failed for {target_res}: {e}",
+            src=original_src)
+    cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
+                                       auto_name)
+    register_temp(cfg_path)
+    user_dir = make_user_dir()
+    env_extra, _ = mutant_env(str(cfg_path), user_dir)
     _ACTIVE_ENV = env_extra
-    _ACTIVE_SCRIPT = host_script_res()
+    _ACTIVE_SCRIPT = beacon.beacon_script_res(slot.root)
+    _ACTIVE_GATE_ROOT = project_root
     try:
         try:
             rc, tail = _run_gut_on_project(
-                project_root, timeout_s=_adaptive_timeout, tests_glob=tests_glob)
-            if rc == 3 and "GQT_INJECT_FAIL" in tail:
-                # 注入失败绝不能当 kill/survive——宿主没把变异送进引擎，
-                # 跑的是原代码，任何判定都是假证据。
-                # SPEC-017：注入失败细分两类——
-                #   (a) impl 解析失败（"Parse Error" + "Invalid operands" 等
-                #       编译错误）：变异体本身产不出可编译脚本 = 操作符 bug
-                #       类 invalid_mutant（与 _split_invalid_mutants 的静态
-                #       预检同类，但解析器拒绝的形态只有引擎能判）；
-                #   (b) 其余注入失败（cfg 丢失/env 缺失/写入失败）：run_error
-                #       ——基础设施问题，数据不可信。
-                # 两者都非 survived——旧路径（stdout-only tail）看不见
-                # GQT_INJECT_FAIL，把这类全部吞成 "only pre-existing failures"
-                # 的假 survived（§SPEC-016 实证 7 个受累变异）。
-                if "Parse Error" in tail or "Failed to load script" in tail:
-                    return _mutant_record(
-                        m, "invalid_mutant",
-                        f"mutated source fails to compile in-project (parser "
-                        f"rejection): {m.kind} {m.original}→{m.mutated}",
-                        src=original_src)
-                return _mutant_record(m, "run_error",
-                                      f"memory injection failed: {tail.strip()[:200]}",
-                                      src=original_src)
+                str(slot.root), timeout_s=_adaptive_timeout,
+                tests_glob=tests_glob)
+            # 四级 beacon 失败分类：load-null/parse → invalid_mutant；
+            # 哈希不符/实例不同源/基础设施 → run_error（§SPEC-003）。
+            beacon_verdict = beacon.classify_beacon_failure(rc, tail)
+            if beacon_verdict is not None:
+                return _mutant_record(
+                    m, beacon_verdict,
+                    f"beacon failed ({beacon_verdict}): {tail.strip()[:200]}",
+                    src=original_src)
             # classify 保持 5 参签名（interrupt 令牌测试以同签名 fake 替换）；
             # line_text 统一在消费侧补——所有 verdict 记录同构（SEE-1416）。
             verdict = _classify_mutant_run(m, rc, tail, baseline_failures,
                                            baseline_dirty)
             verdict = {**verdict, "line_text": line_text_of(original_src, m.line)}
+            # L4 GUT 运行证据门：无运行流不得 killed/survived（§SPEC-003）。
+            if verdict["verdict"] in ("killed", "survived") \
+                    and not _GUT_RUN_EVIDENCE.search(tail):
+                return _mutant_record(
+                    m, "run_error",
+                    f"no GUT run stream evidence for "
+                    f"{m.kind} {m.original}→{m.mutated} — engine output "
+                    f"lacks test-run markers: {tail.strip()[:200]}",
+                    src=original_src)
+            # killed 证书（完整失败集；归属/闭包不确定 → 不附 → 下轮保守
+            # 重跑，fail-safe 只偏向重跑）。
+            if verdict["verdict"] == "killed" and ownership_fn is not None:
+                new_failures = _parse_failing_tests(tail) - baseline_failures
+                cert = killer_certificate(new_failures, ownership_fn(),
+                                          project_root)
+                if cert is not None:
+                    verdict["killed_by"] = cert
         except subprocess.TimeoutExpired:
             verdict = _mutant_record(m, "timeout",
                                      f"GUT timed out after {m.kind} {m.original}→{m.mutated}",
@@ -686,15 +841,11 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     finally:
         _ACTIVE_ENV = None
         _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
-        # impl 磁盘文件正常轮由 Godot 自删；兜底补删覆盖子进程写盘后被中断 /
-        # 编译失败未自删的窗口（登记表仍持有 → SIGTERM/atexit 也能清）。
-        # 路径解析必须在 cfg unlink 之前（cfg 先删则恒读不到——LOW-1 死代码修复）
-        impl_fs = _impl_fs_path(project_root, cfg_path)
+        _ACTIVE_GATE_ROOT = None
         Path(cfg_path).unlink(missing_ok=True)
         forget_temp(cfg_path)
-        if impl_fs is not None:
-            Path(impl_fs).unlink(missing_ok=True)
-            forget_temp(impl_fs)
+        if user_dir:
+            shutil.rmtree(user_dir, ignore_errors=True)
     return verdict
 
 
@@ -707,9 +858,11 @@ class _BaselineLaunchFailure(Exception):
 
 
 # 启动失败类 run_error 的 reason 标记（与 _run_single_mutant /
-# _classify_mutant_run 的产出措辞同源；毒条目防护只认这两类）。
+# _classify_mutant_run 的产出措辞同源；毒条目防护只认这三类——beacon
+# 基础设施失败对 mutant 零信息量，与注入/启动失败同档拒写 resume）。
 _LAUNCH_FAILURE_REASON_MARKERS = (
-    "memory injection failed:",
+    "disk injection failed for",
+    "beacon failed",
     "godot launch failed (tests did not run):",
 )
 

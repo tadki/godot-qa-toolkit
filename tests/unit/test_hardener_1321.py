@@ -189,9 +189,9 @@ class TestSliceRunErrorNotSwallowed:
         monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
 
         def fake(root, timeout_s=60, tests_glob=None):
-            # 首次为 baseline（无 ACTIVE_ENV）→ 干净；注入轮 → 宿主失败
+            # 首次为 baseline（无 ACTIVE_ENV）→ 干净；注入轮 → beacon 失败
             if runner_mod._ACTIVE_ENV:
-                return (3, "GQT_INJECT_FAIL: cannot write impl")
+                return (4, "GQT_BEACON_FAIL: disk hash mismatch")
             return (0, "pass")
 
         monkeypatch.setattr(runner_mod, "_run_gut_on_project", fake)

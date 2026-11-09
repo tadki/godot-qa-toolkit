@@ -1,8 +1,12 @@
-"""SEE-1321 §SPEC-015：SIGTERM/SIGINT 中断清理对抗用例。
+"""SEE-1321 §SPEC-015 → SEE-1550 磁盘影子注入的中断清理契约重钉。
 
-QA 实测缺陷（MEDIUM）：worker 被 SIGTERM 中断后 `.gqt_mutation_cfg_*.json`
-与 `.gqt_mutation_host_*.gd` 残留工作树（os._exit 跳过 finally/atexit）。
-本组用例先 RED 实证再驱动修复。
+旧机制（impl/cfg/host 三类 `.gqt_mutation_*` 落真实仓工作树）已退役：
+- beacon cfg 现落影子槽内（linux 通道 = /tmp 农场；win64 通道 =
+  `.qa-cache` 池，自忽略），SIGTERM 后 `.qa-cache` 外零残留；
+- per-process 临时文件登记表 + atexit 兜底保留（beacon cfg / beacon 宿主
+  .gd 经 register_temp 覆盖 SIGINT/未知退出路径）；
+- SIGKILL 残留 mutant 的修正由槽侧定向三向承接
+  （test_mutation_interrupt.py 的 SIGKILL 格）。
 """
 
 import os
@@ -18,16 +22,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import godot_qa_toolkit.mutation.inject as inject_mod
-import godot_qa_toolkit.mutation.inject as inject_mod
 import godot_qa_toolkit.mutation.runner as runner_mod
 from godot_qa_toolkit.mutation.inject import (
     cleanup_temp_files,
     register_temp,
 )
-
-
-class _ExitJump(BaseException):
-    """模拟 os._exit 的控制流跳转（pytest 内不可真退出）。"""
 
 
 def _write_project(tmp_path):
@@ -43,25 +42,25 @@ def _write_project(tmp_path):
 
 
 class TestTempRegistryCleanup:
-    def test_impl_file_registered_and_cleaned(self, tmp_path):
-        """修复轮 2：impl 磁盘文件（.gqt_mutation_impl_<pid>_<seq>_<stem>.gd）
-        必须入 per-process 登记表——SIGTERM 兜底覆盖第三类临时文件
-        （QA 复验 FAIL 实证 impl 残留 3 个）。"""
+    def test_beacon_cfg_registered_and_cleaned(self, tmp_path):
+        """SEE-1550：beacon cfg（影子槽内临时文件）必须可入 per-process 登记
+        表——SIGTERM/atexit 兜底覆盖（impl 文件已随内存注入机制退役；
+        runner 在 mutant 轮 dispatch 时 register_temp cfg）。"""
         proj, _target = _write_project(tmp_path)
-        from godot_qa_toolkit.mutation.inject import mutant_env
-        _, cfg_fs = mutant_env("res://autoload/save_manager.gd", "src", proj, 0)
-        impl_fs = Path(proj) / f".gqt_mutation_impl_{os.getpid()}_0_save_manager.gd"
-        # 登记在 dispatch 时即发生（即使 Godot 侧尚未写盘）
-        assert str(impl_fs) in inject_mod._TEMP_FILES
-        # 模拟 Godot 写盘后进程被中断（文件在场、无自删机会）
-        impl_fs.write_text("mutant")
+        slot_root = Path(proj) / ".qa-cache" / "mutation-pool" / "slots" / "s"
+        slot_root.mkdir(parents=True)
+        from godot_qa_toolkit.mutation import beacon
+        cfg = beacon.write_beacon_cfg(str(slot_root), "res://calc.gd",
+                                      "deadbeef", "")
+        inject_mod.register_temp(str(cfg))
+        # 登记在 dispatch 时即发生（即使 Godot 侧尚未读 cfg）
+        assert str(cfg) in inject_mod._TEMP_FILES
         cleanup_temp_files()
-        assert not impl_fs.exists()
-        assert not Path(cfg_fs).exists()
+        assert not cfg.exists()
 
     def test_cleanup_removes_registered_files(self, tmp_path):
-        f1 = tmp_path / ".gqt_mutation_host_999.gd"
-        f2 = tmp_path / ".gqt_mutation_cfg_999_0.json"
+        f1 = tmp_path / ".gqt_beacon_host_999.gd"
+        f2 = tmp_path / ".gqt_beacon_cfg_999.json"
         f1.write_text("x")
         f2.write_text("{}")
         register_temp(str(f1))
@@ -70,16 +69,16 @@ class TestTempRegistryCleanup:
         assert not f1.exists() and not f2.exists()
 
     def test_cleanup_survives_missing_files(self, tmp_path):
-        f1 = tmp_path / ".gqt_mutation_host_998.gd"
+        f1 = tmp_path / ".gqt_beacon_host_998.gd"
         f1.write_text("x")
         register_temp(str(f1))
         f1.unlink()
         cleanup_temp_files()  # 已删文件必须幂等，不得抛
 
     def test_cleanup_survives_permission_error(self, tmp_path, monkeypatch):
-        f1 = tmp_path / ".gqt_mutation_host_997.gd"
+        f1 = tmp_path / ".gqt_beacon_host_997.gd"
         f1.write_text("x")
-        f2 = tmp_path / ".gqt_mutation_cfg_997_0.json"
+        f2 = tmp_path / ".gqt_beacon_cfg_997.json"
         f2.write_text("{}")
         register_temp(str(f1))
         register_temp(str(f2))
@@ -95,34 +94,12 @@ class TestTempRegistryCleanup:
         assert not f2.exists(), "remaining files must still be cleaned"
 
 
-class TestSigtermHandlerCleans:
-    def test_handler_invokes_temp_cleanup_before_exit(self, tmp_path, monkeypatch):
-        """SIGTERM handler 恢复目标文件后必须清理临时文件再 os._exit。"""
-        exited = {}
-
-        def fake_exit(code):
-            exited["code"] = code
-            raise _ExitJump(code)
-
-        monkeypatch.setattr(runner_mod.os, "_exit", fake_exit)
-        # SEE-1420：handler 迁入 inject.py——补丁面对准其命名空间绑定
-        monkeypatch.setattr(inject_mod, "cleanup_temp_files",
-                            lambda: exited.setdefault("cleaned", True))
-        target = tmp_path / "t.gd"
-        target.write_text("mutated")
-        handler = runner_mod.make_sigterm_restore_handler(str(target), "original")
-        with pytest.raises(_ExitJump):
-            handler(signal.SIGTERM, None)
-        assert target.read_text() == "original"
-        assert exited.get("cleaned") is True, "handler must sweep temp files"
-        assert exited["code"] == 128 + signal.SIGTERM
-
-
 class TestSigtermIntegration:
-    def test_sigterm_midrun_leaves_no_temp_files(self, tmp_path):
+    def test_sigterm_midrun_leaves_no_residue_outside_qa_cache(self, tmp_path):
         """QA 场景复现（密闭，无 godot 依赖）：子进程 run_mutation 在 mutant
-        轮被 SIGTERM 中断 → 项目目录内 cfg/host/impl 三类 `.gqt_mutation_*`
-        临时文件必须全部清零（QA 复验 impl 残留回归锚）。"""
+        轮被 SIGTERM 中断 → `.qa-cache` 外零 `.gqt_*` 残留（cfg 现落影子槽
+        内），真实仓目标文件保持原码。影子槽本身在 win64 通道位于
+        `.qa-cache`（自忽略）、linux 通道位于 /tmp——两者都不污染 git 面。"""
         proj, target = _write_project(tmp_path)
         src_root = Path(__file__).parent.parent.parent / "src"
         child_script = textwrap.dedent(f"""
@@ -133,9 +110,9 @@ class TestSigtermIntegration:
             def fake_gut(root, timeout_s=60, tests_glob=None):
                 state["calls"] += 1
                 if state["calls"] == 1:
-                    return (0, "pass")          # baseline 快速通过
-                time.sleep(60)                  # mutant 轮挂起——临时文件在场
-                return (0, "pass")
+                    return (0, "pass [passed]")   # baseline 快速通过
+                time.sleep(60)                    # mutant 轮挂起——cfg 已落影子槽
+                return (0, "pass [passed]")
             R._run_gut_on_project = fake_gut
             from godot_qa_toolkit.mutation.runner import run_mutation
             run_mutation({target!r}, {proj!r}, budget=2,
@@ -146,17 +123,20 @@ class TestSigtermIntegration:
         proc = subprocess.Popen(
             [sys.executable, str(script_path)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # 等 mutant 轮进入挂起（cfg/host 已落盘）
-        deadline = time.time() + 20
+        # 等 mutant 轮进入挂起（beacon cfg 已落影子槽——win64 通道在
+        # .qa-cache 池内，linux 通道在 /tmp 农场；两者都可能有）
+        deadline = time.time() + 30
+        found = []
         while time.time() < deadline:
-            leftovers = list(Path(proj).glob(".gqt_mutation_*"))
-            if leftovers:
+            found = list((Path(proj) / ".qa-cache").rglob(".gqt_beacon_cfg_*")) \
+                + list(Path(tempdir()).glob(f"gqt-mutation-farm/*/*/.gqt_beacon_cfg_*")) \
+                + list(Path(tempdir()).glob("gqt-slot-*/**/.gqt_beacon_cfg_*"))
+            if found:
                 break
             if proc.poll() is not None:
                 pytest.fail("child exited before mutant round started")
             time.sleep(0.2)
-        assert list(Path(proj).glob(".gqt_mutation_*")), \
-            "precondition: temp files must exist before SIGTERM"
+        assert found, "precondition: beacon cfg must exist before SIGTERM"
         proc.send_signal(signal.SIGTERM)
         try:
             proc.wait(timeout=15)
@@ -164,5 +144,12 @@ class TestSigtermIntegration:
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail("child did not exit after SIGTERM (cleanup hung?)")
-        leftovers = list(Path(proj).glob(".gqt_mutation_*"))
-        assert not leftovers, f"temp files leaked after SIGTERM: {leftovers}"
+        outside = [p for p in Path(proj).rglob(".gqt_*")
+                   if ".qa-cache" not in p.parts]
+        assert not outside, f"residue outside .qa-cache after SIGTERM: {outside}"
+        assert Path(target).read_text() == "func add(a, b):\n\treturn a + b\n"
+
+
+def tempdir():
+    import tempfile
+    return tempfile.gettempdir()

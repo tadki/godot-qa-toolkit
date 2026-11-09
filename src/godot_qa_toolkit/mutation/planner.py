@@ -13,6 +13,7 @@ import sys
 
 from .coverlink import load_instrumentable_lines, load_reusable_coverage
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
+from .identity import certificate_valid
 from .reporting import _dry_run_result, _mutant_record
 from .resume2 import ResumeStoreV2
 
@@ -21,12 +22,13 @@ __all__ = ["dry_run_estimate", "plan_execution"]
 def dry_run_estimate(file_label, mutants, budget, scoped, total_sites,
                       project_root, tests_glob, binary_kind, resume2_store,
                       mutate_all, header_hash, scope_hashes,
-                      attention: str | None = None):
+                      attention: str | None = None,
+                      identity: dict | None = None):
     """SPEC-009 清点模式（零 GUT/零落盘）+ §SPEC-1420-18 差分计数预估
     （manifest 在场时按 D4 矩阵估 retry 面，只读）。"""
     est_store = resume2_store if resume2_store is not None else \
         ResumeStoreV2(project_root, file_label, tests_glob,
-                      binary_kind=binary_kind)
+                      binary_kind=binary_kind, identity=identity)
     old = est_store.load_manifest()
     if old is not None and not mutate_all:
         est_plan = plan_diff(header_hash, scope_hashes, old, mutants,
@@ -46,7 +48,8 @@ def dry_run_estimate(file_label, mutants, budget, scoped, total_sites,
 def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                     budget, tests_glob, binary_kind, resume2_store,
                     mutate_all, retry_ids, select_ids, select_lines,
-                    reuse_coverage, attention, mutant_slice, original_src):
+                    reuse_coverage, attention, mutant_slice, original_src,
+                    identity: dict | None = None):
     """执行面规划（P1 差分 / P3 寻址 / P2 覆盖过滤三模式互斥落定）。
 
     返回 (prior_entries, reused, untouched, disclosures, executed_list,
@@ -54,7 +57,8 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
     manifest（父层单点写）；卡尺寻址（select_*）强制新执行绕过差分。
     """
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
-        project_root, str(path), tests_glob, binary_kind=binary_kind)
+        project_root, str(path), tests_glob, binary_kind=binary_kind,
+        identity=identity)
     disclosures: dict = {}
     if attention is not None:
         disclosures["attention"] = attention
@@ -66,7 +70,7 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
     return _plan_serial(store2, path, project_root, mutants, header_hash,
                         scope_hashes, budget, tests_glob, binary_kind,
                         mutate_all, reuse_coverage, mutant_slice,
-                        original_src, disclosures)
+                        original_src, disclosures, identity=identity)
 
 
 def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
@@ -103,16 +107,22 @@ def _plan_worker(mutants, retry_ids, disclosures):
 
 def _plan_serial(store2, path, project_root, mutants, header_hash,
                  scope_hashes, budget, tests_glob, binary_kind, mutate_all,
-                 reuse_coverage, mutant_slice, original_src, disclosures):
-    """串行自规划：D4 差分矩阵 → P2 覆盖前置过滤 → D6 budget-on-retry。"""
+                 reuse_coverage, mutant_slice, original_src, disclosures,
+                 identity: dict | None = None):
+    """串行自规划：D4 差分矩阵（killed 证书门）→ P2 覆盖前置过滤 →
+    D6 budget-on-retry。"""
     store2.disclose_v1_superseded()
     old_manifest = store2.load_manifest()
     prior_entries = store2.load_entries()
+    # killed 证书复用门（SEE-1550 §SPEC-007）：killer 改/删/依赖变 → 仅该
+    # entry 重跑；证书缺失 → 保守重跑。校验是定向的（只碰 killer 闭包）。
     plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
-                     prior_entries, mutate_all=mutate_all)
+                     prior_entries, mutate_all=mutate_all,
+                     cert_validator=lambda kb: certificate_valid(kb,
+                                                                 project_root))
     uncovered_mutants, retry_pool = _apply_coverage_prefilter(
         plan, path, project_root, tests_glob, binary_kind, reuse_coverage,
-        disclosures)
+        disclosures, identity=identity)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     reused = plan.reused
     if disclosures.get("coverage_prefilter") not in ("store_miss", "instrumentable_face_missing") \
@@ -143,10 +153,13 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
 
 
 def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
-                              binary_kind, reuse_coverage, disclosures):
-    """§SPEC-1420-12（L3/D7 P2）：coverage 前置过滤（budget 之前）——预算只
-    花在 covered 位点上；uncovered 全部显式标记。store miss = 告警不过滤。
+                              binary_kind, reuse_coverage, disclosures,
+                              identity: dict | None = None):
+    """§SPEC-1420-12（L3/D7 P2）+ SEE-1550 L1：coverage 前置过滤（budget 之前）
+    ——预算只花在 covered 位点上；uncovered 全部显式标记。
 
+    默认自动启用（reuse_coverage=True）：store fresh ∧ 身份包全匹配才生效，
+    任一漂移（含旧 schema 无 identity）禁用并披露——宁多跑不假阴性。
     返回 (uncovered, retry_pool)。D3 修复：过滤锚 = covered ∧ instrumentable
     ——落在不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的位
     点**留在执行面**（Revy 实机 item.gd 11/60 假阴性实证）；可插桩集读不到
@@ -155,14 +168,14 @@ def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
     if not reuse_coverage:
         return [], plan.executed
     cov_lines, cov_reason = load_reusable_coverage(
-        project_root, str(path), tests_glob, binary_kind)
+        project_root, str(path), tests_glob, binary_kind, identity=identity)
     if cov_lines is None:
         print(f"mutation: coverage store miss ({cov_reason}) — "
               f"running unfiltered", file=sys.stderr)
         disclosures["coverage_prefilter"] = "store_miss"
         return [], plan.executed
     inst_lines, inst_reason = load_instrumentable_lines(
-        project_root, str(path), tests_glob, binary_kind)
+        project_root, str(path), tests_glob, binary_kind, identity=identity)
     if inst_lines is None:
         print(f"mutation: instrumentable face unavailable ({inst_reason}) — "
               f"running unfiltered", file=sys.stderr)

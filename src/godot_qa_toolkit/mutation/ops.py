@@ -46,7 +46,10 @@ _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 # see1420/1（SEE-1420 Phase 1 一次 schema bump）：scope manifest + 稳定 id +
 # header hash + no-mutate + timeout_streak 并入同一次 v2 落地（定案 §三：
 # 一次 bump 不拆三次失效窗口）——v1 store 不读不写不删，显式披露。
-OPS_VERSION = "see1420/1"
+# see1550/1（SEE-1550 M0 磁盘影子注入定案）：注入机制由内存注入改为磁盘影子
+# 注入（disk-farm/1）——旧 verdict 由假注入面产生，跨机制复用 = 脏合并；
+# 旧 v2 store 条目不读不写不删并 stderr 披露（Owner 裁决菜单 B：一次性全失效）。
+OPS_VERSION = "see1550/1"
 
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {

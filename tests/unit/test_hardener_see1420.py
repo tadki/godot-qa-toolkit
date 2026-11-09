@@ -53,7 +53,10 @@ TWO_FUNCS = ("extends Node\n"
 MANIFEST = {"header_hash": "H", "scopes": {"func:add": "S1"}}
 PRIOR = {"verdict": "killed", "reason": "r", "scope_hash": "S1",
          "line": 2, "column": 11, "kind": "AOR", "original": "+",
-         "mutated": "-", "timeout_streak": 0}
+         "mutated": "-", "timeout_streak": 0,
+         # SEE-1550：killed 复用必须携带证书（缺证书 = cert_missing 重跑）
+         "killed_by": [{"test_name": "t", "script_path": "res://tests/t.gd",
+                        "script_sha1": "a", "deps_sha1": "b"}]}
 
 
 def _write_project(tmp_path, src=TARGET_SRC):
@@ -91,6 +94,9 @@ def _state(src, label="calc.gd"):
             "line": m.line, "column": m.column, "kind": m.kind,
             "original": m.original, "mutated": m.mutated,
             "verdict": "killed", "reason": "seeded", "timeout_streak": 0,
+            # SEE-1550：killed 复用必须携带证书（缺证书 = cert_missing 重跑）
+            "killed_by": [{"test_name": "t", "script_path": "res://tests/t.gd",
+                           "script_sha1": "a", "deps_sha1": "b"}],
         }
     manifest = {"schema": SCHEMA_V2, "header_hash": header,
                 "scopes": dict(site_scopes)}
@@ -145,7 +151,7 @@ class TestResumeV2EnvelopeAdversarial:
          .write_text(json.dumps(drift), encoding="utf-8"))
         poison = {"schema": SCHEMA_V2, "file_key": store.key,
                   **_entry(i=2, verdict="run_error"),
-                  "reason": "memory injection failed: env missing"}
+                  "reason": "disk injection failed for res://x.gd: slot lost"}
         (store.entry_path("calc.gd#add#2")
          .write_text(json.dumps(poison), encoding="utf-8"))
         assert store.load_entries() == {}

@@ -61,8 +61,9 @@ class TestSpec006XdgIsolation:
     def test_xdg_inject_failure_falls_back(self, tmp_path, monkeypatch, fake_gut):
         """SPEC-006 兜底：user 目录创建失败 → env 无 XDG 但不崩溃。"""
         proj, files = _write_project(tmp_path)
-        import godot_qa_toolkit.mutation.inject as inject_mod
-        monkeypatch.setattr(inject_mod, "make_user_dir", lambda: None)
+        # SEE-1550：make_user_dir 由 runner 直呼（beacon env 装配在 runner 侧），
+        # 补丁点随调用面走 runner_mod。
+        monkeypatch.setattr(runner_mod, "make_user_dir", lambda: None)
         result = run_mutation(files[0], proj, budget=2)
         assert result["summary"]["mutants"] == 2
         assert all("XDG_DATA_HOME" not in (c or {}) for c in fake_gut["calls"])
@@ -78,8 +79,9 @@ class TestSpec006XdgIsolation:
 
         monkeypatch.setattr(runner_mod, "_run_gut_on_project", fake)
         run_mutation(files[0], proj, budget=2)
-        # 宿主脚本按 PID 隔离命名（.gqt_mutation_host_<pid>.gd）
-        assert any(".gqt_mutation_host_" in s and s.endswith(".gd")
+        # beacon 宿主脚本按 PID 隔离命名（.gqt_beacon_host_<pid>.gd，
+        # SEE-1550 磁盘影子注入宿主）
+        assert any(".gqt_beacon_host_" in s and s.endswith(".gd")
                    for s in scripts)
 
     def test_no_env_leakage_after_loop(self, tmp_path, monkeypatch):
@@ -95,7 +97,8 @@ class TestSpec006XdgIsolation:
 
 class TestSpec007MemoryInjection:
     def test_target_disk_never_mutated_during_loops(self, tmp_path, monkeypatch):
-        """SPEC-007：mutant 循环中磁盘目标文件全程保持原始内容。"""
+        """SPEC-007/SEE-1550：真实仓目标文件全程保持原始内容（mutant 只写
+        影子槽——fake 收到的 root 即影子根，真实仓路径是 files[0]）。"""
         proj, files = _write_project(tmp_path)
         target = Path(files[0])
         original = target.read_text()
@@ -105,7 +108,7 @@ class TestSpec007MemoryInjection:
             snapshot["at_run"] = target.read_text()
             if "first" not in snapshot:
                 snapshot["first"] = True
-                return (0, "pass")
+                return (0, "pass [passed]")
             return (1, "* test_kill_x\n    [Failed]: caught\n")
 
         monkeypatch.setattr(runner_mod, "_run_gut_on_project", disk_guard)
@@ -113,26 +116,34 @@ class TestSpec007MemoryInjection:
         assert snapshot["at_run"] == original, "disk must stay original"
         assert result["summary"]["killed"] == result["summary"]["mutants"]
 
-    def test_mutated_source_in_cfg_matches_apply(self, tmp_path, monkeypatch):
-        """SPEC-007：内存变异体 = _apply_mutation 结果传给宿主 cfg。"""
+    def test_mutated_source_lands_in_shadow_target(self, tmp_path, monkeypatch):
+        """SEE-1550：mutant 在引擎启动前落影子内目标 .gd，cfg 携带其 sha256
+        ——磁盘内容 == cfg 哈希 == _apply_mutation 产物（beacon L1 契约）。"""
+        import hashlib
         import json
         proj, files = _write_project(tmp_path)
-        cfgs = []
+        original = Path(files[0]).read_text()
+        seen = []
         import godot_qa_toolkit.mutation.inject as inject_mod
         # cfg 路径关掉 wslpath 转换（真机才需要 win64 形式，本测试用 Linux 侧读回）
         monkeypatch.setattr(inject_mod, "_win_path", lambda p: p)
 
         def capture(root, timeout_s=60, tests_glob=None):
             if runner_mod._ACTIVE_ENV:
-                cfgs.append(json.loads(
-                    Path(runner_mod._ACTIVE_ENV["GQT_MUTATION_CFG"]).read_text()))
-            return (0, "pass")
+                cfg = json.loads(
+                    Path(runner_mod._ACTIVE_ENV["GQT_MUTATION_CFG"]).read_text())
+                disk = (Path(root) / "calc.gd").read_text()
+                seen.append((cfg, disk))
+            return (0, "pass [passed]")
 
         monkeypatch.setattr(runner_mod, "_run_gut_on_project", capture)
         run_mutation(files[0], proj, budget=2)
-        assert cfgs, "mutant host cfg must be handed over"
-        assert cfgs[0]["target_res"].endswith("/calc.gd")
-        assert "mutated_source" in cfgs[0]
+        assert seen, "mutant beacon cfg must be handed over"
+        for cfg, disk in seen:
+            assert cfg["target_res"].endswith("/calc.gd")
+            assert cfg["mutant_sha256"] == hashlib.sha256(
+                disk.encode("utf-8")).hexdigest()
+        assert seen[0][1] != original, "shadow target must hold the mutant at run time"
 
 
 class TestSpec005AdaptiveTimeoutAnchor:

@@ -39,11 +39,14 @@ def save_coverage(covered_lines: set[int], total_lines: int,
                   project_root: str, file_path: str, tests_glob: str | None,
                   binary_kind: str | None = None,
                   coverage_percent: float | None = None,
-                  instrumentable_lines: set[int] | None = None) -> bool:
+                  instrumentable_lines: set[int] | None = None,
+                  identity: dict | None = None) -> bool:
     """coverage 成功 run 的行级事实落盘（原子写；失败告警一次，best-effort）。
 
     instrumentable_lines（D3）：本次 run 的探针可插桩行集——mutation 前置
     过滤的唯一合法跳过锚。None = 旧 schema 形态（读回侧按无该集降级）。
+    identity（SEE-1550 L1）：缓存身份包入档——读回侧要求 fresh ∧ 身份包全
+    匹配才允许 prefilter 生效。
     """
     kind = binary_kind_tag(binary_kind)
     rel = project_relative(project_root, file_path)
@@ -65,6 +68,8 @@ def save_coverage(covered_lines: set[int], total_lines: int,
         "coverage_percent": coverage_percent,
         "recorded_at": time.time(),
     }
+    if identity is not None:
+        doc["identity"] = dict(identity)
     if instrumentable_lines is not None:
         doc["instrumentable_lines"] = sorted(int(l) for l in instrumentable_lines)
     path = coverage_cache_path(project_root, file_path, tests_glob,
@@ -86,22 +91,27 @@ def save_coverage(covered_lines: set[int], total_lines: int,
 
 
 def load_reusable_coverage(project_root: str, file_path: str,
-                           tests_glob: str | None, binary_kind=None
+                           tests_glob: str | None, binary_kind=None,
+                           identity: dict | None = None
                            ) -> tuple[set[int] | None, str | None]:
     """读回可复用的 covered 行集；provenance 不符 = (None, 原因)。
 
     源码 sha1 在读回时对当前文件实测（落盘后源码变更即失效——行级事实
     必须锚定同一份源码）。vacuous（零可执行行）按无数据降级——过滤无意义。
+    identity（SEE-1550 L1）：给出时要求条目身份包全匹配——任一漂移（含
+    旧 schema 无 identity）= (None, 漂移原因)，prefilter 禁用并披露。
     """
     lines, _doc_or_reason = _load_coverage_doc(project_root, file_path,
-                                               tests_glob, binary_kind)
+                                               tests_glob, binary_kind,
+                                               identity=identity)
     if lines is None:
         return None, _doc_or_reason
     return lines, None
 
 
 def load_instrumentable_lines(project_root: str, file_path: str,
-                              tests_glob: str | None, binary_kind=None
+                              tests_glob: str | None, binary_kind=None,
+                              identity: dict | None = None
                               ) -> tuple[set[int] | None, str | None]:
     """D3：读回可插桩行集（provenance 同 load_reusable_coverage）。
 
@@ -109,7 +119,7 @@ def load_instrumentable_lines(project_root: str, file_path: str,
     「整文件视为可插桩」的既有语义降级（不假阴性也不扩面）。
     """
     _, doc_or_reason = _load_coverage_doc(project_root, file_path, tests_glob,
-                                          binary_kind)
+                                          binary_kind, identity=identity)
     if isinstance(doc_or_reason, str):
         return None, doc_or_reason
     raw = doc_or_reason
@@ -120,7 +130,8 @@ def load_instrumentable_lines(project_root: str, file_path: str,
 
 
 def _load_coverage_doc(project_root: str, file_path: str,
-                       tests_glob: str | None, binary_kind=None
+                       tests_glob: str | None, binary_kind=None,
+                       identity: dict | None = None
                        ) -> tuple[set[int] | None, dict | str | None]:
     """provenance 校验 + (covered_lines, doc-or-reason) 复合读取。"""
     kind = binary_kind_tag(binary_kind)
@@ -138,6 +149,9 @@ def _load_coverage_doc(project_root: str, file_path: str,
         return None, "coverage cache tests_glob mismatch (exact-match rule)"
     if raw.get("binary_kind") != kind:
         return None, "coverage cache binary kind mismatch"
+    if identity is not None and raw.get("identity") != identity:
+        return None, ("coverage cache identity drift (fresh + identity-pack "
+                      "match required — store invalidated)")
     try:
         source_sha1 = hashlib.sha1(
             Path(file_path).read_bytes()).hexdigest()

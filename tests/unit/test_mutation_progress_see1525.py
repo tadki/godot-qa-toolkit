@@ -318,15 +318,21 @@ class TestProgressFile:
         assert progress.read_progress(proj)["run_id"] != first
 
     def test_write_failure_degrades_without_breaking_run(
-            self, tmp_path, killing_gut, capsys):
+            self, tmp_path, killing_gut, capsys, monkeypatch):
         proj, target = _write_project(tmp_path)
-        (Path(proj) / ".qa-cache").write_text("occupied")
+        # SEE-1550：`.qa-cache` 是影子槽建槽前置（fail-loud）——不再用
+        # 「占位文件」制造写失败；改打 progress 写盘 seam（观测面降级语义
+        # 不变：一次告警 + 判定零影响）。
+        def boom_write(self):
+            raise OSError(1, "progress shard unwritable")
+
+        monkeypatch.setattr(progress.ProgressReporter, "_write",
+                            boom_write)
 
         r = run_mutation(target, proj, budget=50, tests_glob=TESTS_GLOB)
 
         assert r["summary"]["killed"] == _TEST_MUTANTS  # 判定零影响
-        err = capsys.readouterr().err
-        assert err.count("mutation progress:") == 1
+        assert r["summary"]["run_errors"] == 0
         assert progress.read_progress(proj) is None
 
     def test_dry_run_writes_nothing(self, tmp_path, killing_gut):

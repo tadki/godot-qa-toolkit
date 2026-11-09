@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from ..timing import binary_kind_tag, project_relative
+from .identity import identity_sha1
 from .ops import OPS_VERSION
 
 SCHEMA_V2 = "see1420-resume/2"
@@ -38,16 +39,21 @@ RESUME_V2_DIRNAME = "gqt-mutation-resume-v2"
 # 信封核对失败（key 不符）与毒条目同样按无数据处理——身份漂移的条目
 # 绝不复用（v1 hardener 同款红线）。
 _LAUNCH_FAILURE_MARKERS = (
-    "memory injection failed:",
+    "disk injection failed for",
+    "beacon failed",
     "godot launch failed (tests did not run):",
 )
 
 
 def file_key(project_root: str, file_path: str, tests_glob: str | None,
-             binary_kind: str | None = None) -> str:
+             binary_kind: str | None = None,
+             identity_sha: str | None = None) -> str:
+    """file_key（SEE-1550）：增身份包成分——inject_scheme/godot 版本/wiring/
+    GUT 哈希任一漂移 = 旧 key 永不再命中（identity.disclose_superseded 披露，
+    旧条目不读不写不删）。"""
     kind = binary_kind if binary_kind is not None else binary_kind_tag(None)
     rel = project_relative(project_root, file_path)
-    payload = f"{rel}|{tests_glob or ''}|{OPS_VERSION}|{kind}"
+    payload = f"{rel}|{tests_glob or ''}|{OPS_VERSION}|{kind}|{identity_sha or ''}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -56,13 +62,17 @@ class ResumeStoreV2:
 
     def __init__(self, project_root: str, file_path: str,
                  tests_glob: str | None, binary_kind: str | None = None,
-                 now: float | None = None):
+                 now: float | None = None, identity: dict | None = None):
         self.project_root = str(Path(project_root).resolve())
         self.file_path = file_path
         self.tests_glob = tests_glob
         self.binary_kind = binary_kind_tag(binary_kind)
+        self.identity = identity
+        self.identity_sha = (identity_sha1(identity)
+                             if identity is not None else "")
         self.key = file_key(project_root, file_path, tests_glob,
-                            binary_kind=self.binary_kind)
+                            binary_kind=self.binary_kind,
+                            identity_sha=self.identity_sha)
         self._now = time.time() if now is None else now
         self._warned_write = False
         self._warned_manifest = False
@@ -125,7 +135,10 @@ class ResumeStoreV2:
                 "rel": rel,
                 "tests_glob": self.tests_glob,
                 "ops_version": OPS_VERSION,
+                "inject_scheme": (self.identity or {}).get(
+                    "inject_scheme", "unknown"),
                 "binary_kind": self.binary_kind,
+                "identity_sha": self.identity_sha,
                 "source_sha1": source_sha1,
                 "header_hash": header_hash,
                 "scopes": dict(scopes),

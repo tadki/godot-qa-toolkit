@@ -15,6 +15,14 @@ from godot_qa_toolkit.mutation.coverlink import (
     load_reusable_coverage,
     save_coverage,
 )
+from godot_qa_toolkit.mutation.identity import identity_pack
+from godot_qa_toolkit.mutation.inject import detect_binary_kind
+
+
+def _ident(proj):
+    """SEE-1550 L1：prefilter 要求 store 身份包全匹配——测试侧用与
+    run_mutation 同源的 pack 落盘（同进程同缓存，godot --version 稳定）。"""
+    return identity_pack(str(proj), detect_binary_kind())
 
 SRC = ("func add(a, b):\n"
        "\treturn a + b\n"
@@ -76,7 +84,8 @@ class TestCoveragePrefilter:
         proj, target = _write_project(tmp_path)
         # 行 2（add 体）覆盖；行 5（sub 体）未覆盖；位点行全部可插桩（D3）
         save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5})
+                      instrumentable_lines={2, 5},
+                      identity=_ident(proj))
         calls = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):
@@ -101,7 +110,8 @@ class TestCoveragePrefilter:
         """uncovered 不计入 ok 门禁失败档——quality 信号非工具失败。"""
         proj, target = _write_project(tmp_path)
         save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5})
+                      instrumentable_lines={2, 5},
+                      identity=_ident(proj))
 
         state = {"n": 0}
 
@@ -148,7 +158,8 @@ class TestCoveragePrefilter:
         proj, target = _write_project(tmp_path, src)
         # 只覆盖 two 体（行 5）；one（行 2）uncovered；位点行全可插桩（D3）
         save_coverage({5}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5})
+                      instrumentable_lines={2, 5},
+                      identity=_ident(proj))
         calls = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):
@@ -193,7 +204,8 @@ class TestCoveredVerdictConsistency:
         assert full["summary"]["killed"] == 6
         # 只覆盖 add 体（行 2）→ covered 位点 = 3；位点行全可插桩（D3）
         save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5})
+                      instrumentable_lines={2, 5},
+                      identity=_ident(proj))
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         filtered = mrunner.run_mutation(str(target), str(proj), budget=10,
                                         tests_glob="res://tests/",

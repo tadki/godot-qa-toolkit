@@ -207,7 +207,7 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         mutation_warning=args.mutation_warning,
         timeout_factor=args.timeout_factor,
         mutate_all=args.mutate_all,
-        reuse_coverage=args.reuse_coverage)
+        reuse_coverage=_reuse_coverage_flag(args))
     if len(files) == 1 and args.jobs is None:
         # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
         envelope = result
@@ -243,10 +243,16 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
                     else None),
         select_lines=([args.lines] if getattr(args, "lines", None)
                       else None),
-        reuse_coverage=args.reuse_coverage,
+        reuse_coverage=_reuse_coverage_flag(args),
     )
     result["summary"].setdefault("jobs", 1)
     return result
+
+
+def _reuse_coverage_flag(args: argparse.Namespace) -> bool:
+    """SEE-1550 L1：coverage prefilter 默认自动启用；--no-reuse-coverage
+    显式关断。旧 --reuse-coverage 旗标继续接受（与默认同义，向后兼容）。"""
+    return not getattr(args, "no_reuse_coverage", False)
 
 
 def cmd_risk(args: argparse.Namespace) -> int:
@@ -438,6 +444,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "last `gqt coverage` run for this file (SEE-1420 P2; "
                         "provenance-checked: source/tests/binary must match; "
                         "uncovered sites are marked 'uncovered' and skipped)")
+    m.add_argument("--no-reuse-coverage", action="store_true",
+                   help="disable the coverage prefilter (SEE-1550 L1: "
+                        "prefilter is ON by default when a fresh coverage "
+                        "store with a matching identity pack exists; "
+                        "uncovered sites never enter the ok gate)")
     _add_godot_bin_arg(m)
     m.set_defaults(func=cmd_mutation)
 

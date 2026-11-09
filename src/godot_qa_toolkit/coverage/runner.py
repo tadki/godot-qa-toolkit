@@ -584,6 +584,10 @@ def _coverage_report(file: str, original_src: str, executable_lines, hits: set[i
             "branch_total": branches.total,
             "branch_covered": branches_covered,
             "branch_coverage_percent": branch_pct,
+            # SEE-1546 M2: per-line hits are the only source for per-function
+            # attribution in the risk shadow report — exposing them keeps the
+            # risk layer from re-running the same instrumentation twice.
+            "hits_lines": sorted(hits),
             **summary_extra,
         },
         "failures": failures,

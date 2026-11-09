@@ -46,11 +46,13 @@ EXPECTED_SCENARIO_COUNTS = {
     # HIGH-1 拆分：8 个自足场景 + 3 个真实 KOL 树场景独立模块守卫）。
     "see1546_wp1a": 8,
     "see1546_wp1a_kol": 3,
+    # SEE-1546 M2：最小 exploratory shadow（CRAP-Line 诊断排序器）。
+    "see1546_shadow": 8,
 }
 EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
-EXPECTED_STEPS = 110
-EXPECTED_DEFINITIONS = 101
+EXPECTED_STEPS = 142
+EXPECTED_DEFINITIONS = 133
 CONTRACT_MARKER = '{\n  "tool": "gherkin"'
 
 
@@ -136,8 +138,9 @@ def _write_contract_case(tmp_path: Path) -> None:
 def test_dual_source_scenario_count_matches_ledger(request: pytest.FixtureRequest) -> None:
     # SEE-1468 M5-a：see1288_fork_cli 4 场景收编后双源对账 17 -> 21。
     # SEE-1546 WP1a：see1546_wp1a 11 场景接入后对账 21 -> 32。
+    # SEE-1546 M2：see1546_shadow 8 场景接入后对账 32 -> 40。
     collection = _full_collection(request)
-    assert len(collection.items) == EXPECTED_SCENARIOS == 32
+    assert len(collection.items) == EXPECTED_SCENARIOS == 40
     for name, expected in EXPECTED_SCENARIO_COUNTS.items():
         assert _source_scenario_count(name) == expected, name
         prefix = f"tests/bdd/test_{name}.py::"

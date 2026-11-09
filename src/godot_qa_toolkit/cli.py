@@ -249,6 +249,63 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
     return result
 
 
+def cmd_risk(args: argparse.Namespace) -> int:
+    from .risk.shadow import run_shadow_from_paths
+
+    early = _apply_godot_bin_or_contract("risk", args)
+    if early is not None:
+        return early
+    paths = [Path(p) for p in args.files]
+    missing = [str(p) for p in paths if not p.is_file()]
+    if missing:
+        return _emit(
+            {
+                "tool": "risk",
+                "ok": False,
+                "summary": {"error": f"target files not found: {missing}"},
+                "failures": [{"reason": f"target files not found: {missing}"}],
+            }
+        )
+    performance_input = None
+    if args.performance_file:
+        import json as _json
+
+        performance_input = _json.loads(
+            Path(args.performance_file).read_text(encoding="utf-8")
+        )
+    report = run_shadow_from_paths(
+        paths=paths,
+        project_root=args.project_root,
+        core_tests=args.core_tests,
+        full_tests=args.full_tests,
+        skip_measure=args.skip_measure,
+        performance_input=performance_input,
+    )
+    report_path = Path(args.report)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    scored = report["ranking"]["top"]
+    return _emit(
+        {
+            "tool": "risk",
+            "ok": True,
+            "summary": {
+                "report": str(report_path),
+                "evidence_level": "exploratory",
+                "diagnostic_only": True,
+                "dynamic_cache": False,
+                "records": len(report["records"]),
+                "scored": len(scored),
+                "unknown_share": report["unknown"]["share"],
+                "eligible_files": report["confidence"]["sample_files"],
+                "negative_files": report["confidence"]["negative_files"],
+            },
+            "failures": [],
+        }
+    )
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage.runner import run_coverage
     from .timing import TimingStore
@@ -385,6 +442,45 @@ def build_parser() -> argparse.ArgumentParser:
                         "uncovered sites are marked 'uncovered' and skipped)")
     _add_godot_bin_arg(m)
     m.set_defaults(func=cmd_mutation)
+
+    r = sub.add_parser(
+        "risk",
+        help="exploratory CRAP-Line shadow over selected files (diagnostic-only, SEE-1546 M2)",
+    )
+    r.add_argument(
+        "files",
+        nargs="+",
+        help="candidate .gd files (eligible ones are measured; lambda/inner-class/"
+        "var-def files route to the measurement-gap lanes)",
+    )
+    r.add_argument("--project-root", required=True, help="target Godot project root")
+    r.add_argument(
+        "--core-tests",
+        default="res://tests/unit/",
+        help="GUT dir for the core recipe (default res://tests/unit/)",
+    )
+    r.add_argument(
+        "--full-tests",
+        default=None,
+        help="GUT dir for the full recipe (default: res://tests/ via .gutconfig dirs)",
+    )
+    r.add_argument(
+        "--report",
+        default="shadow-report.json",
+        help="where to write the shadow report JSON (default ./shadow-report.json)",
+    )
+    r.add_argument(
+        "--performance-file",
+        default=None,
+        help="optional JSON with measured complexity/coverage head-vs-master medians",
+    )
+    r.add_argument(
+        "--skip-measure",
+        action="store_true",
+        help="static-only dry run: no GUT rounds executed",
+    )
+    _add_godot_bin_arg(r)
+    r.set_defaults(func=cmd_risk)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
     v.add_argument("file", help="the .gd file to measure")

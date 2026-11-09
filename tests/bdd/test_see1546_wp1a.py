@@ -135,17 +135,17 @@ NON_DEF_KEYWORD_SRC = (
 
 
 @given("a GDScript file using def as a local variable name")
-def given_var_def_file(tmp_path: Path, bdd_state: dict) -> None:
+def given_var_def_file(tmp_path: Path) -> None:
     (tmp_path / "with_var_def.gd").write_text(VAR_DEF_SRC, encoding="utf-8")
 
 
 @given("a GDScript file with def only inside strings and comments")
-def given_string_comment_file(tmp_path: Path, bdd_state: dict) -> None:
+def given_string_comment_file(tmp_path: Path) -> None:
     (tmp_path / "strings.gd").write_text(STRING_COMMENT_SRC, encoding="utf-8")
 
 
 @given("a GDScript file whose def tokens sit next to else and func keyword positions")
-def given_keyword_position_file(tmp_path: Path, bdd_state: dict) -> None:
+def given_keyword_position_file(tmp_path: Path) -> None:
     (tmp_path / "keyword_pos.gd").write_text(KEYWORD_POS_SRC, encoding="utf-8")
 
 
@@ -155,7 +155,7 @@ def given_raw_pipeline(bdd_state: dict) -> None:
 
 
 @given("a GDScript file with an inner class and outer functions")
-def given_inner_class_file(tmp_path: Path, bdd_state: dict) -> None:
+def given_inner_class_file(tmp_path: Path) -> None:
     (tmp_path / "inner_class.gd").write_text(INNER_CLASS_SRC, encoding="utf-8")
 
 
@@ -165,12 +165,12 @@ def given_raw_cc_visit(bdd_state: dict) -> None:
 
 
 @given("a GDScript file whose host function contains a branching lambda")
-def given_lambda_host_file(tmp_path: Path, bdd_state: dict) -> None:
+def given_lambda_host_file(tmp_path: Path) -> None:
     (tmp_path / "lambda_host.gd").write_text(LAMBDA_HOST_SRC, encoding="utf-8")
 
 
 @given("a GDScript file with a non-def Python keyword collision")
-def given_non_def_collision_file(tmp_path: Path, bdd_state: dict) -> None:
+def given_non_def_collision_file(tmp_path: Path) -> None:
     (tmp_path / "collision.gd").write_text(NON_DEF_KEYWORD_SRC, encoding="utf-8")
     (tmp_path / "sibling.gd").write_text(
         "func fine() -> int:\n\treturn 7\n", encoding="utf-8"
@@ -178,7 +178,7 @@ def given_non_def_collision_file(tmp_path: Path, bdd_state: dict) -> None:
 
 
 @given("the real KOL worktree with systems scenes and autoload trees")
-def given_kol_worktree(bdd_state: dict) -> None:
+def given_kol_worktree() -> None:
     if not KOL_ROOT:
         pytest.skip("KOL_ROOT not set — real-tree scenario skipped")
 
@@ -203,7 +203,6 @@ def when_collector(tmp_path: Path, bdd_state: dict) -> None:
 def when_raw_convert(bdd_state: dict) -> None:
     # gd2py's emit does not compile its output; the `def = ...` syntax error
     # only surfaces when radon's cc_visit compiles the converted source.
-    from gdtoolkit.gd2py import convert_code
     from radon.complexity import cc_visit
 
     try:
@@ -224,7 +223,6 @@ def when_sanitize(tmp_path: Path, bdd_state: dict) -> None:
 
 @when("the unfiltered block list is inspected")
 def when_unfiltered(bdd_state: dict) -> None:
-    from gdtoolkit.gd2py import convert_code
     from radon.complexity import cc_visit
     from radon.visitors import Class
 
@@ -239,8 +237,6 @@ def when_parity(bdd_state: dict) -> None:
 
 @when("the complexity gate runs over the three trees")
 def when_gate(bdd_state: dict) -> None:
-    from godot_qa_toolkit.complexity.gate import run_gate
-
     dirs = [str(Path(KOL_ROOT) / d) for d in ("systems", "scenes", "autoload")]
     bdd_state["gate"] = run_gate(dirs)
 
@@ -416,7 +412,7 @@ def then_mini_parity(bdd_state: dict) -> None:
 
 
 @given("the real KOL worktree with the seven var def files present")
-def given_kol_seven_files(bdd_state: dict) -> None:
+def given_kol_seven_files() -> None:
     if not KOL_ROOT:
         pytest.skip("KOL_ROOT not set — real-tree scenario skipped")
     for rel in SEVEN_VAR_DEF_FILES:

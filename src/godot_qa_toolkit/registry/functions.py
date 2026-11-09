@@ -258,12 +258,3 @@ def build_file_registry(gd_source: str, file_label: str) -> dict:
     snapshot["entries"] = entries
     snapshot["inner_classes"] = inner_classes
     return snapshot
-
-
-def _min_tree_line(node: Tree) -> int:
-    lo = 0
-    for token in node.scan_values(lambda v: isinstance(v, Token)):
-        line = getattr(token, "line", 0) or 0
-        if line and (not lo or line < lo):
-            lo = line
-    return lo

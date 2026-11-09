@@ -4,10 +4,12 @@ Oracle = registry func_def entries (raw-AST decision points — radon records
 are never the oracle, §SPEC-004 discipline). Radon records come from the same
 convert+sanitize pipeline as the collector, so parity measures the real
 pipeline. Pairing is per bare name by occurrence order: equal counts pair 1:1
-(gd2py flattens inner-class methods to top-level defs in source order), any
-count divergence sends the whole name group to identity_mismatch — never
-folded, never guessed. `closure_ok` is the machine-checkable invariant that
-every registry entry landed in exactly one lane.
+(both sides enumerate inner-class methods; radon's cc_visit output order is
+NOT source order once classes are present — fixture-verified — so the radon
+side is sorted by lineno before pairing), and any count divergence sends the
+whole name group to identity_mismatch — never folded, never guessed.
+`closure_ok` is the machine-checkable invariant that every registry entry
+landed in exactly one lane.
 """
 
 from __future__ import annotations
@@ -28,6 +30,20 @@ LANES = (
     "mismatch",
     "cc_unmeasured",
 )
+
+
+def _row(fid, name, lane, cc_oracle=None, radon_cc=None, lambda_gap=None,
+         pairing=None) -> dict:
+    """One parity/1 row — the seven-key shape every lane emits."""
+    return {
+        "fid": fid,
+        "name": name,
+        "lane": lane,
+        "cc_oracle": cc_oracle,
+        "radon_cc": radon_cc,
+        "lambda_gap": lambda_gap,
+        "pairing": pairing,
+    }
 
 
 def _lane_for(cc_oracle: int, radon_cc: int | None,
@@ -64,15 +80,8 @@ def pair_file(gd_source: str, file_label: str,
             "parse": "error",
             "reason": registry.get("reason"),
             "rows": [
-                {
-                    "fid": f"{file_label}::<unparseable>",
-                    "name": "<unparseable>",
-                    "lane": "cc_unmeasured",
-                    "cc_oracle": None,
-                    "radon_cc": None,
-                    "lambda_gap": None,
-                    "pairing": None,
-                }
+                _row(f"{file_label}::<unparseable>", "<unparseable>",
+                     "cc_unmeasured")
             ],
             "func_entries": 0,
             "lambda_entries": 0,
@@ -92,15 +101,8 @@ def pair_file(gd_source: str, file_label: str,
     rows: list[dict] = []
     for lam in lambda_entries:
         rows.append(
-            {
-                "fid": lam["fid"],
-                "name": lam["name"],
-                "lane": "lambda_disclosed",
-                "cc_oracle": lam["cc_oracle"],
-                "radon_cc": None,
-                "lambda_gap": 0,
-                "pairing": "lambda",
-            }
+            _row(lam["fid"], lam["name"], "lambda_disclosed",
+                 cc_oracle=lam["cc_oracle"], lambda_gap=0, pairing="lambda")
         )
 
     by_name: dict[str, list[dict]] = {}
@@ -112,17 +114,17 @@ def pair_file(gd_source: str, file_label: str,
         if len(entries) == len(radon_ccs):
             for entry, radon_cc in zip(entries, radon_ccs):
                 rows.append(
-                    {
-                        "fid": entry["fid"],
-                        "name": name,
-                        "lane": _lane_for(
+                    _row(
+                        entry["fid"],
+                        name,
+                        _lane_for(
                             entry["cc_oracle"], radon_cc, entry["lambda_gap"]
                         ),
-                        "cc_oracle": entry["cc_oracle"],
-                        "radon_cc": radon_cc,
-                        "lambda_gap": entry["lambda_gap"],
-                        "pairing": "occurrence",
-                    }
+                        cc_oracle=entry["cc_oracle"],
+                        radon_cc=radon_cc,
+                        lambda_gap=entry["lambda_gap"],
+                        pairing="occurrence",
+                    )
                 )
         elif not radon_ccs and len(entries) == 1:
             # 1:0 — e.g. a function literally named `def` sanitized to `def_`
@@ -131,29 +133,17 @@ def pair_file(gd_source: str, file_label: str,
             # pipeline anomaly, not a known rename pattern.
             entry = entries[0]
             rows.append(
-                {
-                    "fid": entry["fid"],
-                    "name": name,
-                    "lane": "missing_in_radon",
-                    "cc_oracle": entry["cc_oracle"],
-                    "radon_cc": None,
-                    "lambda_gap": entry["lambda_gap"],
-                    "pairing": None,
-                }
+                _row(entry["fid"], name, "missing_in_radon",
+                     cc_oracle=entry["cc_oracle"],
+                     lambda_gap=entry["lambda_gap"])
             )
         else:
             # count divergence: the whole name group fails loud, no folding
             for entry in entries:
                 rows.append(
-                    {
-                        "fid": entry["fid"],
-                        "name": name,
-                        "lane": "identity_mismatch",
-                        "cc_oracle": entry["cc_oracle"],
-                        "radon_cc": None,
-                        "lambda_gap": entry["lambda_gap"],
-                        "pairing": None,
-                    }
+                    _row(entry["fid"], name, "identity_mismatch",
+                         cc_oracle=entry["cc_oracle"],
+                         lambda_gap=entry["lambda_gap"])
                 )
 
     return {
@@ -176,26 +166,11 @@ def parity_file(gd_source: str, file_label: str,
     return report
 
 
-def _parity_file_task(task: tuple[str, str]) -> tuple[str, dict, dict]:
-    """Worker: (abs_path, rel_label) → (label, parity report, registry).
-
-    Module-level pure function so parity_paths can fan out across a process
-    pool — the AST face (lark parse + oracle counters) and the radon face are
-    independent per file, and the §SPEC-022 budget (parity ≤ 1.5× the
-    serial complexity scan) is only reachable with the AST face parallelized.
-    """
-    path, label = task
-    gd_source = Path(path).read_text(encoding="utf-8")
-    registry = build_file_registry(gd_source, file_label=label)
-    report = parity_file(gd_source, file_label=label, registry=registry)
-    return label, report, registry
-
-
-def parity_paths(paths: list[Path], project_root: str) -> dict:
-    """Run parity over recursive .gd files under each path (L3: the same
-    three roots as the complexity gate)."""
+def _collect_tasks(paths: list[Path], project_root: str) -> list[tuple[str, str]]:
+    """(abs_path, rel_label) worker tasks: recursive .gd walk under each path,
+    deduplicated by resolved path (L3: the same three roots as the complexity
+    gate)."""
     import glob
-    from concurrent.futures import ProcessPoolExecutor
 
     tasks: list[tuple[str, str]] = []
     root = Path(project_root).resolve()
@@ -217,18 +192,32 @@ def parity_paths(paths: list[Path], project_root: str) -> dict:
             except ValueError:
                 rel = Path(file_path).name
             tasks.append((file_path, rel))
+    return tasks
+
+
+def _run_tasks(tasks: list[tuple[str, str]]) -> list[tuple[str, dict, dict]]:
+    """Fan tasks across a process pool — the §SPEC-022 budget (parity ≤ 1.5×
+    the serial complexity scan) is only reachable with the AST face
+    parallelized. Restricted environments fall back to serial."""
+    from concurrent.futures import ProcessPoolExecutor
 
     workers = min(os.cpu_count() or 1, 8)
     if workers > 1 and len(tasks) > 1:
         try:
             with ProcessPoolExecutor(max_workers=workers) as pool:
-                results = list(pool.map(_parity_file_task, tasks))
+                return list(pool.map(_parity_file_task, tasks))
         except (OSError, PermissionError):
             # process-pool unavailable (restricted env) — serial fallback
-            results = [_parity_file_task(t) for t in tasks]
-    else:
-        results = [_parity_file_task(t) for t in tasks]
+            pass
+    return [_parity_file_task(t) for t in tasks]
 
+
+def _aggregate_results(
+    results: list[tuple[str, dict, dict]],
+) -> tuple[list[dict], dict[str, dict], dict]:
+    """Fold per-file results into the parity/1 summary (closure invariant
+    appended last), file reports sorted by label, and the registry snapshot
+    transport for --registry-out."""
     file_reports: list[dict] = []
     snapshot_files: dict[str, dict] = {}
     summary = {
@@ -265,16 +254,39 @@ def parity_paths(paths: list[Path], project_root: str) -> dict:
         snapshot_files[rel] = registry
 
     lanes_total = sum(summary[lane] for lane in LANES)
-    closure_ok = lanes_total == (
+    summary["closure_ok"] = lanes_total == (
         summary["func_entries"] + summary["lambda_entries"]
     )
     file_reports.sort(key=lambda r: r["file"])
+    return file_reports, snapshot_files, summary
+
+
+def _parity_file_task(task: tuple[str, str]) -> tuple[str, dict, dict]:
+    """Worker: (abs_path, rel_label) → (label, parity report, registry).
+
+    Module-level pure function so parity_paths can fan out across a process
+    pool — the AST face (lark parse + oracle counters) and the radon face are
+    independent per file.
+    """
+    path, label = task
+    gd_source = Path(path).read_text(encoding="utf-8")
+    registry = build_file_registry(gd_source, file_label=label)
+    report = parity_file(gd_source, file_label=label, registry=registry)
+    return label, report, registry
+
+
+def parity_paths(paths: list[Path], project_root: str) -> dict:
+    """Run parity over recursive .gd files under each path (L3: the same
+    three roots as the complexity gate)."""
+    file_reports, snapshot_files, summary = _aggregate_results(
+        _run_tasks(_collect_tasks(paths, project_root))
+    )
     return {
         "tool": "parity",
         "ok": True,
         "report_version": PARITY_VERSION,
         "diagnostic_only": True,
-        "summary": {**summary, "closure_ok": closure_ok},
+        "summary": summary,
         "files": file_reports,
         "_snapshot_files": snapshot_files,
     }

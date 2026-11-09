@@ -17,7 +17,6 @@ the WP1a oracle counters — the probe-plan side lives in registry.manifest.
 from __future__ import annotations
 
 import hashlib
-import re
 
 from gdtoolkit.parser import parser as gdtoolkit_parser
 from lark import Tree

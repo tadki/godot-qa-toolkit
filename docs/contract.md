@@ -243,7 +243,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 
 ### 9.3 `gqt registry diff <old.json> <new.json> [--out diff.json]`（`func-registry-diff/1`）
 
-statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed` / `identity_changed_candidate`（removed∩added 且 body_hash 一致——机器候选，`human_final:true`，不得自动计收益）。scope escape 规则（L1）：`escape_dir`（路径落入 `acceptance/generated/`、`.godot/`、`addons/`）、`lambda_kind`、`moved_into_inner_class`；escape 行单独计数、**永不计入治理净收益**——机器门 `governance_net.countable_added == added - scope_escape`。
+statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed` / `identity_changed_candidate`（removed∩added 且 body_hash 一致——机器候选，`human_final:true`，不得自动计收益）/ `removed_identity_candidate`（removed 行被配对进候选后的状态；summary 的 `removed` 计数同时含 `removed` 与 `removed_identity_candidate` 两类行）。scope escape 规则（L1）：`escape_dir`（路径落入 `acceptance/generated/`、`.godot/`、`addons/`）、`lambda_kind`、`moved_into_inner_class`；escape 行单独计数、**永不计入治理净收益**——机器门 `governance_net.countable_added == added - scope_escape`。
 
 ### 9.4 契约增量分类
 

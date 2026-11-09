@@ -47,4 +47,3 @@ Feature: SEE-1546 WP1a — complexity 门对 var def 文件的失明修复与 Cl
     When the complexity collector processes the file
     Then the file stays unparseable with an explicit reason
     And sibling files in the same run still report their functions
-

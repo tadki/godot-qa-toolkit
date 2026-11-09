@@ -323,4 +323,3 @@ def then_sibling_ok(bdd_state: dict) -> None:
     funcs = [f.name for f in bdd_state["funcs"]]
     if "fine" not in funcs:
         _fail("sibling function lost", str(funcs))
-

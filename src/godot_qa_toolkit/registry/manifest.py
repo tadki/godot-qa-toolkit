@@ -1,0 +1,198 @@
+"""probe-manifest/2: build-time fid materialization and per-callable T/I (§SPEC-018).
+
+Ownership is resolved once, here, from the registry spans (innermost span
+wins — a lambda span is strictly inside its host span, so lambda body lines
+belong to the lambda entry). Consumers see only fids; nothing downstream
+re-infers ownership from line ranges. T-side per-entry counts are derived
+from the registry spans too, with the host census pruning lambda subtrees
+(the lambda body belongs to the lambda entry). Inner-class entries are
+pruned by the instrumenter, so their census rows land in `census_gaps` and
+the entry itself carries `state_hint=partial_instrumentation` — sibling
+entries in the same file are never poisoned.
+"""
+
+from __future__ import annotations
+
+import re
+
+from gdtoolkit.parser import parser as gdtoolkit_parser
+from lark import Tree
+
+from ..coverage.runner import (
+    _EXECUTABLE_NODE_NAMES,
+    _collect_executable_lines,
+    _node_line,
+    _paren_depths,
+)
+
+MANIFEST_VERSION = "probe-manifest/2"
+
+
+def _entry_statement_lines(node: Tree, depths: list[int]) -> tuple[int, ...]:
+    found: list[int] = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.data == "lambda":
+            continue
+        if current.data in _EXECUTABLE_NODE_NAMES:
+            line = _node_line(current)
+            if line and line <= len(depths) and depths[line - 1] == 0:
+                found.append(line)
+        stack.extend(
+            c for c in getattr(current, "children", []) if isinstance(c, Tree)
+        )
+    return tuple(sorted(set(found)))
+
+
+def _lambda_statement_lines(lambda_node: Tree, depths: list[int]) -> tuple[int, ...]:
+    found: list[int] = []
+    stack = [lambda_node]
+    while stack:
+        current = stack.pop()
+        if current.data in _EXECUTABLE_NODE_NAMES:
+            line = _node_line(current)
+            if line and line <= len(depths) and depths[line - 1] == 0:
+                found.append(line)
+        stack.extend(
+            c for c in getattr(current, "children", []) if isinstance(c, Tree)
+        )
+    return tuple(sorted(set(found)))
+
+
+def _reparse_source(gd_source: str) -> tuple[Tree, list[int]]:
+    tree = gdtoolkit_parser.parse(gd_source, gather_metadata=True)
+    return tree, _paren_depths(gd_source)
+
+
+def _node_by_span(tree: Tree, start: int) -> Tree | None:
+    """Locate the AST node whose func_def/lambda meta.line == start (spans in
+    the registry were derived from these nodes)."""
+    for sub in tree.iter_subtrees():
+        if sub.data in ("func_def", "lambda"):
+            if int(getattr(sub.meta, "line", 0) or 0) == start:
+                return sub
+    return None
+
+
+def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
+    """Assemble the `probe-manifest/2` contract for one file.
+
+    Entries with `instrumentable=False` (inner-class methods, pruned by the
+    instrumenter) contribute `census_gaps` rows instead of probe lines; every
+    other entry keeps its own T/I decomposition and stays fully usable.
+    """
+    tree, depths = _reparse_source(gd_source)
+    executable = _collect_executable_lines(gd_source)
+    plan_lines = [entry.line for entry in executable]
+
+    instrumentable_entries = [
+        e for e in registry["entries"] if e["instrumentable"]
+    ]
+    # innermost span wins: (start, end] containment, smallest end then latest
+    # start resolves the lambda-inside-host nesting without any guesswork
+    spans = sorted(
+        ((e["start_line"], e["end_line"], e["fid"], e["kind"])
+         for e in instrumentable_entries),
+        key=lambda s: (s[1] - s[0], -s[0]),
+    )
+
+    probe_plan: list[dict] = []
+    unowned = ambiguous = 0
+    i_by_fid: dict[str, int] = {}
+    for probe_id, line in enumerate(plan_lines):
+        hits = [s for s in spans if s[0] < line <= s[1]]
+        if not hits:
+            unowned += 1
+            fid, kind = None, None
+        else:
+            # spans are pre-sorted innermost-first; lambda⊂host nesting is the
+            # expected shape, so ambiguity only exists when the two innermost
+            # spans are *identical* (same start and end, different fid)
+            innermost = hits[0]
+            if len(hits) > 1 and (hits[1][0], hits[1][1]) == (
+                innermost[0],
+                innermost[1],
+            ):
+                ambiguous += 1
+                fid, kind = None, None
+            else:
+                fid, kind = innermost[2], innermost[3]
+                i_by_fid[fid] = i_by_fid.get(fid, 0) + 1
+        probe_plan.append(
+            {
+                "probe_id": probe_id,
+                "line": line,
+                "fid": fid,
+                # contract naming: func_def → func, lambda → lambda
+                "owner_kind": "func" if kind == "func_def" else kind,
+            }
+        )
+
+    census_gaps: list[dict] = []
+    per_function: list[dict] = []
+    for entry in registry["entries"]:
+        if not entry["instrumentable"]:
+            ast_node = _node_by_span(tree, entry["start_line"])
+            t_ids = (
+                _entry_statement_lines(ast_node, depths)
+                if ast_node is not None
+                else ()
+            )
+            for line in t_ids:
+                census_gaps.append(
+                    {
+                        "line": line,
+                        "fid": entry["fid"],
+                        "owner_kind": "inner_class_method",
+                        "reason": "class_def_pruned",
+                        "expected": "not_instrumented",
+                    }
+                )
+            per_function.append(
+                {
+                    "fid": entry["fid"],
+                    "t_lines": len(t_ids),
+                    "i_lines": 0,
+                    "t_equal_i": False,
+                    "state_hint": "partial_instrumentation",
+                }
+            )
+            continue
+        ast_node = _node_by_span(tree, entry["start_line"])
+        if entry["kind"] == "lambda":
+            t_ids = (
+                _lambda_statement_lines(ast_node, depths)
+                if ast_node is not None
+                else ()
+            )
+        else:
+            t_ids = (
+                _entry_statement_lines(ast_node, depths)
+                if ast_node is not None
+                else ()
+            )
+        i_lines = i_by_fid.get(entry["fid"], 0)
+        per_function.append(
+            {
+                "fid": entry["fid"],
+                "t_lines": len(t_ids),
+                "i_lines": i_lines,
+                "t_equal_i": len(t_ids) == i_lines,
+                "t_line_ids": list(t_ids),
+            }
+        )
+
+    return {
+        "manifest_version": MANIFEST_VERSION,
+        "file": registry["file"],
+        "probe_plan": probe_plan,
+        "census_gaps": census_gaps,
+        "per_function": per_function,
+        "census": {
+            "probes_total": len(plan_lines),
+            "unowned": unowned,
+            "ambiguous": ambiguous,
+            "owners_complete": unowned == 0 and ambiguous == 0,
+        },
+    }

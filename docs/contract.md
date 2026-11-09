@@ -224,3 +224,27 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 已撤回的误导性承诺：fsprobe docstring 原称「报告 `summary.fs_projection` 形态」，
 上文（§4.3 mutation 正常输出）**不包含** `fs_projection` 键——以本条为准，该接口属后续
 演进，不属于当前契约。
+
+## 9. parity / registry 契约（SEE-1546 WP1b-PR1，diagnostic-only）
+
+三个新面，全部 **diagnostic-only**：`ok` 只表示命令完整执行，车道异常是数据不是 exit code——机器判定交给 jq 门；不接 CI、不设阈值、无均分（plan §4.1 口径）。
+
+### 9.1 `gqt parity <paths...> --project-root <root> [--report parity.json] [--registry-out reg.json]`
+
+全量逐函数 CC parity（`parity/1`）。oracle = registry func_def 条目（原始 AST 决策点计数，radon 记录绝不当 oracle）；radon 记录来自与 collector 完全相同的 convert+sanitize 管线。配对 = 文件内按裸名分组、**出现序 1:1**（radon 记录按 lineno 排序恢复源码序——fixture 实证 cc_visit 输出序在有 class 时非源码序）；同名计数不符时整组 `identity_mismatch`，绝不折叠。
+
+七车道：`match`（忠实）/ `lambda_gap`（宿主低估=其 lambda_gap，已披露）/ `lambda_disclosed`（lambda 条目无 radon 对应，预期盲区）/ `missing_in_radon`（1:0，如名为 `def` 的函数被消毒改名）/ `identity_mismatch`（同名计数不符或 radon 多出，fail-loud）/ `mismatch`（其余差值=第二层转换缺陷）/ `cc_unmeasured`（parse 失败按文件隔离）。
+
+闭合不变量（机器可查）：七车道行数之和 == `func_entries + lambda_entries`；`summary.closure_ok` 即其判定。`inner_class_files` / `inner_class_method_entries` 为 census 形状值（真树定版见 §SPEC-017），`lambda_gap_total` 为宿主 gap 幅度之和（区别于 `lambda_gap` 车道行数——行数按宿主计）。
+
+### 9.2 `--registry-out reg.json`（`func-registry-snapshot/1`）
+
+多文件 registry 快照：`{snapshot_version, project_root, summary{func_entries, lambda_entries, unparseable, inner_class_files}, files{relpath: func-registry/1}}`。`func-registry/1` 条目字段：`fid`（`relpath::Scope.name`，同类出现序 >1 加 `#k`）、`kind`（func_def|lambda）、`lex_scope`（class 链）、`occurrence`、`static`（穿透单计）、`instrumentable`（inner class 方法 false）、`start_line/end_line`（叶 token 算法）、`body_hash`（span sha1 前 12）、`cc_oracle`（1+自身决策点；lambda 即自身 CC，不据此出分）、`lambda_gap`（仅宿主）；lambda 条目带 `host_fid` 回指，fid 形如 `...::host.<lambda#k>`。parse 失败文件 `entries=[]` 且 `parse:"error"`。文件级 `inner_classes` 清单为诊断字段。
+
+### 9.3 `gqt registry diff <old.json> <new.json> [--out diff.json]`（`func-registry-diff/1`）
+
+statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed` / `identity_changed_candidate`（removed∩added 且 body_hash 一致——机器候选，`human_final:true`，不得自动计收益）。scope escape 规则（L1）：`escape_dir`（路径落入 `acceptance/generated/`、`.godot/`、`addons/`）、`lambda_kind`、`moved_into_inner_class`；escape 行单独计数、**永不计入治理净收益**——机器门 `governance_net.countable_added == added - scope_escape`。
+
+### 9.4 契约增量分类
+
+上列三面均为 **capability**（新能力面，加法向后兼容）；`coverage/runner.py` 与 mutation 零改动（§SPEC-021 零漂移承诺）。

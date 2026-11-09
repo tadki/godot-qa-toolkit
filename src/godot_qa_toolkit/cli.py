@@ -304,6 +304,59 @@ def cmd_risk(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_parity(args: argparse.Namespace) -> int:
+    from .complexity.parity import parity_paths
+    from .registry.snapshot import save_snapshot
+
+    paths = [Path(p) for p in args.paths]
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        return _emit(
+            {
+                "tool": "parity",
+                "ok": False,
+                "summary": {"error": f"paths not found: {missing}"},
+                "failures": [{"reason": f"paths not found: {missing}"}],
+            }
+        )
+    report = parity_paths(paths, args.project_root)
+    snapshot_files = report.pop("_snapshot_files", {})
+    if args.registry_out:
+        save_snapshot(
+            {
+                "snapshot_version": "func-registry-snapshot/1",
+                "project_root": args.project_root,
+                # census fields the §SPEC-017 jq gate reads from the snapshot
+                "summary": {
+                    "func_entries": report["summary"]["func_entries"],
+                    "lambda_entries": report["summary"]["lambda_entries"],
+                    "unparseable": report["summary"]["unparseable"],
+                    "inner_class_files": report["summary"]["inner_class_files"],
+                },
+                "files": snapshot_files,
+            },
+            args.registry_out,
+        )
+    report["summary"]["registry_out"] = args.registry_out
+    Path(args.report).write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    report["summary"]["report"] = args.report
+    return _emit(report)
+
+
+def cmd_registry(args: argparse.Namespace) -> int:
+    from .registry.snapshot import diff_registries, load_snapshot, save_snapshot
+
+    old = load_snapshot(args.old)
+    new = load_snapshot(args.new)
+    diff = diff_registries(old, new)
+    if args.out:
+        save_snapshot(diff, args.out)
+        diff["summary"]["out"] = args.out
+    return _emit(diff)
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage.runner import run_coverage
     from .timing import TimingStore
@@ -479,6 +532,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_godot_bin_arg(r)
     r.set_defaults(func=cmd_risk)
+
+    p = sub.add_parser(
+        "parity",
+        help="full per-function CC parity over the neutral registry (SEE-1546 WP1b, diagnostic-only)",
+    )
+    p.add_argument(
+        "paths",
+        nargs="+",
+        help="directories or .gd files to scan (same roots as the complexity gate)",
+    )
+    p.add_argument("--project-root", required=True, help="project root for relative fids")
+    p.add_argument(
+        "--report",
+        default="parity.json",
+        help="where to write the parity report JSON (default ./parity.json)",
+    )
+    p.add_argument(
+        "--registry-out",
+        default=None,
+        help="optionally write the multi-file registry snapshot JSON",
+    )
+    p.set_defaults(func=cmd_parity)
+
+    rg = sub.add_parser("registry", help="registry snapshot operations (SEE-1546 WP1b)")
+    rgsub = rg.add_subparsers(dest="registry_command", required=True)
+    rd = rgsub.add_parser("diff", help="diff two registry snapshots (func-registry-diff/1)")
+    rd.add_argument("old", help="old snapshot JSON path")
+    rd.add_argument("new", help="new snapshot JSON path")
+    rd.add_argument("--out", default=None, help="optionally write the diff JSON")
+    rd.set_defaults(func=cmd_registry)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
     v.add_argument("file", help="the .gd file to measure")

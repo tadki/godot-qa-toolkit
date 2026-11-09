@@ -24,6 +24,8 @@ from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
 from .coverlink import load_instrumentable_lines, load_reusable_coverage
 from .identity import certificate_valid, disclose_superseded, identity_pack
+from .baseline import (_BASELINE_FAILURE_REASONS, _baseline_key,
+                       _run_baseline_snapshot)
 from .progress import new_run_id
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
@@ -670,14 +672,9 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
     return chunks
 
 
-# 基线预跑失败原因（SEE-1525）：_run_baseline_snapshot 的返回契约
-# （dict|None）被既有测试替身钉死，故失败原因经此旁路表透出，供
-# _precompute_baselines 组降级告警文案。键 = (project_root, tests_glob)。
-_BASELINE_FAILURE_REASONS: dict[tuple[str, str], str] = {}
-
-
-def _baseline_key(project_root: str, tests_glob: str | None) -> tuple[str, str]:
-    return (str(Path(project_root).resolve()), tests_glob or "")
+# 基线预跑快照原语（SEE-1550 tidy）在 baseline.py（<800 行纪律拆分先例）；
+# 再导出保持既有 executor.* monkeypatch seam（替身钉死契约）与旁路表共享
+# dict 对象身份零变化。
 
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob):
@@ -714,30 +711,6 @@ def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
     """父层推导 scoped glob（与 worker 侧 run_mutation 内推导同口径）。"""
     from .runner import _auto_scan_tests_glob as _runner_scan
     return _runner_scan(file_path, project_root)
-
-
-def _run_baseline_snapshot(project_root: str, tests_glob: str | None,
-                           timeout_s: int) -> dict | None:
-    """父层基线预跑快照；失败返回 None（契约被既有替身钉死）。
-
-    失败原因（异常类型 + 摘要 / 非零 rc）记入 _BASELINE_FAILURE_REASONS，
-    由 _precompute_baselines 取出生成降级告警——快照与原因同源，避免二次
-    推断。
-    """
-    from .runner import _run_baseline
-
-    key = _baseline_key(project_root, tests_glob)
-    try:
-        rc, tail, elapsed = _run_baseline(project_root, tests_glob, timeout_s)
-    except Exception as e:
-        _BASELINE_FAILURE_REASONS[key] = f"{type(e).__name__}: {e}"[:200]
-        return None
-    if rc != 0:
-        _BASELINE_FAILURE_REASONS[key] = f"baseline GUT exited rc={rc}"
-        return None
-    # 成功即清掉上一次的失败原因——原因表绝不跨 run 漂移到别的降级文案上。
-    _BASELINE_FAILURE_REASONS.pop(key, None)
-    return {"rc": rc, "tail": tail, "elapsed": elapsed}
 
 
 def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:

@@ -17,6 +17,7 @@ from godot_qa_toolkit.complexity.collector import (
     collect_paths,
 )
 from godot_qa_toolkit.complexity.gd_ast_oracle import (
+    _iter_function_defs_with_paths,
     count_decision_points,
     count_lambda_decision_points,
     function_name,
@@ -778,3 +779,18 @@ def test_sanitize_raises_when_token_position_disagrees_with_text(monkeypatch):
     monkeypatch.setattr(sanitizer, "tokenize", _FakeTokenize)
     with pytest.raises(ValueError, match="sanitizer rewrite missed"):
         sanitizer.sanitize_python_ir_identifiers("abc = 1\n")
+
+
+# D2 (final QA FAIL): gd_ast_oracle.py:73->75 — a `class_def` with no NAME
+# must take the identity-preserving branch (no class prefix, no crash).
+def test_unnamed_class_def_yields_no_functions():
+    assert _iter_function_defs_with_paths(Tree("class_def", [])) == []
+
+
+def test_unnamed_class_def_does_not_prefix_nested_function_identity():
+    # An unnamed class carrying an unnamed function: the class chain must stay
+    # empty, so the row is not given a bogus `None.` / `.` prefix.
+    func_def = Tree("func_def", [])
+    rows = _iter_function_defs_with_paths(Tree("class_def", [func_def]))
+    assert [path for path, _ in rows] == [""]
+    assert rows[0][1] is func_def

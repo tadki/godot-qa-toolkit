@@ -471,10 +471,12 @@ def test_run_shadow_from_paths_delegates_to_default_measure(
     good = root / "good.gd"
     good.write_text(IDENTITY_SRC, encoding="utf-8")
     calls: list[tuple[str, str | None]] = []
+    captured_stores: list[object] = []
 
     def fake_run_coverage(file_path, project_root, min_percent, timeout_s,
                           timing_store, tests_glob):
         calls.append((file_path, tests_glob))
+        captured_stores.append(timing_store)
         return {
             "ok": True,
             "summary": {
@@ -493,6 +495,9 @@ def test_run_shadow_from_paths_delegates_to_default_measure(
     )
     # core + full + one same-recipe re-run = exactly three GUT rounds per file
     assert len(calls) == 3
+    # D-M2-1 guard (default direction): with no timing_store passed, the
+    # forward must be None — never an implicit store.
+    assert captured_stores == [None, None, None]
     assert report["performance"]["extra_gut_rounds"] == 0
     assert report["records"]
 

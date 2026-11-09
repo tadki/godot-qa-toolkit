@@ -23,6 +23,7 @@ from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
 from .coverlink import load_instrumentable_lines, load_reusable_coverage
+from .identity import certificate_valid, disclose_superseded, identity_pack
 from .progress import new_run_id
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
@@ -34,6 +35,53 @@ _worker_pool = ProcessPoolExecutor
 
 # 预热 godot import 缓存；幂等（--import 不产生写副作用差异）
 _PREWARM_TIMEOUT_S = 300
+
+
+def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
+                      tests_glob, resume, binary_kind, timing_store,
+                      mutation_warning, timeout_factor, reuse_coverage,
+                      identity) -> dict:
+    """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。"""
+    r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
+                     dry_run=dry_run, tests_glob=tests_glob, resume=resume,
+                     binary_kind=binary_kind, timing_store=timing_store,
+                     mutation_warning=mutation_warning,
+                     timeout_factor=timeout_factor,
+                     reuse_coverage=reuse_coverage, identity=identity)
+    r["summary"].setdefault("jobs", 1)
+    return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
+
+
+def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
+                  binary_kind, mutation_warning, timeout_factor,
+                  reuse_coverage, identity) -> dict:
+    """多文件 dry-run 清点（零 GUT/零预热/零 baseline）。"""
+    results = [
+        run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
+                     dry_run=True, tests_glob=tests_glob,
+                     binary_kind=binary_kind,
+                     mutation_warning=mutation_warning,
+                     timeout_factor=timeout_factor,
+                     reuse_coverage=reuse_coverage, identity=identity)
+        for f in files
+    ]
+    for result in results:
+        result["summary"].setdefault("jobs", 1)
+    return {"tool": "mutation", "ok": all(r["ok"] for r in results),
+            "jobs": 1, "results": results}
+
+
+def _detect_binary_kind() -> str:
+    from .inject import detect_binary_kind
+    return detect_binary_kind()
+
+
+def _disclose_superseded_stores(project_root: str) -> None:
+    """旧 store 一次性失效披露（OPS see1550/1 bump；不读不写不删旧条目）。"""
+    root = Path(project_root) / ".qa-cache"
+    disclose_superseded(project_root,
+                        root / "gqt-mutation-resume-v2",
+                        root / "gqt-coverage")
 
 
 def default_jobs(jobs: int | None) -> int:
@@ -93,7 +141,7 @@ def run_mutation_files(
     mutation_warning: int | None = None,
     timeout_factor: float | None = None,
     mutate_all: bool = False,
-    reuse_coverage: bool = False,
+    reuse_coverage: bool = True,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -107,37 +155,24 @@ def run_mutation_files(
     SEE-1413：单文件 jobs>1 时变异点总数 ≤ jobs 自动退串行（判定在收集
     后、prewarm/baseline 之前——少变异场景共享 baseline 预跑的固定开销
     会倒挂），summary.jobs=1 与显式 --jobs 1 同形态。
+    SEE-1550：身份包在父层计算一次并随 chunk 注入（多 worker 同 key）；
+    reuse_coverage 默认自动启用（store fresh ∧ 身份包全匹配才生效）。
     """
     files = _group_by_file(files)
+    kind = binary_kind or _detect_binary_kind()
+    identity = identity_pack(project_root, kind)
+    _disclose_superseded_stores(project_root)
     # SEE-1413：--jobs 1（显式串行）走单文件串行快路径；缺省时默认并行
     # 上限几乎必然 >1，不需要在这里走快路径。
     if len(files) == 1 and jobs == 1:
-        r = run_mutation(files[0], project_root, budget=budget,
-                         timeout_s=timeout_s, dry_run=dry_run,
-                         tests_glob=tests_glob, resume=resume,
-                         binary_kind=binary_kind,
-                         timing_store=timing_store,
-                         mutation_warning=mutation_warning,
-                         timeout_factor=timeout_factor)
-        r["summary"].setdefault("jobs", 1)
-        return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
-                "results": [r]}
-
+        return _serial_fast_path(files[0], project_root, budget, timeout_s,
+                                 dry_run, tests_glob, resume, binary_kind,
+                                 timing_store, mutation_warning,
+                                 timeout_factor, reuse_coverage, identity)
     if dry_run:
-        results = [
-            run_mutation(f, project_root, budget=budget,
-                         timeout_s=timeout_s, dry_run=True,
-                         tests_glob=tests_glob, binary_kind=binary_kind,
-                         mutation_warning=mutation_warning,
-                         timeout_factor=timeout_factor)
-            for f in files
-        ]
-        for result in results:
-            result["summary"].setdefault("jobs", 1)
-        return {"tool": "mutation",
-                "ok": all(r["ok"] for r in results),
-                "jobs": 1,
-                "results": results}
+        return _dry_run_list(files, project_root, budget, timeout_s,
+                             tests_glob, binary_kind, mutation_warning,
+                             timeout_factor, reuse_coverage, identity)
 
     jobs = default_jobs(jobs)
     # SEE-1413 退串行判定：必须在任何 GUT 调用（prewarm / 共享 baseline
@@ -174,7 +209,8 @@ def run_mutation_files(
                                            mutation_warning=mutation_warning,
                                            timeout_factor=timeout_factor,
                                            mutate_all=mutate_all,
-                                           reuse_coverage=reuse_coverage)
+                                           reuse_coverage=reuse_coverage,
+                                           identity=identity)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -251,10 +287,12 @@ def _chunk_worker(payload: dict) -> dict:
     v2 条目由 run_mutation 内增量落盘——各 worker 只写各自 retry_ids 的
     条目文件（分片零重叠），manifest 索引层由父层收尾单点写。
     timeout_factor（§SPEC-1420-02）随 payload 穿线。
+    identity（SEE-1550）：父层身份包随 payload 注入——多 worker 同 key。
     """
     resume = bool(payload.get("resume"))
     binary_kind = payload.get("binary_kind")
     timeout_factor = payload.get("timeout_factor")
+    identity = payload.get("identity")
     if payload.get("serial"):
         return run_mutation(
             payload["file"], payload["project_root"], budget=payload["budget"],
@@ -262,7 +300,8 @@ def _chunk_worker(payload: dict) -> dict:
             resume=resume, binary_kind=binary_kind,
             timeout_factor=timeout_factor,
             mutate_all=bool(payload.get("mutate_all")),
-            progress=payload.get("progress"))
+            progress=payload.get("progress"),
+            identity=identity)
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -271,6 +310,7 @@ def _chunk_worker(payload: dict) -> dict:
         resume=resume, binary_kind=binary_kind,
         timeout_factor=timeout_factor,
         progress=payload.get("progress"),
+        identity=identity,
     )
 
 
@@ -290,6 +330,11 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
     # invalid 预检覆写，逐分片求和（父层不得回填计划面值）。
     if s.get("executed") is not None:
         agg["executed"] = (agg["executed"] or 0) + s["executed"]
+    # SEE-1550 只加不改披露面：机制标签（passthrough）+ 槽位/新鲜度/killed
+    # 证书/疑似孤儿（跨分片拼接——各分片槽位结论与证书并集）。
+    agg["freshness"] += list(s.get("freshness") or [])
+    agg["killed_by_certificates"] += list(s.get("killed_by_certificates") or [])
+    agg["suspected_orphans"] += list(s.get("suspected_orphans") or [])
     agg["failures"].extend(cr.get("failures", []))
     agg["scoped"] = bool(s.get("scoped"))
     agg["budget"] = s.get("budget")
@@ -309,7 +354,7 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     """
     passthrough_keys = (
         "adaptive_timeout_s", "timing_source", "samples_n", "baseline_p90",
-        "run_error", "error",
+        "run_error", "error", "inject_scheme", "slot_mode",
     )
     per_file: dict[str, dict] = {}
     resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
@@ -323,6 +368,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
             "jobs": 0, "ok": True, "failures": [], "scoped": None,
             "budget": None, "baseline_reused": None,
             "total_sites": None, "attention": None,
+            "freshness": [], "killed_by_certificates": [],
+            "suspected_orphans": [],
         })
         _accumulate_chunk(agg, cr, passthrough_keys)
         # §SPEC-1420-01：截断面 N/M 披露的父层聚合锚（截断前全量位点数）
@@ -341,6 +388,28 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     }
 
 
+def _truncation_disclosure(agg: dict) -> dict:
+    """§SPEC-1420-01 截断面披露（total_sites > budget 时在场）。"""
+    if agg["total_sites"] is None or agg["budget"] is None \
+            or agg["total_sites"] <= agg["budget"]:
+        return {}
+    executed = (agg["executed"] if agg["executed"] is not None
+                else min(agg["total_sites"], agg["budget"]))
+    return {"total_sites": agg["total_sites"], "executed": executed}
+
+
+def _see1550_disclosures(agg: dict) -> dict:
+    """SEE-1550 只加不改披露面（跨分片拼接的槽位/新鲜度/证书/孤儿）。"""
+    out: dict = {}
+    if agg.get("freshness"):
+        out["freshness"] = agg["freshness"]
+    if agg.get("killed_by_certificates"):
+        out["killed_by_certificates"] = agg["killed_by_certificates"]
+    if agg.get("suspected_orphans"):
+        out["suspected_orphans"] = agg["suspected_orphans"]
+    return out
+
+
 def _file_summary(agg: dict, passthrough_keys: tuple[str, ...],
                   resumed_present: bool) -> dict:
     """聚合态 → 单文件 result（summary 形态唯一出处，<800/复杂度纪律拆分）。"""
@@ -348,35 +417,33 @@ def _file_summary(agg: dict, passthrough_keys: tuple[str, ...],
           and agg["run_errors"] == 0 and agg["suspect"] == 0)
     total = agg["mutants"]
     kill_rate = round(agg["killed"] / total, 4) if total else 0.0
+    summary = {
+        "file": agg["file"],
+        "jobs": agg["jobs"],
+        "mutants": agg["mutants"],
+        "killed": agg["killed"],
+        "survived": agg["survived"],
+        "suspect": agg["suspect"],
+        "timeout": agg["timeout"],
+        "run_errors": agg["run_errors"],
+        "invalid_mutants": agg["invalid_mutants"],
+        "kill_rate": kill_rate,
+        "budget": agg["budget"],
+        "scoped": agg["scoped"],
+        "baseline_reused": agg["baseline_reused"],
+        **({"timeout_pinned": agg["timeout_pinned"]}
+           if agg["timeout_pinned"] else {}),
+        **(_truncation_disclosure(agg)),
+        **({"attention": agg["attention"]}
+           if agg.get("attention") else {}),
+        **{k: agg[k] for k in passthrough_keys if k in agg},
+        **_see1550_disclosures(agg),
+        **({"resumed": agg["resumed"]} if resumed_present else {}),
+    }
     return {
         "tool": "mutation",
         "ok": ok,
-        "summary": {
-            "file": agg["file"],
-            "jobs": agg["jobs"],
-            "mutants": agg["mutants"],
-            "killed": agg["killed"],
-            "survived": agg["survived"],
-            "suspect": agg["suspect"],
-            "timeout": agg["timeout"],
-            "run_errors": agg["run_errors"],
-            "invalid_mutants": agg["invalid_mutants"],
-            "kill_rate": kill_rate,
-            "budget": agg["budget"],
-            "scoped": agg["scoped"],
-            "baseline_reused": agg["baseline_reused"],
-            **({"timeout_pinned": agg["timeout_pinned"]}
-               if agg["timeout_pinned"] else {}),
-            **({"total_sites": agg["total_sites"],
-                "executed": (agg["executed"] if agg["executed"] is not None
-                             else min(agg["total_sites"], agg["budget"]))}
-               if agg["total_sites"] is not None and agg["budget"] is not None
-               and agg["total_sites"] > agg["budget"] else {}),
-            **({"attention": agg["attention"]}
-               if agg.get("attention") else {}),
-            **{k: agg[k] for k in passthrough_keys if k in agg},
-            **({"resumed": agg["resumed"]} if resumed_present else {}),
-        },
+        "summary": summary,
         "failures": agg["failures"],
     }
 
@@ -388,7 +455,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   mutation_warning: int | None = None,
                   timeout_factor: float | None = None,
                   mutate_all: bool = False,
-                  reuse_coverage: bool = False
+                  reuse_coverage: bool = True,
+                  identity: dict | None = None,
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
@@ -412,7 +480,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         file_chunks, file_ctx, file_settled = _plan_file_chunks(
             f, project_root, budget, timeout_s, tests_glob, jobs, resume,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
-            reuse_coverage, baselines, baseline_failures, run_id)
+            reuse_coverage, baselines, baseline_failures, run_id,
+            identity=identity)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
@@ -424,8 +493,10 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       resume, binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
-                      baseline_failures=None, run_id=None):
-    """单文件规划：收集 → 差分 plan → P2 覆盖过滤 → budget → 分片。
+                      baseline_failures=None, run_id=None,
+                      identity: dict | None = None):
+    """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
+    budget → 分片。
 
     返回 (chunks_for_file, v2ctx_entry_or_None, settled_or_None)。
     """
@@ -451,14 +522,19 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     if raw_total <= 0 or budget <= 0:
         return [], None, _settled_no_sites(f, bool(glob))
     header_hash, spans, mutants, scope_hashes = build_manifest(src, f, collected)
-    store2 = ResumeStoreV2(project_root, f, glob, binary_kind=binary_kind)
+    store2 = ResumeStoreV2(project_root, f, glob, binary_kind=binary_kind,
+                           identity=identity)
     store2.disclose_v1_superseded()
     old_manifest = store2.load_manifest()
     entries = store2.load_entries()
+    # killed 证书复用门（SEE-1550 §SPEC-007）：定向校验 killer 闭包
     plan = plan_diff(header_hash, scope_hashes, old_manifest, mutants,
-                     entries, mutate_all=mutate_all)
+                     entries, mutate_all=mutate_all,
+                     cert_validator=lambda kb: certificate_valid(kb,
+                                                                 project_root))
     uncovered_mutants, retry_pool = _apply_coverage_prefilter(
-        plan, f, project_root, glob, binary_kind, reuse_coverage)
+        plan, f, project_root, glob, binary_kind, reuse_coverage,
+        identity=identity)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     baseline = baselines.get(glob)
     if not executed_list:
@@ -474,7 +550,9 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                          mutate_all=mutate_all,
                          precomputed_baseline=baseline,
                          progress={"run_id": run_id, "worker": "serial",
-                                   "total": 0})
+                                   "total": 0},
+                         reuse_coverage=reuse_coverage,
+                         identity=identity)
         r["summary"].setdefault("jobs", 1)
         return [], None, r
     ids = [m.stable_id for m in executed_list]
@@ -495,6 +573,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             "attention": attention, "mutate_all": mutate_all,
             "progress": {"run_id": run_id, "worker": "serial",
                          "total": len(executed_list)},
+            "identity": identity,
         }
         return [chunk], None, None
     ctx = {
@@ -506,7 +585,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
                               binary_kind, ids, baseline, resume,
                               timeout_factor, raw_total, attention, jobs,
-                              run_id=run_id)
+                              run_id=run_id, identity=identity)
     return chunks, ctx, None
 
 
@@ -523,23 +602,25 @@ def _warn_serial_fallback(file: str, reason: str | None) -> None:
 
 
 def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
-                              reuse_coverage):
-    """§SPEC-1420-12（P2）：coverage 前置过滤先于 budget（预算只花在
-    covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。
+                              reuse_coverage, identity=None):
+    """§SPEC-1420-12（P2）+ SEE-1550 L1：coverage 前置过滤先于 budget（预算只
+    花在 covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。
 
+    store fresh ∧ 身份包全匹配才生效，任一漂移禁用并披露。
     D3 修复：过滤锚 = covered ∧ instrumentable——不可插桩行上的位点留在
     执行面（与 planner._apply_coverage_prefilter 同语义）；可插桩集不可得
     = 不过滤（宁多跑不假阴性）。"""
     if not reuse_coverage:
         return [], plan.executed
     cov, cov_reason = load_reusable_coverage(project_root, f, glob,
-                                             binary_kind)
+                                             binary_kind, identity=identity)
     if cov is None:
         print(f"mutation: coverage store miss ({cov_reason}) for {f} "
               f"— running unfiltered", file=sys.stderr)
         return [], plan.executed
     inst, inst_reason = load_instrumentable_lines(project_root, f, glob,
-                                                  binary_kind)
+                                                  binary_kind,
+                                                  identity=identity)
     if inst is None:
         print(f"mutation: instrumentable face unavailable ({inst_reason}) "
               f"for {f} — running unfiltered", file=sys.stderr)
@@ -555,7 +636,7 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
 
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
                      ids, baseline, resume, timeout_factor, raw_total,
-                     attention, jobs, run_id=None):
+                     attention, jobs, run_id=None, identity=None):
     """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。
 
     progress（SEE-1525）：各分片共用同一 run_id 与**全局分母** `len(ids)`，
@@ -584,6 +665,7 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
             "attention": attention,
             "progress": {"run_id": run_id, "worker": f"w{i}",
                          "total": len(ids)},
+            "identity": identity,
         })
     return chunks
 

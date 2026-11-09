@@ -21,6 +21,11 @@ def _write_project(tmp_path, src=TARGET_SRC):
     proj.mkdir()
     (proj / "addons" / "gut").mkdir(parents=True)
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+    # SEE-1550：killer 测试脚本必须在场（killed_by 证书按真实 tests 树解析）
+    tests = proj / "tests"
+    tests.mkdir()
+    (tests / "test_x.gd").write_text(
+        "extends GutTest\n\nfunc test_x():\n\tpass\n")
     target = proj / "calc.gd"
     target.write_text(src)
     return proj, target

@@ -100,7 +100,7 @@ class TestPoisonEntries:
         proj, target = _write_project(tmp_path)
         store = ResumeStoreV2(str(proj), str(target), "res://tests/")
         poison = _entry(verdict="run_error")
-        poison["reason"] = "memory injection failed: env missing"
+        poison["reason"] = "disk injection failed for res://x.gd: slot lost"
         assert store.record_entry(poison) is False
         assert store.load_entries() == {}
 

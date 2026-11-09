@@ -88,7 +88,7 @@ class TestRunMutation:
         def fake_run(root, timeout_s=60, tests_glob=None):
             calls["n"] += 1
             if calls["n"] == 1:
-                return (0, "all pass")
+                return (0, "all pass [passed]")
             return (1, f"* test_kill_{calls['n']}\n    [Failed]: caught\n")
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
@@ -101,9 +101,10 @@ class TestRunMutation:
     def test_survived_returns_ok_false(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
         # Baseline and every mutant run: tests pass → mutants survive.
+        # SEE-1550 L4 beacon：survived 必须有 GUT 运行流证据（[passed]）。
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"),
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"),
         )
         result = run_mutation(str(target), str(proj), budget=5)
         assert result["ok"] is False
@@ -115,7 +116,7 @@ class TestRunMutation:
         before = target.read_text()
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"),
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"),
         )
         run_mutation(str(target), str(proj), budget=3)
         assert target.read_text() == before
@@ -155,7 +156,8 @@ class TestRunMutation:
 
         def mixed(root, timeout_s=60, tests_glob=None):
             calls["n"] += 1
-            return (1, "fail") if calls["n"] % 2 == 0 else (0, "pass")
+            return (1, "fail [Failed]") if calls["n"] % 2 == 0 \
+                else (0, "pass [passed]")
 
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", mixed
@@ -338,16 +340,16 @@ class TestSpec017InjectionFailureVisibility:
         return proj, target
 
     def test_inject_fail_with_parse_error_is_invalid_mutant_not_survived(self, tmp_path, monkeypatch):
-        # rc=3 + GQT_INJECT_FAIL + Parse Error（stderr 拼接进 tail）→
-        # invalid_mutant。旧路径：tail 只有 stdout banner → 守卫不命中 →
-        # "tests passed"/"only pre-existing failures" 假 survived。
+        # SEE-1550 beacon 契约：rc=3 + GQT_BEACON_FAIL（load-null/parse 类，
+        # stderr 拼接进 tail）→ invalid_mutant。beacon 宿主没把变异送进
+        # 引擎时绝不产出 survived。
         proj, target = self._write_project(tmp_path)
 
         def fake_run(root, timeout_s=60, tests_glob=None):
             stdout = "Godot Engine v4.6.2.stable.official.71f334935\n\n"
             stderr = ('SCRIPT ERROR: Parse Error: Invalid operands "String" and '
                       '"String" for "-" operator.\n'
-                      "GQT_INJECT_FAIL: mutant failed to compile via impl file")
+                      "GQT_BEACON_FAIL: mutant failed to compile/load: res://calc.gd")
             return (3, stdout + "\n--- gqt: stderr ---\n" + stderr)
 
         monkeypatch.setattr(
@@ -364,13 +366,14 @@ class TestSpec017InjectionFailureVisibility:
         assert "survived" not in verdicts
 
     def test_inject_fail_without_parse_error_is_run_error_not_survived(self, tmp_path, monkeypatch):
-        # rc=3 + GQT_INJECT_FAIL（cfg 缺失类，无 Parse Error）→ run_error。
+        # SEE-1550 beacon 契约：rc=4 + GQT_BEACON_FAIL（哈希不符/实例不同源/
+        # 基础设施类）→ run_error。
         proj, target = self._write_project(tmp_path)
 
         def fake_run(root, timeout_s=60, tests_glob=None):
             stdout = "Godot Engine v4.6.2.stable.official.71f334935\n\n"
-            stderr = "GQT_INJECT_FAIL: GQT_MUTATION_CFG env missing"
-            return (3, stdout + "\n--- gqt: stderr ---\n" + stderr)
+            stderr = "GQT_BEACON_FAIL: GQT_MUTATION_CFG env missing"
+            return (4, stdout + "\n--- gqt: stderr ---\n" + stderr)
 
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
@@ -389,17 +392,17 @@ class TestSpec017InjectionFailureVisibility:
 
         def fake_run(root, timeout_s=60, tests_glob=None):
             stdout = "* test_running\n    [Passed]\n"
-            stderr = "GQT_INJECT_FAIL: cannot write impl res://x.gd"
+            stderr = "GQT_BEACON_FAIL: disk hash mismatch for res://calc.gd"
             merged = stdout + "\n--- gqt: stderr ---\n" + stderr
             captured["tail"] = merged
-            return (3, merged)
+            return (4, merged)
 
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
         )
         run_mutation(str(target), str(proj), budget=1)
         assert "test_running" in captured["tail"]
-        assert "GQT_INJECT_FAIL" in captured["tail"]
+        assert "GQT_BEACON_FAIL" in captured["tail"]
 
     def test_runtime_invalid_mutant_counts_into_invalid_mutants(self, tmp_path, monkeypatch):
         # runtime invalid 与静态预检 invalid 同档合并计数——summary 的
@@ -412,7 +415,7 @@ class TestSpec017InjectionFailureVisibility:
             stdout = "Godot Engine v4.6.2.stable.official.71f334935\n\n"
             stderr = ('SCRIPT ERROR: Parse Error: Invalid operands "String" and '
                       '"String" for "-" operator.\n'
-                      "GQT_INJECT_FAIL: mutant failed to compile via impl file")
+                      "GQT_BEACON_FAIL: mutant failed to compile/load: res://calc.gd")
             return (3, stdout + "\n--- gqt: stderr ---\n" + stderr)
 
         monkeypatch.setattr(
@@ -541,7 +544,7 @@ class TestSurvivorSummarySEE1416:
         proj, target = self._write_project(tmp_path)
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         result = run_mutation(str(target), str(proj), budget=2)
         s = result["summary"]
         assert "survivors" in s
@@ -573,7 +576,7 @@ class TestSurvivorSummarySEE1416:
         proj, target = self._write_project(tmp_path)
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         src = ("func add(a, b):\n"
                "\treturn a + b\n"
                "\treturn a - b\n"
@@ -600,7 +603,7 @@ class TestMutantRecordColumnsSEE1416:
         target.write_text(src)
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         result = run_mutation(str(target), str(proj), budget=3)
         for f in result["failures"]:
             assert "column" in f and "operator" in f and "line_text" in f

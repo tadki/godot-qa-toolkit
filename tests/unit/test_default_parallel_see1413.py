@@ -66,7 +66,7 @@ def sealed(monkeypatch):
     monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
     monkeypatch.setattr(
         runner_mod, "_run_gut_on_project",
-        lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+        lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
 
 
 class TestDefaultParallelRouting:
@@ -112,11 +112,14 @@ class TestDefaultParallelRouting:
         out = cli_mod.json.loads(capsys.readouterr().out)
         assert set(out) == {"tool", "ok", "summary", "failures"}
         summary = out["summary"]
+        # SEE-1550 只加不改：机制标签/槽位披露键并入既有键集（inject_scheme
+        # 恒在场；slot_mode/freshness 在影子槽执行轮在场）。
         assert set(summary) == {
             "file", "mutants", "killed", "survived", "suspect", "timeout",
             "run_errors", "invalid_mutants", "kill_rate", "budget",
             "adaptive_timeout_s", "scoped", "baseline_reused",
             "timing_source", "samples_n", "baseline_p90", "jobs",
+            "inject_scheme", "slot_mode", "freshness",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")
@@ -187,7 +190,7 @@ class TestAutoSerialFallback:
             lambda root: warm.__setitem__("n", warm["n"] + 1))
         monkeypatch.setattr(
             runner_mod, "_run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         d = executor.run_mutation_files(
             [target], proj, budget=1, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/",
@@ -238,7 +241,7 @@ class TestAutoSerialFallback:
         store = TimingStore(proj, target, "mutation", "res://tests/unit/save/")
         monkeypatch.setattr(
             runner_mod, "_run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
         executor.run_mutation_files(
             [target], proj, budget=1, timeout_s=60, dry_run=False,
@@ -372,7 +375,7 @@ class TestAttentionEnvelopeSEE1416:
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
         monkeypatch.setattr(
             runner_mod, "_run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         d = executor.run_mutation_files(
             paths, proj, budget=3, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=2)
@@ -393,7 +396,7 @@ class TestAttentionEnvelopeSEE1416:
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
         monkeypatch.setattr(
             runner_mod, "_run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         d = executor.run_mutation_files(
             paths[:1], proj, budget=3, timeout_s=60, dry_run=False,
             tests_glob="res://tests/unit/save/", jobs=1)

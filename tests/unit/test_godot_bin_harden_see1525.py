@@ -268,7 +268,9 @@ class TestEnvInjectionChannelHardening:
         exe = _mk_binary(tmp_path, "godot.exe", WIN64_MAGIC)
         monkeypatch.setenv("GQT_GODOT_BIN", str(exe))
         monkeypatch.setattr(inject, "wslpath_win", lambda p: "D:\\" + p)
-        env, _ = inject.mutant_env("res://a.gd", "src", str(tmp_path), 1)
+        # SEE-1550：mutant_env(cfg_fs, user_dir)——cfg/user 双值由调用方提供
+        env, _ = inject.mutant_env(str(tmp_path / "cfg.json"),
+                                   str(tmp_path / "user"))
         return env
 
     def test_win64_xdg_and_appdata_are_converted(self, tmp_path, monkeypatch):
@@ -293,7 +295,8 @@ class TestEnvInjectionChannelHardening:
         """linux 通道注入键集恰为两项（APPDATA / WSLENV 属 win64-only 语义）。"""
         elf = _mk_binary(tmp_path, "godot_lin")
         monkeypatch.setenv("GQT_GODOT_BIN", str(elf))
-        env, _ = inject.mutant_env("res://a.gd", "src", str(tmp_path), 1)
+        env, _ = inject.mutant_env(str(tmp_path / "cfg.json"),
+                                   str(tmp_path / "user"))
         assert set(env) == {"XDG_DATA_HOME", "GQT_MUTATION_CFG"}
 
 

@@ -1,11 +1,15 @@
-"""SEE-1319 缺陷1：mutation 外层中断恢复守卫单元测试。
+"""SEE-1319 缺陷1 → SEE-1550 磁盘影子注入的中断语义重钉。
 
-缺口实证（Revy QA + Atlas 复核）：外部 kill -TERM / TaskStop 硬杀进程时
-_run_single_mutant 的 finally 不执行，工作树遗留活跃变异体。守卫 =
-run_mutation 层 try/except BaseException + SIGTERM handler 主动恢复。
+旧机制（内存注入 + 真实仓写回守卫）已退役：磁盘影子架构下 mutant 只写
+影子槽内目标文件，真实仓目标文件零写入——中断/硬杀不可能把变异体遗留进
+git 工作树。本文件钉住新语义：
+1. run_mutation 任意异常路径（分类崩溃 / KeyboardInterrupt / baseline 中止
+   契约）→ 真实仓目标文件 == 原码（从未被写）；
+2. SIGKILL 等价残留（mutant 留在槽内、进程消失）→ 下一次 acquire_slot 的
+   定向三向捕获 inode 漂移并重链仓原版（W 矩阵 SIGKILL 格）；
+3. 槽归还断言失败 → stderr 显式暴露且槽标死（不静默）。
 """
 
-import signal
 import sys
 from pathlib import Path
 
@@ -14,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation import runner as mrunner
+from godot_qa_toolkit.mutation import shadow, shadowpool
 from godot_qa_toolkit.mutation.runner import run_mutation
 
 
@@ -28,7 +33,8 @@ def _write_project(tmp_path):
 
 
 def test_run_mutation_restores_on_exception_after_write(tmp_path, monkeypatch):
-    """异常发生在变异体已写入之后（分类阶段抛错）→ 外层兜底必须恢复原文件。"""
+    """异常发生在变异体已注入影子之后（分类阶段抛错）→ 真实仓文件必须
+    保持原码（mutant 只存在于影子槽，finally release 必然归还）。"""
     proj, target = _write_project(tmp_path)
     before = target.read_text()
 
@@ -40,14 +46,14 @@ def test_run_mutation_restores_on_exception_after_write(tmp_path, monkeypatch):
     def fake_run(root, timeout_s=60, tests_glob=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            return (0, "baseline pass")
-        return (0, "mutant run")
+            return (0, "baseline pass [passed]")
+        return (0, "mutant run [passed]")
 
     monkeypatch.setattr(mrunner, "_run_gut_on_project", fake_run)
     monkeypatch.setattr(mrunner, "_classify_mutant_run", crash_classify)
     with pytest.raises(RuntimeError):
         run_mutation(str(target), str(proj), budget=2)
-    assert target.read_text() == before, "外层异常路径必须恢复原文件，不得遗留变异体"
+    assert target.read_text() == before, "异常路径真实仓不得遗留变异体"
 
 
 def test_run_mutation_restores_on_keyboard_interrupt(tmp_path, monkeypatch):
@@ -57,11 +63,8 @@ def test_run_mutation_restores_on_keyboard_interrupt(tmp_path, monkeypatch):
     def crash_classify(m, rc, tail, baseline_failures, baseline_dirty):
         raise KeyboardInterrupt
 
-    calls = {"n": 0}
-
     def fake_run(root, timeout_s=60, tests_glob=None):
-        calls["n"] += 1
-        return (0, "pass")
+        return (0, "pass [passed]")
 
     monkeypatch.setattr(mrunner, "_run_gut_on_project", fake_run)
     monkeypatch.setattr(mrunner, "_classify_mutant_run", crash_classify)
@@ -70,89 +73,69 @@ def test_run_mutation_restores_on_keyboard_interrupt(tmp_path, monkeypatch):
     assert target.read_text() == before
 
 
-def test_sigterm_handler_restores_backup_and_exits(tmp_path, monkeypatch):
-    """SIGTERM 硬杀路径：handler 必须先恢复备份再终止（finally 不保证执行）。"""
+def test_sigkill_residual_mutant_relinked_on_next_acquire(tmp_path, monkeypatch):
+    """SIGKILL 等价残留（warm 池通道）：mutant 留在槽内、持有进程消失
+    （flock 自动释放）→ 下一次 acquire 的定向三向捕获 inode 漂移并重链
+    仓原版（W 矩阵 SIGKILL 格）。linux fresh 农场每 run 新建、无残留面，
+    本格钉的是 warm 池复用路径。"""
     proj, target = _write_project(tmp_path)
-    before = target.read_text()
-    target.write_text("func add(a, b):\n\treturn a + 0\n")  # 模拟变异体遗留态
+    target_rel = "calc.gd"
+    slot = shadowpool.acquire_slot(str(proj), "win64", [target_rel],
+                                   wiring_hash="w1")
+    # 模拟 worker 在 mutant 注入后被 SIGKILL：槽内目标被 mutant 覆盖、
+    # 不经过 release_slot（锁句柄直接遗弃 → fd 关闭模拟进程死亡）。
+    shadow.inject_mutant(slot.root, target_rel,
+                         "func add(a, b):\n\treturn a - b\n")
+    if slot._slot_lock_fd is not None:
+        import fcntl, os
+        fcntl.flock(slot._slot_lock_fd, fcntl.LOCK_UN)
+        os.close(slot._slot_lock_fd)
+        slot._slot_lock_fd = None
+    slot.released = True  # 阻止测试句柄再次释放
 
-    exited = {}
+    slot2 = shadowpool.acquire_slot(str(proj), "win64", [target_rel],
+                                    wiring_hash="w1")
+    try:
+        assert "residual-mutant" in " ".join(slot2.freshness) or \
+            "inode-drift" in " ".join(slot2.freshness), \
+            f"freshness must disclose the SIGKILL residual: {slot2.freshness}"
+        disk = (Path(slot2.root) / target_rel).read_text()
+        assert disk == target.read_text(), "定向三向必须重链仓原版"
+    finally:
+        shadowpool.release_slot(slot2)
+    assert target.read_text() == "func add(a, b):\n\treturn a + b\n"
 
-    def fake_exit(code):
-        exited["code"] = code
-        raise SystemExit(code)
 
-    monkeypatch.setattr(mrunner.os, "_exit", fake_exit)
-    handler = mrunner.make_sigterm_restore_handler(str(target), before)
-    with pytest.raises(SystemExit):
-        handler(signal.SIGTERM, None)
-    assert target.read_text() == before, "SIGTERM handler 必须恢复原文件"
-    assert exited["code"] == 128 + signal.SIGTERM
+class TestSlotReturnGuarantees:
+    """SEE-1550 hardener：槽归还断言 / 中止契约 / 真实仓零残留。"""
 
+    def test_release_assert_failure_prints_stderr_and_marks_slot_dead(
+            self, tmp_path, monkeypatch, capsys):
+        proj, target = _write_project(tmp_path)
+        target_rel = "calc.gd"
+        slot = shadowpool.acquire_slot(str(proj), "linux", [target_rel],
+                                       wiring_hash="w1")
 
-class TestInterruptGuardHardening:
-    """SEE-1319 hardener：_interrupt_guard / make_sigterm_restore_handler 对抗性补强。
+        def broken_restore(project_root, slot_root, rel):
+            raise shadow.SlotProvisionError(
+                f"slot return assert failed: {rel} differs after restore")
 
-    以"默认守卫是错的"预设覆盖：降级路径、恢复失败暴露、中止契约经守卫
-    恢复、信号 handler 还原。
-    """
-
-    def _write_project(self, tmp_path):
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        target = proj / "calc.gd"
-        target.write_text("func add(a, b):\n\treturn a + b\n")
-        return proj, target
-
-    def test_signal_registration_failure_degrades_to_finally_only(self, tmp_path, monkeypatch):
-        # signal.signal 抛 ValueError（非主线程典型）→ 守卫不得崩，finally 兜底仍须恢复。
-        proj, target = self._write_project(tmp_path)
-        before = target.read_text()
-
-        def boom(sig, handler):
-            raise ValueError("signal only works in main thread")
-
-        monkeypatch.setattr(mrunner.signal, "signal", boom)
-        with mrunner._interrupt_guard(target, before):
-            target.write_text("mutated")
-        assert target.read_text() == before
-
-    def test_exit_restore_failure_prints_to_stderr_and_propagates(self, tmp_path, monkeypatch, capsys):
-        # __exit__ 恢复写盘失败（如目录只读）→ stderr 显式暴露，异常原样上抛。
-        proj, target = self._write_project(tmp_path)
-        before = target.read_text()
-
-        def readonly_write(_path, _text, **kw):
-            raise OSError("disk full / readonly fs")
-
-        monkeypatch.setattr(mrunner.Path, "write_text", readonly_write)
-        with pytest.raises(RuntimeError, match="simulated"):
-            with mrunner._interrupt_guard(target, before):
-                raise RuntimeError("simulated mid-loop crash")
+        # 归还断言失败注入点 = restore_target 本体（gqt 写纪律是「临时文件
+        # + os.replace」原子替换——就地写穿透 hardlink 共享 inode 的模拟
+        # 会连真实仓一起改写，不属于 gqt 可能产生的失败面）。
+        monkeypatch.setattr(shadow, "restore_target", broken_restore)
+        problems = shadowpool.release_slot(slot)
         captured = capsys.readouterr()
-        assert "restore failed" in captured.err
+        assert problems, "归还断言失败必须显式返回问题"
+        assert "FAILED" in captured.err, "stderr 必须显式暴露归还失败"
+        # warm 记录标死：path 清空 → 下次获取按 missing tree 重建（linux
+        # fresh 通道无池记录，直接断言真实仓未被污染）
+        assert target.read_text() == "func add(a, b):\n\treturn a + b\n"
 
-    def test_sigterm_handler_restore_failure_prints_stderr_before_exit(self, tmp_path, monkeypatch, capsys):
-        # handler 恢复写盘失败 → stderr 暴露后仍 os._exit（不能静默吞成遗留变异）。
-        target = tmp_path / "calc.gd"
-        before = "func add(a, b):\n\treturn a + b\n"
-        target.write_text("mutated")
-
-        def readonly_write(_path, _text, **kw):
-            raise OSError("readonly fs")
-
-        monkeypatch.setattr(mrunner.Path, "write_text", readonly_write)
-        monkeypatch.setattr(mrunner.os, "_exit", lambda code: None)
-        handler = mrunner.make_sigterm_restore_handler(str(target), before)
-        handler(signal.SIGTERM, None)  # os._exit stubbed → 可直接调用断言
-        captured = capsys.readouterr()
-        assert "SIGTERM restore failed" in captured.err
-
-    def test_baseline_timeout_abort_contract_still_restores_file(self, tmp_path, monkeypatch):
-        # baseline TimeoutExpired → 中止契约 JSON 返回；守卫必须已恢复原文件。
-        proj, target = self._write_project(tmp_path)
+    def test_baseline_timeout_abort_contract_leaves_repo_pristine(
+            self, tmp_path, monkeypatch):
+        # baseline TimeoutExpired → 中止契约 JSON 返回；真实仓文件保持原码。
+        proj, target = _write_project(tmp_path)
         before = target.read_text()
 
         def timeout_run(root, timeout_s=60, tests_glob=None):
@@ -162,11 +145,11 @@ class TestInterruptGuardHardening:
         monkeypatch.setattr(mrunner, "_run_gut_on_project", timeout_run)
         result = run_mutation(str(target), str(proj), budget=2, timeout_s=60)
         assert result["summary"]["run_error"] is True
-        assert target.read_text() == before, "中止契约路径也必须恢复原文件"
+        assert target.read_text() == before, "中止契约路径真实仓必须零写入"
 
-    def test_baseline_launch_failure_abort_contract_still_restores_file(self, tmp_path, monkeypatch):
-        # _BaselineLaunchFailure → 中止契约 JSON；守卫必须已恢复原文件。
-        proj, target = self._write_project(tmp_path)
+    def test_baseline_launch_failure_abort_contract_leaves_repo_pristine(
+            self, tmp_path, monkeypatch):
+        proj, target = _write_project(tmp_path)
         before = target.read_text()
         monkeypatch.setattr(
             mrunner, "_run_gut_on_project",
@@ -178,37 +161,16 @@ class TestInterruptGuardHardening:
         assert result["summary"]["run_error"] is True
         assert target.read_text() == before
 
-    def test_previous_signal_handlers_reinstated_after_exit(self, tmp_path):
-        # __exit__ 必须还原进入前的 signal handler（不得污染进程级状态）。
-        proj, target = self._write_project(tmp_path)
-        before = target.read_text()
-        sentinel = object()
-
-        def prev_handler(signum, frame):
-            pass
-
-        orig = {}
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            orig[sig] = signal.getsignal(sig)
-            signal.signal(sig, prev_handler)
-        try:
-            with mrunner._interrupt_guard(target, before):
-                assert signal.getsignal(signal.SIGTERM) is not prev_handler
-            assert signal.getsignal(signal.SIGTERM) is prev_handler, "必须还原原 handler"
-            assert signal.getsignal(signal.SIGHUP) is prev_handler
-        finally:
-            for sig, h in orig.items():
-                signal.signal(sig, h)
-
-    def test_nested_exception_inside_guard_body_restores(self, tmp_path):
-        # 嵌套异常（守卫体内层 try/except 后又抛新异常）→ 兜底仍恢复 + 新异常上抛。
-        proj, target = self._write_project(tmp_path)
-        before = target.read_text()
-        with pytest.raises(ValueError, match="outer"):
-            with mrunner._interrupt_guard(target, before):
-                try:
-                    raise RuntimeError("inner")
-                except RuntimeError:
-                    target.write_text("mutated-mid")
-                    raise ValueError("outer")
-        assert target.read_text() == before
+    def test_no_mutation_residue_outside_qa_cache(self, tmp_path, monkeypatch):
+        """W 矩阵门：`.qa-cache` 外零残留——run 后真实仓新增文件只允许在
+        `.qa-cache` 内（影子槽在 linux 通道位于 /tmp，不落仓内）。"""
+        proj, target = _write_project(tmp_path)
+        before = {p.name for p in proj.iterdir()}
+        monkeypatch.setattr(
+            mrunner, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
+        run_mutation(str(target), str(proj), budget=2)
+        after = {p.name for p in proj.iterdir()}
+        new_names = after - before
+        assert all(n == ".qa-cache" for n in new_names), \
+            f"only .qa-cache may appear: {new_names}"

@@ -70,6 +70,9 @@ class TestCrossKindCollision:
                 "line": m.line, "column": m.column, "kind": m.kind,
                 "original": m.original, "mutated": m.mutated,
                 "verdict": "killed", "reason": "r", "timeout_streak": 0,
+                # SEE-1550：killed 条目必须带证书（缺证书 = cert_missing 保守重跑）
+                "killed_by": [{"test_name": "t", "script_path": "res://tests/t.gd",
+                               "script_sha1": "a", "deps_sha1": "b"}],
             })
 
         muts_b = _collect_mutations(SRC_FUNC_CHANGED, str(target))
@@ -113,6 +116,9 @@ class TestCrossKindCollision:
                 "line": m.line, "column": m.column, "kind": m.kind,
                 "original": m.original, "mutated": m.mutated,
                 "verdict": "killed", "reason": "r", "timeout_streak": 0,
+                # SEE-1550：killed 条目必须带证书（缺证书 = cert_missing 保守重跑）
+                "killed_by": [{"test_name": "t", "script_path": "res://tests/t.gd",
+                               "script_sha1": "a", "deps_sha1": "b"}],
             })
 
         muts_b = _collect_mutations(src_class_changed, str(target))

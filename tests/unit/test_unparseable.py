@@ -6,9 +6,13 @@ from godot_qa_toolkit.complexity.gate import run_gate
 
 
 def test_unparseable_file_counts_as_failure(tmp_path):
-    # `def` is a Python keyword — gd2py cannot convert this file.
+    # SEE-1546 WP1a re-anchored the old `var def` fixture: identifier-position
+    # `def` is now sanitized in-memory, so a non-covered Python-keyword
+    # collision (`var lambda`) carries the structural-failure semantics here.
     bad = tmp_path / "bad.gd"
-    bad.write_text("extends Node\n\nfunc f() -> void:\n\tvar def := 1\n\tprint(def)\n")
+    bad.write_text(
+        "extends Node\n\nfunc f() -> void:\n\tvar lambda := 1\n\tprint(lambda)\n"
+    )
     good = tmp_path / "good.gd"
     good.write_text("extends Node\n\nfunc g() -> int:\n\treturn 1\n")
 

@@ -268,9 +268,7 @@ def cmd_risk(args: argparse.Namespace) -> int:
         )
     performance_input = None
     if args.performance_file:
-        import json as _json
-
-        performance_input = _json.loads(
+        performance_input = json.loads(
             Path(args.performance_file).read_text(encoding="utf-8")
         )
     report = run_shadow_from_paths(

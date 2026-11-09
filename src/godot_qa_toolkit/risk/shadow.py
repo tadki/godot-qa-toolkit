@@ -113,102 +113,87 @@ def _records_for_file(
     return records
 
 
-def run_shadow(
-    *,
-    eligible_sources: dict[str, str],
-    negative_sources: dict[str, str],
+def _measure_eligible_file(
+    label: str,
+    source: str,
     measure,
-    core_tests: str = "res://tests/unit/",
-    full_tests: str | None = None,
+    core_tests: str,
+    full_tests: str | None,
 ) -> dict:
-    """Assemble the exploratory shadow report.
+    """Run one eligible file through the §SPEC-009 recipe (core, full, one
+    same-recipe re-run) and produce its records plus every report block it
+    contributes. The caller owns all report accumulators."""
+    static_t0 = time.monotonic()
+    profile = file_profile(source, file_label=label)
+    static_seconds = time.monotonic() - static_t0
 
-    `measure(file_label, source, tests_glob) -> dict` returns the coverage
-    runner contract plus a "hits_lines" set under summary (see
-    `default_measure`); tests inject deterministic fakes.
-    """
-    unknown = []
-    ranking: list[dict] = []
-    core_full = []
-    noise = []
-    per_file = []
+    core = measure(label, source, core_tests)
+    full = measure(label, source, full_tests)
+    rerun = measure(label, source, full_tests)
 
-    for label, source in eligible_sources.items():
-        static_t0 = time.monotonic()
-        profile = file_profile(source, file_label=label)
-        static_seconds = time.monotonic() - static_t0
+    core_hits = set(core["summary"].get("hits_lines", ()))
+    full_hits = set(full["summary"].get("hits_lines", ()))
+    rerun_hits = set(rerun["summary"].get("hits_lines", ()))
 
-        core = measure(label, source, core_tests)
-        full = measure(label, source, full_tests)
-        rerun = measure(label, source, full_tests)
+    state = _file_state(full)
+    records = _records_for_file(profile, full_hits, cov_source="gut_full", state=state)
 
-        core_hits = set(core["summary"].get("hits_lines", ()))
-        full_hits = set(full["summary"].get("hits_lines", ()))
-        rerun_hits = set(rerun["summary"].get("hits_lines", ()))
+    per_block = _function_stats(profile, full_hits)
+    core_block = {s["function_id"]: s for s in _function_stats(profile, core_hits)}
+    rerun_identical = full_hits == rerun_hits
+    return {
+        "records": records,
+        "unknown": (
+            {"file": label, "reason": state, "count": len(records)}
+            if state != "scored"
+            else None
+        ),
+        "core_full": {
+            "file": label,
+            "core_covered_lines": len(core_hits),
+            "full_covered_lines": len(full_hits),
+            "core_wall_s": core["summary"].get("wall_s"),
+            "full_wall_s": full["summary"].get("wall_s"),
+            "per_function_core_minus_full": [
+                {
+                    "function_id": s["function_id"],
+                    "core_covered": core_block.get(s["function_id"], {}).get(
+                        "covered", 0
+                    ),
+                    "full_covered": s["covered"],
+                }
+                for s in per_block
+            ],
+        },
+        "noise": {
+            "file": label,
+            "rerun_identical": rerun_identical,
+            "status": (
+                "no_instability_observed" if rerun_identical else "unstable"
+            ),
+        },
+        "file": {
+            "file": label,
+            "profile": profile,
+            "static_seconds": static_seconds,
+            "state": state,
+        },
+    }
 
-        core_state = _file_state(core)
-        full_state = _file_state(full)
-        state = full_state
-        records = _records_for_file(
-            profile, full_hits, cov_source="gut_full", state=state
-        )
-        ranking.extend(records)
-        if state != "scored":
-            unknown.append({"file": label, "reason": state, "count": len(records)})
 
-        per_block = _function_stats(profile, full_hits)
-        core_block = {s["function_id"]: s for s in _function_stats(profile, core_hits)}
-        core_full.append(
-            {
-                "file": label,
-                "core_covered_lines": len(core_hits),
-                "full_covered_lines": len(full_hits),
-                "core_wall_s": core["summary"].get("wall_s"),
-                "full_wall_s": full["summary"].get("wall_s"),
-                "per_function_core_minus_full": [
-                    {
-                        "function_id": s["function_id"],
-                        "core_covered": core_block.get(s["function_id"], {}).get(
-                            "covered", 0
-                        ),
-                        "full_covered": s["covered"],
-                    }
-                    for s in per_block
-                ],
-            }
-        )
-        noise.append(
-            {
-                "file": label,
-                "rerun_identical": full_hits == rerun_hits,
-                "status": (
-                    "no_instability_observed"
-                    if full_hits == rerun_hits
-                    else "unstable"
-                ),
-            }
-        )
-        per_file.append(
-            {
-                "file": label,
-                "profile": profile,
-                "static_seconds": static_seconds,
-                "state": state,
-            }
-        )
-
-    negatives = []
-    for label, source in negative_sources.items():
-        profile = file_profile(source, file_label=label)
-        negatives.append(
-            {
-                "file": label,
-                "gap_lane": profile["gap_lane"],
-                "eligible": profile["eligible"],
-                "reason": profile["gap_lane"],
-            }
-        )
-
+def _report_document(
+    *,
+    ranking: list[dict],
+    unknown: list[dict],
+    core_full: list[dict],
+    noise: list[dict],
+    negatives: list[dict],
+    per_file: list[dict],
+    sample_files: int,
+    negative_files: int,
+) -> dict:
+    """Freeze the §SPEC-010 report document. Key order and every literal here
+    are the report JSON contract — consumers (jq gates, QA) pin them."""
     scored = [r for r in ranking if r["score_status"] == "scored"]
     scored.sort(
         key=lambda r: (r["crap_line"]["score"] or 0.0), reverse=True
@@ -260,14 +245,69 @@ def run_shadow(
             "tool_chain_gap": len(negatives) + unknown_count,
         },
         "confidence": {
-            "sample_files": len(eligible_sources),
+            "sample_files": sample_files,
             "caveat": "2-3 files cannot be extrapolated to the whole repository",
-            "negative_files": len(negative_sources),
+            "negative_files": negative_files,
         },
         "negatives": negatives,
         "files": per_file,
         "records": ranking,
     }
+
+
+def run_shadow(
+    *,
+    eligible_sources: dict[str, str],
+    negative_sources: dict[str, str],
+    measure,
+    core_tests: str = "res://tests/unit/",
+    full_tests: str | None = None,
+) -> dict:
+    """Assemble the exploratory shadow report.
+
+    `measure(file_label, source, tests_glob) -> dict` returns the coverage
+    runner contract plus a "hits_lines" set under summary (see
+    `default_measure`); tests inject deterministic fakes.
+    """
+    ranking: list[dict] = []
+    unknown: list[dict] = []
+    core_full: list[dict] = []
+    noise: list[dict] = []
+    per_file: list[dict] = []
+
+    for label, source in eligible_sources.items():
+        outcome = _measure_eligible_file(
+            label, source, measure, core_tests, full_tests
+        )
+        ranking.extend(outcome["records"])
+        if outcome["unknown"] is not None:
+            unknown.append(outcome["unknown"])
+        core_full.append(outcome["core_full"])
+        noise.append(outcome["noise"])
+        per_file.append(outcome["file"])
+
+    negatives = []
+    for label, source in negative_sources.items():
+        profile = file_profile(source, file_label=label)
+        negatives.append(
+            {
+                "file": label,
+                "gap_lane": profile["gap_lane"],
+                "eligible": profile["eligible"],
+                "reason": profile["gap_lane"],
+            }
+        )
+
+    return _report_document(
+        ranking=ranking,
+        unknown=unknown,
+        core_full=core_full,
+        noise=noise,
+        negatives=negatives,
+        per_file=per_file,
+        sample_files=len(eligible_sources),
+        negative_files=len(negative_sources),
+    )
 
 
 def partition_sources(
@@ -296,6 +336,27 @@ def partition_sources(
         else:
             negatives[label] = source
     return eligible, negatives
+
+
+def _risk_static_block(report: dict) -> dict:
+    """§SPEC-014 static-layer budget: per-file static seconds vs the measured
+    (core+full) wall clock, both read from the assembled report's own rows."""
+    static_max = max(
+        (float(f.get("static_seconds", 0.0)) for f in report["files"]), default=0.0
+    )
+    measured_wall = sum(
+        float(entry.get("full_wall_s") or 0.0) for entry in report["core_full"]
+    ) + sum(
+        float(entry.get("core_wall_s") or 0.0) for entry in report["core_full"]
+    )
+    return {
+        "max_seconds_per_file": round(static_max, 4),
+        "max_share_of_total": (
+            round(static_max / (static_max + measured_wall), 4)
+            if (static_max + measured_wall) > 0
+            else 0.0
+        ),
+    }
 
 
 def run_shadow_from_paths(
@@ -328,32 +389,13 @@ def run_shadow_from_paths(
         core_tests=core_tests,
         full_tests=full_tests,
     )
-    total_wall = sum(
-        float(f.get("static_seconds", 0.0)) for f in report["files"]
-    )
-    static_max = max(
-        (float(f.get("static_seconds", 0.0)) for f in report["files"]), default=0.0
-    )
-    measured_wall = sum(
-        float(entry.get("full_wall_s") or 0.0) for entry in report["core_full"]
-    ) + sum(
-        float(entry.get("core_wall_s") or 0.0) for entry in report["core_full"]
-    )
-    risk_static = {
-        "max_seconds_per_file": round(static_max, 4),
-        "max_share_of_total": (
-            round(static_max / (static_max + measured_wall), 4)
-            if (static_max + measured_wall) > 0
-            else 0.0
-        ),
-    }
     perf_in = performance_input or {}
     report["performance"] = build_performance_block(
         complexity_runs=perf_in.get(
             "complexity", {"baseline_median_s": 0.0, "head_median_s": 0.0}
         ),
         coverage_runs=perf_in.get("coverage", []),
-        risk_static=risk_static,
+        risk_static=_risk_static_block(report),
         extra_gut_rounds=0,
     )
     if perf_in.get("acceptance_cost"):

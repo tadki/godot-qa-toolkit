@@ -38,6 +38,33 @@ from ..mutation.scopemanifest import _max_leaf_line
 REGISTRY_VERSION = "func-registry/1"
 
 
+def _start_line(node: Tree) -> int:
+    """First leaf-token line of the subtree, identical under both parse modes
+    (gather_metadata True/False): with metadata the Tree.meta.line equals the
+    first leaf token's lexer line, so callers may pin this anchor either way
+    (hardener contract test_start_line_agrees_between_metadata_modes).
+
+    Kept as the public span-start helper even though build_file_registry now
+    derives line bounds inside its single-pass scan (§SPEC-022)."""
+    best = 0
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        meta = getattr(current, "meta", None)
+        if meta is not None and not getattr(meta, "empty", True):
+            line = getattr(meta, "line", 0) or 0
+            if line and (not best or line < best):
+                best = line
+        for child in getattr(current, "children", []):
+            if isinstance(child, Tree):
+                stack.append(child)
+            else:
+                line = getattr(child, "line", 0) or 0
+                if line and (not best or line < best):
+                    best = line
+    return best
+
+
 def _first_name(node: Tree) -> str | None:
     """Class-name lookup (rare — at most one inner-class file in the census):
     whole-subtree scan keeps it robust against class_def header shapes."""

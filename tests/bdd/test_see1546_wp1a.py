@@ -1,17 +1,15 @@
 """SEE-1546 WP1a scenarios on pytest-bdd: def sanitization, Class-block
-filtering, lambda-gap disclosure and the real-tree baseline re-anchor."""
+filtering, lambda-gap disclosure. Real-tree scenarios live in
+test_see1546_wp1a_kol.py (collection-time module guard, Final Review HIGH-1)."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import pytest
 from pytest_bdd import given, scenarios, then, when
 
 from gdtoolkit.gd2py import convert_code
 from godot_qa_toolkit.complexity.collector import collect_file
-from godot_qa_toolkit.complexity.gate import run_gate
 from godot_qa_toolkit.complexity.gd_ast_oracle import parity_report
 from godot_qa_toolkit.complexity.sanitizer import (
     sanitize_python_ir_identifiers,
@@ -20,36 +18,6 @@ from godot_qa_toolkit.complexity.sanitizer import (
 from ._support import fail_step as _fail
 
 scenarios("features/see1546_wp1a.feature")
-
-KOL_ROOT = os.environ.get("KOL_ROOT")
-
-SEVEN_VAR_DEF_FILES = [
-    "systems/effect/effect_definition_factory.gd",
-    "scenes/ui/sane/sane_effect_formatter.gd",
-    "autoload/effect_manager.gd",
-    "autoload/hardware_manager.gd",
-    "autoload/hardware_multi_driver.gd",
-    "autoload/sane_subsystem.gd",
-    "autoload/shadowconsole_subsystem.gd",
-]
-
-SEVEN_FILE_COUNTS = {
-    "systems/effect/effect_definition_factory.gd": 14,
-    "scenes/ui/sane/sane_effect_formatter.gd": 2,
-    "autoload/effect_manager.gd": 36,
-    "autoload/hardware_manager.gd": 30,
-    "autoload/hardware_multi_driver.gd": 7,
-    "autoload/sane_subsystem.gd": 45,
-    "autoload/shadowconsole_subsystem.gd": 36,
-}
-
-PREEXISTING_VIOLATIONS = {
-    ("active_range_calculator.gd", "_compute", 19),
-    ("fair_absorption_solver.gd", "solve", 25),
-    ("debug_panel.gd", "_row_less", 19),
-    ("vendor_panel.gd", "_connect_signals", 16),
-    ("vendor_panel.gd", "_disconnect_signals", 16),
-}
 
 VAR_DEF_SRC = (
     "extends RefCounted\n"
@@ -177,12 +145,6 @@ def given_non_def_collision_file(tmp_path: Path) -> None:
     )
 
 
-@given("the real KOL worktree with systems scenes and autoload trees")
-def given_kol_worktree() -> None:
-    if not KOL_ROOT:
-        pytest.skip("KOL_ROOT not set — real-tree scenario skipped")
-
-
 @when("the complexity collector processes the file")
 def when_collector(tmp_path: Path, bdd_state: dict) -> None:
     files = sorted(tmp_path.glob("*.gd"))
@@ -233,12 +195,6 @@ def when_unfiltered(bdd_state: dict) -> None:
 @when("the parity oracle diffs raw AST against radon records")
 def when_parity(bdd_state: dict) -> None:
     bdd_state["parity"] = parity_report(LAMBDA_HOST_SRC)
-
-
-@when("the complexity gate runs over the three trees")
-def when_gate(bdd_state: dict) -> None:
-    dirs = [str(Path(KOL_ROOT) / d) for d in ("systems", "scenes", "autoload")]
-    bdd_state["gate"] = run_gate(dirs)
 
 
 @then("every named function is recovered with no error")
@@ -368,101 +324,3 @@ def then_sibling_ok(bdd_state: dict) -> None:
     if "fine" not in funcs:
         _fail("sibling function lost", str(funcs))
 
-
-@then("exactly 1561 functions are reported with zero unparseable files")
-def then_rebaseline(bdd_state: dict) -> None:
-    summary = bdd_state["gate"]["summary"]
-    if summary["functions"] != 1561 or summary["unparseable"] != 0:
-        _fail(
-            "baseline re-anchor mismatch",
-            f"functions={summary['functions']} unparseable={summary['unparseable']}",
-        )
-
-
-@then("the seven var def files contribute exactly 170 recovered functions")
-def then_170(bdd_state: dict) -> None:
-    recovered = 0
-    for rel in SEVEN_VAR_DEF_FILES:
-        funcs, error = collect_file(Path(KOL_ROOT) / rel)
-        if error is not None:
-            _fail(f"{rel} still unparseable", str(error))
-        recovered += len(funcs)
-    if recovered != 170:
-        _fail("recovered function total mismatch", str(recovered))
-
-
-@then(
-    "mini parity over the 170 functions shows no mismatch beyond the disclosed lambda gaps"
-)
-def then_mini_parity(bdd_state: dict) -> None:
-    match = gap = mismatch = 0
-    for rel in SEVEN_VAR_DEF_FILES:
-        report = parity_report((Path(KOL_ROOT) / rel).read_text(encoding="utf-8"))
-        for row in report:
-            if row["kind"] == "match":
-                match += 1
-            elif row["kind"] == "lambda_gap":
-                gap += 1
-            else:
-                mismatch += 1
-    if mismatch != 0:
-        _fail("unexplained parity mismatches", str(mismatch))
-    if match != 167 or gap != 3:
-        _fail(f"lane totals drifted: match={match} gap={gap}", "")
-
-
-@given("the real KOL worktree with the seven var def files present")
-def given_kol_seven_files() -> None:
-    if not KOL_ROOT:
-        pytest.skip("KOL_ROOT not set — real-tree scenario skipped")
-    for rel in SEVEN_VAR_DEF_FILES:
-        if not (Path(KOL_ROOT) / rel).exists():
-            _fail("expected var def file missing from KOL worktree", rel)
-
-
-@when("the complexity gate runs on each of the seven files alone")
-def when_gate_per_file(bdd_state: dict) -> None:
-    bdd_state["per_file_gate"] = {
-        rel: run_gate([str(Path(KOL_ROOT) / rel)]) for rel in SEVEN_VAR_DEF_FILES
-    }
-
-
-@then("every single-file gate verdict is ok=true")
-def then_single_file_ok(bdd_state: dict) -> None:
-    bad = {
-        rel: result["failures"][:2]
-        for rel, result in bdd_state["per_file_gate"].items()
-        if result["ok"] is not True
-    }
-    if bad:
-        _fail("some var def files still fail their own gate", str(bad))
-
-
-@then("the per-file function counts are exactly 14 2 36 30 7 45 36 totalling 170")
-def then_per_file_counts(bdd_state: dict) -> None:
-    drifted = {
-        rel: result["summary"]["functions"]
-        for rel, result in bdd_state["per_file_gate"].items()
-        if result["summary"]["functions"] != SEVEN_FILE_COUNTS[rel]
-    }
-    if drifted:
-        _fail("per-file function counts drifted", str(drifted))
-    total = sum(r["summary"]["functions"] for r in bdd_state["per_file_gate"].values())
-    if total != 170:
-        _fail("seven-file total is not 170", str(total))
-
-
-@then(
-    "exactly 5 violations remain with their exact file function and complexity identity"
-)
-def then_violations_pinned(bdd_state: dict) -> None:
-    result = bdd_state["gate"]
-    violations = {
-        (Path(v["file"]).name, v["name"], v["complexity"])
-        for v in result["failures"]
-        if "complexity" in v
-    }
-    if len(result["failures"]) != 5:
-        _fail("violation count is not 5", str(result["failures"]))
-    if violations != PREEXISTING_VIOLATIONS:
-        _fail("pre-existing violation identity drifted", str(violations))

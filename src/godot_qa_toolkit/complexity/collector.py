@@ -16,7 +16,7 @@ from lark.exceptions import LarkError
 from radon.complexity import cc_visit
 from radon.visitors import Function
 
-from .sanitizer import sanitize_python_keyword_identifiers
+from .sanitizer import sanitize_python_ir_identifiers
 
 
 def _function_blocks(blocks: list) -> list:
@@ -79,12 +79,13 @@ def collect_paths(paths: list[str | Path]) -> tuple[list[FunctionComplexity], li
 
 
 def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
-    # WP1a: identifier-position `def` is renamed in-memory before conversion;
-    # without it gd2py emits `def = ...` and the whole file goes unparseable.
-    python_code = convert_code(sanitize_python_keyword_identifiers(src))
+    # WP1a §SPEC-001: gd2py emits identifier-position `def` verbatim (`def = …`)
+    # and radon rejects the whole file — sanitize the *converted Python IR*
+    # before radon sees it; the GDScript source passes through untouched.
+    python_code = sanitize_python_ir_identifiers(convert_code(src))
     # Attribution matters for diagnosis: convert_code failures mean the GDScript
     # itself could not be transpiled; cc_visit failures mean conversion succeeded
-    # but the emitted Python is invalid for radon (e.g. a Python-keyword
+    # but the emitted Python is still invalid for radon (e.g. a Python-keyword
     # identifier like `var lambda` that the WP1a sanitizer does not cover). Both
     # surface as SyntaxError at the caller, so the phase must be captured here —
     # a shared "gd2py conversion failed" label sent us chasing a nonexistent

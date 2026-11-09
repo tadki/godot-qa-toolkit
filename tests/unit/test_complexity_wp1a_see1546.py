@@ -21,7 +21,7 @@ from godot_qa_toolkit.complexity.gd_ast_oracle import (
     parity_report,
 )
 from godot_qa_toolkit.complexity.sanitizer import (
-    sanitize_python_keyword_identifiers,
+    sanitize_python_ir_identifiers,
 )
 
 KOL_ROOT = os.environ.get("KOL_ROOT")
@@ -38,86 +38,108 @@ SEVEN_VAR_DEF_FILES = [
 
 
 # --------------------------------------------------------------------------
-# §SPEC-001: token-level def sanitization
+# §SPEC-001: token-level def sanitization ON THE CONVERTED PYTHON IR
 # --------------------------------------------------------------------------
 
 
 def test_sanitize_renames_def_at_identifier_positions_only():
-    src = (
-        "func compute(def: int) -> int:\n"
-        "\tvar result := def * 2\n"
-        "\tif result > 0:\n"
-        "\t\treturn result\n"
-        "\treturn def - result\n"
+    ir = (
+        "def = 1\n"
+        "print(def)\n"
+        "x.def = 2\n"
+        "y = [def]\n"
     )
-    out = sanitize_python_keyword_identifiers(src)
+    out = sanitize_python_ir_identifiers(ir)
     assert "def_" in out
-    assert "var def " not in out
     # renamed consistently at every identifier occurrence — semantics preserved
-    assert out.count("def_") == 3
+    assert "def_ = 1" in out
+    assert "print(def_)" in out
+    assert "x.def_ = 2" in out
+    assert "y = [def_]" in out
 
 
 def test_sanitize_skips_strings_and_comments():
-    src = (
-        'func messages() -> String:\n'
-        '\t# comment mentions def here\n'
-        '\tvar s := "call def in string"\n'
-        "\tvar t := 'another def inside quotes'\n"
-        "\treturn s + t\n"
+    ir = (
+        "# comment mentions def here\n"
+        's = "call def in string"\n'
+        "t = 'another def inside quotes'\n"
+        "def = 1\n"
     )
-    out = sanitize_python_keyword_identifiers(src)
+    out = sanitize_python_ir_identifiers(ir)
     assert "call def in string" in out
     assert "another def inside quotes" in out
     assert "# comment mentions def here" in out
-    # only real identifiers renamed (none here besides s/t/messages)
-    assert "def_" not in out
+    # only the real identifier (assignment target) is renamed
+    assert "def_ = 1" in out
 
 
 def test_sanitize_handles_raw_and_multiline_strings():
-    # GDScript raw strings have no escape sequences: the first quote closes
-    # the literal, so `r"raw def stays"` must survive verbatim while a normal
-    # multiline string keeps its `def` untouched too.
-    src = (
-        'func texts() -> void:\n'
-        '\tvar r := r"raw def stays"\n'
-        '\tvar doc := """\n'
+    # Python raw strings and triple-quoted docstrings keep their `def` even
+    # when backslash-escape forms would otherwise hide the closing quote.
+    ir = (
+        'r = r"raw \\" def stays"\n'
+        'doc = """\n'
         "multi line doc with def inside\n"
-        '\t"""\n'
-        "\tprint(r)\n"
-        "\tprint(doc)\n"
+        '"""\n'
+        "def = 1\n"
+        "print(r)\n"
+        "print(doc)\n"
     )
-    out = sanitize_python_keyword_identifiers(src)
-    assert 'r"raw def stays"' in out
+    out = sanitize_python_ir_identifiers(ir)
+    assert 'r"raw \\" def stays"' in out
     assert "multi line doc with def inside" in out
+    assert "def_ = 1" in out
 
 
 def test_sanitize_covers_func_named_def_and_leaves_else_alone():
-    # `def` is a legal GDScript identifier, so `func def():` is legal GDScript;
-    # its *name* must be sanitized while GDScript keywords (`else:`) and the
-    # Python `def foo():` keyword position produced later by gd2py stay intact.
-    src = (
-        "func def(x: int) -> int:\n"
-        "\tif x > 0:\n"
+    # In converted IR, `def def():` has TWO def tokens: the leading keyword
+    # position (function-definition head) must stay, the trailing *name*
+    # position is an identifier and must be renamed; `else:` is a keyword
+    # NAME token that is not `def` and never moves.
+    ir = (
+        "def def():\n"
+        "\tif 1:\n"
         "\t\treturn 1\n"
         "\telse:\n"
         "\t\treturn 0\n"
+        "\ndef foo():\n"
+        "\tpass\n"
     )
-    out = sanitize_python_keyword_identifiers(src)
-    assert "func def_(x: int) -> int:" in out
+    out = sanitize_python_ir_identifiers(ir)
+    assert "def def_():" in out
+    assert "def foo():" in out
     assert "else:" in out
-    assert not out.startswith("func def(")
 
 
 def test_sanitize_avoids_name_collisions():
-    src = (
-        "func f(def_: int, def: int) -> int:\n"
-        "\treturn def + def_\n"
+    ir = (
+        "def_ = 10\n"
+        "def = 1\n"
+        "print(def + def_)\n"
     )
-    out = sanitize_python_keyword_identifiers(src)
+    out = sanitize_python_ir_identifiers(ir)
     lines = out.splitlines()
     # pre-existing `def_` must not be reused as the sanitized name
-    assert "func f(def_: int, def__: int) -> int:" in lines[0]
-    assert "return def__ + def_" in lines[1]
+    assert "def_ = 10" in lines[0]
+    assert "def__ = 1" in lines[1]
+    assert "print(def__ + def_)" in lines[2]
+
+
+def test_sanitize_keeps_async_def_and_control_flow():
+    ir = (
+        "async def worker():\n"
+        "\tpass\n"
+        "\n"
+        "for i in range(3):\n"
+        "\twhile i > 0:\n"
+        "\t\ti -= 1\n"
+        "def = 1\n"
+    )
+    out = sanitize_python_ir_identifiers(ir)
+    assert "async def worker():" in out
+    assert "for i in range(3):" in out
+    assert "while i > 0:" in out
+    assert "def_ = 1" in out
 
 
 def test_sanitizer_off_leaves_file_unparseable(tmp_path: Path):
@@ -448,14 +470,17 @@ def test_seven_files_mini_parity_all_recovered():
 )
 def test_seven_files_recover_170_functions_and_rebaseline():
     """Baseline side-effects of §SPEC-003: the 7 files contribute 170 functions,
-    the systems/scenes/autoload totals re-anchor to 1561/0, and the lambda
-    decision gap stays visible (not written off) in the parity oracle."""
+    the systems/scenes/autoload totals re-anchor to 1561/0, the full-scan gate
+    stays ok=false ONLY because of the 5 pre-existing violations, and the
+    lambda decision gap stays visible (not written off) in the parity oracle."""
     from godot_qa_toolkit.complexity.gate import run_gate
 
     dirs = [str(Path(KOL_ROOT) / d) for d in ("systems", "scenes", "autoload")]
     result = run_gate(dirs)
     assert result["summary"]["functions"] == 1561
     assert result["summary"]["unparseable"] == 0
+    assert result["summary"]["violations"] == 5
+    assert result["ok"] is False  # pre-existing violations only — never new ones
 
     recovered = 0
     for rel in SEVEN_VAR_DEF_FILES:
@@ -469,3 +494,57 @@ def test_seven_files_recover_170_functions_and_rebaseline():
     sane = parity_report((Path(KOL_ROOT) / "autoload/sane_subsystem.gd").read_text(encoding="utf-8"))
     gaps = [row for row in sane if row["kind"] == "lambda_gap"]
     assert gaps, "lambda decision gap must stay disclosed, not written off"
+
+
+PREEXISTING_VIOLATIONS = {
+    ("active_range_calculator.gd", "_compute", 19),
+    ("fair_absorption_solver.gd", "solve", 25),
+    ("debug_panel.gd", "_row_less", 19),
+    ("vendor_panel.gd", "_connect_signals", 16),
+    ("vendor_panel.gd", "_disconnect_signals", 16),
+}
+
+
+@pytest.mark.skipif(
+    not KOL_ROOT, reason="KOL_ROOT not set — real-tree reconciliation skipped"
+)
+def test_seven_files_each_pass_gate_individually():
+    """§SPEC-003 re-anchor: each of the 7 recovered files passes its own gate
+    (ok=true — no violations, no unparseable), with the exact per-file
+    function counts Leader verified: 14/2/36/30/7/45/36 = 170."""
+    from godot_qa_toolkit.complexity.gate import run_gate
+
+    expected_counts = {
+        "systems/effect/effect_definition_factory.gd": 14,
+        "scenes/ui/sane/sane_effect_formatter.gd": 2,
+        "autoload/effect_manager.gd": 36,
+        "autoload/hardware_manager.gd": 30,
+        "autoload/hardware_multi_driver.gd": 7,
+        "autoload/sane_subsystem.gd": 45,
+        "autoload/shadowconsole_subsystem.gd": 36,
+    }
+    for rel, expected_count in expected_counts.items():
+        result = run_gate([str(Path(KOL_ROOT) / rel)])
+        assert result["ok"] is True, f"{rel}: {result['failures'][:2]}"
+        assert result["summary"]["functions"] == expected_count, rel
+        assert result["summary"]["unparseable"] == 0, rel
+
+
+@pytest.mark.skipif(
+    not KOL_ROOT, reason="KOL_ROOT not set — real-tree reconciliation skipped"
+)
+def test_full_scan_violations_pinned_to_preexisting_identity():
+    """The full scan keeps ok=false, but ONLY through the exact 5 pre-existing
+    violations — same file, same function, same CC as on origin/master. Any
+    addition or identity drift fails (§SPEC-003: 不得增加或变化)."""
+    from godot_qa_toolkit.complexity.gate import run_gate
+
+    dirs = [str(Path(KOL_ROOT) / d) for d in ("systems", "scenes", "autoload")]
+    result = run_gate(dirs)
+    violations = {
+        (Path(v["file"]).name, v["name"], v["complexity"])
+        for v in result["failures"]
+        if "complexity" in v  # violations carry thresholds; unparseable do not
+    }
+    assert len(result["failures"]) == 5
+    assert violations == PREEXISTING_VIOLATIONS

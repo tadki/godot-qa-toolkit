@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 from pytest_bdd import given, scenarios, then, when
 
+from gdtoolkit.gd2py import convert_code
 from godot_qa_toolkit.complexity.collector import collect_file
+from godot_qa_toolkit.complexity.gate import run_gate
 from godot_qa_toolkit.complexity.gd_ast_oracle import parity_report
 from godot_qa_toolkit.complexity.sanitizer import (
-    sanitize_python_keyword_identifiers,
+    sanitize_python_ir_identifiers,
 )
 
 from ._support import fail_step as _fail
@@ -30,6 +32,24 @@ SEVEN_VAR_DEF_FILES = [
     "autoload/sane_subsystem.gd",
     "autoload/shadowconsole_subsystem.gd",
 ]
+
+SEVEN_FILE_COUNTS = {
+    "systems/effect/effect_definition_factory.gd": 14,
+    "scenes/ui/sane/sane_effect_formatter.gd": 2,
+    "autoload/effect_manager.gd": 36,
+    "autoload/hardware_manager.gd": 30,
+    "autoload/hardware_multi_driver.gd": 7,
+    "autoload/sane_subsystem.gd": 45,
+    "autoload/shadowconsole_subsystem.gd": 36,
+}
+
+PREEXISTING_VIOLATIONS = {
+    ("active_range_calculator.gd", "_compute", 19),
+    ("fair_absorption_solver.gd", "solve", 25),
+    ("debug_panel.gd", "_row_less", 19),
+    ("vendor_panel.gd", "_connect_signals", 16),
+    ("vendor_panel.gd", "_disconnect_signals", 16),
+}
 
 VAR_DEF_SRC = (
     "extends RefCounted\n"
@@ -195,8 +215,11 @@ def when_raw_convert(bdd_state: dict) -> None:
 
 @when("the sanitizer builds the in-memory projection")
 def when_sanitize(tmp_path: Path, bdd_state: dict) -> None:
+    # §SPEC-001 rework: sanitization now happens on the *converted Python IR*
+    # (gd2py emits `def = ...` for identifier-position `def`; the keyword head
+    # of `def foo():` it also emits must survive untouched).
     src = (tmp_path / "keyword_pos.gd").read_text(encoding="utf-8")
-    bdd_state["sanitized"] = sanitize_python_keyword_identifiers(src)
+    bdd_state["sanitized"] = sanitize_python_ir_identifiers(convert_code(src))
 
 
 @when("the unfiltered block list is inspected")
@@ -256,29 +279,38 @@ def then_parses(bdd_state: dict) -> None:
 @then("the sanitized projection leaves every string and comment verbatim")
 def then_verbatim(bdd_state: dict) -> None:
     src = (bdd_state["root"] / "strings.gd").read_text(encoding="utf-8")
-    out = sanitize_python_keyword_identifiers(src)
-    for verbatim in (
-        "# comment mentions def here",
-        '"call def in string"',
-        "'another def inside quotes'",
-        '"and def again"',
-    ):
-        if verbatim not in out:
-            _fail("verbatim fragment lost", verbatim)
+    ir_raw = convert_code(src)
+    ir = sanitize_python_ir_identifiers(ir_raw)
+    # gd2py evaporates string literals and drops comments before the IR
+    # exists, so this projection carries NO identifier-position `def` at all:
+    # the sanitizer must be a byte-identical no-op here (two-way diff).
+    if ir != ir_raw:
+        _fail(
+            "sanitizer changed an IR whose def tokens are all in strings/comments",
+            f"before={ir_raw!r} after={ir!r}",
+        )
+    if "def_" in ir:
+        _fail("sanitizer invented a def_ that has no source", ir)
 
 
 @then("control flow tokens are untouched")
 def then_control_flow(bdd_state: dict) -> None:
-    for token in ("if x > 0:", "elif x == 0:", "else:", "return"):
-        if token not in bdd_state["sanitized"]:
+    # gd2py evaporates conditions (`if 1:`), but the if/elif/else skeleton it
+    # emits IS the control flow — it must reach radon verbatim.
+    ir = bdd_state["sanitized"]
+    for token in ("if 1:", "elif 1:", "else:", "return"):
+        if token not in ir:
             _fail("control flow token disturbed", token)
 
 
 @then("the function named def is renamed only at its name position")
 def then_func_name_renamed(bdd_state: dict) -> None:
-    out = bdd_state["sanitized"]
-    if "func def_(x: int) -> int:" not in out:
-        _fail("function name position not renamed", out.splitlines()[0])
+    ir = bdd_state["sanitized"]
+    # keyword head stays `def`, identifier name becomes `def_`
+    if "def def_():" not in ir:
+        _fail("function name position not renamed", ir.splitlines()[0])
+    if "def def():" in ir:
+        _fail("function *name* left as keyword-colliding def", ir.splitlines()[0])
 
 
 @then("conversion fails with a syntax error proving the sanitizer is the fix")
@@ -381,3 +413,60 @@ def then_mini_parity(bdd_state: dict) -> None:
         _fail("unexplained parity mismatches", str(mismatch))
     if match != 167 or gap != 3:
         _fail(f"lane totals drifted: match={match} gap={gap}", "")
+
+
+@given("the real KOL worktree with the seven var def files present")
+def given_kol_seven_files(bdd_state: dict) -> None:
+    if not KOL_ROOT:
+        pytest.skip("KOL_ROOT not set — real-tree scenario skipped")
+    for rel in SEVEN_VAR_DEF_FILES:
+        if not (Path(KOL_ROOT) / rel).exists():
+            _fail("expected var def file missing from KOL worktree", rel)
+
+
+@when("the complexity gate runs on each of the seven files alone")
+def when_gate_per_file(bdd_state: dict) -> None:
+    bdd_state["per_file_gate"] = {
+        rel: run_gate([str(Path(KOL_ROOT) / rel)]) for rel in SEVEN_VAR_DEF_FILES
+    }
+
+
+@then("every single-file gate verdict is ok=true")
+def then_single_file_ok(bdd_state: dict) -> None:
+    bad = {
+        rel: result["failures"][:2]
+        for rel, result in bdd_state["per_file_gate"].items()
+        if result["ok"] is not True
+    }
+    if bad:
+        _fail("some var def files still fail their own gate", str(bad))
+
+
+@then("the per-file function counts are exactly 14 2 36 30 7 45 36 totalling 170")
+def then_per_file_counts(bdd_state: dict) -> None:
+    drifted = {
+        rel: result["summary"]["functions"]
+        for rel, result in bdd_state["per_file_gate"].items()
+        if result["summary"]["functions"] != SEVEN_FILE_COUNTS[rel]
+    }
+    if drifted:
+        _fail("per-file function counts drifted", str(drifted))
+    total = sum(r["summary"]["functions"] for r in bdd_state["per_file_gate"].values())
+    if total != 170:
+        _fail("seven-file total is not 170", str(total))
+
+
+@then(
+    "exactly 5 violations remain with their exact file function and complexity identity"
+)
+def then_violations_pinned(bdd_state: dict) -> None:
+    result = bdd_state["gate"]
+    violations = {
+        (Path(v["file"]).name, v["name"], v["complexity"])
+        for v in result["failures"]
+        if "complexity" in v
+    }
+    if len(result["failures"]) != 5:
+        _fail("violation count is not 5", str(result["failures"]))
+    if violations != PREEXISTING_VIOLATIONS:
+        _fail("pre-existing violation identity drifted", str(violations))

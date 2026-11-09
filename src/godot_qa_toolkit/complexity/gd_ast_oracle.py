@@ -27,7 +27,7 @@ from __future__ import annotations
 from lark import Tree
 from lark.lexer import Token
 
-from .sanitizer import sanitize_python_keyword_identifiers
+from .sanitizer import sanitize_python_ir_identifiers
 
 DECISION_POINT_NODES = frozenset(
     {
@@ -92,14 +92,19 @@ def parity_report(gd_source: str) -> list[dict]:
     """Diff raw-AST oracle CC against radon CC for every function in the
     source. Radon records carry post-conversion line numbers that do not map
     back to GDScript lines, so functions are matched by name (GDScript has no
-    overloading; duplicate names in one file would be a real anomaly)."""
+    overloading; duplicate names in one file would be a real anomaly).
+
+    The oracle parses the *original* GDScript source; the radon side converts
+    the same raw source and sanitizes the Python IR exactly like the
+    collector does, so parity measures the real pipeline. A function actually
+    named `def` would surface as missing-in-radon (its IR name becomes
+    `def_`) and fail loudly instead of silently mis-matching."""
     from gdtoolkit.gd2py import convert_code
     from gdtoolkit.parser import parser
     from radon.complexity import cc_visit
     from radon.visitors import Function
 
-    sanitized = sanitize_python_keyword_identifiers(gd_source)
-    tree = parser.parse(sanitized)
+    tree = parser.parse(gd_source)
     oracle: dict[str, int] = {}
     lambda_gap_by_name: dict[str, int] = {}
     for func_def in iter_function_defs(tree):
@@ -109,7 +114,7 @@ def parity_report(gd_source: str) -> list[dict]:
         oracle[name] = 1 + count_decision_points(func_def)
         lambda_gap_by_name[name] = count_lambda_decision_points(func_def)
 
-    python_code = convert_code(sanitized)
+    python_code = sanitize_python_ir_identifiers(convert_code(gd_source))
     radon: dict[str, int] = {}
     for block in cc_visit(python_code):
         if isinstance(block, Function):

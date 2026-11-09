@@ -156,10 +156,15 @@ def diff_registries(old: dict, new: dict,
                 row["human_final"] = True
 
     _mark_escapes(rows, new_by_fid, escape_dirs)
+    # unified JSON contract keys: `ok` means "command executed completely"
+    # (plan §4.1) — lane anomalies are data, not exit-code semantics
     return {
+        "tool": "registry",
+        "ok": True,
         "diff_version": DIFF_VERSION,
         "rows": rows,
         "summary": _summarize_rows(rows),
+        "failures": [],
     }
 
 

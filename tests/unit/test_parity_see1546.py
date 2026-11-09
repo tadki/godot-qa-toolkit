@@ -177,3 +177,105 @@ def test_identity_mismatch_when_radon_count_differs(monkeypatch):
     counts = _lanes(report["rows"])
     assert counts.get("identity_mismatch") == 1
     assert counts.get("match") == 1
+
+
+# --------------------------------------------------------------------------
+# D-WP1b-1: `gqt registry diff` unified JSON contract
+# --------------------------------------------------------------------------
+
+
+def _diff_entry(fid: str, body_hash: str) -> dict:
+    return {"fid": fid, "name": fid.rsplit(".", 1)[-1], "kind": "func_def",
+            "lex_scope": [], "occurrence": 1, "static": False,
+            "instrumentable": True, "start_line": 1, "end_line": 2,
+            "body_hash": body_hash, "cc_oracle": 1, "lambda_gap": 0}
+
+
+def test_registry_diff_cli_emits_unified_contract_ok_path(tmp_path: Path):
+    """D-WP1b-1: cmd_registry must emit {tool, ok, ...} like every other
+    subcommand — the bare diff dict has no `ok` key and used to KeyError."""
+    import argparse
+    import io
+    import json
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import cmd_registry
+    from godot_qa_toolkit.registry.snapshot import save_snapshot
+
+    old = {"files": {"f.gd": {"entries": [_diff_entry("f.gd::a", "h1")]}}}
+    new = {"files": {"f.gd": {"entries": [_diff_entry("f.gd::a", "h1")]}}}
+    old_p, new_p = tmp_path / "old.json", tmp_path / "new.json"
+    save_snapshot(old, old_p)
+    save_snapshot(new, new_p)
+    args = argparse.Namespace(old=str(old_p), new=str(new_p), out=None)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cmd_registry(args)
+    payload = json.loads(buf.getvalue())
+    assert rc == 0
+    assert payload["tool"] == "registry"
+    assert payload["ok"] is True
+    assert "summary" in payload and "rows" in payload
+    assert payload["summary"]["added"] == 0
+
+
+def test_registry_diff_cli_fail_loud_on_unparseable_snapshot(tmp_path: Path):
+    import argparse
+    import io
+    import json
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import cmd_registry
+    from godot_qa_toolkit.registry.snapshot import save_snapshot
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    good = tmp_path / "good.json"
+    save_snapshot({"files": {}}, good)
+    args = argparse.Namespace(old=str(bad), new=str(good), out=None)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cmd_registry(args)
+    payload = json.loads(buf.getvalue())
+    assert rc == 1
+    assert payload["tool"] == "registry"
+    assert payload["ok"] is False
+    assert payload["failures"] and payload["failures"][0]["reason"]
+
+
+# --------------------------------------------------------------------------
+# obs-1: process-pool crash must fall back to serial, equivalently
+# --------------------------------------------------------------------------
+
+
+def test_run_tasks_falls_back_serial_on_broken_pool(monkeypatch, tmp_path: Path):
+    from concurrent.futures.process import BrokenProcessPool
+
+    from godot_qa_toolkit.complexity import parity as parity_mod
+
+    f1 = tmp_path / "a.gd"
+    f1.write_text(PLAIN_SRC, encoding="utf-8")
+    f2 = tmp_path / "b.gd"
+    f2.write_text(
+        "extends RefCounted\n\nfunc g() -> int:\n\treturn 3\n", encoding="utf-8"
+    )
+    tasks = [(str(f1), "a.gd"), (str(f2), "b.gd")]
+
+    class BrokenPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def map(self, fn, task_list):
+            raise BrokenProcessPool()
+
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", BrokenPool)
+    results = parity_mod._run_tasks(tasks)
+    serial = [parity_mod._parity_file_task(t) for t in tasks]
+    assert results == serial
+    assert [r[0] for r in results] == ["a.gd", "b.gd"]

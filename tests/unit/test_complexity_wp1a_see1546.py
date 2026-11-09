@@ -396,6 +396,49 @@ def test_lambda_decision_points_counted_in_lambda_subtree():
     assert count_decision_points(fds[0]) == 1
 
 
+# D1 (QA FAIL): the host above has no decision point of its own, so
+# "lambda-subtree count" and "whole-function count" coincide and the scope
+# is unpinned. This mixed host separates them: one decision point in the
+# host, one inside the lambda.
+MIXED_LAMBDA_HOST_SRC = (
+    "extends RefCounted\n"
+    "\n"
+    "func mixed(q: int) -> int:\n"
+    "\tvar cb := func(v: int) -> int:\n"
+    "\t\tif v > 0:\n"
+    "\t\t\treturn v * 2\n"
+    "\t\treturn -v\n"
+    "\tif q > 0:\n"
+    "\t\treturn cb(q)\n"
+    "\treturn 0\n"
+)
+
+
+def test_lambda_gap_counts_only_lambda_subtree_decision_points():
+    """`count_lambda_decision_points` must stay scoped to the lambda: with a
+    host decision point present, a whole-function count would report 2 here."""
+    from gdtoolkit.parser import parser
+
+    fds = list(iter_function_defs(parser.parse(MIXED_LAMBDA_HOST_SRC)))
+    assert len(fds) == 1
+    assert count_decision_points(fds[0]) == 2
+    assert count_lambda_decision_points(fds[0]) == 1
+
+
+def test_mixed_host_parity_reports_exact_lambda_gap():
+    """oracle 3 (host `if` + lambda `if`), radon 2 (lambda body evaporates):
+    the classifier must call this a gap of exactly 1, not a mismatch."""
+    report = parity_report(MIXED_LAMBDA_HOST_SRC)
+    row = [r for r in report if r["name"] == "mixed"][0]
+    assert row == {
+        "name": "mixed",
+        "oracle_cc": 3,
+        "radon_cc": 2,
+        "lambda_gap": 1,
+        "kind": "lambda_gap",
+    }
+
+
 # --------------------------------------------------------------------------
 # §SPEC-004 (isolation): second-layer conversion failure stays unparseable
 # --------------------------------------------------------------------------

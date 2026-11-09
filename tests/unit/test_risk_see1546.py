@@ -509,3 +509,28 @@ def test_real_kol_selected_eligible_files_are_eligible():
         src = (Path(KOL_ROOT) / rel).read_text(encoding="utf-8")
         profile = file_profile(src, file_label=rel)
         assert profile["eligible"] is True, (rel, profile)
+
+
+def test_default_measure_forwards_timing_store(monkeypatch, tmp_path: Path):
+    """D-M2-1: the closure must pass the outer `timing_store` through to
+    run_coverage — a hardcoded None here silently ignores the parameter and
+    any caller wiring the timing store would lose every sample."""
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+
+    captured: dict = {}
+    sentinel = object()
+
+    def fake_run_coverage(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "summary": {"hits_lines": []}}
+
+    monkeypatch.setattr(
+        "godot_qa_toolkit.coverage.runner.run_coverage", fake_run_coverage
+    )
+    measure = shadow_mod.default_measure(str(tmp_path), timing_store=sentinel)
+    measure("f.gd", "source", None)
+    assert captured["timing_store"] is sentinel
+
+    bare = shadow_mod.default_measure(str(tmp_path))
+    bare("f.gd", "source", None)
+    assert captured["timing_store"] is None

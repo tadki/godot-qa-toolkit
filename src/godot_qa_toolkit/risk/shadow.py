@@ -415,7 +415,7 @@ def default_measure(project_root: str, timing_store=None):
             project_root=project_root,
             min_percent=0.0,
             timeout_s=300,
-            timing_store=None,
+            timing_store=timing_store,
             tests_glob=tests_glob,
         )
         wall = time.monotonic() - start

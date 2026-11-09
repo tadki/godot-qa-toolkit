@@ -42,9 +42,10 @@ EXPECTED_SCENARIO_COUNTS = {
     "see1413_default_parallel": 4,
     # SEE-1468 M5-a：see1288_fork_cli 4 场景自 KOL 收编（pending -> bdd）。
     "see1288_fork_cli": 4,
-    # SEE-1546 WP1a：def 消毒 + Class 过滤 + AST parity oracle（11 场景，含
-    # 返工新增的逐文件门通过与预存 violations 身份钉住两场景）。
-    "see1546_wp1a": 11,
+    # SEE-1546 WP1a：def 消毒 + Class 过滤 + AST parity oracle（Final Review
+    # HIGH-1 拆分：8 个自足场景 + 3 个真实 KOL 树场景独立模块守卫）。
+    "see1546_wp1a": 8,
+    "see1546_wp1a_kol": 3,
 }
 EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())

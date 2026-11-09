@@ -396,6 +396,50 @@ def test_lambda_decision_points_counted_in_lambda_subtree():
     assert count_decision_points(fds[0]) == 1
 
 
+# --------------------------------------------------------------------------
+# Final Review MEDIUM-1: cross-scope same-name functions must not be folded
+# --------------------------------------------------------------------------
+
+
+DUP_NAME_SRC = (
+    "extends RefCounted\n"
+    "\n"
+    "class Wrapper:\n"
+    '\tvar label: String = ""\n'
+    "\n"
+    "\tfunc same(x: int) -> int:\n"
+    "\t\tif x > 0:\n"
+    "\t\t\treturn x\n"
+    "\t\treturn 0\n"
+    "\n"
+    "func same() -> int:\n"
+    "\treturn 7\n"
+)
+
+
+def test_parity_reports_cross_scope_same_name_fail_loud():
+    """GDScript allows the same function name in different lexical scopes
+    (inner-class method vs top-level). Name-only folding would drop one and
+    could fake a match — every ambiguous pair must surface as
+    identity_mismatch instead (fail-loud, no guessed pairing)."""
+    report = parity_report(DUP_NAME_SRC)
+    same_rows = [r for r in report if r["name"] == "same"]
+    assert len(same_rows) == 2, f"functions lost by folding: {report}"
+    assert {r["lex_path"] for r in same_rows} == {"Wrapper.same", "same"}
+    assert {r["kind"] for r in same_rows} == {"identity_mismatch"}
+    assert all(r["lambda_gap"] == 0 for r in same_rows)
+    # the unrelated wrapper field is a plain String assignment — no function
+    assert len(report) == 2
+
+
+def test_parity_rows_carry_lex_path_when_names_are_unique():
+    """With unique names every row still exposes its lexical path (== bare
+    name for top-level functions) and keeps the strict lanes intact."""
+    report = parity_report(LAMBDA_HOST_SRC)
+    assert [r["lex_path"] for r in report] == ["host"]
+    assert report[0]["kind"] == "lambda_gap"
+
+
 # D1 (QA FAIL): the host above has no decision point of its own, so
 # "lambda-subtree count" and "whole-function count" coincide and the scope
 # is unpinned. This mixed host separates them: one decision point in the
@@ -432,6 +476,7 @@ def test_mixed_host_parity_reports_exact_lambda_gap():
     row = [r for r in report if r["name"] == "mixed"][0]
     assert row == {
         "name": "mixed",
+        "lex_path": "mixed",
         "oracle_cc": 3,
         "radon_cc": 2,
         "lambda_gap": 1,
@@ -657,7 +702,11 @@ def test_function_name_none_when_header_has_no_name_token():
 def test_parity_report_skips_unnamed_func_def(monkeypatch):
     import godot_qa_toolkit.complexity.gd_ast_oracle as oracle
 
-    monkeypatch.setattr(oracle, "iter_function_defs", lambda tree: [Tree("func_def", [])])
+    monkeypatch.setattr(
+        oracle,
+        "_iter_function_defs_with_paths",
+        lambda tree: [("", Tree("func_def", []))],
+    )
     assert oracle.parity_report("func f():\n\tpass\n") == []
 
 
@@ -677,6 +726,7 @@ def test_parity_report_function_named_def_reports_missing_in_radon():
     assert report == [
         {
             "name": "def",
+            "lex_path": "def",
             "oracle_cc": 1,
             "radon_cc": None,
             "lambda_gap": 0,

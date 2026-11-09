@@ -42,11 +42,13 @@ EXPECTED_SCENARIO_COUNTS = {
     "see1413_default_parallel": 4,
     # SEE-1468 M5-a：see1288_fork_cli 4 场景自 KOL 收编（pending -> bdd）。
     "see1288_fork_cli": 4,
+    # SEE-1546 WP1a：def 消毒 + Class 过滤 + AST parity oracle（9 场景）。
+    "see1546_wp1a": 9,
 }
 EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
-EXPECTED_STEPS = 68
-EXPECTED_DEFINITIONS = 64
+EXPECTED_STEPS = 103
+EXPECTED_DEFINITIONS = 96
 CONTRACT_MARKER = '{\n  "tool": "gherkin"'
 
 
@@ -131,8 +133,9 @@ def _write_contract_case(tmp_path: Path) -> None:
 
 def test_dual_source_scenario_count_matches_ledger(request: pytest.FixtureRequest) -> None:
     # SEE-1468 M5-a：see1288_fork_cli 4 场景收编后双源对账 17 -> 21。
+    # SEE-1546 WP1a：see1546_wp1a 9 场景接入后对账 21 -> 30。
     collection = _full_collection(request)
-    assert len(collection.items) == EXPECTED_SCENARIOS == 21
+    assert len(collection.items) == EXPECTED_SCENARIOS == 30
     for name, expected in EXPECTED_SCENARIO_COUNTS.items():
         assert _source_scenario_count(name) == expected, name
         prefix = f"tests/bdd/test_{name}.py::"

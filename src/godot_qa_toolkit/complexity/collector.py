@@ -14,6 +14,17 @@ from pathlib import Path
 from gdtoolkit.gd2py import convert_code
 from lark.exceptions import LarkError
 from radon.complexity import cc_visit
+from radon.visitors import Function
+
+from .sanitizer import sanitize_python_keyword_identifiers
+
+
+def _function_blocks(blocks: list) -> list:
+    # radon's cc_visit returns Class and Function blocks; a Class block is an
+    # aggregate over its methods (SEE-1546 WP1a) — keeping it double-counts
+    # inner-class code as one pseudo-function. Methods themselves come back as
+    # Function blocks, so filtering by type loses no real function.
+    return [b for b in blocks if isinstance(b, Function)]
 
 
 @dataclass(frozen=True)
@@ -68,11 +79,13 @@ def collect_paths(paths: list[str | Path]) -> tuple[list[FunctionComplexity], li
 
 
 def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
-    python_code = convert_code(src)
+    # WP1a: identifier-position `def` is renamed in-memory before conversion;
+    # without it gd2py emits `def = ...` and the whole file goes unparseable.
+    python_code = convert_code(sanitize_python_keyword_identifiers(src))
     # Attribution matters for diagnosis: convert_code failures mean the GDScript
     # itself could not be transpiled; cc_visit failures mean conversion succeeded
     # but the emitted Python is invalid for radon (e.g. a Python-keyword
-    # identifier like `var def` that gd2py emits verbatim as `def = 1`). Both
+    # identifier like `var lambda` that the WP1a sanitizer does not cover). Both
     # surface as SyntaxError at the caller, so the phase must be captured here —
     # a shared "gd2py conversion failed" label sent us chasing a nonexistent
     # transpiler bug (SEE-1367 §SPEC-017).
@@ -81,7 +94,7 @@ def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
     except SyntaxError as e:
         raise RadonVisitError(
             f"radon cc_visit failed on converted source (likely Python-keyword "
-            f"identifier, e.g. `var def`): {e}"
+            f"identifier outside the WP1a sanitizer scope, e.g. `var lambda`): {e}"
         ) from e
     return [
         FunctionComplexity(
@@ -90,7 +103,7 @@ def _collect_source(src: str, file_name: str) -> list[FunctionComplexity]:
             complexity=int(b.complexity),
             line=int(b.lineno),
         )
-        for b in blocks
+        for b in _function_blocks(blocks)
     ]
 
 
@@ -113,5 +126,5 @@ def _collect_python_source(src: str, file_name: str) -> tuple[list[FunctionCompl
             complexity=int(b.complexity),
             line=int(b.lineno),
         )
-        for b in blocks
+        for b in _function_blocks(blocks)
     ], None

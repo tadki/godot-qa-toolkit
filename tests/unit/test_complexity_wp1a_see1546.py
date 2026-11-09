@@ -4,9 +4,12 @@ and the raw-GDScript-AST decision-point parity oracle (§SPEC-001/002/004)."""
 from __future__ import annotations
 
 import os
+import tokenize
 from pathlib import Path
 
 import pytest
+from lark import Tree
+from lark.lexer import Token
 
 from godot_qa_toolkit.complexity.collector import (
     _collect_python_source,
@@ -548,3 +551,137 @@ def test_full_scan_violations_pinned_to_preexisting_identity():
     }
     assert len(result["failures"]) == 5
     assert violations == PREEXISTING_VIOLATIONS
+
+
+# --------------------------------------------------------------------------
+# §SPEC-005 hardener: coverage closure for the WP1a change surface
+#
+# These pin the error/guard paths the functional scenarios do not reach on a
+# healthy real tree. Each one is asserted as behaviour: the structural-error
+# lanes must report instead of crash, the oracle guards must skip or report
+# loudly instead of mis-matching silently.
+# --------------------------------------------------------------------------
+
+
+def test_collect_file_unreadable_path_returns_structural_error(tmp_path: Path):
+    funcs, error = collect_file(tmp_path / "does_not_exist.gd")
+    assert funcs == []
+    assert error is not None and error.startswith("unreadable:")
+
+
+def test_collect_file_undecodable_bytes_returns_structural_error(tmp_path: Path):
+    bad = tmp_path / "bad.gd"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+    funcs, error = collect_file(bad)
+    assert funcs == []
+    assert error is not None and error.startswith("unreadable:")
+
+
+def test_collect_file_python_suffix_routes_to_python_ast(tmp_path: Path):
+    py = tmp_path / "mod.py"
+    py.write_text("def f(x):\n    if x:\n        return 1\n    return 2\n", encoding="utf-8")
+    funcs, error = collect_file(py)
+    assert error is None
+    assert [(f.name, f.complexity) for f in funcs] == [("f", 2)]
+
+
+def test_collect_python_source_reports_syntax_error_as_structural_failure():
+    funcs, error = _collect_python_source("def broken(:\n", file_name="broken.py")
+    assert funcs == []
+    assert error is not None and error.startswith(
+        "python ast conversion failed: SyntaxError:"
+    )
+
+
+def test_function_name_none_for_empty_func_def():
+    assert function_name(Tree("func_def", [])) is None
+
+
+def test_function_name_none_when_header_is_not_a_tree():
+    assert function_name(Tree("func_def", [Token("NAME", "x")])) is None
+
+
+def test_function_name_skips_non_name_tokens():
+    header = Tree("func_header", [Token("LPAR", "("), Token("NAME", "foo")])
+    assert function_name(Tree("func_def", [header])) == "foo"
+
+
+def test_function_name_none_when_header_has_no_name_token():
+    header = Tree("func_header", [Token("LPAR", "(")])
+    assert function_name(Tree("func_def", [header])) is None
+
+
+def test_parity_report_skips_unnamed_func_def(monkeypatch):
+    import godot_qa_toolkit.complexity.gd_ast_oracle as oracle
+
+    monkeypatch.setattr(oracle, "iter_function_defs", lambda tree: [Tree("func_def", [])])
+    assert oracle.parity_report("func f():\n\tpass\n") == []
+
+
+def test_parity_report_inner_class_function_matches_and_class_block_ignored():
+    # radon returns both a Class block and the method Function blocks; the
+    # Class aggregate must never be read as a function of its own name.
+    src = "class Inner:\n\tfunc m():\n\t\tpass\n\nfunc f():\n\tpass\n"
+    report = parity_report(src)
+    assert {r["name"] for r in report} == {"f", "m"}
+    assert all(r["kind"] == "match" for r in report)
+
+
+def test_parity_report_function_named_def_reports_missing_in_radon():
+    # The sanitizer renames the IR identifier to `def_`, so the radon record is
+    # keyed under a different name: the oracle must fail loudly, not mis-match.
+    report = parity_report("func def():\n\tpass\n")
+    assert report == [
+        {
+            "name": "def",
+            "oracle_cc": 1,
+            "radon_cc": None,
+            "lambda_gap": 0,
+            "kind": "mismatch",
+        }
+    ]
+
+
+def test_parity_report_unexplained_radon_divergence_is_mismatch(monkeypatch):
+    import radon.complexity as radon_complexity
+    from radon.visitors import Function as RadonFunction
+
+    monkeypatch.setattr(
+        radon_complexity,
+        "cc_visit",
+        lambda _code: [RadonFunction("f", 1, 0, 2, False, None, [], 9)],
+    )
+    report = parity_report("func f(x):\n\tif x:\n\t\treturn 1\n\treturn 2\n")
+    assert [r["kind"] for r in report] == ["mismatch"]
+
+
+def test_parity_report_lower_radon_without_lambda_gap_is_mismatch(monkeypatch):
+    # oracle > radon by an amount that is NOT the lambda gap: the classifier
+    # must call this a second-layer defect, never wave it through as a gap.
+    import radon.complexity as radon_complexity
+    from radon.visitors import Function as RadonFunction
+
+    monkeypatch.setattr(
+        radon_complexity,
+        "cc_visit",
+        lambda _code: [RadonFunction("f", 1, 0, 2, False, None, [], 0)],
+    )
+    report = parity_report("func f(x):\n\tif x:\n\t\treturn 1\n\treturn 2\n")
+    assert [r["kind"] for r in report] == ["mismatch"]
+
+
+def test_sanitize_is_a_noop_when_the_keyword_never_appears():
+    assert sanitize_python_ir_identifiers("x = 1\n") == "x = 1\n"
+
+
+def test_sanitize_raises_when_token_position_disagrees_with_text(monkeypatch):
+    import godot_qa_toolkit.complexity.sanitizer as sanitizer
+
+    bogus = tokenize.TokenInfo(tokenize.NAME, "def", (1, 0), (1, 3), "abc = 1\n")
+
+    class _FakeTokenize:
+        generate_tokens = staticmethod(lambda readline: iter([bogus]))
+
+    monkeypatch.setattr(sanitizer, "tokenize", _FakeTokenize)
+    with pytest.raises(ValueError, match="sanitizer rewrite missed"):
+        sanitizer.sanitize_python_ir_identifiers("abc = 1\n")

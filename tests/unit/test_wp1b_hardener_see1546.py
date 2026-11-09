@@ -71,10 +71,28 @@ def test_first_name_skips_non_name_tokens():
 
 def test_start_line_agrees_between_metadata_modes():
     """Leaf-token lines and tree-meta lines must agree — the meta branch of
-    _start_line exists for metadata parses and must not shift the span."""
+    _start_line exists for metadata parses and must not shift the span.
+    D-WP1b-2 restored this helper precisely to keep this dual-mode anchor."""
     tree = gd_parser.parse(GD_SNIPPET, gather_metadata=True)
     func_def = [s for s in tree.iter_subtrees() if s.data == "func_def"][0]
     assert _start_line(func_def) == 1
+    tree_nometa = gd_parser.parse(GD_SNIPPET, gather_metadata=False)
+    func_def_nometa = [
+        s for s in tree_nometa.iter_subtrees() if s.data == "func_def"
+    ][0]
+    assert _start_line(func_def_nometa) == 1
+
+
+def test_func_name_header_guards():
+    """_func_name is O(header): a non-Tree first child yields None, non-NAME
+    header tokens are skipped, and a NAME-less header yields None."""
+    from godot_qa_toolkit.registry.functions import _func_name
+
+    assert _func_name(Tree("func_def", [Token("NAME", "x")])) is None
+    header = Tree("func_header", [Token("LPAR", "("), Token("NAME", "foo")])
+    assert _func_name(Tree("func_def", [header])) == "foo"
+    nameless = Tree("func_header", [Token("LPAR", "(")])
+    assert _func_name(Tree("func_def", [nameless])) is None
 
 
 DUP_SNIPPET = "func a():\n\treturn 1\n\nfunc a():\n\treturn 2\n"

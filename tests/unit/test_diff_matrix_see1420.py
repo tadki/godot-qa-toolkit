@@ -19,9 +19,13 @@ SRC = ("func add(a, b):\n"
        "\treturn a + b\n")
 
 MANIFEST = {"header_hash": "H", "scopes": {"func:add": "S1"}}
+# SEE-1550：killed 条目必须携带 killed_by 证书（缺失 = cert_missing 保守
+# 重跑——fail-safe 只偏向重跑；本文件钉证书在场路径的矩阵语义）。
+CERT = [{"test_name": "test_x", "script_path": "res://tests/t.gd",
+         "script_sha1": "a", "deps_sha1": "b"}]
 PRIOR = {"verdict": "killed", "reason": "r", "scope_hash": "S1",
          "line": 2, "column": 11, "kind": "AOR", "original": "+",
-         "mutated": "-", "timeout_streak": 0}
+         "mutated": "-", "timeout_streak": 0, "killed_by": CERT}
 
 
 def _mutants():

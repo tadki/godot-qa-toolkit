@@ -162,6 +162,10 @@ def then_summary_keys(bdd_state: dict) -> None:
         "samples_n",
         "baseline_p90",
         "jobs",
+        # SEE-1550 只加不改披露面（机制标签恒在场 + 槽位/新鲜度在影子轮在场）
+        "inject_scheme",
+        "slot_mode",
+        "freshness",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

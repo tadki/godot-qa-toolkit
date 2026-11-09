@@ -46,6 +46,8 @@ EXPECTED_SCENARIO_COUNTS = {
     # HIGH-1 拆分：8 个自足场景 + 3 个真实 KOL 树场景独立模块守卫）。
     "see1546_wp1a": 8,
     "see1546_wp1a_kol": 3,
+    # SEE-1550 §SPEC-002：8 形态真实引擎加载矩阵（7 killed + orphan 披露）。
+    "see1550_forms": 8,
     # SEE-1546 M2：最小 exploratory shadow（CRAP-Line 诊断排序器）。
     "see1546_shadow": 8,
     # SEE-1546 WP1b：中立函数 registry + 全量逐函数 CC parity。

@@ -352,8 +352,8 @@ class TestFreezeUnset:
         monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
         monkeypatch.setattr(inject, "wslpath_win", lambda p: "D:\\" + p)
-        env_extra, cfg = inject.mutant_env("res://a.gd", "src",
-                                           str(tmp_path), 1)
+        env_extra, cfg = inject.mutant_env(str(tmp_path / "cfg.json"),
+                                           str(tmp_path / "user"))
         assert set(env_extra) == {"XDG_DATA_HOME", "APPDATA",
                                   "GQT_MUTATION_CFG", "WSLENV"}
 

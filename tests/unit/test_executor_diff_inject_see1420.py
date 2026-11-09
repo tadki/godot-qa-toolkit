@@ -59,11 +59,35 @@ def _mutants_of(target):
     return build_manifest(src, target, _collect_mutations(src, target))
 
 
+def _real_cert(proj):
+    """SEE-1550 killed 证书门：预置条目必须携带可通过 certificate_valid 的
+    证书（killer=fixture 测试脚本，script/deps sha1 对真实文件计算）。"""
+    import hashlib
+    from godot_qa_toolkit.mutation.identity import deps_closure_sha1
+    script_res = "res://tests/unit/save/test_save.gd"
+    fs = Path(proj) / "tests/unit/save/test_save.gd"
+    return [{
+        "test_name": "test_x", "script_path": script_res,
+        "script_sha1": hashlib.sha1(fs.read_bytes()).hexdigest(),
+        "deps_sha1": deps_closure_sha1(str(proj), script_res),
+    }]
+
+
+def _seed_store(proj, target):
+    """SEE-1550：store key 含身份包成分——预置侧必须用与 executor 同源的
+    identity 创建（同进程内 godot --version 缓存稳定，key 确定性一致）。"""
+    from godot_qa_toolkit.mutation.identity import identity_pack
+    from godot_qa_toolkit.mutation.inject import detect_binary_kind
+    ident = identity_pack(str(proj), detect_binary_kind())
+    return ResumeStoreV2(proj, target, "res://tests/unit/save/",
+                         binary_kind=detect_binary_kind(), identity=ident)
+
+
 def _seed_killed_prior(proj, target):
     """预置 v1→v2 store：add#1 killed（全签名/scope_hash 与当前源精确一致）。"""
     header_hash, _spans, mutants, scope_hashes = _mutants_of(target)
     m0 = mutants[0]
-    store = ResumeStoreV2(proj, target, "res://tests/unit/save/")
+    store = _seed_store(proj, target)
     assert store.write_manifest(header_hash, scope_hashes,
                                 store._sha1_text(
                                     Path(target).read_text(encoding="utf-8")),
@@ -76,6 +100,7 @@ def _seed_killed_prior(proj, target):
         "original": m0.original, "mutated": m0.mutated,
         "scope_hash": scope_hashes[m0.scope_id],
         "timeout_streak": 0,
+        "killed_by": _real_cert(proj),
     })
     return m0.stable_id
 
@@ -223,7 +248,7 @@ def test_zero_executed_reuses_precomputed_baseline(tmp_path, monkeypatch):
     """
     proj, target = _write_project(tmp_path)
     header_hash, _spans, mutants, scope_hashes = _mutants_of(target)
-    store = ResumeStoreV2(proj, target, "res://tests/unit/save/")
+    store = _seed_store(proj, target)
     src = Path(target).read_text(encoding="utf-8")
     assert store.write_manifest(header_hash, scope_hashes,
                                 store._sha1_text(src), "calc.gd")
@@ -233,6 +258,7 @@ def test_zero_executed_reuses_precomputed_baseline(tmp_path, monkeypatch):
             "line": m.line, "column": m.column, "kind": m.kind,
             "original": m.original, "mutated": m.mutated,
             "scope_hash": scope_hashes[m.scope_id], "timeout_streak": 0,
+            "killed_by": _real_cert(proj),
         })
 
     calls = {"gut": 0}

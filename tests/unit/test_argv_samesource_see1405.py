@@ -117,19 +117,19 @@ class TestGodotCommandSameSource:
 class TestPoisonEntryGuard:
     @staticmethod
     def _fake_gut(calls: dict, mode: str):
-        """mode=inject_fail → rc=3 + GQT_INJECT_FAIL；launch_fail → rc=1
-        启动失败形态；ok → baseline 后全过。"""
+        """mode=inject_fail → rc=4 + GQT_BEACON_FAIL（SEE-1550 beacon 基础
+        设施失败档）；launch_fail → rc=1 启动失败形态；ok → baseline 后全过。"""
         def fake(root, timeout_s=60, tests_glob=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 return (0, "baseline ok")
             if mode == "inject_fail":
-                return (3, "--- gqt: stderr ---\nGQT_INJECT_FAIL: "
+                return (4, "--- gqt: stderr ---\nGQT_BEACON_FAIL: "
                           "GQT_MUTATION_CFG env missing")
             if mode == "launch_fail":
                 return (1, "Godot Engine v4.6\nAttempt to open script "
                            "res://x.gd File not found")
-            return (0, "all passed")
+            return (0, "all passed [passed]")
         return fake
 
     def _run(self, tmp_path, mode, resume=True):
@@ -175,6 +175,6 @@ class TestPoisonEntryGuard:
         store.record_entry({"id": "calc.gd#add#1", "kind": "AOR",
                             "original": "a + b", "mutated": "a - b",
                             "line": 1, "verdict": "run_error",
-                            "reason": "memory injection failed: "
+                            "reason": "disk injection failed for res://x.gd: "
                                       "GQT_MUTATION_CFG env missing"})
         assert store.load_entries() == {}

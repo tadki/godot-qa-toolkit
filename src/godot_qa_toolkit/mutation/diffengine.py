@@ -52,60 +52,100 @@ def signature_matches(entry: dict, mutant) -> bool:
 
 
 def plan_diff(header_hash: str, scopes: dict, old_manifest: dict | None,
-              mutants: list, entries: dict, mutate_all: bool = False) -> DiffPlan:
-    """D4 矩阵：逐位点判 skip/retry。mutants 须已标 stable_id/scope_id。"""
-    if mutate_all or old_manifest is None:
-        plan = DiffPlan(executed=list(mutants), diff_active=False,
-                        mutate_all=mutate_all)
-        reason = "mutate_all" if mutate_all else "no_prior_manifest"
-        for m in mutants:
-            plan.triggers[m.stable_id] = reason
-        return plan
+              mutants: list, entries: dict, mutate_all: bool = False,
+              cert_validator=None) -> DiffPlan:
+    """D4 矩阵：逐位点判 skip/retry。mutants 须已标 stable_id/scope_id。
 
+    cert_validator（SEE-1550 §SPEC-007）：killed 条目的 killed_by 证书校验
+    回调（None = 跳过校验直接复用——无身份上下文的既有调用面）。killer 改/
+    删/依赖变 → 仅该 entry 重跑；证书缺失 → 保守重跑（fail-safe 只偏向
+    重跑）；新增测试不影响旧 killed（证书只看 killer 自身，非整树指纹）。
+    """
+    if mutate_all or old_manifest is None:
+        return _fresh_plan(mutants, mutate_all)
     plan = DiffPlan(diff_active=True)
     plan.header_changed = old_manifest.get("header_hash") != header_hash
     old_scopes = old_manifest.get("scopes") or {}
     for m in mutants:
-        sid = m.stable_id
-        if plan.header_changed:
-            plan.executed.append(m)
-            plan.triggers[sid] = "header_changed"
-            continue
-        if old_scopes.get(m.scope_id) != scopes.get(m.scope_id):
-            plan.executed.append(m)
-            plan.triggers[sid] = ("scope_new" if m.scope_id not in old_scopes
-                                  else "scope_changed")
-            continue
-        prior = entries.get(sid)
-        if prior is None:
-            plan.executed.append(m)
-            plan.triggers[sid] = "new_site"
-            continue
-        if not signature_matches(prior, m):
-            print(f"diff: id {sid} full-signature drift "
-                  f"(stored {prior.get('line')}:{prior.get('column')} "
-                  f"{prior.get('kind')} vs current {m.line}:{m.column} "
-                  f"{m.kind}) — refusing to reuse by id, degrading to rerun",
-                  file=sys.stderr)
-            plan.executed.append(m)
-            plan.triggers[sid] = "signature_drift"
-            continue
-        if prior.get("scope_hash") != scopes.get(m.scope_id):
-            plan.executed.append(m)
-            plan.triggers[sid] = "scope_hash_drift"
-            continue
-        verdict = prior.get("verdict")
-        if verdict in SKIP_VERDICTS:
-            plan.reused[sid] = prior
-            plan.triggers[sid] = f"reused:{verdict}"
-        elif verdict in RETRY_VERDICTS:
-            plan.executed.append(m)
-            plan.triggers[sid] = f"retry:{verdict}"
-        else:
-            # 未知 verdict（旧 schema 残留）——按重跑处理，绝不复用
-            plan.executed.append(m)
-            plan.triggers[sid] = f"retry:unknown_verdict:{verdict}"
+        _classify_site(plan, m, scopes, old_scopes, entries, cert_validator)
     return plan
+
+
+def _fresh_plan(mutants: list, mutate_all: bool) -> DiffPlan:
+    plan = DiffPlan(executed=list(mutants), diff_active=False,
+                    mutate_all=mutate_all)
+    reason = "mutate_all" if mutate_all else "no_prior_manifest"
+    for m in mutants:
+        plan.triggers[m.stable_id] = reason
+    return plan
+
+
+def _classify_site(plan: DiffPlan, m, scopes: dict, old_scopes: dict,
+                   entries: dict, cert_validator) -> None:
+    """单位点判定（判定序：header → scope → 签名 → scope_hash → verdict）。"""
+    sid = m.stable_id
+    if plan.header_changed:
+        plan.executed.append(m)
+        plan.triggers[sid] = "header_changed"
+        return
+    if old_scopes.get(m.scope_id) != scopes.get(m.scope_id):
+        plan.executed.append(m)
+        plan.triggers[sid] = ("scope_new" if m.scope_id not in old_scopes
+                              else "scope_changed")
+        return
+    prior = entries.get(sid)
+    if prior is None:
+        plan.executed.append(m)
+        plan.triggers[sid] = "new_site"
+        return
+    if not signature_matches(prior, m):
+        print(f"diff: id {sid} full-signature drift "
+              f"(stored {prior.get('line')}:{prior.get('column')} "
+              f"{prior.get('kind')} vs current {m.line}:{m.column} "
+              f"{m.kind}) — refusing to reuse by id, degrading to rerun",
+              file=sys.stderr)
+        plan.executed.append(m)
+        plan.triggers[sid] = "signature_drift"
+        return
+    if prior.get("scope_hash") != scopes.get(m.scope_id):
+        plan.executed.append(m)
+        plan.triggers[sid] = "scope_hash_drift"
+        return
+    _classify_by_verdict(plan, m, prior, cert_validator)
+
+
+def _classify_by_verdict(plan: DiffPlan, m, prior: dict,
+                         cert_validator) -> None:
+    sid = m.stable_id
+    verdict = prior.get("verdict")
+    if verdict in SKIP_VERDICTS:
+        if verdict == "killed":
+            cert_check = _cert_check(prior, cert_validator)
+            if cert_check is not None:
+                plan.executed.append(m)
+                plan.triggers[sid] = cert_check
+                return
+        plan.reused[sid] = prior
+        plan.triggers[sid] = f"reused:{verdict}"
+        return
+    if verdict in RETRY_VERDICTS:
+        plan.executed.append(m)
+        plan.triggers[sid] = f"retry:{verdict}"
+        return
+    # 未知 verdict（旧 schema 残留）——按重跑处理，绝不复用
+    plan.executed.append(m)
+    plan.triggers[sid] = f"retry:unknown_verdict:{verdict}"
+
+
+def _cert_check(prior: dict, cert_validator) -> str | None:
+    """killed 条目证书门：None = 通过（复用）；字符串 = 重跑触发器。"""
+    killed_by = prior.get("killed_by")
+    if killed_by is None:
+        # 证书缺失（解析失败轮 / 旧条目）——保守重跑，绝不静默复用
+        return "cert_missing"
+    if cert_validator is not None and not cert_validator(killed_by):
+        return "killer_changed"
+    return None
 
 
 def budget_on_retry(executed: list, budget: int) -> tuple[list, list]:
@@ -157,8 +197,8 @@ def streak_for(prior: dict | None, verdict: str,
 
 def make_entry(m, record: dict, verdict: str, streak: int,
                scopes: dict, now: float) -> dict:
-    """v2 per-mutant 条目（全签名五元组 + scope 锚 + streak）。"""
-    return {
+    """v2 per-mutant 条目（全签名五元组 + scope 锚 + streak + killed 证书）。"""
+    entry = {
         "id": m.stable_id,
         "scope_id": m.scope_id,
         "scope_hash": scopes.get(m.scope_id),
@@ -172,6 +212,9 @@ def make_entry(m, record: dict, verdict: str, streak: int,
         "timeout_streak": streak,
         "executed_at": now,
     }
+    if record.get("killed_by") is not None:
+        entry["killed_by"] = record["killed_by"]
+    return entry
 
 
 @dataclass

@@ -1,0 +1,17 @@
+; SEE-1550 8-form fixture project — real-engine mutation matrix (§SPEC-002).
+config_version=5
+
+[application]
+
+config/name="see1550_forms"
+run/main_scene="res://forms/main.tscn"
+config/features=PackedStringArray("4.6")
+
+[autoload]
+
+FormAuto="*res://forms/autoload_form.gd"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

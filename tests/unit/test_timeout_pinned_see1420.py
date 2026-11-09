@@ -20,6 +20,17 @@ from godot_qa_toolkit.mutation.diffengine import (
 )
 from godot_qa_toolkit.mutation.ops import Mutant
 from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
+from godot_qa_toolkit.mutation.identity import identity_pack
+from godot_qa_toolkit.mutation.inject import detect_binary_kind
+
+
+def _reading_store(proj, target):
+    """SEE-1550：读取 run 落盘条目必须用与 run_mutation 同源的身份包
+    （store key 含 identity_sha）——否则读错 key、恒空。"""
+    kind = detect_binary_kind()
+    return ResumeStoreV2(str(proj), str(target), "res://tests/",
+                         binary_kind=kind,
+                         identity=identity_pack(str(proj), kind))
 
 TARGET_SRC = ("func add(a, b):\n"
               "\treturn a + b\n")
@@ -145,7 +156,7 @@ class TestPinnedEndToEnd:
         assert all(f["verdict"] == "timeout_pinned" for f in r2["failures"])
         assert all("consecutive timeouts" in f["reason"] for f in r2["failures"])
         # v2 条目携带 streak
-        store = ResumeStoreV2(str(proj), str(target), "res://tests/")
+        store = _reading_store(proj, target)
         entries = store.load_entries()
         pinned_entries = [e for e in entries.values()
                           if e["verdict"] == "timeout_pinned"]
@@ -187,7 +198,7 @@ class TestPinnedEndToEnd:
         # 解除：重判 killed → streak 清零、真实 kill 证据不吞
         assert r3["summary"].get("timeout_pinned", 0) == 0
         assert r3["summary"]["killed"] == 3
-        store = ResumeStoreV2(str(proj), str(target), "res://tests/")
+        store = _reading_store(proj, target)
         executed = [e for e in store.load_entries().values()
                     if e["verdict"] == "killed"]
         assert len(executed) == 3

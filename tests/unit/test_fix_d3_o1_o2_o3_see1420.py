@@ -11,6 +11,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation import runner as mrunner
 from godot_qa_toolkit.mutation.coverlink import save_coverage
+from godot_qa_toolkit.mutation.identity import identity_pack
+from godot_qa_toolkit.mutation.inject import detect_binary_kind
+
+
+def _ident(proj):
+    # SEE-1550 L1：prefilter 身份包全匹配——测试侧与 run_mutation 同源落盘
+    return identity_pack(str(proj), detect_binary_kind())
 from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 
 KILL_TAIL = "* test_x\n\t\ttest_x [Failed]"
@@ -60,7 +67,7 @@ class TestD3NonInstrumentableNotUncovered:
         proj, target = _write_project(tmp_path, INIT_SRC)
         # 可插桩面 = {7}（行 7 可插桩但未覆盖——它才是合法 uncovered 对象）
         save_coverage(set(), 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={7})
+                      instrumentable_lines={7}, identity=_ident(proj))
         monkeypatch.setattr(mrunner, "_run_gut_on_project", _mk_kill_fake())
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
                                  tests_glob="res://tests/",
@@ -85,7 +92,10 @@ class TestD3NonInstrumentableNotUncovered:
                                                                capsys):
         """旧 schema（无 instrumentable_lines）→ 不过滤（宁多跑不假阴性）。"""
         proj, target = _write_project(tmp_path, INIT_SRC)
-        save_coverage(set(), 6, str(proj), str(target), "res://tests/")  # 无 face
+        # 旧 schema（无 face）但身份包匹配 → 走 face 缺失降级路径（钉的是
+        # face 降级而非身份漂移；身份漂移格由 prefilter 测试文件承接）
+        save_coverage(set(), 6, str(proj), str(target), "res://tests/",
+                      identity=_ident(proj))
         monkeypatch.setattr(mrunner, "_run_gut_on_project", _mk_kill_fake())
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
                                  tests_glob="res://tests/",

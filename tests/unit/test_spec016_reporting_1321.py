@@ -133,7 +133,7 @@ class TestLow4WslenvAppend:
         from godot_qa_toolkit.mutation.inject import mutant_env
         monkeypatch.setattr(inject, "detect_binary_kind", lambda: "win64")
         monkeypatch.setenv("WSLENV", "USER_FLAG/w")
-        env, _cfg = mutant_env("res://calc.gd", "x", str(tmp_path), 0)
+        env, _cfg = mutant_env(str(tmp_path / "cfg.json"), None)
         assert "USER_FLAG/w" in env["WSLENV"]
         assert "GQT_MUTATION_CFG/w" in env["WSLENV"]
 
@@ -143,7 +143,7 @@ class TestLow4WslenvAppend:
         from godot_qa_toolkit.mutation.inject import mutant_env
         monkeypatch.setattr(inject, "detect_binary_kind", lambda: "linux")
         monkeypatch.setenv("WSLENV", "USER_FLAG/w")
-        env, _cfg = mutant_env("res://calc.gd", "x", str(tmp_path), 0)
+        env, _cfg = mutant_env(str(tmp_path / "cfg.json"), None)
         assert "WSLENV" not in env
         assert "APPDATA" not in env
 

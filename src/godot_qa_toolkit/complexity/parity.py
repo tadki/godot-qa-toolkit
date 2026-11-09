@@ -69,6 +69,48 @@ def _radon_records(gd_source: str) -> list:
     ]
 
 
+def _lambda_rows(lambda_entries: list[dict]) -> list[dict]:
+    return [
+        _row(lam["fid"], lam["name"], "lambda_disclosed",
+             cc_oracle=lam["cc_oracle"], lambda_gap=0, pairing="lambda")
+        for lam in lambda_entries
+    ]
+
+
+def _named_group_rows(name: str, entries: list[dict],
+                      radon_ccs: list[int]) -> list[dict]:
+    """Occurrence pairing for one bare-name group; count divergence fails
+    loud for the whole group instead of folding or guessing."""
+    if len(entries) == len(radon_ccs):
+        return [
+            _row(
+                entry["fid"],
+                name,
+                _lane_for(entry["cc_oracle"], radon_cc, entry["lambda_gap"]),
+                cc_oracle=entry["cc_oracle"],
+                radon_cc=radon_cc,
+                lambda_gap=entry["lambda_gap"],
+                pairing="occurrence",
+            )
+            for entry, radon_cc in zip(entries, radon_ccs)
+        ]
+    if not radon_ccs and len(entries) == 1:
+        # 1:0 — e.g. a function literally named `def` sanitized to `def_`
+        # before radon sees it: fail-loud missing lane. A whole group missing
+        # (N:0, N>1) stays in identity_mismatch — pipeline anomaly, not a
+        # known rename pattern.
+        entry = entries[0]
+        return [
+            _row(entry["fid"], name, "missing_in_radon",
+                 cc_oracle=entry["cc_oracle"], lambda_gap=entry["lambda_gap"])
+        ]
+    return [
+        _row(entry["fid"], name, "identity_mismatch",
+             cc_oracle=entry["cc_oracle"], lambda_gap=entry["lambda_gap"])
+        for entry in entries
+    ]
+
+
 def pair_file(gd_source: str, file_label: str,
               registry: dict | None = None) -> dict:
     """Build the per-file parity rows and lane counts (parity/1)."""
@@ -98,53 +140,13 @@ def pair_file(gd_source: str, file_label: str,
     func_entries = [e for e in registry["entries"] if e["kind"] == "func_def"]
     lambda_entries = [e for e in registry["entries"] if e["kind"] == "lambda"]
 
-    rows: list[dict] = []
-    for lam in lambda_entries:
-        rows.append(
-            _row(lam["fid"], lam["name"], "lambda_disclosed",
-                 cc_oracle=lam["cc_oracle"], lambda_gap=0, pairing="lambda")
-        )
-
     by_name: dict[str, list[dict]] = {}
     for entry in func_entries:
         by_name.setdefault(entry["name"], []).append(entry)
 
+    rows = _lambda_rows(lambda_entries)
     for name, entries in by_name.items():
-        radon_ccs = radon_by_name.get(name, [])
-        if len(entries) == len(radon_ccs):
-            for entry, radon_cc in zip(entries, radon_ccs):
-                rows.append(
-                    _row(
-                        entry["fid"],
-                        name,
-                        _lane_for(
-                            entry["cc_oracle"], radon_cc, entry["lambda_gap"]
-                        ),
-                        cc_oracle=entry["cc_oracle"],
-                        radon_cc=radon_cc,
-                        lambda_gap=entry["lambda_gap"],
-                        pairing="occurrence",
-                    )
-                )
-        elif not radon_ccs and len(entries) == 1:
-            # 1:0 — e.g. a function literally named `def` sanitized to `def_`
-            # before radon sees it: fail-loud missing lane. A whole group
-            # missing (N:0, N>1) stays in identity_mismatch — that shape is a
-            # pipeline anomaly, not a known rename pattern.
-            entry = entries[0]
-            rows.append(
-                _row(entry["fid"], name, "missing_in_radon",
-                     cc_oracle=entry["cc_oracle"],
-                     lambda_gap=entry["lambda_gap"])
-            )
-        else:
-            # count divergence: the whole name group fails loud, no folding
-            for entry in entries:
-                rows.append(
-                    _row(entry["fid"], name, "identity_mismatch",
-                         cc_oracle=entry["cc_oracle"],
-                         lambda_gap=entry["lambda_gap"])
-                )
+        rows.extend(_named_group_rows(name, entries, radon_by_name.get(name, [])))
 
     return {
         "file": file_label,
@@ -200,14 +202,16 @@ def _run_tasks(tasks: list[tuple[str, str]]) -> list[tuple[str, dict, dict]]:
     the serial complexity scan) is only reachable with the AST face
     parallelized. Restricted environments fall back to serial."""
     from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
 
     workers = min(os.cpu_count() or 1, 8)
     if workers > 1 and len(tasks) > 1:
         try:
             with ProcessPoolExecutor(max_workers=workers) as pool:
                 return list(pool.map(_parity_file_task, tasks))
-        except (OSError, PermissionError):
-            # process-pool unavailable (restricted env) — serial fallback
+        except (OSError, PermissionError, BrokenProcessPool):
+            # process-pool unavailable or a worker crashed at startup —
+            # serial fallback keeps the run complete (obs-1)
             pass
     return [_parity_file_task(t) for t in tasks]
 

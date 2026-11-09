@@ -63,28 +63,9 @@ def _node_by_span(tree: Tree, start: int) -> Tree | None:
     return None
 
 
-def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
-    """Assemble the `probe-manifest/2` contract for one file.
-
-    Entries with `instrumentable=False` (inner-class methods, pruned by the
-    instrumenter) contribute `census_gaps` rows instead of probe lines; every
-    other entry keeps its own T/I decomposition and stays fully usable.
-    """
-    tree, depths = _reparse_source(gd_source)
-    executable = _collect_executable_lines(gd_source)
-    plan_lines = [entry.line for entry in executable]
-
-    instrumentable_entries = [
-        e for e in registry["entries"] if e["instrumentable"]
-    ]
-    # innermost span wins: (start, end] containment, smallest end then latest
-    # start resolves the lambda-inside-host nesting without any guesswork
-    spans = sorted(
-        ((e["start_line"], e["end_line"], e["fid"], e["kind"])
-         for e in instrumentable_entries),
-        key=lambda s: (s[1] - s[0], -s[0]),
-    )
-
+def _resolve_ownership(
+    spans: list[tuple], plan_lines: list[int],
+) -> tuple[list[dict], int, int, dict[str, int]]:
     probe_plan: list[dict] = []
     unowned = ambiguous = 0
     i_by_fid: dict[str, int] = {}
@@ -116,37 +97,70 @@ def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
                 "owner_kind": "func" if kind == "func_def" else kind,
             }
         )
+    return probe_plan, unowned, ambiguous, i_by_fid
+
+
+def _gap_rows(entry: dict, t_ids: tuple[int, ...]) -> list[dict]:
+    return [
+        {
+            "line": line,
+            "fid": entry["fid"],
+            "owner_kind": "inner_class_method",
+            "reason": "class_def_pruned",
+            "expected": "not_instrumented",
+        }
+        for line in t_ids
+    ]
+
+
+def _partial_row(entry: dict, t_count: int) -> dict:
+    return {
+        "fid": entry["fid"],
+        "t_lines": t_count,
+        "i_lines": 0,
+        "t_equal_i": False,
+        "state_hint": "partial_instrumentation",
+    }
+
+
+def _measured_row(entry: dict, t_count: int, i_lines: int,
+                  t_ids: tuple[int, ...]) -> dict:
+    return {
+        "fid": entry["fid"],
+        "t_lines": t_count,
+        "i_lines": i_lines,
+        "t_equal_i": t_count == i_lines,
+        "t_line_ids": list(t_ids),
+    }
+
+
+def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
+    """Assemble the `probe-manifest/2` contract for one file.
+
+    Entries with `instrumentable=False` (inner-class methods, pruned by the
+    instrumenter) contribute `census_gaps` rows instead of probe lines; every
+    other entry keeps its own T/I decomposition and stays fully usable.
+    """
+    tree, depths = _reparse_source(gd_source)
+    executable = _collect_executable_lines(gd_source)
+    plan_lines = [entry.line for entry in executable]
+
+    instrumentable_entries = [
+        e for e in registry["entries"] if e["instrumentable"]
+    ]
+    # innermost span wins: (start, end] containment, smallest end then latest
+    # start resolves the lambda-inside-host nesting without any guesswork
+    spans = sorted(
+        ((e["start_line"], e["end_line"], e["fid"], e["kind"])
+         for e in instrumentable_entries),
+        key=lambda s: (s[1] - s[0], -s[0]),
+    )
+
+    probe_plan, unowned, ambiguous, i_by_fid = _resolve_ownership(spans, plan_lines)
 
     census_gaps: list[dict] = []
     per_function: list[dict] = []
     for entry in registry["entries"]:
-        if not entry["instrumentable"]:
-            ast_node = _node_by_span(tree, entry["start_line"])
-            t_ids = (
-                _statement_lines(ast_node, depths, skip_subtrees=("lambda",))
-                if ast_node is not None
-                else ()
-            )
-            for line in t_ids:
-                census_gaps.append(
-                    {
-                        "line": line,
-                        "fid": entry["fid"],
-                        "owner_kind": "inner_class_method",
-                        "reason": "class_def_pruned",
-                        "expected": "not_instrumented",
-                    }
-                )
-            per_function.append(
-                {
-                    "fid": entry["fid"],
-                    "t_lines": len(t_ids),
-                    "i_lines": 0,
-                    "t_equal_i": False,
-                    "state_hint": "partial_instrumentation",
-                }
-            )
-            continue
         ast_node = _node_by_span(tree, entry["start_line"])
         t_ids = (
             _statement_lines(
@@ -157,16 +171,12 @@ def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
             if ast_node is not None
             else ()
         )
+        if not entry["instrumentable"]:
+            census_gaps.extend(_gap_rows(entry, t_ids))
+            per_function.append(_partial_row(entry, len(t_ids)))
+            continue
         i_lines = i_by_fid.get(entry["fid"], 0)
-        per_function.append(
-            {
-                "fid": entry["fid"],
-                "t_lines": len(t_ids),
-                "i_lines": i_lines,
-                "t_equal_i": len(t_ids) == i_lines,
-                "t_line_ids": list(t_ids),
-            }
-        )
+        per_function.append(_measured_row(entry, len(t_ids), i_lines, t_ids))
 
     return {
         "manifest_version": MANIFEST_VERSION,

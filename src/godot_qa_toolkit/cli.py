@@ -348,8 +348,20 @@ def cmd_parity(args: argparse.Namespace) -> int:
 def cmd_registry(args: argparse.Namespace) -> int:
     from .registry.snapshot import diff_registries, load_snapshot, save_snapshot
 
-    old = load_snapshot(args.old)
-    new = load_snapshot(args.new)
+    try:
+        old = load_snapshot(args.old)
+        new = load_snapshot(args.new)
+    except (OSError, ValueError) as e:
+        # json.JSONDecodeError is a ValueError subclass: unparseable or
+        # missing snapshots fail loud with the unified contract (ok=false)
+        return _emit(
+            {
+                "tool": "registry",
+                "ok": False,
+                "summary": {"error": str(e)},
+                "failures": [{"reason": f"snapshot load failed: {e}"}],
+            }
+        )
     diff = diff_registries(old, new)
     if args.out:
         save_snapshot(diff, args.out)

@@ -32,8 +32,6 @@ SCORE_STATUS_VALUES = frozenset(
     }
 )
 
-_SCORELESS = SCORE_STATUS_VALUES - {"scored", "no_instability_observed"}
-
 
 def classify_file_state(
     *,

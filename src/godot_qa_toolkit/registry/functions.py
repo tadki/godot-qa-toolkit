@@ -253,7 +253,23 @@ def build_file_registry(gd_source: str, file_label: str) -> dict:
                 _walk(child, scope, instrumentable)
 
     _walk(tree, (), instrumentable=True)
+
+    # §SPEC-024 span closure: without parse metadata, pure-punctuation body
+    # lines (`return []` etc.) carry ZERO leaf tokens, so the token-max span
+    # can end before the callable's real last body line — leaving later body
+    # probes unowned. Close each span to just before the next structure's
+    # start line (file end for the last entry); ownership still resolves via
+    # innermost span + source-order lambdas, so no probe changes owner.
     entries.sort(key=lambda e: (e["start_line"], e["fid"]))
+    total_lines = len(src_lines)
+    for i, entry in enumerate(entries):
+        next_start = (
+            entries[i + 1]["start_line"] if i + 1 < len(entries) else total_lines + 1
+        )
+        closed_end = min(next_start - 1, total_lines)
+        if closed_end > entry["end_line"]:
+            entry["end_line"] = closed_end
+
     snapshot["entries"] = entries
     snapshot["inner_classes"] = inner_classes
     return snapshot

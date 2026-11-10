@@ -519,6 +519,11 @@ def default_measure(project_root: str, timing_store=None, evidence_out=None):
     def measure(label: str, source: str, tests_glob: str | None) -> dict:
         from ..coverage.runner import run_coverage
 
+        # §SPEC-030 / D-WP2C-1: snapshot the evidence dir's bundle set before
+        # the run — summary carries no run_uuid (§SPEC-026 stdout freeze), so
+        # the adapter locates this run's bundle by snapshot diff instead.
+        bundles_before = _evidence_bundle_names(evidence_dir)
+
         start = time.monotonic()
         result = run_coverage(
             file_path=str(Path(project_root) / label),
@@ -534,11 +539,35 @@ def default_measure(project_root: str, timing_store=None, evidence_out=None):
         summary["wall_s"] = round(wall, 3)
         out = {"ok": result.get("ok"), "summary": summary}
         if evidence_dir is not None:
-            bundle_path = evidence_dir / f"{summary.get('run_uuid')}.json"
-            if bundle_path.is_file():
+            new_bundles = sorted(
+                _evidence_bundle_names(evidence_dir) - bundles_before
+            )
+            if len(new_bundles) == 1:
+                bundle_path = evidence_dir / new_bundles[0]
                 out["bundle"] = json.loads(
                     bundle_path.read_text(encoding="utf-8")
+                )
+            else:
+                # fail-loud (D-WP2C-1 ruling): silent bundle loss is exactly
+                # the defect class this fix eliminates — never return a
+                # measure result whose evidence vanished or is ambiguous
+                raise RuntimeError(
+                    f"evidence bundle for {label!r}: expected exactly 1 new "
+                    f"bundle in {evidence_dir}, found {len(new_bundles)} "
+                    f"(new: {sorted(new_bundles)}; run ok={out['ok']}, "
+                    f"run_error={summary.get('run_error')})"
                 )
         return out
 
     return measure
+
+
+def _evidence_bundle_names(evidence_dir: Path | None) -> set[str]:
+    """Names of bundle files (coverage-evidence/2) in the evidence dir —
+    `*.record.json` run records are lifecycle state, not bundles."""
+    if evidence_dir is None or not evidence_dir.is_dir():
+        return set()
+    return {
+        p.name for p in evidence_dir.glob("*.json")
+        if not p.name.endswith(".record.json")
+    }

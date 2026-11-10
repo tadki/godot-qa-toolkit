@@ -164,6 +164,28 @@ class TestSlotPrimitives:
             import shutil
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_restore_target_raises_on_content_mismatch(self, tmp_path,
+                                                       monkeypatch):
+        """归还还原断言 fail-loud：重链后槽内容 ≠ 仓原码 → SlotProvisionError
+        （断言缺席 = 残留 mutant 静默留槽，下轮复用判定全失真）。"""
+        proj, target = _write_project(tmp_path)
+        root, _ = shadow.create_slot(str(proj), "linux")
+        try:
+            def bad_relink(project_root, slot_root, target_rel):
+                # 模拟重链产出错误内容：先断链再写（直接 write 会经共享
+                # inode 同步改写仓文件，两边恒相等，模拟失真）
+                p = Path(slot_root) / target_rel
+                p.unlink()
+                p.write_text(SRC + "\n# residual mutant\n")
+
+            monkeypatch.setattr(shadow, "relink_from_repo", bad_relink)
+            with pytest.raises(SlotProvisionError):
+                shadow.restore_target(str(proj), str(root), "calc.gd")
+            assert target.read_text() == SRC, "仓原码不受坏重链影响"
+        finally:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_inject_disk_full_raises(self, tmp_path, monkeypatch):
         """磁盘不足（ENOSPC 等价）：写失败上抛（调用方转 run_error），
         槽内不留半成品临时文件。"""
@@ -382,6 +404,26 @@ class TestFreshFarmLifecycle:
         shadowpool.release_slot(s1)
         assert not root1.exists(), "fresh 槽归还即删"
 
+    def test_prune_farm_removes_only_expired_slots(self, tmp_path):
+        """fresh 农场崩溃残留清理按年龄：超龄槽删除、新鲜槽保留。"""
+        proj, _ = _write_project(tmp_path)
+        import os
+        import time
+        base = shadow.binary_domain_root(str(proj), "linux")
+        base.mkdir(parents=True, exist_ok=True)
+        expired = base / "gqt-slot-expired"
+        fresh = base / "gqt-slot-fresh"
+        expired.mkdir()
+        fresh.mkdir()
+        (expired / "calc.gd").write_text(SRC)
+        (fresh / "calc.gd").write_text(SRC)
+        past = time.time() - 25 * 3600
+        os.utime(expired, (past, past))
+        removed = shadow.prune_farm("linux", str(proj))
+        assert removed >= 1, "超龄残留槽必须被清理"
+        assert not expired.exists()
+        assert fresh.exists(), "新鲜槽不得误删"
+
     def test_wiring_hash_mismatch_no_warm_reuse(self, tmp_path):
         """wiring hash 变化（project.godot autoload 改动等）→ 不复用旧槽。"""
         proj, _ = _write_project(tmp_path)
@@ -395,3 +437,56 @@ class TestFreshFarmLifecycle:
             assert "warm:created" in freshness or "rebuilt" in freshness
         finally:
             shadowpool.release_slot(s2)
+
+
+class TestReleaseMarkDead:
+    def test_release_assert_failure_marks_slot_dead(self, tmp_path,
+                                                    monkeypatch):
+        """归还断言失败 = 槽状态存疑 → problems 显式披露 + 池记录标死
+        （树路径清空）。"""
+        import json
+        proj, _ = _write_project(tmp_path)
+        slot = shadowpool.acquire_slot(str(proj), "win64", ["calc.gd"],
+                                       wiring_hash="w1")
+
+        def broken_restore(project_root, slot_root, target_rel):
+            raise SlotProvisionError("simulated restore mismatch")
+
+        monkeypatch.setattr(shadow, "restore_target", broken_restore)
+        problems = shadowpool.release_slot(slot)
+        assert problems, "归还断言失败必须显式披露 problems"
+        pool = json.loads((proj / ".qa-cache" / "mutation-pool" /
+                           "pool.json").read_text(encoding="utf-8"))
+        rec = pool["slots"][slot.slot_id]
+        assert rec["path"] == "", "标死：树路径必须清空"
+
+    @pytest.mark.xfail(strict=True, reason="D-1 登记缺陷：标死记录 path='' "
+                       "经 Path('')→'.' 使 is_dir() 恒真，缺失树重建通道不触发，"
+                       "槽以 CWD 为根被复活并做 CWD 相对重链——待 Leader 裁定修复")
+    def test_marked_dead_slot_rebuilds_on_next_acquire(self, tmp_path,
+                                                       monkeypatch):
+        """契约：标死槽（path=''）下次获取必须按缺失树重建，绝不复活
+        （hardener 变异轮 P6 发现，缺陷登记见 D-1）。"""
+        import json
+        # chdir 进 pytest 临时目录：D-1 未修复前 revive 路径的 CWD 相对写
+        # 全部落在 tmp_path 内，不污染调用方工作树
+        monkeypatch.chdir(tmp_path)
+        proj, _ = _write_project(tmp_path)
+        slot = shadowpool.acquire_slot(str(proj), "win64", ["calc.gd"],
+                                       wiring_hash="w1")
+
+        def broken_restore(project_root, slot_root, target_rel):
+            raise SlotProvisionError("simulated restore mismatch")
+
+        monkeypatch.setattr(shadow, "restore_target", broken_restore)
+        shadowpool.release_slot(slot)
+        slot2 = shadowpool.acquire_slot(str(proj), "win64", ["calc.gd"],
+                                        wiring_hash="w1")
+        try:
+            freshness = " ".join(slot2.freshness)
+            assert "slot_tree:missing" in freshness or \
+                "warm:created" in freshness, \
+                f"标死槽不得复用: {slot2.freshness}"
+            assert (Path(slot2.root) / "calc.gd").is_file()
+        finally:
+            shadowpool.release_slot(slot2)

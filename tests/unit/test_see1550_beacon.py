@@ -198,3 +198,19 @@ class TestAutoloadWiring:
 
     def test_no_project_godot_returns_empty(self, tmp_path):
         assert beacon.autoload_map(str(tmp_path)) == {}
+
+    def test_non_autoload_section_res_entries_not_parsed(self, tmp_path):
+        """[autoload] 外段落的 ``key="res://…"`` 行不得进 autoload 表
+        （误入 → L3 对非 autoload 目标错误发起同源断言 → run_error 风暴）。"""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "project.godot").write_text(
+            'config_version=5\n\n[application]\n'
+            'boot_splash="res://ui/splash.png"\n'
+            'main_scene="res://main.tscn"\n\n'
+            '[autoload]\nEvents="*res://autoload/events.gd"\n\n'
+            '[editor]\nplugin="res://addons/tool/plugin.gd"\n')
+        assert beacon.autoload_map(str(proj)) == {
+            "res://autoload/events.gd": "Events"}
+        assert beacon.autoload_name_for(
+            str(proj), "res://ui/splash.png") == ""

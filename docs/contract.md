@@ -281,7 +281,7 @@ sink 名 PID→UUID 属私有传输面变更（对外 stdout 契约零影响—�
 
 - **gut_face**：`.gutconfig.json` 现役非 quarantine GUT 面解析（dirs/include_subdirs/prefix 等扫描键原文进 hash）+ config sha256；
 - **acceptance_face**：`acceptance/features/**/*.feature` 全量扫描，逐 feature `{key, source, sha256}`（KOL 定版 36）；harness 接线 sha256；
-- **toolchain**：gqt/OPS/Godot/GUT 版本——版本变化即 recipe 变化；
+- **toolchain**：gqt/OPS/Godot/GUT 版本——版本变化即 recipe 变化。§SPEC-041 L1 注记：`gqt recipe` CLI 缺省 toolchain 字段为 `unknown`——真实版本由 canonical 编排器（§SPEC-037，PR-C）在测量时注入，注入路径下版本变化即 recipe 变化成立；
 - **exclusions**：必须带理由——**空理由 = 配方非法（fail-loud ok=false）**；排除名单与理由全部进 recipe hash；
 - **recipe_hash**：对除自身外的规范化 JSON（`sort_keys=True, separators=(',',':')`）取 sha256——同输入同 hash、任一字节变化即变；`verify` 路径（`recipe_hash` 重算比对）校验加载/恢复后的 recipe。
 

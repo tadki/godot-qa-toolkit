@@ -230,3 +230,60 @@ def test_wiring_sha256_is_the_harness_file_digest(kol_like: Path):
         (root / _gutconfig_name()).read_bytes()
     ).hexdigest()  # guard: the two files really differ here
     assert recipe["acceptance_face"]["harness"]["wiring_sha256"] == expected
+
+
+# --------------------------------------------------------------------------
+# §SPEC-041 L2: recipe_hash excludes project_root (path is provenance)
+# --------------------------------------------------------------------------
+
+
+def test_recipe_hash_path_independent_same_content_two_paths(tmp_path: Path):
+    """§SPEC-041 L2: the same project content checked out at two different
+    paths must yield the SAME recipe_hash — the path is provenance
+    (project_root field), not a measured face."""
+    import shutil
+
+    src_a = tmp_path / "checkout-a"
+    src_b = tmp_path / "deeper" / "checkout-b"
+    for root in (src_a, src_b):
+        root.mkdir(parents=True)
+        (root / ".gutconfig.json").write_text(
+            json.dumps(GUTCONFIG, indent=1), encoding="utf-8")
+        features = root / "acceptance" / "features"
+        features.mkdir(parents=True)
+        (features / "feature_0.feature").write_text(
+            "Feature: f0\n", encoding="utf-8")
+
+    r_a, err_a = build_recipe(src_a)
+    r_b, err_b = build_recipe(src_b)
+    assert err_a is None and err_b is None
+    # RED before fix: hash differed because project_root polluted the basis
+    assert r_a["recipe_hash"] == r_b["recipe_hash"], (
+        "same content at different paths must hash identically"
+    )
+    # provenance fields differ, but the hash basis ignores them
+    assert r_a["project_root"] != r_b["project_root"]
+
+
+# --------------------------------------------------------------------------
+# §SPEC-041 L3: exclusion scope is an enum — illegal scope fails loud
+# --------------------------------------------------------------------------
+
+
+def test_recipe_illegal_scope_fails_loud(kol_like: Path):
+    for bad_scope in ("gut_dirs", "acceptance_features", "unknown_lane"):
+        exclusions = [{"scope": bad_scope, "entry": "res://tests/x/**",
+                       "reason": "stated"}]
+        recipe, error = build_recipe(kol_like, exclusions=exclusions)
+        assert recipe is None, bad_scope
+        assert error is not None and "scope" in error, (bad_scope, error)
+
+
+def test_recipe_legal_scopes_accepted(kol_like: Path):
+    exclusions = [
+        {"scope": "gut_dir", "entry": "res://tests/unit/x/**", "reason": "r1"},
+        {"scope": "acceptance_feature", "entry": "feature_0", "reason": "r2"},
+    ]
+    recipe, error = build_recipe(kol_like, exclusions=exclusions)
+    assert error is None
+    assert len(recipe["exclusions"]) == 2

@@ -25,11 +25,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation.runner import run_mutation
 
-# 真实引擎矩阵：每 mutant 一次 Godot 启动（win64 wrapper ~5-8s/轮），单场景
-# 30-90s+——BDD collection 默认 60s 场景超时不够（只在无显式 marker 时注入
-# 默认），模块级放宽到 30min。
-pytestmark = pytest.mark.timeout(1800, method="signal", func_only=True)
-
 scenarios("features/see1550_forms.feature")
 
 REPO_ROOT = Path(__file__).parent.parent.parent

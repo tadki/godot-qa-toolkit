@@ -200,6 +200,10 @@ class TestOwnershipIndex:
     同名测试定义在多个脚本 → 歧义（证书不确定 → None → 保守重跑）。
     """
 
+    # R-3：类名以 Test 开头会被 pytest 误收集为测试类（PytestCollectionWarning
+    # 存量）——产品域索引类，显式退出收集面（最小不改行为）。
+    __test__ = False
+
     def __init__(self, project_root: str):
         self.project_root = str(Path(project_root).resolve())
         self._map: dict[str, set[str]] = {}

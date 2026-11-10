@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 # preload("res://x") / load("res://x") 字面量（与 testscan 同源形态）
@@ -136,16 +137,28 @@ def _in_gut_domain(res_path: str) -> bool:
     return res_path.startswith(GUT_DOMAIN_PREFIX)
 
 
+@lru_cache(maxsize=8)
+def _cached_graph(project_root: str) -> dict[str, set[str]]:
+    """引用图进程级缓存：真实仓在 mutation 期间零写入（影盘写入在槽内），
+    同进程对同一项目复用图——executor 多 worker 路径不重复扫树。"""
+    return build_reference_graph(project_root)
+
+
+@lru_cache(maxsize=8)
+def _cached_autoload_table(project_root: str) -> dict[str, str]:
+    return parse_autoload_table(project_root)
+
+
 def route_target(project_root: str, target_res: str,
                  graph: dict[str, set[str]] | None = None,
                  autoload_table: dict[str, str] | None = None,
                  closure: tuple[str, ...] | None = None) -> RouteDecision:
     """单目标静态路由：排除语义命中任一即冷通道，reason 码全量披露。"""
     if autoload_table is None:
-        autoload_table = parse_autoload_table(project_root)
+        autoload_table = _cached_autoload_table(project_root)
     if closure is None:
         if graph is None:
-            graph = build_reference_graph(project_root)
+            graph = _cached_graph(project_root)
         closure = compute_reload_closure(graph, target_res)
     reasons: list[str] = []
     if target_res in autoload_table:

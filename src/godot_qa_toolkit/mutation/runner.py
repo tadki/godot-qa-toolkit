@@ -50,22 +50,22 @@ from . import beacon
 from . import shadow
 from . import shadowpool
 from .shadow import SlotProvisionError
-from .identity import (INJECT_SCHEME, TestOwnershipIndex, identity_pack,
-                       killer_certificate, suspected_orphan)
+from .identity import (COLD_SCHEME, INJECT_SCHEME, TestOwnershipIndex,
+                       WORKER_SCHEME, identity_pack, killer_certificate,
+                       suspected_orphan)
+from .channel_router import CHANNEL_WORKER, route_target
+from .worker_channel import identity_for_target, run_worker_legs, worker_enabled
 # 统一 mutant 明细记录形态（SEE-1416 扩列）、结果塑形契约与统一报告构建
 # （SEE-1550 tidy 迁入）在 reporting.py（<800 行纪律拆分先例）；调用方留在
 # runner，by-value import 经本命名空间解析——既有 monkeypatch seam 零变化。
 from .reporting import (
-    _classify_mutant_run,
-    _mutant_record,
-    _no_sites_result,
-    _record_invalid_mutants,
+    _attention_note, _classify_mutant_run, _mutant_record,
+    _no_sites_result, _record_invalid_mutants, _require_baseline_snapshot,
     _run_error_result,
     _setup_error_result,
     _mutation_report,
     _valid_mutants,
-    line_text_of,
-)
+    classify_worker_leg, line_text_of,)
 from .godot_gate import GlobalGodotGate
 from .diffengine import apply_timeout_streaks, make_entry, streak_for
 from .planner import dry_run_estimate, plan_execution
@@ -181,30 +181,6 @@ def adaptive_timeout_for(baseline_elapsed: float, timeout_s: int,
 
 
 
-def _require_baseline_snapshot(mutant_slice, retry_ids,
-                               precomputed_baseline) -> None:
-    """worker 注入契约：分片/重试面必须携带共享 baseline 快照（各自跑
-    baseline 会 N 倍放大启动税且污染 timeout 锚）。"""
-    if ((mutant_slice is not None or retry_ids is not None)
-            and precomputed_baseline is None):
-        raise ValueError(
-            "slice/retry_ids workers require a precomputed baseline snapshot — "
-            "each worker running its own baseline would multiply the startup "
-            f"tax N-fold and pollute the adaptive timeout anchor: {mutant_slice}")
-
-
-def _attention_note(mutation_warning: int | None, total_sites: int,
-                    file_label: str) -> str | None:
-    """§SPEC-1420-01：按截断前全量位点数的告警（stderr + summary.attention）。"""
-    if mutation_warning is None or total_sites <= mutation_warning:
-        return None
-    note = (f"{total_sites} mutation sites exceed "
-            f"--mutation-warning {mutation_warning} — consider "
-            f"splitting this file")
-    print(f"mutation-warning: {note} in {file_label}", file=sys.stderr)
-    return note
-
-
 def run_mutation(    file_path: str,
     project_root: str,
     budget: int = 50,
@@ -226,6 +202,7 @@ def run_mutation(    file_path: str,
     reuse_coverage: bool = True,
     progress: dict | None = None,
     identity: dict | None = None,
+    worker_channel: bool | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -277,9 +254,15 @@ def run_mutation(    file_path: str,
     original_src = path.read_text(encoding="utf-8")
     backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
 
+    kind = binary_kind or detect_binary_kind()
+    target_res_early = _res_path_of(str(path), str(project_root))
+    # SEE-1550 §SPEC-020：exec_scheme 按目标路由入身份包（worker 显式启用且
+    # 路由判 worker 才 worker-reset/1；A9 默认冷）。parent 传入的 identity
+    # 用同源解析覆盖 scheme——父子两侧 file_key 一致。
+    identity, _route, exec_scheme = identity_for_target(
+        identity, project_root, target_res_early, worker_channel)
     if identity is None:
-        kind = binary_kind or detect_binary_kind()
-        identity = identity_pack(project_root, kind)
+        identity = identity_pack(project_root, kind, exec_scheme=exec_scheme)
 
     try:
         raw_mutants = _collect_mutations(original_src, str(path))
@@ -331,7 +314,8 @@ def run_mutation(    file_path: str,
         budget, tests_glob, timing_store, timeout_s, precomputed_baseline,
         store2, timeout_factor, header_hash, retry_ids, resume, scoped,
         total_sites, progress=progress, identity=identity,
-        targeted_only=bool(select_ids or select_lines))
+        targeted_only=bool(select_ids or select_lines),
+        worker_channel=worker_channel)
 
 
 def _execute_planned(path, project_root, original_src, backup, mutants,
@@ -340,7 +324,7 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      timing_store, timeout_s, precomputed_baseline, store2,
                      timeout_factor, header_hash, retry_ids, resume, scoped,
                      total_sites, progress=None, identity=None,
-                     targeted_only=False):
+                     targeted_only=False, worker_channel=None):
     """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
@@ -398,7 +382,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
         path, project_root, original_src, backup, executed_list,
         tests_glob, effective_timeout, precomputed_baseline,
         store2, prior_entries, scope_hashes, timeout_factor,
-        reporter=reporter, identity=identity, targeted_only=targeted_only)
+        reporter=reporter, identity=identity, targeted_only=targeted_only,
+        worker_channel=worker_channel)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
@@ -503,7 +488,8 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  scopes=None,
                                  timeout_factor: float | None = None,
                                  reporter=None, identity=None,
-                                 targeted_only: bool = False):
+                                 targeted_only: bool = False,
+                                 worker_channel=None):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
@@ -511,7 +497,7 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             _valid_mutants(original_src, executed_list), tests_glob, timeout_s,
             precomputed_baseline, store2, prior_entries, scopes,
             timeout_factor, reporter=reporter, identity=identity,
-            targeted_only=targeted_only,
+            targeted_only=targeted_only, worker_channel=worker_channel,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -558,6 +544,7 @@ def _run_mutant_loop(
     store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
     timeout_factor: float | None = None, reporter=None,
     identity: dict | None = None, targeted_only: bool = False,
+    worker_channel=None,
 ) -> tuple[list, bool, float, dict]:
     """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
     baseline_elapsed, slot_info)。
@@ -623,33 +610,27 @@ def _run_mutant_loop(
                 ownership_holder.append(TestOwnershipIndex(project_root))
             return ownership_holder[0]
 
+        use_worker = (worker_enabled(worker_channel)
+                      and route_target(project_root,
+                                       target_res).channel == CHANNEL_WORKER)
+        slot_info["exec_scheme"] = WORKER_SCHEME if use_worker else COLD_SCHEME
         try:
             beacon.seed_beacon_script(slot.root)
-            for seq, m in enumerate(mutants):
-                t_mutant = time.monotonic()
-                verdict = _run_single_mutant(m, path, project_root,
-                                             original_src, backup, tests_glob,
-                                             seq, baseline_failures,
-                                             baseline_dirty, slot=slot,
-                                             auto_name=auto_name,
-                                             ownership_fn=_ownership,
-                                             target_rel=target_rel,
-                                             target_res=target_res)
-                raw_pairs.append((m, verdict))
-                # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
-                if reporter is not None:
-                    reporter.record(m, verdict,
-                                    time.monotonic() - t_mutant)
-                # 中断安全增量落盘：乐观 streak（毒窗口收尾修正）。
-                # SEE-1405 发现三毒条目防护由 resume2.record_entry 承接
-                # （启动失败类 run_error 拒收——verdict 零信息量）。
-                if store2 is not None:
-                    prior = prior_entries.get(m.stable_id)
-                    streak, v2_verdict = streak_for(prior,
-                                                    verdict["verdict"])
-                    store2.record_entry(make_entry(m, verdict, v2_verdict,
-                                                   streak, scopes or {},
-                                                   time.time()))
+            if use_worker:
+                from .worker_channel import execute_worker_branch
+                raw_pairs, fatal_events = execute_worker_branch(
+                    path, project_root, original_src, mutants, tests_glob,
+                    baseline_failures, baseline_dirty, slot, auto_name,
+                    target_rel, target_res, kind, reporter, store2,
+                    prior_entries, scopes, _ownership)
+                if fatal_events:
+                    slot_info["worker_fatal_events"] = fatal_events
+            else:
+                raw_pairs = _run_cold_legs(
+                    path, project_root, original_src, backup, mutants,
+                    tests_glob, baseline_failures, baseline_dirty, slot,
+                    auto_name, target_rel, target_res, _ownership, reporter,
+                    store2, prior_entries, scopes)
         finally:
             release_problems = shadowpool.release_slot(slot)
             if release_problems:
@@ -659,16 +640,47 @@ def _run_mutant_loop(
         slot_info["slot_mode"] = slot.mode
         slot_info["freshness"] = list(slot.freshness)
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
-            # unreachable 不进 verdict、不 skip——静态零引用只做疑似孤儿披露
-            try:
-                slot_info["suspected_orphan"] = suspected_orphan(
-                    project_root, target_res)
-            except OSError as e:
-                print(f"orphan scan failed for {target_res}: {e}",
-                      file=sys.stderr)
-                slot_info["suspected_orphan"] = False
+            slot_info["suspected_orphan"] = _orphan_disclosure(
+                project_root, target_res)
 
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
+
+
+def _run_cold_legs(path, project_root, original_src, backup, mutants,
+                   tests_glob, baseline_failures, baseline_dirty, slot,
+                   auto_name, target_rel, target_res, ownership_fn, reporter,
+                   store2, prior_entries, scopes):
+    """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
+    raw_pairs: list[tuple] = []
+    for seq, m in enumerate(mutants):
+        t_mutant = time.monotonic()
+        verdict = _run_single_mutant(
+            m, path, project_root, original_src, backup, tests_glob, seq,
+            baseline_failures, baseline_dirty, slot=slot,
+            auto_name=auto_name, ownership_fn=ownership_fn,
+            target_rel=target_rel, target_res=target_res)
+        raw_pairs.append((m, verdict))
+        # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
+        if reporter is not None:
+            reporter.record(m, verdict, time.monotonic() - t_mutant)
+        # 中断安全增量落盘：乐观 streak（毒窗口收尾修正）。
+        # SEE-1405 发现三毒条目防护由 resume2.record_entry 承接
+        # （启动失败类 run_error 拒收——verdict 零信息量）。
+        if store2 is not None:
+            prior = prior_entries.get(m.stable_id)
+            streak, v2_verdict = streak_for(prior, verdict["verdict"])
+            store2.record_entry(make_entry(m, verdict, v2_verdict, streak,
+                                           scopes or {}, time.time()))
+    return raw_pairs
+
+
+def _orphan_disclosure(project_root: str, target_res: str) -> bool:
+    """unreachable 不进 verdict、不 skip——静态零引用只做疑似孤儿披露。"""
+    try:
+        return suspected_orphan(project_root, target_res)
+    except OSError as e:
+        print(f"orphan scan failed for {target_res}: {e}", file=sys.stderr)
+        return False
 
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,

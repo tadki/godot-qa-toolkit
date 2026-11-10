@@ -137,6 +137,8 @@ class ResumeStoreV2:
                 "ops_version": OPS_VERSION,
                 "inject_scheme": (self.identity or {}).get(
                     "inject_scheme", "unknown"),
+                "exec_scheme": (self.identity or {}).get(
+                    "exec_scheme", "cold-shadow/1"),
                 "binary_kind": self.binary_kind,
                 "identity_sha": self.identity_sha,
                 "source_sha1": source_sha1,

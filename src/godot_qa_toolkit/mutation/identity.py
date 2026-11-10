@@ -35,6 +35,11 @@ from .testscan import _RES_REF_PATTERN
 
 INJECT_SCHEME = "disk-farm/1"
 
+# SEE-1551 定案 §3.6：exec_scheme 双标签——killed 证书按 scheme 隔离
+# （身份包入 file_key，跨 scheme 天然不复用）。
+COLD_SCHEME = "cold-shadow/1"
+WORKER_SCHEME = "worker-reset/1"
+
 # Godot --version 不可解析时的身份兜底：按二进制路径界定（不同二进制不共享
 # 身份），跨 run 稳定。fail-soft 理由：版本探针失败时 dry-run/diff 规划仍须
 # 可用（CI 无引擎环境）；执行路径另由 godot 启动失败契约兜底。
@@ -163,13 +168,19 @@ def gut_addon_hash(project_root: str) -> str:
 
 
 def identity_pack(project_root: str, binary_kind: str | None,
-                  godot_bin: str | None = None) -> dict:
-    """完整身份包（终案 §3.5）。godot_bin 缺省经统一解析源取（与启动同源）。"""
+                  godot_bin: str | None = None,
+                  exec_scheme: str = COLD_SCHEME) -> dict:
+    """完整身份包（终案 §3.5）。godot_bin 缺省经统一解析源取（与启动同源）。
+
+    exec_scheme（§SPEC-020）：cold-shadow/1（M0 冷通道）vs worker-reset/1
+    （常驻 worker）——入身份包 → file_key/killed 证书按 scheme 隔离。
+    """
     if godot_bin is None:
         from .inject import godot_command
         godot_bin = godot_command()
     return {
         "inject_scheme": INJECT_SCHEME,
+        "exec_scheme": exec_scheme,
         "ops_version": OPS_VERSION,
         "godot_version": godot_version_string(godot_bin),
         "boot_wiring_hash": boot_wiring_hash(project_root),

@@ -89,6 +89,8 @@ class TestMdrMutationApplication:
 
 class TestOpsVersionBump:
     def test_ops_version_bumped_for_collection_semantics(self):
-        """§SPEC-014：收集语义变更必须随 OPS_VERSION bump（旧缓存一次性
-        失效并披露——identity.disclose_superseded 消费该值）。"""
-        assert OPS_VERSION == "see1550/2"
+        """§SPEC-014/§SPEC-020：收集语义变更（mdr_expr 扫描面）与身份包
+        变更（exec_scheme）都必须随 OPS_VERSION bump——旧缓存一次性失效
+        并披露（identity.disclose_superseded 消费该值）。当前档位
+        see1550/3（see1550/2 = 收集面，see1550/3 = exec_scheme 身份包）。"""
+        assert OPS_VERSION == "see1550/3"

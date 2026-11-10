@@ -524,3 +524,158 @@ def test_spec024_private_census_symbol_debt_gate():
         cwd=str(repo), capture_output=True,
     )
     assert proc.returncode == 1, proc.stdout.decode()
+
+
+# --------------------------------------------------------------------------
+# WP2 PR-C hardener guards (§SPEC-027 face)
+# --------------------------------------------------------------------------
+
+
+def test_derive_per_entry_falls_back_to_registry_func_defs():
+    """§SPEC-027: when profile_functions is empty the derivation falls back to
+    the registry's func_def entries (lambda entries never join the
+    denominator) — C/I keyed by fid drive covered/total."""
+    from godot_qa_toolkit.registry.functions import build_file_registry
+    from godot_qa_toolkit.risk.shadow import _derive_per_entry
+
+    src = (
+        "func f(x):\n"
+        "\tif x:\n"
+        "\t\treturn 1\n"
+        "\treturn 2\n"
+        "\n"
+        "func g():\n"
+        "\tvar h := func(v: int) -> int:\n"
+        "\t\tif v > 0:\n"
+        "\t\t\treturn 3\n"
+        "\t\treturn 4\n"
+        "\treturn h(1)\n"
+    )
+    registry = build_file_registry(src, file_label="x.gd")
+    fids = {e["name"]: e["fid"] for e in registry["entries"]
+            if e["kind"] == "func_def"}
+    import hashlib
+
+    bundle = {
+        "target": {"sha256": hashlib.sha256(src.encode("utf-8")).hexdigest()},
+        "C": [{"fid": fids["f"], "covered": 2}],
+        "I": [{"fid": fids["f"], "i_lines": 3}],
+    }
+    per_entry, stale = _derive_per_entry(bundle, [], src, registry=registry)
+    assert per_entry[fids["f"]] == {"covered": 2, "total": 3, "state": "scored"}
+    # lambda host g: lambda_gap > 0 → cc_unmeasured lane (WP1c 前出分车道)
+    g_row = per_entry[fids["g"]]
+    assert g_row["state"] == "cc_unmeasured"
+    assert g_row["covered"] is None and g_row["total"] is None
+
+
+def test_derive_per_entry_unknown_state_for_missing_fid():
+    """A measured-capable entry (lambda_gap == 0) with NO C/I rows keeps
+    unknown — never fabricated as a true zero."""
+    from godot_qa_toolkit.risk.shadow import _derive_per_entry
+
+    import hashlib
+
+    src = "func f():\n\treturn 1\n"
+    bundle = {"target": {"sha256": hashlib.sha256(src.encode("utf-8")).hexdigest()},
+              "C": [], "I": []}
+    per_entry, stale = _derive_per_entry(
+        bundle,
+        [{"function_id": "x.gd::f", "lambda_gap": 0}],
+        src,
+    )
+    assert stale is False
+    assert per_entry["x.gd::f"] == {"covered": None, "total": None,
+                                    "state": "unknown"}
+
+
+def test_partition_sources_routes_unreadable_files(tmp_path):
+    """§SPEC-028: an unreadable (non-UTF-8) file in the scan tree routes to
+    the read_error gap lane — the scan continues, never crashes."""
+    from godot_qa_toolkit.risk.shadow import partition_sources
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    good = root / "good.gd"
+    good.write_text("func a():\n\treturn 1\n", encoding="utf-8")
+    bad = root / "bad.gd"
+    bad.write_bytes(b"\xff\xfe\x00 not utf-8")
+
+    eligible, negatives = partition_sources([good, bad], project_root=str(root))
+    assert "good.gd" in eligible
+    assert "bad.gd" in negatives
+    assert negatives["bad.gd"] == ""
+
+
+def test_default_measure_fails_loud_when_bundle_count_is_zero(
+    tmp_path, monkeypatch
+):
+    """D-WP2C-1 fail-loud: if this run produced NO new bundle (evidence lost),
+    measure raises RuntimeError with context instead of returning a result
+    whose evidence vanished."""
+    import godot_qa_toolkit.coverage.evidence as evidence_mod
+    from godot_qa_toolkit.coverage import runner as runner_mod
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+
+    proj = tmp_path / "proj"
+    (proj / "addons" / "gut").mkdir(parents=True)
+    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
+    target = proj / "calc.gd"
+    target.write_text("func add(a, b):\n\treturn a + b\n")
+    ev = tmp_path / "ev"
+    ev.mkdir()
+
+    monkeypatch.setattr(runner_mod, "_run_gut_for_coverage",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
+    # the runner writes its bundle, but the evidence layer loses it (write
+    # suppressed) — the snapshot diff finds zero new bundles
+    monkeypatch.setattr(evidence_mod, "write_bundle", lambda *a, **k: None)
+
+    measure = shadow_mod.default_measure(str(proj), evidence_out=str(ev))
+    with pytest.raises(RuntimeError, match="expected exactly 1 new bundle"):
+        measure("calc.gd", target.read_text(encoding="utf-8"),
+                "res://tests/unit/")
+
+
+def test_default_measure_snapshot_excludes_preexisting_bundles(
+    tmp_path, monkeypatch
+):
+    """D-WP2C-1 snapshot-diff guard: pre-existing bundle files in the
+    evidence dir (stale or from earlier runs) must be EXCLUDED from the
+    diff, so a run into a shared evidence dir still locates exactly its own
+    bundle (SN1: bundles_before pinned to set() would count them as new and
+    fail loud spuriously)."""
+    import godot_qa_toolkit.coverage.runner as runner_mod
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+
+    proj = tmp_path / "proj"
+    (proj / "addons" / "gut").mkdir(parents=True)
+    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
+    target = proj / "calc.gd"
+    target.write_text("func add(a, b):\n\treturn a + b\n")
+    ev = tmp_path / "ev"
+    ev.mkdir()
+    (ev / "00000000-dead-beef-0000-000000000000.json").write_text(
+        json.dumps({"evidence_version": "coverage-evidence/2",
+                    "run_uuid": "dead-beef"}), encoding="utf-8"
+    )
+    (ev / "00000000-dead-beef-0000-000000000000.record.json").write_text(
+        json.dumps({"run_uuid": "dead-beef", "status": "bundle_written"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(runner_mod, "_run_gut_for_coverage",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
+
+    measure = shadow_mod.default_measure(str(proj), evidence_out=str(ev))
+    out = measure("calc.gd", target.read_text(encoding="utf-8"),
+                  "res://tests/unit/")
+    assert "bundle" in out
+    assert out["bundle"]["run_uuid"] != "dead-beef"
+
+    out2 = measure("calc.gd", target.read_text(encoding="utf-8"),
+                   "res://tests/unit/")
+    assert "bundle" in out2
+    assert out2["bundle"]["run_uuid"] != out["bundle"]["run_uuid"]

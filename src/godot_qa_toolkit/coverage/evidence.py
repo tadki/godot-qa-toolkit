@@ -112,11 +112,21 @@ def build_bundle(
     zero_tests: bool,
     vacuous: bool,
     recovered: bool = False,
+    registry: dict | None = None,
+    probe_manifest: dict | None = None,
 ) -> dict:
     """Assemble the `coverage-evidence/2` bundle: probe-manifest/2 (T/I), the
-    sink hits attributed to fids (C), run sentinels and per-entry states."""
-    registry = build_file_registry(gd_source, file_label=file_path)
-    manifest = build_probe_manifest_v2(gd_source, registry)
+    sink hits attributed to fids (C), run sentinels and per-entry states.
+
+    §SPEC-030 (D-性能-1): the run path already built the registry and probe
+    manifest for instrumentation — pass them in via `registry`/`probe_manifest`
+    to avoid a second lark parse per run. When omitted (direct callers,
+    tests), both are built here exactly as before."""
+    if registry is None:
+        registry = build_file_registry(gd_source, file_label=file_path)
+    if probe_manifest is None:
+        probe_manifest = build_probe_manifest_v2(gd_source, registry)
+    manifest = probe_manifest
     line_to_plan = {p["line"]: p for p in manifest["probe_plan"]}
     hits = set(hits_lines)
     instrumentable_fids = {
@@ -214,7 +224,8 @@ def write_bundle(evidence_dir: Path, bundle: dict) -> Path:
 
 
 def _recover_record(
-    evidence_dir: Path, record_path: Path
+    evidence_dir: Path, record_path: Path,
+    project_root: str | None = None,
 ) -> tuple[dict | None, str | None]:
     """Recover one started-but-unfinished run record into a bundle. Returns
     (result_row, None) on success, (None, error) on a recoverable-record
@@ -233,7 +244,7 @@ def _recover_record(
     run_uuid = record.get("run_uuid")
     manifest = record.get("probe_manifest") or {}
     plan_by_id = {p["probe_id"]: p for p in manifest.get("probe_plan", [])}
-    sink = _find_sink(evidence_dir, record, run_uuid)
+    sink = _find_sink(evidence_dir, record, run_uuid, project_root)
     if sink is None:
         return None, (
             f"run {run_uuid}: sink {SINK_PREFIX}{run_uuid}.txt missing — "
@@ -302,7 +313,8 @@ def _recover_record(
     return {"run_uuid": run_uuid, "bundle": str(out)}, None
 
 
-def recover_bundle(evidence_dir: Path) -> dict:
+def recover_bundle(evidence_dir: Path,
+                   project_root: str | None = None) -> dict:
     """Rebuild bundles for started-but-unfinished runs on disk, WITHOUT
     re-running GUT: the started record carries the probe manifest inline, so
     the UUID sink's raw probe ids can be re-attributed to fids exactly like
@@ -313,7 +325,8 @@ def recover_bundle(evidence_dir: Path) -> dict:
         return {"recovered": recovered, "errors": ["evidence dir missing"]}
 
     for record_path in sorted(evidence_dir.glob("*.record.json")):
-        result, error = _recover_record(evidence_dir, record_path)
+        result, error = _recover_record(evidence_dir, record_path,
+                                        project_root=project_root)
         if error is not None:
             errors.append(error)
         elif result is not None:
@@ -321,8 +334,18 @@ def recover_bundle(evidence_dir: Path) -> dict:
     return {"recovered": recovered, "errors": errors}
 
 
-def _find_sink(evidence_dir: Path, record: dict, run_uuid: str) -> str | None:
+def _find_sink(evidence_dir: Path, record: dict, run_uuid: str,
+               project_root: str | None = None) -> str | None:
+    """Sink candidates, in order: recorded sink_path → evidence-dir sibling →
+    the project's user:// sink dir (where the probes actually wrote; the
+    user:// location is resolved the same way coverage.runner resolves it)."""
     candidates = [record.get("sink_path"), str(evidence_dir / sink_name_for(run_uuid))]
+    if project_root:
+        from .runner import _resolve_user_sink
+
+        user_sink = _resolve_user_sink(project_root, sink_name_for(run_uuid))
+        if user_sink:
+            candidates.append(user_sink)
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             return candidate

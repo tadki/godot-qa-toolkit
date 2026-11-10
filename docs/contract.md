@@ -301,7 +301,11 @@ sink 名 PID→UUID 属私有传输面变更（对外 stdout 契约零影响—�
 run 侧整目录执行，绕开 GUT `-gselect` 子串碰撞（选 `{save}` 不会误吸
 `test_save_roundtrip.gd`）。私有目录非空即拒（`suite_error`，绝不复用
 旧目录）；主 `acceptance/ir|generated` 全程只读不碰；单 feature 不带
-`--out-dir` 时缺省行为与 PR-A 前逐字节一致。
+`--out-dir` 时缺省行为与 PR-A 前逐字节一致。裸 `accept compile`（无
+`<feature>` 且无 `--keys`）错误道为结构化 `ok:false` rc=1（`accept
+compile needs <feature> or --keys`），不经 argparse usage error rc=2，
+与 §5 exit code 语义一致（exit 2 = 调用方用法错误，exit 1 = 被测对象
+判为失败）。
 
 ### 12.2 `gqt accept run --project-root R --suite-dir D`（与 `--acceptance-probe-keys` 互斥）
 

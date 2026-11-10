@@ -74,6 +74,22 @@ def t_census(identities: list[FunctionIdentity]) -> set[int]:
     return lines
 
 
+def _probe_rows(manifest: dict) -> list[dict]:
+    """probe_plan rows in the M2 assertion shape: `function_id` aliases the
+    materialized fid; `owner_ambiguous` reads the build-time ownership flag
+    (unowned lines keep M2 semantics — fid None, ambiguous False)."""
+    return [
+        {
+            "probe_id": probe["probe_id"],
+            "line": probe["line"],
+            "function_id": probe["fid"],
+            "owner_ambiguous": probe.get("ownership") == "ambiguous",
+            "owner_kind": probe["owner_kind"],
+        }
+        for probe in manifest["probe_plan"]
+    ]
+
+
 def build_probe_manifest(
     gd_source: str, identities: list[dict] | None = None,
     file_label: str | None = None,
@@ -92,19 +108,8 @@ def build_probe_manifest(
         label = str(fid).split("::", 1)[0] or "unknown.gd"
     registry = build_file_registry(gd_source, file_label=label)
     manifest = build_probe_manifest_v2(gd_source, registry)
-    rows: list[dict] = []
-    for probe in manifest["probe_plan"]:
-        rows.append(
-            {
-                "probe_id": probe["probe_id"],
-                "line": probe["line"],
-                "function_id": probe["fid"],
-                "owner_ambiguous": probe.get("ownership") == "ambiguous",
-                "owner_kind": probe["owner_kind"],
-            }
-        )
     lines = [p["line"] for p in manifest["probe_plan"]]
-    return rows, lines
+    return _probe_rows(manifest), lines
 
 
 def _uses_sanitized_projection(gd_source: str) -> bool:
@@ -130,17 +135,7 @@ def file_profile(gd_source: str, file_label: str) -> dict:
     census = manifest["census"]
     per_function = manifest["per_function"]
 
-    rows: list[dict] = []
-    for probe in manifest["probe_plan"]:
-        rows.append(
-            {
-                "probe_id": probe["probe_id"],
-                "line": probe["line"],
-                "function_id": probe["fid"],
-                "owner_ambiguous": probe.get("ownership") == "ambiguous",
-                "owner_kind": probe["owner_kind"],
-            }
-        )
+    rows = _probe_rows(manifest)
 
     func_entries = [e for e in registry["entries"] if e["kind"] == "func_def"]
     lambda_entries = [e for e in registry["entries"] if e["kind"] == "lambda"]
@@ -159,15 +154,13 @@ def file_profile(gd_source: str, file_label: str) -> dict:
         for e in func_entries
     ]
 
-    instrumentable = [p for p in per_function
-                      if p["fid"] in {f["function_id"] for f in functions}
-                      or p["fid"].endswith(">")]
-    # per-entry aggregation (§SPEC-024: file-level facts degrade to entries)
+    # per-entry aggregation (§SPEC-024: file-level facts degrade to entries);
+    # inner-class rows keep t_equal_i=False, so a partial-instrumentation
+    # file stays ineligible by construction. Ambiguous ownership is an
+    # ownership defect (owners_complete), not a T/I mismatch.
     t_total = sum(p["t_lines"] for p in per_function)
     i_total = sum(p["i_lines"] for p in per_function)
-    # ambiguous ownership is an ownership defect (owners_complete), not a
-    # T/I mismatch — the M2 hardener pin keeps T=I true under ambiguity
-    t_equal_i = all(p["t_equal_i"] for p in instrumentable) and not census.get(
+    t_equal_i = all(p["t_equal_i"] for p in per_function) and not census.get(
         "unowned"
     )
     owners_complete = census["owners_complete"]

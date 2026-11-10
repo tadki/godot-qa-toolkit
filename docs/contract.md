@@ -272,3 +272,21 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 ### 10.4 契约增量分类
 
 sink 名 PID→UUID 属私有传输面变更（对外 stdout 契约零影响——§10 冻结门兜底）= **comparability**（PR-B 前的 run 间数据不可比，PR-B 起可比较）；evidence bundle/生命周期/恢复/清理 = **capability**（加法）。`coverage/runner.py` 的插桩判定面（EXECUTABLE_NODE_NAMES/括号深度/class_def 剪枝）语义不变；行收集符号反向公开化至 `registry/lines.py`（§SPEC-029 债务收敛，runner 保留向后兼容别名）。
+
+## 11. canonical recipe 契约（SEE-1546 WP3 PR-A，只读构建器）
+
+### 11.1 `gqt recipe --project-root <root> [--out recipe.json] [--exclude scope:entry:reason ...]`
+
+只读构建 canonical full recipe（`canonical-recipe/1`），**不跑 GUT、不插桩、不宣称 certified**（单轮 exploratory；WP5 拥有双轮认证）：
+
+- **gut_face**：`.gutconfig.json` 现役非 quarantine GUT 面解析（dirs/include_subdirs/prefix 等扫描键原文进 hash）+ config sha256；
+- **acceptance_face**：`acceptance/features/**/*.feature` 全量扫描，逐 feature `{key, source, sha256}`（KOL 定版 36）；harness 接线 sha256；
+- **toolchain**：gqt/OPS/Godot/GUT 版本——版本变化即 recipe 变化；
+- **exclusions**：必须带理由——**空理由 = 配方非法（fail-loud ok=false）**；排除名单与理由全部进 recipe hash；
+- **recipe_hash**：对除自身外的规范化 JSON（`sort_keys=True, separators=(',',':')`）取 sha256——同输入同 hash、任一字节变化即变；`verify` 路径（`recipe_hash` 重算比对）校验加载/恢复后的 recipe。
+
+缺省行为不变：不加任何 flag 的既有命令零影响；`recipe` 是新子命令（加法）。
+
+### 11.2 契约增量分类
+
+`gqt recipe` 子命令 + canonical-recipe/1 快照 = **capability**（新能力面，加法向后兼容）；`coverage/runner.py` 插桩判定面、`mutation/`、`risk/` 域本 PR 零触碰。

@@ -521,6 +521,7 @@ def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch
     ONE registry build per run — a second build is the doubled lark parse
     D-性能-1 removed (mutation ②)."""
     import godot_qa_toolkit.registry.functions as registry_functions
+    import godot_qa_toolkit.registry.manifest as registry_manifest
     from godot_qa_toolkit import coverage as coverage_pkg
     from godot_qa_toolkit.coverage import runner as runner_mod
     import io
@@ -535,16 +536,26 @@ def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch
     ev.mkdir(exist_ok=True)
 
     real_build = registry_functions.build_file_registry
+    real_manifest = registry_manifest.build_probe_manifest_v2
     builds = []
+    manifest_builds = []
 
     def counting_build(src, file_label):
         builds.append(1)
         return real_build(src, file_label=file_label)
 
+    def counting_manifest(src, registry):
+        manifest_builds.append(1)
+        return real_manifest(src, registry)
+
     # count across BOTH namespaces: runner's direct call and any build_bundle
-    # re-derivation (evidence holds its own module-level binding)
+    # re-derivation (evidence holds its own module-level binding).
+    # B3: the probe-manifest/2 build is counted the same way — the D-性能-1
+    # contract is ONE parse per run, which covers BOTH builders.
     monkeypatch.setattr(registry_functions, "build_file_registry", counting_build)
     monkeypatch.setattr(coverage_pkg.evidence, "build_file_registry", counting_build)
+    monkeypatch.setattr(registry_manifest, "build_probe_manifest_v2", counting_manifest)
+    monkeypatch.setattr(coverage_pkg.evidence, "build_probe_manifest_v2", counting_manifest)
     monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", lambda *a, **k: None)
     monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
 
@@ -557,6 +568,7 @@ def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch
         rc = args.func(args)
     assert rc == 0
     assert len(builds) == 1
+    assert len(manifest_builds) == 1
 
 
 def test_recover_finds_user_sink_via_project_root(tmp_path, monkeypatch):
@@ -605,3 +617,67 @@ def test_recover_finds_user_sink_via_project_root(tmp_path, monkeypatch):
     assert [c["fid"] for c in bundle["C"]] == ["x.gd::f"]
     assert [c["covered"] for c in bundle["C"]] == [1]
     assert bundle["probe_manifest"]["inline"]["probe_plan"][0]["fid"] == "x.gd::f"
+
+
+# --------------------------------------------------------------------------
+# B1 (QA FAIL): §SPEC-029 dual-direction debt gate, in-suite anchors.
+# The §SPEC-029 grep gate is machine-proven; these pin the same semantics in
+# the suite so re-introducing EITHER private import direction turns red.
+# --------------------------------------------------------------------------
+
+
+def test_spec029_registry_private_runner_import_gate():
+    """D1 anchor: registry/ must not import private coverage.runner symbols
+    (`_node_line` et al.) — public registry.lines names replaced them."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parent.parent.parent
+    proc = subprocess.run(
+        ["grep", "-rnE", r"from ..coverage.runner import _",
+         "src/godot_qa_toolkit/registry/"],
+        cwd=str(repo), capture_output=True,
+    )
+    assert proc.returncode == 1, proc.stdout.decode()
+
+
+def test_spec029_risk_private_scopemanifest_import_gate():
+    """D2 anchor: risk/ must not import private mutation.scopemanifest
+    symbols (`_max_leaf_line` et al.) — gd_ast_utils is the neutral home."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parent.parent.parent
+    proc = subprocess.run(
+        ["grep", "-rnE", r"from ..mutation.scopemanifest import _",
+         "src/godot_qa_toolkit/risk/"],
+        cwd=str(repo), capture_output=True,
+    )
+    assert proc.returncode == 1, proc.stdout.decode()
+
+
+# --------------------------------------------------------------------------
+# B2 (QA FAIL): run-record atomic write anchor — the record must land via a
+# temp file + Path.replace, so a crash mid-write can never leave a
+# half-written record that recovery would misread.
+# --------------------------------------------------------------------------
+
+
+def test_write_run_record_replaces_atomically(tmp_path, monkeypatch):
+    import godot_qa_toolkit.coverage.evidence as evidence_mod
+
+    replace_calls = []
+    real_replace = pathlib.Path.replace
+
+    def spy_replace(self, target):
+        replace_calls.append(str(self))
+        return real_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", spy_replace)
+    record = {"run_uuid": "u-atomic", "status": "started"}
+    evidence_mod.write_run_record(tmp_path, record)
+
+    final = tmp_path / "u-atomic.record.json"
+    assert final.is_file()
+    assert json.loads(final.read_text(encoding="utf-8")) == record
+    # the temp file was consumed via Path.replace (atomic rename)
+    assert replace_calls == [str(tmp_path / "u-atomic.record.tmp")]
+    assert not (tmp_path / "u-atomic.record.tmp").exists()

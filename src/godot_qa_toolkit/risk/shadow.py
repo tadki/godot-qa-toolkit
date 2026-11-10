@@ -122,6 +122,7 @@ def _records_for_file(
         )
     return records
 
+
 def _derive_per_entry(
     bundle: dict,
     profile_functions: list[dict],
@@ -131,18 +132,20 @@ def _derive_per_entry(
 ) -> tuple[dict[str, dict], bool]:
     """§SPEC-027 per-entry score_status derivation (§8-4 rules unchanged):
     stale = bundle target sha ≠ current source sha; cc_unmeasured = host
-    lambda_gap > 0 (WP1c 前出分车道不变). Returns (per_entry, stale)."""
+    lambda_gap > 0 (WP1c 前出分车道不变). Returns (per_entry, stale).
+
+    `registry` is only the fallback function list when `profile_functions` is
+    empty; `probe_manifest` is accepted for callers that precompute it, but
+    the derivation itself reads only the bundle's C/I rows and the host
+    lambda_gap — no manifest walk is needed here."""
     import hashlib
 
     from ..registry.functions import build_file_registry
-    from ..registry.manifest import build_probe_manifest_v2
 
     current_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
     stale = bundle.get("target", {}).get("sha256") != current_sha
     if registry is None:
         registry = build_file_registry(source, file_label="")
-    if probe_manifest is None:
-        probe_manifest = build_probe_manifest_v2(source, registry)
 
     c_by_fid = {c["fid"]: c for c in bundle.get("C", [])}
     i_by_fid = {r["fid"]: r for r in bundle.get("I", [])}
@@ -206,9 +209,8 @@ def _measure_eligible_file(
     # replacing the hits_lines aggregation for the records lane.
     bundle = full.get("bundle")
     per_entry = None
-    stale = False
     if bundle is not None:
-        per_entry, stale = _derive_per_entry(
+        per_entry, _ = _derive_per_entry(
             bundle, profile["functions"], source
         )
         records = _records_for_file(

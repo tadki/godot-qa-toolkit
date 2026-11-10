@@ -46,8 +46,12 @@ def _run_mutation(src_root: Path, proj: Path, target_rel: str,
     env["PYTHONPATH"] = str(src_root / "src") + os.pathsep + \
         env.get("PYTHONPATH", "")
     env["GQT_BENCH"] = "1"
+    # R-1①②（QA 第三轮实证）：mutation CLI 契约为 --project-root（--path
+    # 是 argparse exit 2）；target 的 res:// 前缀必须剥离后再与项目根拼接
+    # （proj/"res://..." 路径不存在 exit 1）。
+    target_fs = proj / target_rel.removeprefix("res://")
     argv = [sys.executable, "-m", "godot_qa_toolkit.cli", "mutation",
-            str(proj / target_rel), "--path", str(proj),
+            str(target_fs), "--project-root", str(proj),
             "--timeout", "300", *args]
     t0 = time.monotonic()
     r = subprocess.run(argv, capture_output=True, text=True, env=env,
@@ -61,18 +65,24 @@ def _run_mutation(src_root: Path, proj: Path, target_rel: str,
     return payload, elapsed
 
 
-def _kill_set(payload: dict) -> set[tuple]:
-    """verdict 一致性判定面：{(id, verdict)} 全集（killed/survived/...）。"""
+def _consistency_surface(payload: dict) -> tuple[frozenset, int, int]:
+    """verdict 一致性判定面（A/B 两侧同形可计算）：
+    (failures 的 (id, verdict) 全集, killed 计数, mutants 计数)。
+
+    killed 逐 id 集合在 A 侧（master 旧机制无 killed_by 证书）不可计算
+    ——证书是 B 侧新增披露，计入判定面会让 A/B 结构性恒不等；以计数对齐
+    替代（QA 协议口径：verdict 分区与 failures 全等）。"""
     results = payload.get("results") or [payload]
-    out: set[tuple] = set()
+    failures: set[tuple] = set()
+    killed = mutants = 0
     for r in results:
         for f in r.get("failures", []):
             if "verdict" in f:
-                out.add((f.get("id", f["file"]), f["verdict"]))
+                failures.add((f.get("id", f["file"]), f["verdict"]))
         s = r.get("summary", {})
-        for cert in s.get("killed_by_certificates", []) or []:
-            out.add((cert["id"], "killed"))
-    return out
+        killed += int(s.get("killed", 0))
+        mutants += int(s.get("mutants", 0))
+    return frozenset(failures), killed, mutants
 
 
 def _noise_band(samples: list[float]) -> float:
@@ -128,8 +138,8 @@ def main() -> int:
     ap.add_argument("--fixture", default="tests/fixtures/see1550_forms")
     ap.add_argument("--gut-dir", default=None, help="GUT addon 源（只读拷贝）")
     ap.add_argument("--target", default="res://forms/runtime_load.gd")
-    ap.add_argument("--point-line", type=int, default=5,
-                    help="point 场景的 --lines 寻址行（fixture 默认行 5）")
+    ap.add_argument("--point-line", type=int, default=6,
+                    help="point 场景的 --lines 寻址行（fixture 默认位点行 6）")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--master-ref", default="origin/master",
                     help="A 侧基线（git worktree 检出）")
@@ -153,46 +163,53 @@ def main() -> int:
     a_src, b_src = awt.resolve(), REPO_ROOT
 
     report: dict = {"protocol": {"rounds": args.rounds,
-                                 "scenarios": list(SCENARIOS)},
+                                 "scenarios": list(SCENARIOS),
+                                 # Owner 协议：A/A ≥3 轮定噪声带——<3 轮的
+                                 # 门是临时 smoke 结论（噪声带=0 掷硬币），
+                                 # 不具协议效力，只披露不判 FAIL。
+                                 "protocol_valid": args.rounds >= 3},
                     "aa": {}, "ab": {}, "gates": {}}
     overall_ok = True
 
     for scenario in SCENARIOS:
         # A/A 噪声带
         aa: list[float] = []
-        aa_kill: set | None = None
+        aa_surf: tuple | None = None
         proj = _prep_project(fixture, gut_dir, outdir, f"aa-{scenario}")
         for i in range(args.rounds):
             payload, elapsed, meta = _run_scenario(
                 a_src, proj, args.target, scenario,
                 keep_cache=(scenario == "warm"), point_line=args.point_line)
             aa.append(elapsed)
-            ks = _kill_set(payload)
-            if aa_kill is None:
-                aa_kill = ks
-            elif ks != aa_kill:
+            surf = _consistency_surface(payload)
+            if aa_surf is None:
+                aa_surf = surf
+            elif surf != aa_surf:
                 report["gates"][f"{scenario}/aa_consistent"] = False
-                overall_ok = False
+                if args.rounds >= 3:
+                    overall_ok = False
         band = _noise_band(aa)
         report["aa"][scenario] = {"rounds": aa, "band_s": round(band, 3)}
 
         # A/B 交错
         ab: dict = {"a": [], "b": []}
         proj_ab = _prep_project(fixture, gut_dir, outdir, f"ab-{scenario}")
-        ab_kill: set | None = None
+        ab_surf: tuple | None = None
         for i in range(args.rounds):
             for side, src in (("a", a_src), ("b", b_src)):
                 payload, elapsed, meta = _run_scenario(
                     src, proj_ab, args.target, scenario,
                     keep_cache=(scenario == "warm"),
                     point_line=args.point_line)
-                ab[side].append(meta | {"kill_n": len(_kill_set(payload))})
-                ks = _kill_set(payload)
-                if ab_kill is None:
-                    ab_kill = ks
-                elif ks != ab_kill:
-                    report["gates"][f"{scenario}/ab_killset_consistent"] = False
-                    overall_ok = False
+                surface = _consistency_surface(payload)
+                ab[side].append(meta | {"killed_n": surface[1],
+                                        "mutants_n": surface[2]})
+                if ab_surf is None:
+                    ab_surf = surface
+                elif surface != ab_surf:
+                    report["gates"][f"{scenario}/verdict_surface_consistent"] = False
+                    if args.rounds >= 3:
+                        overall_ok = False
         b_best = min(x["wall_s"] for x in ab["b"])
         a_worst = max(x["wall_s"] for x in ab["a"])
         ok = b_best <= a_worst + band
@@ -202,11 +219,14 @@ def main() -> int:
             "band_s": round(band, 3),
             "speed_gate": ok,
         }
+        if not args.rounds >= 3:
+            report["gates"][f"{scenario}/speed_provisional"] = \
+                "rounds<3: band=0, gate is smoke-only"
         report["gates"][f"{scenario}/speed"] = ok
-        if not ok:
+        if not ok and args.rounds >= 3:
             overall_ok = False
         # 确定性门（warm 场景）：B 侧 warm 全复用仅一次 baseline —— 由
-        # _kill_set 一致 + warm 轮数 ≥2 时 b 轮间墙钟骤降佐证（基线复用）。
+        # 判定面一致 + warm 轮数 ≥2 时 b 轮间墙钟骤降佐证（基线复用）。
         if scenario == "warm" and len(ab["b"]) >= 2:
             report["gates"][f"{scenario}/determinism_hint"] = \
                 ab["b"][-1]["wall_s"] <= ab["b"][0]["wall_s"]
@@ -222,6 +242,11 @@ def main() -> int:
     (outdir / "bench_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print(json.dumps(report["gates"], ensure_ascii=False))
+    if not args.rounds >= 3:
+        print("bench: rounds<3 — gates are provisional smoke results; "
+              "protocol verdict requires --rounds >= 3 (A/A band + A/B "
+              "interleave)", file=sys.stderr)
+        return 0
     return 0 if overall_ok else 1
 
 

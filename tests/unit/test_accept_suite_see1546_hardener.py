@@ -20,13 +20,16 @@ from pathlib import Path
 import pytest
 
 import godot_qa_toolkit.accept.suite as suite_mod
+from godot_qa_toolkit.accept.compile import compile_feature
 from godot_qa_toolkit.accept.run import AcceptRunError
 from godot_qa_toolkit.accept.suite import (
     SuiteError,
     _executed_scripts,
+    _snapshot_main,
     compile_keys_to_suite,
     create_suite_dir,
     reconcile,
+    run_acceptance_probe,
     run_suite_dir,
 )
 
@@ -213,3 +216,123 @@ def test_reconcile_without_snapshot_and_replay_false_is_not_ok(project: Path):
     assert record["rules"]["executed_scripts_eq_generated"] is True
     assert record["rules"]["executed_count_eq_expected"] is True
     assert record["rules"]["unselected_absent"] is True
+
+
+# ------------------------------------------------------------------
+# §SPEC-043（QA r21 六项存活变异锚定 + OBS-1 错误道契约）
+# ------------------------------------------------------------------
+
+
+def test_r1_same_count_substitution_is_reconcile_failure(project: Path):
+    """X1：R1 是集合相等不是数量相等——选中文件被同名数未选文件顶替
+    （1:1 替换）必须 r1=False，防「==数量」恒真化。"""
+    rec = compile_keys_to_suite(project, ["demo"], create_suite_dir(project))
+    d = Path(rec["suite_dir"])
+    gen = d / "generated"
+    (gen / "test_demo.gd").rename(gen / "test_other.gd")
+    name = rec["manifests"]["demo"]["attribution"][0]["test_name"]
+    out = (f"res://acceptance/generated/.gqt-run-x/generated/test_other.gd\n"
+           f"* {name}\n")
+    record = reconcile(project, d, ["demo"], out, replay_ok=True)
+    assert record["rules"]["generated_eq_selected"] is False
+    assert record["ok"] is False
+
+
+def test_r3_duplicate_known_entries_fail_count_rule(project: Path):
+    """X2：R3 计数是 == 不是 >=——全部 known 但重复条目（数>预期）必须
+    r3=False。R2 隔离为 True，缺口单独归 R3。"""
+    rec = compile_keys_to_suite(project, ["demo"], create_suite_dir(project))
+    name = rec["manifests"]["demo"]["attribution"][0]["test_name"]
+    header = "res://acceptance/generated/.gqt-run-x/generated/test_demo.gd"
+    _fake_gut(f"{header}\n* {name}\n* {name}\n")
+    record = run_suite_dir(project, Path(rec["suite_dir"]))
+    assert record["rules"]["executed_scripts_eq_generated"] is True
+    assert record["rules"]["executed_count_eq_expected"] is False
+    assert record["ok"] is False
+
+
+def test_r3_unknown_name_same_count_fails_count_rule(project: Path):
+    """X3：R3 的 `not unknown` 合取不可删——unknown 测试名同数替换
+    （条目数==预期）必须 r3=False。"""
+    rec = compile_keys_to_suite(project, ["demo"], create_suite_dir(project))
+    header = "res://acceptance/generated/.gqt-run-x/generated/test_demo.gd"
+    _fake_gut(f"{header}\n* test_rogue\n")
+    record = run_suite_dir(project, Path(rec["suite_dir"]))
+    assert record["rules"]["executed_scripts_eq_generated"] is True
+    assert record["unknown_executed"] == ["test_rogue"]
+    assert record["rules"]["executed_count_eq_expected"] is False
+    assert record["ok"] is False
+
+
+def test_r4_main_dir_snapshot_tamper_fails_reconcile(project: Path):
+    """X4：R4 的「主目录字节级快照比对」半条不可删——快照后主目录被改
+    必须 r4=False（主 ir/generated 只读不碰守卫）。"""
+    main_ir = project / "acceptance" / "ir"
+    main_ir.mkdir(parents=True)
+    kept = main_ir / "kept.json"
+    kept.write_text("{}", encoding="utf-8")
+    rec = compile_keys_to_suite(project, ["demo"], create_suite_dir(project))
+    snap = _snapshot_main(project)
+    kept.write_text('{"tampered": true}', encoding="utf-8")
+    record = reconcile(project, Path(rec["suite_dir"]), ["demo"],
+                       _gut_ok_output(rec), replay_ok=True,
+                       main_snapshot=snap)
+    assert record["rules"]["generated_eq_selected"] is True
+    assert record["rules"]["unselected_absent"] is False
+    assert record["ok"] is False
+
+
+def test_all_four_gut_hooks_excluded_from_count(project: Path):
+    """X5：四钩子（before_all/before_each/after_each/after_all）混入运行
+    流均不计入测试——排除集缺任一钩子即 r3 红。"""
+    rec = compile_keys_to_suite(project, ["demo"], create_suite_dir(project))
+    man = rec["manifests"]["demo"]
+    lines = ["res://acceptance/generated/.gqt-run-x/generated/test_demo.gd",
+             "* before_all", "* before_each", "* after_each", "* after_all"]
+    lines += [f"* {a['test_name']}" for a in man["attribution"]]
+    _fake_gut("\n".join(lines) + "\n")
+    record = run_suite_dir(project, Path(rec["suite_dir"]))
+    assert record["ok"] is True
+    assert record["rules"]["executed_count_eq_expected"] is True
+    assert record["executed_tests"] == sorted(
+        a["test_name"] for a in man["attribution"])
+
+
+def test_probe_extrapolation_assumption_is_exact_contract_value(
+        project: Path):
+    """X7：探针 extrapolation_assumption 锚定契约精确值
+    linear-in-feature-count（非仅真值断言）。"""
+    f = project / "acceptance" / "features" / "demo.feature"
+    suite, error = compile_feature(f, project, write=False)
+    assert error is None
+    _fake_gut(_gut_ok_output({"manifests": {"demo": suite.manifest}}))
+    probe = run_acceptance_probe(project, ["demo"])
+    assert probe["extrapolation_assumption"] == "linear-in-feature-count"
+    assert probe["suite_ok"] is True
+
+
+def test_bare_accept_compile_no_feature_no_keys_is_structured_error(
+        project: Path):
+    """OBS-1：裸 `accept compile`（无 feature 无 --keys）错误道钉为契约
+    ——结构化 ok=false rc=1，不走 argparse usage error rc=2。"""
+    code, out = _run_cli(
+        ["accept", "compile", "--project-root", str(project)])
+    assert code == 1
+    assert out["ok"] is False
+    assert "accept compile needs <feature> or --keys" \
+        in out["summary"]["error"]
+    assert out["failures"]
+
+
+def _run_cli(argv: list[str]) -> tuple[int, dict]:
+    import io
+    import json as j
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    return code, (j.loads(buf.getvalue()) if buf.getvalue().strip() else {})

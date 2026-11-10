@@ -106,19 +106,22 @@ _IMPORT_ARTIFACTS = ("uid_cache.bin", "imported",
 
 def require_import_cache(project_root: str) -> None:
     """§SPEC-015 前置守卫：真实 Godot 项目（project.godot 在场）缺 `.godot`
-    或缺导入产物 → fail-fast（明确报错 + 修复指令），不得放行进逐位点
+    或导入产物不全 → fail-fast（明确报错 + 修复指令），不得放行进逐位点
     600s timeout 级联（Revy O-1 实证：GUT 收集期挂起，每位点烧满超时）。
+    G-1（QA 定向复验 FAIL 裁定）：判据为三产物**俱在才放行**——部分导入
+    工程（如只跑过一次部分导入/中途取消）的 GUT 收集同样会挂起，`any()`
+    语义放行了该形态，与「任一产物缺失即 fail-fast」判据相反。
     无 project.godot 的玩具/单测工程不设此门（保持既有替身测试形态）。
     """
     root = Path(project_root)
     if not (root / "project.godot").is_file():
         return
     godot_dir = root / ".godot"
-    imported = godot_dir.is_dir() and any(
+    complete = godot_dir.is_dir() and all(
         (godot_dir / name).exists() for name in _IMPORT_ARTIFACTS)
-    if imported:
+    if complete:
         return
-    state = "missing" if not godot_dir.is_dir() else "present but not imported"
+    state = "missing" if not godot_dir.is_dir() else "present but incompletely imported"
     raise SlotProvisionError(
         f"target project import cache {state}: {root}/.godot — engine test "
         f"collection would hang per site (Revy O-1). Run "

@@ -444,18 +444,45 @@ def test_run_shadow_from_paths_delegates_to_default_measure(
     captured_stores: list[object] = []
 
     def fake_run_coverage(file_path, project_root, min_percent, timeout_s,
-                          timing_store, tests_glob):
+                          timing_store, tests_glob, evidence_out=None):
         calls.append((file_path, tests_glob))
         captured_stores.append(timing_store)
-        return {
-            "ok": True,
-            "summary": {
-                "total_lines": 3,
-                "covered_lines": 3,
-                "probes_fired": 3,
-                "hits_lines": [4, 5, 7],
-            },
+        summary = {
+            "total_lines": 3,
+            "covered_lines": 3,
+            "probes_fired": 3,
+            "hits_lines": [4, 5, 7],
         }
+        out = {"ok": True, "summary": summary}
+        if evidence_out:
+            # PR-B evidence contract: bundle lands in the evidence dir
+            import hashlib
+            run_uuid = "prc-delegate-0000-0000-000000000000"
+            src_sha = hashlib.sha256(
+                Path(file_path).read_text(encoding="utf-8").encode("utf-8")
+            ).hexdigest()
+            bundle = {
+                "evidence_version": "coverage-evidence/2",
+                "run_uuid": run_uuid,
+                "recovered": False,
+                "target": {"file": file_path, "sha256": src_sha},
+                "recipe": {"arm": "gut_full", "tests_glob": tests_glob},
+                "probe_manifest": {"manifest_version": "probe-manifest/2",
+                                   "inline": {}},
+                "T": [], "I": [], "C": [], "census_gaps": [],
+                "sentinels": {"probes_fired": 3, "vacuous": False,
+                              "run_error": False, "timeout": False,
+                              "zero_tests": False, "gut_ok": True,
+                              "transport_anomaly": 0},
+                "entry_states": [],
+                "file_state": "bundle_only",
+            }
+            ev = Path(evidence_out)
+            ev.mkdir(parents=True, exist_ok=True)
+            (ev / f"{run_uuid}.json").write_text(
+                json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
+            summary["run_uuid"] = run_uuid
+        return out
 
     monkeypatch.setattr(
         "godot_qa_toolkit.coverage.runner.run_coverage", fake_run_coverage
@@ -509,3 +536,180 @@ def test_default_measure_forwards_timing_store(monkeypatch, tmp_path: Path):
     bare = shadow_mod.default_measure(str(tmp_path))
     bare("f.gd", "source", None)
     assert captured["timing_store"] is None
+
+
+# --------------------------------------------------------------------------
+# §SPEC-027 (PR-C): evidence-bundle consumption and per-entry derivation
+# --------------------------------------------------------------------------
+
+
+def _bundle_for(source: str, hits: list[int], sha: str) -> dict:
+    """Deterministic evidence bundle in the coverage-evidence/2 shape, built
+    from the real registry/manifest pipeline (same as runner would produce)."""
+    from godot_qa_toolkit.registry.functions import build_file_registry
+    from godot_qa_toolkit.registry.manifest import build_probe_manifest_v2
+
+    registry = build_file_registry(source, file_label="x.gd")
+    manifest = build_probe_manifest_v2(source, registry)
+    hits_set = set(hits)
+    plan_by_line = {p["line"]: p for p in manifest["probe_plan"]}
+    c_rows = []
+    per = {p["fid"]: p for p in manifest["per_function"]}
+    for fid, pf in per.items():
+        covered = sorted(
+            ln for ln in pf.get("t_line_ids", [])
+            if ln in hits_set and ln in plan_by_line
+            and plan_by_line[ln]["fid"] == fid
+        )
+        c_rows.append({"fid": fid, "covered": len(covered),
+                       "covered_line_ids": covered})
+    i_rows = [{"fid": fid, "i_lines": pf.get("i_lines", 0)}
+              for fid, pf in per.items()]
+    return {
+        "evidence_version": "coverage-evidence/2",
+        "target": {"sha256": sha},
+        "probe_manifest": {"manifest_version": "probe-manifest/2",
+                           "inline": manifest},
+        "T": [{"fid": fid, "t_lines": pf.get("t_lines", 0),
+               "line_ids": pf.get("t_line_ids", [])} for fid, pf in per.items()],
+        "I": i_rows,
+        "C": c_rows,
+        "census_gaps": manifest["census_gaps"],
+        "sentinels": {"probes_fired": len(hits)},
+    }
+
+
+def test_evidence_bundle_consumed_for_records(monkeypatch):
+    """§SPEC-027: measure results carrying a bundle feed records from the
+    bundle's per-entry T/I/C — the evidence lane replaces hits aggregation."""
+    import hashlib
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+
+    source = (
+        "extends RefCounted\n"
+        "\n"
+        "func one() -> int:\n"
+        "\treturn 1\n"
+        "\n"
+        "func two() -> int:\n"
+        "\tif 1:\n"
+        "\t\treturn 2\n"
+        "\treturn 0\n"
+    )
+    src_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    captured = {}
+
+    def fake_measure(label, src, tests_glob):
+        bundle = _bundle_for(src, hits=[4, 7, 8, 9], sha=src_sha)
+        captured["bundle"] = bundle
+        covered_lines = sorted(
+            ln for c in bundle["C"] for ln in c["covered_line_ids"]
+        )
+        return {"ok": True, "summary": {
+            "total_lines": 4, "covered_lines": len(covered_lines),
+            "probes_fired": len(covered_lines), "hits_lines": covered_lines,
+            "wall_s": 0.01,
+        }, "bundle": bundle}
+
+    outcome = shadow_mod._measure_eligible_file(
+        "x.gd", source, fake_measure,
+        "res://tests/unit/container/", "res://tests/unit/"
+    )
+    rows = outcome["records"]
+    assert len(rows) == 2
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["one"]["covered"] == 1 and by_name["one"]["total"] == 1
+    assert by_name["two"]["covered"] == 3 and by_name["two"]["total"] == 3
+    assert all(r["cov_source"] == "gut_full" for r in rows)
+
+
+def test_evidence_stale_sha_derives_stale_status():
+    """§8-4 derivation: bundle target sha ≠ current source sha → every record
+    goes stale (covered/total nulled, no score)."""
+    import hashlib
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+
+    source = SHADOW_TWO_FUNC_SRC
+    src_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    bundle = _bundle_for(source, hits=[3, 7], sha=src_sha)
+    # drift the bundle's sha so it no longer matches the current source
+    bundle["target"]["sha256"] = "stale" * 8
+    profile = shadow_mod.file_profile(source, file_label="x.gd")
+    per_entry, stale = shadow_mod._derive_per_entry(
+        bundle, profile["functions"], source
+    )
+    assert stale is True
+    assert all(e["state"] == "stale" for e in per_entry.values())
+
+
+def test_evidence_host_lambda_gap_derives_cc_unmeasured():
+    """§8-4: host lambda_gap > 0 → cc_unmeasured (WP1c 前出分车道不变)."""
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+    from godot_qa_toolkit.risk.identity import file_profile
+    import hashlib
+
+    lam_src = (
+        "extends RefCounted\n"
+        "\n"
+        "func host(x: int) -> int:\n"
+        "\tvar f := func(v: int) -> int:\n"
+        "\t\tif v > 0:\n"
+        "\t\t\treturn v\n"
+        "\t\treturn 0\n"
+        "\treturn f(x)\n"
+    )
+    src_sha = hashlib.sha256(lam_src.encode("utf-8")).hexdigest()
+    bundle = _bundle_for(lam_src, hits=[3], sha=src_sha)
+    profile = file_profile(lam_src, file_label="x.gd")
+    per_entry, stale = shadow_mod._derive_per_entry(
+        bundle, profile["functions"], lam_src
+    )
+    host = per_entry["x.gd::host"]
+    assert host["state"] == "cc_unmeasured"
+    assert host["covered"] is None and host["total"] is None
+
+
+SHADOW_TWO_FUNC_SRC = (
+    "extends RefCounted\n"
+    "\n"
+    "func one() -> int:\n"
+    "\treturn 1\n"
+    "\n"
+    "func two() -> int:\n"
+    "\tif 1:\n"
+    "\t\treturn 2\n"
+    "\treturn 0\n"
+)
+
+
+def test_derive_per_entry_signature_helper_exists():
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+    import hashlib
+    import json
+
+    from godot_qa_toolkit.registry.functions import build_file_registry
+    from godot_qa_toolkit.registry.manifest import build_probe_manifest_v2
+
+    src = SHADOW_TWO_FUNC_SRC
+    sha = hashlib.sha256(src.encode()).hexdigest()
+    reg = build_file_registry(src, file_label="x.gd")
+    man = build_probe_manifest_v2(src, reg)
+    profile_functions = [
+        {"function_id": e["fid"], "lambda_gap": e["lambda_gap"]}
+        for e in reg["entries"] if e["kind"] == "func_def"
+    ]
+    c_rows = [{"fid": fid, "covered": covered, "covered_line_ids": []}
+              for fid, covered in (("x.gd::one", 1), ("x.gd::two", 3))]
+    i_rows = [{"fid": fid, "i_lines": total}
+              for fid, total in (("x.gd::one", 1), ("x.gd::two", 3))]
+    bundle = {"C": c_rows, "I": i_rows, "target": {"sha256": sha}}
+
+    per_entry, stale = shadow_mod._derive_per_entry(
+        bundle, profile_functions, src,
+        registry=reg, probe_manifest=man,
+    )
+    assert stale is False
+    assert set(per_entry) == {"x.gd::one", "x.gd::two"}
+    assert all(e["state"] == "scored" for e in per_entry.values())
+    assert per_entry["x.gd::one"]["covered"] == 1
+    assert per_entry["x.gd::two"]["covered"] == 3

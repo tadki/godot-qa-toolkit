@@ -9,6 +9,7 @@ the real KOL tree. Extra GUT rounds are limited to what §SPEC-009 prescribes
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -79,13 +80,21 @@ def _records_for_file(
     *,
     cov_source: str,
     state: str,
+    per_entry: dict[str, dict] | None = None,
 ) -> list[dict]:
+    """PR-C (§SPEC-027): when `per_entry` (fid → covered/total/state from the
+    evidence bundle) is given, records consume the bundle's per-entry T/I/C
+    directly; the probe-line aggregation stays as the fallback lane."""
     identities = {f["function_id"]: f for f in profile["functions"]}
     stats = {s["function_id"]: s for s in _function_stats(profile, hits)}
     records = []
     for fid, identity in identities.items():
+        entry = (per_entry or {}).get(fid)
         stat = stats.get(fid)
-        if state != "scored" or stat is None:
+        if entry is not None:
+            covered, total = entry["covered"], entry["total"]
+            record_state = entry["state"]
+        elif state != "scored" or stat is None:
             covered = total = None
             record_state = state if state != "scored" else "unknown"
         else:
@@ -103,6 +112,7 @@ def _records_for_file(
                 total=total,
                 cov_source=cov_source,
                 state=record_state,
+                lambda_gap=identity.get("lambda_gap", 0),
                 recipe={"cov_source": cov_source, "semantics": "statement_start_line"},
                 blind_spots=[
                     "path coverage not measured",
@@ -111,6 +121,59 @@ def _records_for_file(
             )
         )
     return records
+
+def _derive_per_entry(
+    bundle: dict,
+    profile_functions: list[dict],
+    source: str,
+    registry: dict | None = None,
+    probe_manifest: dict | None = None,
+) -> tuple[dict[str, dict], bool]:
+    """§SPEC-027 per-entry score_status derivation (§8-4 rules unchanged):
+    stale = bundle target sha ≠ current source sha; cc_unmeasured = host
+    lambda_gap > 0 (WP1c 前出分车道不变). Returns (per_entry, stale)."""
+    import hashlib
+
+    from ..registry.functions import build_file_registry
+    from ..registry.manifest import build_probe_manifest_v2
+
+    current_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    stale = bundle.get("target", {}).get("sha256") != current_sha
+    if registry is None:
+        registry = build_file_registry(source, file_label="")
+    if probe_manifest is None:
+        probe_manifest = build_probe_manifest_v2(source, registry)
+
+    c_by_fid = {c["fid"]: c for c in bundle.get("C", [])}
+    i_by_fid = {r["fid"]: r for r in bundle.get("I", [])}
+    per_entry: dict[str, dict] = {}
+    if not profile_functions:
+        profile_functions = [
+            {"function_id": e["fid"], "lambda_gap": e.get("lambda_gap", 0)}
+            for e in registry.get("entries", []) if e.get("kind") == "func_def"
+        ]
+    for fn in profile_functions:
+        fid = fn["function_id"]
+        if stale:
+            per_entry[fid] = {"covered": None, "total": None,
+                              "state": "stale"}
+            continue
+        c_row = c_by_fid.get(fid, {})
+        i_row = i_by_fid.get(fid, {})
+        covered = c_row.get("covered", 0)
+        total = i_row.get("i_lines", 0)
+        lambda_gap = fn.get("lambda_gap", 0)
+        if lambda_gap > 0:
+            # §8-4: 带分支 lambda 宿主的出分车道维持 cc_unmeasured（WP1c 前）
+            per_entry[fid] = {"covered": None, "total": None,
+                              "state": "cc_unmeasured"}
+        elif total > 0:
+            per_entry[fid] = {"covered": covered, "total": total,
+                              "state": "scored"}
+        else:
+            per_entry[fid] = {"covered": None, "total": None,
+                              "state": "unknown"}
+    return per_entry, stale
 
 
 def _measure_eligible_file(
@@ -136,7 +199,26 @@ def _measure_eligible_file(
     rerun_hits = set(rerun["summary"].get("hits_lines", ()))
 
     state = _file_state(full)
-    records = _records_for_file(profile, full_hits, cov_source="gut_full", state=state)
+
+    # §SPEC-027 (PR-C): consume the evidence bundle's per-entry T/I/C when the
+    # measure adapter produced one; derive per-entry score_status from it
+    # (stale = target sha mismatch, cc_unmeasured = host lambda_gap > 0),
+    # replacing the hits_lines aggregation for the records lane.
+    bundle = full.get("bundle")
+    per_entry = None
+    stale = False
+    if bundle is not None:
+        per_entry, stale = _derive_per_entry(
+            bundle, profile["functions"], source
+        )
+        records = _records_for_file(
+            profile, full_hits, cov_source="gut_full", state=state,
+            per_entry=per_entry,
+        )
+    else:
+        records = _records_for_file(
+            profile, full_hits, cov_source="gut_full", state=state
+        )
 
     per_block = _function_stats(profile, full_hits)
     core_block = {s["function_id"]: s for s in _function_stats(profile, core_hits)}
@@ -420,8 +502,17 @@ def run_shadow_from_paths(
     return report
 
 
-def default_measure(project_root: str, timing_store=None):
-    """Real measurement adapter: one coverage run per (file, tests_glob)."""
+def default_measure(project_root: str, timing_store=None, evidence_out=None):
+    """Real measurement adapter: one coverage run per (file, tests_glob).
+
+    PR-C (§SPEC-027): with `evidence_out`, each run produces a
+    coverage-evidence/2 bundle and the adapter returns its per-entry T/I/C in
+    the `bundle` key — the shadow consumes bundles instead of hits_lines.
+    Bundles are reused as explicit outputs; no extra GUT rounds are added
+    (§SPEC-027 extra_gut_rounds==0)."""
+    evidence_dir = Path(evidence_out) if evidence_out else None
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
 
     def measure(label: str, source: str, tests_glob: str | None) -> dict:
         from ..coverage.runner import run_coverage
@@ -434,10 +525,18 @@ def default_measure(project_root: str, timing_store=None):
             timeout_s=300,
             timing_store=timing_store,
             tests_glob=tests_glob,
+            evidence_out=str(evidence_dir) if evidence_dir else None,
         )
         wall = time.monotonic() - start
         summary = dict(result.get("summary", {}))
         summary["wall_s"] = round(wall, 3)
-        return {"ok": result.get("ok"), "summary": summary}
+        out = {"ok": result.get("ok"), "summary": summary}
+        if evidence_dir is not None:
+            bundle_path = evidence_dir / f"{summary.get('run_uuid')}.json"
+            if bundle_path.is_file():
+                out["bundle"] = json.loads(
+                    bundle_path.read_text(encoding="utf-8")
+                )
+        return out
 
     return measure

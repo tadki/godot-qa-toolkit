@@ -369,6 +369,50 @@ def cmd_registry(args: argparse.Namespace) -> int:
     return _emit(diff)
 
 
+def cmd_recipe(args: argparse.Namespace) -> int:
+    from .canonical.recipe import build_recipe
+
+    exclusions = []
+    for raw in args.exclude:
+        parts = raw.split(":", 2)
+        if len(parts) != 3:
+            return _emit({
+                "tool": "recipe",
+                "ok": False,
+                "summary": {"error": f"--exclude expects scope:entry:reason, got {raw!r}"},
+                "failures": [{"reason": f"--exclude expects scope:entry:reason, got {raw!r}"}],
+            })
+        scope, entry, reason = parts
+        exclusions.append({"scope": scope, "entry": entry, "reason": reason})
+    recipe, error = build_recipe(
+        args.project_root, exclusions=exclusions,
+    )
+    if error is not None:
+        return _emit({
+            "tool": "recipe",
+            "ok": False,
+            "summary": {"error": error},
+            "failures": [{"reason": error}],
+        })
+    out_path = Path(args.out)
+    out_path.write_text(
+        json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return _emit({
+        "tool": "recipe",
+        "ok": True,
+        "summary": {
+            "recipe_version": recipe["recipe_version"],
+            "recipe_hash": recipe["recipe_hash"],
+            "out": str(out_path),
+            "gut_dirs": len(recipe["gut_face"]["dirs"]),
+            "acceptance_features": recipe["acceptance_face"]["count"],
+            "exclusions": len(recipe["exclusions"]),
+        },
+        "failures": [],
+    })
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage.runner import run_coverage
     from .timing import TimingStore
@@ -595,6 +639,17 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("new", help="new snapshot JSON path")
     rd.add_argument("--out", default=None, help="optionally write the diff JSON")
     rd.set_defaults(func=cmd_registry)
+
+    cr = sub.add_parser(
+        "recipe",
+        help="build the canonical full recipe (canonical-recipe/1, read-only, SEE-1546 WP3)",
+    )
+    cr.add_argument("--project-root", required=True, help="target Godot project root")
+    cr.add_argument("--out", default="recipe.json",
+                    help="where to write the recipe JSON (default ./recipe.json)")
+    cr.add_argument("--exclude", action="append", default=[],
+                    help="exclusion as scope:entry:reason (repeatable; reason required)")
+    cr.set_defaults(func=cmd_recipe)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
     v.add_argument("file", nargs="?", default=None,

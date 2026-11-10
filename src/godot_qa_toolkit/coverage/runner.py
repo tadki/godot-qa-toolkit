@@ -358,19 +358,17 @@ def run_coverage(
         # §SPEC-026: vacuous bundles land too (no sink was created yet —
         # zero executable lines means zero probes, nothing to recover)
         if evidence_out:
-            from .evidence import (
-                build_bundle as _bb, make_run_uuid as _mru,
-                sink_name_for as _snf, evidence_dir_for as _edf,
-                write_bundle as _wb,
+            uuid0 = make_run_uuid()
+            evidence_dir_for(evidence_out).mkdir(parents=True, exist_ok=True)
+            write_bundle(
+                evidence_dir_for(evidence_out),
+                build_bundle(
+                    run_uuid=uuid0, file_path=str(path), gd_source=original_src,
+                    tests_glob=tests_glob, hits_lines=[], probes_fired=0,
+                    gut_ok=True, run_error=False, timeout=False, zero_tests=False,
+                    vacuous=True,
+                ),
             )
-            uuid0 = _mru()
-            _edf(evidence_out).mkdir(parents=True, exist_ok=True)
-            _wb(_edf(evidence_out), _bb(
-                run_uuid=uuid0, file_path=str(path), gd_source=original_src,
-                tests_glob=tests_glob, hits_lines=[], probes_fired=0,
-                gut_ok=True, run_error=False, timeout=False, zero_tests=False,
-                vacuous=True,
-            ))
         return _vacuous_result(str(path), min_percent)
 
     # SEE-1356 L1：coverage 同 timing store 接入——缓存只喂预算锚，GUT 永远

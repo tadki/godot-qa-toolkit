@@ -364,7 +364,7 @@ def clear_sink(sink_path: str | None, project_root: str,
                sink_name: str) -> None:
     """Delete this run's sink after the bundle landed (evidence moved)."""
     if sink_path and Path(sink_path).is_file():
-        os.remove(sink_path)
+        Path(sink_path).unlink()
     local = Path(project_root) / sink_name
     if local.is_file():
         local.unlink()

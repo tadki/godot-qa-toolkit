@@ -202,3 +202,33 @@ def test_stdout_contract_frozen_against_011b87d(tmp_path: Path, monkeypatch):
     assert not any("evidence" in k or "run_uuid" in k
                    for k in payload["summary"])
 
+
+
+def test_clear_sink_removes_real_sink_path_file(tmp_path: Path):
+    """D-WP2B-1: clear_sink with a real sink_path must delete that file
+    (and the local fallback) without crashing — RED before the Path.unlink
+    fix (os.remove raised NameError; module never imported os)."""
+    from godot_qa_toolkit.coverage.evidence import clear_sink
+
+    evidence = tmp_path / "ev"
+    evidence.mkdir()
+    sink_path = evidence / sink_name_for("u-clear")
+    sink_path.write_text("0\n", encoding="utf-8")
+    local = tmp_path / "proj" / sink_name_for("u-clear")
+    local.parent.mkdir(parents=True)
+    local.write_text("0\n", encoding="utf-8")
+
+    clear_sink(str(sink_path), str(tmp_path / "proj"), sink_name_for("u-clear"))
+
+    assert not sink_path.exists()
+    assert not local.exists()
+
+
+def test_clear_sink_missing_paths_stays_silent(tmp_path: Path):
+    """sink_path=None and missing local fallback → silent no-op (contract:
+    clear is only called after the bundle landed; missing paths are fine)."""
+    from godot_qa_toolkit.coverage.evidence import clear_sink
+
+    clear_sink(None, str(tmp_path), "qa-coverage-hits-never.txt")
+    clear_sink(str(tmp_path / "missing" / "sink.txt"), str(tmp_path),
+               "qa-coverage-hits-never.txt")

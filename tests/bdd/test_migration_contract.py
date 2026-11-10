@@ -46,8 +46,9 @@ EXPECTED_SCENARIO_COUNTS = {
     # HIGH-1 拆分：8 个自足场景 + 3 个真实 KOL 树场景独立模块守卫）。
     "see1546_wp1a": 8,
     "see1546_wp1a_kol": 3,
-    # SEE-1550 §SPEC-002：8 形态真实引擎加载矩阵（7 killed + orphan 披露）。
-    "see1550_forms": 8,
+    # SEE-1550 §SPEC-002+017：真实引擎加载矩阵 8 形态 + vendored 显式目标
+    # （7 killed + orphan 披露 + vendored killed）。
+    "see1550_forms": 9,
     # SEE-1546 M2：最小 exploratory shadow（CRAP-Line 诊断排序器）。
     "see1546_shadow": 8,
     # SEE-1546 WP1b：中立函数 registry + 全量逐函数 CC parity。
@@ -56,7 +57,8 @@ EXPECTED_SCENARIO_COUNTS = {
 EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
 # 合并账本（rebase SEE-1546 WP 系列后）：base 142/133
-# + SEE-1550 §SPEC-002 see1550_forms（+29 步 / +4 唯一定义）
+# + SEE-1550 §SPEC-002 see1550_forms（+29 步 / +4 唯一定义，含 §SPEC-017
+#   vendored 显式目标 +3 步）
 # + SEE-1546 WP1b/WP2/WP3（master 侧 +30 步 / +30 定义）→ 201 / 167。
 EXPECTED_STEPS = 201
 EXPECTED_DEFINITIONS = 167

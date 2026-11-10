@@ -99,6 +99,32 @@ def ensure_qa_cache_ignored(project_root: str) -> Path:
             f"channel") from e
 
 
+# 导入缓存判据：任一产物在场即视为已导入（godot 4.x `--import` 产物）。
+_IMPORT_ARTIFACTS = ("uid_cache.bin", "imported",
+                     "global_script_class_cache.cfg")
+
+
+def require_import_cache(project_root: str) -> None:
+    """§SPEC-015 前置守卫：真实 Godot 项目（project.godot 在场）缺 `.godot`
+    或缺导入产物 → fail-fast（明确报错 + 修复指令），不得放行进逐位点
+    600s timeout 级联（Revy O-1 实证：GUT 收集期挂起，每位点烧满超时）。
+    无 project.godot 的玩具/单测工程不设此门（保持既有替身测试形态）。
+    """
+    root = Path(project_root)
+    if not (root / "project.godot").is_file():
+        return
+    godot_dir = root / ".godot"
+    imported = godot_dir.is_dir() and any(
+        (godot_dir / name).exists() for name in _IMPORT_ARTIFACTS)
+    if imported:
+        return
+    state = "missing" if not godot_dir.is_dir() else "present but not imported"
+    raise SlotProvisionError(
+        f"target project import cache {state}: {root}/.godot — engine test "
+        f"collection would hang per site (Revy O-1). Run "
+        f"`godot --headless --import --path {root}` first")
+
+
 def binary_domain_root(project_root: str, kind: str) -> Path:
     """分域影子根（不创建目录）：linux→ext4 农场；win64→.qa-cache 同盘根。"""
     if kind == "win64":

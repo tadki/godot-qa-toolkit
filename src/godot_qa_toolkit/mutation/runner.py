@@ -108,7 +108,10 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     SEE-1550：mutant 轮的 project_root 是影子槽，跨进程槽位闸必须仍锚真实仓
     （"GlobalGodotGate 锚真实仓"既有语义）——闸锚经模块级 _ACTIVE_GATE_ROOT
     传递（缺省回落 project_root，3 参 fake 契约零变化）。
+    §SPEC-015：真实 Godot 项目缺导入缓存时在此 fail-fast（首个 GUT 调用即
+    拦截——baseline 之前，绝不放行进逐位点 timeout 级联）。
     """
+    shadow.require_import_cache(project_root)
     gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
     if not os.path.isfile(gut_fs):
         raise FileNotFoundError(f"GUT runner not found: {gut_fs}")

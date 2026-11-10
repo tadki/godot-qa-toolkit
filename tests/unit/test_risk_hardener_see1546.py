@@ -19,7 +19,7 @@ from godot_qa_toolkit import cli as cli_mod
 from godot_qa_toolkit.cli import build_parser
 from godot_qa_toolkit.coverage.runner import ExecutableLine, _coverage_report
 from godot_qa_toolkit.risk.contract import build_shadow_record
-from godot_qa_toolkit.risk.identity import _function_statement_lines
+from godot_qa_toolkit.registry.manifest import _statement_lines
 from godot_qa_toolkit.risk.shadow import _report_document
 
 GD_SNIPPET = "func a():\n\treturn 1\n"
@@ -55,7 +55,10 @@ def test_coverage_report_exposes_hits_lines():
 
 
 def test_function_statement_lines_skips_metadataless_nodes():
-    assert _function_statement_lines(Tree("pass_stmt", []), [0]) == ()
+    """PR-A re-anchor: the census traversal lives in registry.manifest
+    and must skip nodes without `.data` (metadataless/Token shapes)."""
+    assert _statement_lines(Tree("pass_stmt", []), [0],
+                            skip_subtrees=("lambda",)) == ()
 
 
 # --------------------------------------------------------------------------
@@ -243,15 +246,16 @@ _MULTILINE_FUNC = "func a(x):\n\tif x:\n\t\treturn 1\n\treturn 0\n"
 def test_file_profile_flags_t_not_equal_i(monkeypatch):
     """An instrumented line the statement census does not count (T≠I) must
     keep the file ineligible even without any gap-lane marker."""
-    import godot_qa_toolkit.risk.identity as identity_mod
+    import godot_qa_toolkit.registry.manifest as manifest_mod
 
-    real = identity_mod._collect_executable_lines
+    real = manifest_mod._collect_executable_lines
 
     def drop_if_line(src_arg):
         return [row for row in real(src_arg) if row.line != 2]
 
-    monkeypatch.setattr(identity_mod, "_collect_executable_lines", drop_if_line)
-    profile = identity_mod.file_profile(_MULTILINE_FUNC, file_label="x.gd")
+    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", drop_if_line)
+    from godot_qa_toolkit.risk.identity import file_profile
+    profile = file_profile(_MULTILINE_FUNC, file_label="x.gd")
     assert profile["has_lambda"] is False and profile["has_inner_class"] is False
     assert profile["gap_lane"] is None
     assert profile["t_equal_i"] is False
@@ -262,15 +266,16 @@ def test_file_profile_flags_t_not_equal_i(monkeypatch):
 def test_file_profile_flags_probe_without_owner(monkeypatch):
     """An instrumented line outside every function span leaves ownership
     incomplete — the file must never enter the eligible lane."""
-    import godot_qa_toolkit.risk.identity as identity_mod
+    import godot_qa_toolkit.registry.manifest as manifest_mod
 
-    real = identity_mod._collect_executable_lines
+    real = manifest_mod._collect_executable_lines
 
     def with_orphan(src_arg):
         return real(src_arg) + [ExecutableLine(line=99, node="expr_stmt")]
 
-    monkeypatch.setattr(identity_mod, "_collect_executable_lines", with_orphan)
-    profile = identity_mod.file_profile(GD_SNIPPET, file_label="x.gd")
+    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", with_orphan)
+    from godot_qa_toolkit.risk.identity import file_profile
+    profile = file_profile(GD_SNIPPET, file_label="x.gd")
     assert profile["t_equal_i"] is False
     assert profile["owners_complete"] is False
     assert profile["eligible"] is False
@@ -282,10 +287,20 @@ def test_file_profile_flags_ambiguous_ownership(monkeypatch):
     """True ownership ambiguity is reported, never guessed — and ambiguous
     attribution keeps the file out of the eligible lane even though the
     probe/line sets still match (T=I)."""
-    import godot_qa_toolkit.risk.identity as identity_mod
+    import godot_qa_toolkit.registry.manifest as manifest_mod
 
-    monkeypatch.setattr(identity_mod, "_owner", lambda identities, line: ("x.gd::a", True))
-    profile = identity_mod.file_profile(GD_SNIPPET, file_label="x.gd")
+    def all_ambiguous(spans, plan_lines):
+        plan = [
+            {"probe_id": i, "line": line, "fid": "x.gd::a",
+             "owner_kind": "func", "ownership": "ambiguous"}
+            for i, line in enumerate(plan_lines)
+        ]
+        i_by_fid = {"x.gd::a": len(plan_lines)}
+        return plan, 0, len(plan_lines), i_by_fid
+
+    monkeypatch.setattr(manifest_mod, "_resolve_ownership", all_ambiguous)
+    from godot_qa_toolkit.risk.identity import file_profile
+    profile = file_profile(GD_SNIPPET, file_label="x.gd")
     assert profile["t_equal_i"] is True
     assert profile["owners_complete"] is False
     assert profile["eligible"] is False
@@ -296,13 +311,13 @@ def test_file_profile_flags_ambiguous_ownership(monkeypatch):
 def test_function_census_excludes_paren_depth_lines():
     """The per-function census counts depth-0 statement lines only: a line
     sitting inside an open bracket (paren depth > 0) is not a statement start."""
-    from godot_qa_toolkit.complexity.gd_ast_oracle import _iter_function_defs_with_paths
+    from godot_qa_toolkit.registry.manifest import _node_by_span
     from gdtoolkit.parser import parser
 
     tree = parser.parse(GD_SNIPPET, gather_metadata=True)
-    func_def = _iter_function_defs_with_paths(tree)[0][1]
-    assert _function_statement_lines(func_def, [0, 0]) == (2,)
-    assert _function_statement_lines(func_def, [0, 1]) == ()
+    func_def = _node_by_span(tree, 1)
+    assert _statement_lines(func_def, [0, 0]) == (2,)
+    assert _statement_lines(func_def, [0, 1]) == ()
 
 
 def test_report_routing_thresholds():

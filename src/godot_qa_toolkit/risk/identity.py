@@ -1,34 +1,29 @@
-"""Function identity, probe→function mapping and instrumentation census (§SPEC-006).
+"""Function identity, probe→function mapping and instrumentation census (§SPEC-006),
+PR-A re-anchor (§SPEC-024): this module is now a *registry consumer*.
 
-Identity is anchored on the raw GDScript AST (gdtoolkit), never on radon
-records: lex_path (class chain + name), span, decision-point cc and a body
-hash. The probe manifest reuses the coverage runner's executable-line set
-(the instrumentation `I`) and compares it with an independently derived
-per-function statement census (`T`) — class_def bodies are pruned by the
-instrumenter, so inner-class files expose that gap as `t_equal_i=False`
-instead of pretending full measurement.
+Identity collection delegates to `registry.functions.build_file_registry`
+(fid = path + class chain + name + occurrence; leaf-token spans; standalone
+lambda entries) and line ownership delegates to
+`registry.manifest.build_probe_manifest_v2` (build-time fid materialization —
+no downstream line-range inference). The private coverage.runner imports of
+M2 are gone (§SPEC-024 debt gate): the instrumentation line set and per-entry
+T census arrive through probe-manifest/2, whose collector constants remain the
+single source of truth inside registry.manifest.
+
+Eligibility stays in the risk domain (a measurement policy, not a neutral
+fact): gap lanes and the eligible verdict are aggregated here from the
+registry/manifest facts.
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 
-from gdtoolkit.parser import parser as gdtoolkit_parser
-from lark import Tree
+from gdtoolkit.gd2py import convert_code
 
-from ..complexity.gd_ast_oracle import (
-    _iter_function_defs_with_paths,
-    count_decision_points,
-    function_name,
-)
 from ..complexity.sanitizer import sanitize_python_ir_identifiers
-from ..coverage.runner import (
-    _EXECUTABLE_NODE_NAMES,
-    _collect_executable_lines,
-    _node_line,
-    _paren_depths,
-)
+from ..registry.functions import build_file_registry
+from ..registry.manifest import build_probe_manifest_v2
 
 
 @dataclass(frozen=True)
@@ -44,48 +39,29 @@ class FunctionIdentity:
     t_lines: tuple[int, ...] = field(default=())
 
 
-def _body_hash(src: str, node: Tree) -> str:
-    start = getattr(node.meta, "start_pos", None)
-    end = getattr(node.meta, "end_pos", None)
-    chunk = src[start:end] if start is not None and end is not None else ""
-    return hashlib.sha1(chunk.encode("utf-8")).hexdigest()[:12]
-
-
-def _function_statement_lines(node: Tree, depths: list[int]) -> tuple[int, ...]:
-    """Per-function statement census (T side): a *separate* traversal from the
-    global instrumentation collector, restricted to the func_def subtree."""
-    found: list[int] = []
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if current.data in _EXECUTABLE_NODE_NAMES:
-            ln = _node_line(current)
-            if ln and ln <= len(depths) and depths[ln - 1] == 0:
-                found.append(ln)
-        stack.extend(c for c in getattr(current, "children", []) if hasattr(c, "data"))
-    return tuple(sorted(set(found)))
-
-
 def collect_function_identities(gd_source: str, file_label: str) -> list[FunctionIdentity]:
-    tree = gdtoolkit_parser.parse(gd_source, gather_metadata=True)
-    depths = _paren_depths(gd_source)
+    """func_def identities from the registry (lambda entries are exposed
+    separately via file_profile; §SPEC-024 incremental disclosure). Per-entry
+    T line ids are backfilled from probe-manifest/2's per-function census."""
+    registry = build_file_registry(gd_source, file_label)
+    manifest = build_probe_manifest_v2(gd_source, registry)
+    per_function = {p["fid"]: p for p in manifest["per_function"]}
     identities: list[FunctionIdentity] = []
-    for lex_path, func_def in _iter_function_defs_with_paths(tree):
-        name = function_name(func_def)
-        if name is None:
+    for entry in registry["entries"]:
+        if entry["kind"] != "func_def":
             continue
-        meta = func_def.meta
+        pf = per_function.get(entry["fid"], {})
         identities.append(
             FunctionIdentity(
-                function_id=f"{file_label}::{lex_path}",
-                name=name,
-                lex_path=lex_path,
-                start_line=int(getattr(meta, "line", 0) or 0),
-                end_line=int(getattr(meta, "end_line", 0) or 0),
-                cc=1 + count_decision_points(func_def),
-                kind=str(func_def.data),
-                body_hash=_body_hash(gd_source, func_def),
-                t_lines=_function_statement_lines(func_def, depths),
+                function_id=entry["fid"],
+                name=entry["name"],
+                lex_path=".".join(entry["lex_scope"] + [entry["name"]]),
+                start_line=entry["start_line"],
+                end_line=entry["end_line"],
+                cc=entry["cc_oracle"],
+                kind=entry["kind"],
+                body_hash=entry["body_hash"],
+                t_lines=tuple(pf.get("t_line_ids", [])),
             )
         )
     return identities
@@ -98,56 +74,40 @@ def t_census(identities: list[FunctionIdentity]) -> set[int]:
     return lines
 
 
-def _owner(identities: list[FunctionIdentity], line: int) -> tuple[str | None, bool]:
-    """Line → function_id by the innermost span (GDScript has no nested
-    functions; the looser end_line occasionally touches the next header line,
-    so the latest start wins). True ambiguity is reported, never guessed."""
-    candidates = [
-        i for i in identities if i.start_line < line <= i.end_line
-    ]
-    if not candidates:
-        return None, False
-    if len(candidates) > 1:
-        starts = {i.start_line for i in candidates}
-        if len(starts) > 1:
-            latest = max(candidates, key=lambda i: i.start_line)
-            return latest.function_id, False
-        return None, True
-    return candidates[0].function_id, False
-
-
 def build_probe_manifest(
-    gd_source: str, identities: list[FunctionIdentity]
+    gd_source: str, identities: list[dict] | None = None,
+    file_label: str | None = None,
 ) -> tuple[list[dict], list[int]]:
-    """probe_id → {line, function_id} rows plus the probe_id→line manifest
-    (same ordering as the coverage runner's manifest)."""
-    executable_lines = _collect_executable_lines(gd_source)
-    manifest = [entry.line for entry in executable_lines]
+    """Adapter over probe-manifest/2 returning the M2-shaped (rows, manifest)
+    pair so §SPEC-006 consumers keep their assertion shape.
+
+    `rows` add `function_id` (from the materialized fid) and
+    `owner_ambiguous` (probe-manifest/2 ownership == ambiguous) per line;
+    unowned lines keep M2 semantics (fid None, ambiguous False).
+    """
+    label = file_label
+    if not label and identities:
+        first = identities[0]
+        fid = getattr(first, "function_id", "") or first.get("function_id", "")
+        label = str(fid).split("::", 1)[0] or "unknown.gd"
+    registry = build_file_registry(gd_source, file_label=label)
+    manifest = build_probe_manifest_v2(gd_source, registry)
     rows: list[dict] = []
-    for probe_id, line in enumerate(manifest):
-        function_id, ambiguous = _owner(identities, line)
+    for probe in manifest["probe_plan"]:
         rows.append(
             {
-                "probe_id": probe_id,
-                "line": line,
-                "function_id": function_id,
-                "owner_ambiguous": ambiguous,
+                "probe_id": probe["probe_id"],
+                "line": probe["line"],
+                "function_id": probe["fid"],
+                "owner_ambiguous": probe.get("ownership") == "ambiguous",
+                "owner_kind": probe["owner_kind"],
             }
         )
-    return rows, manifest
-
-
-def _has_lambda(tree: Tree) -> bool:
-    return any(sub.data == "lambda" for sub in tree.iter_subtrees())
-
-
-def _has_inner_class(tree: Tree) -> bool:
-    return any(sub.data == "class_def" for sub in tree.iter_subtrees())
+    lines = [p["line"] for p in manifest["probe_plan"]]
+    return rows, lines
 
 
 def _uses_sanitized_projection(gd_source: str) -> bool:
-    from gdtoolkit.gd2py import convert_code
-
     try:
         python_code = convert_code(gd_source)
     except Exception:
@@ -161,55 +121,89 @@ GAP_LANE_VAR_DEF = "sanitized_ir_projection"
 
 
 def file_profile(gd_source: str, file_label: str) -> dict:
-    tree = gdtoolkit_parser.parse(gd_source, gather_metadata=True)
-    identities = collect_function_identities(gd_source, file_label)
-    rows, manifest = build_probe_manifest(gd_source, identities)
-    t_set = t_census(identities)
-    i_set = {row["line"] for row in rows}
-    has_lambda = _has_lambda(tree)
-    has_inner = _has_inner_class(tree)
-    t_equal_i = t_set == i_set
-    owners_complete = all(
-        row["function_id"] is not None and not row["owner_ambiguous"] for row in rows
+    """Aggregate registry + probe-manifest/2 facts into the risk eligibility
+    profile (§SPEC-024). File-level `t_equal_i`/`owners_complete` degrade to
+    per-entry aggregation; lambda and inner-class registry entries surface in
+    the profile as incremental disclosure (§SPEC-024 disclosure gate)."""
+    registry = build_file_registry(gd_source, file_label)
+    manifest = build_probe_manifest_v2(gd_source, registry)
+    census = manifest["census"]
+    per_function = manifest["per_function"]
+
+    rows: list[dict] = []
+    for probe in manifest["probe_plan"]:
+        rows.append(
+            {
+                "probe_id": probe["probe_id"],
+                "line": probe["line"],
+                "function_id": probe["fid"],
+                "owner_ambiguous": probe.get("ownership") == "ambiguous",
+                "owner_kind": probe["owner_kind"],
+            }
+        )
+
+    func_entries = [e for e in registry["entries"] if e["kind"] == "func_def"]
+    lambda_entries = [e for e in registry["entries"] if e["kind"] == "lambda"]
+
+    functions = [
+        {
+            "function_id": e["fid"],
+            "name": e["name"],
+            "lex_path": ".".join(e["lex_scope"] + [e["name"]]),
+            "start_line": e["start_line"],
+            "end_line": e["end_line"],
+            "cc": e["cc_oracle"],
+            "kind": e["kind"],
+            "body_hash": e["body_hash"],
+        }
+        for e in func_entries
+    ]
+
+    instrumentable = [p for p in per_function
+                      if p["fid"] in {f["function_id"] for f in functions}
+                      or p["fid"].endswith(">")]
+    # per-entry aggregation (§SPEC-024: file-level facts degrade to entries)
+    t_total = sum(p["t_lines"] for p in per_function)
+    i_total = sum(p["i_lines"] for p in per_function)
+    # ambiguous ownership is an ownership defect (owners_complete), not a
+    # T/I mismatch — the M2 hardener pin keeps T=I true under ambiguity
+    t_equal_i = all(p["t_equal_i"] for p in instrumentable) and not census.get(
+        "unowned"
     )
+    owners_complete = census["owners_complete"]
+
+    has_lambda = bool(lambda_entries)
+    has_inner_class = bool(registry.get("inner_classes"))
 
     gap_lane = None
     if has_lambda:
         gap_lane = GAP_LANE_LAMBDA
-    elif has_inner:
+    elif has_inner_class:
         gap_lane = GAP_LANE_INNER
     elif _uses_sanitized_projection(gd_source):
         gap_lane = GAP_LANE_VAR_DEF
 
     eligible = (
         gap_lane is None
-        and bool(identities)
+        and bool(func_entries)
         and t_equal_i
         and owners_complete
     )
     return {
         "file": file_label,
-        "functions": [
-            {
-                "function_id": i.function_id,
-                "name": i.name,
-                "lex_path": i.lex_path,
-                "start_line": i.start_line,
-                "end_line": i.end_line,
-                "cc": i.cc,
-                "kind": i.kind,
-                "body_hash": i.body_hash,
-            }
-            for i in identities
-        ],
+        "functions": functions,
+        "lambda_entries": lambda_entries,
         "probes": rows,
-        "manifest": manifest,
-        "t_total": len(t_set),
-        "i_total": len(i_set),
+        "manifest": [p["line"] for p in manifest["probe_plan"]],
+        "census_gaps": manifest["census_gaps"],
+        "per_function": per_function,
+        "census": census,
+        "t_total": t_total,
+        "i_total": i_total,
         "t_equal_i": t_equal_i,
         "owners_complete": owners_complete,
         "has_lambda": has_lambda,
-        "has_inner_class": has_inner,
+        "has_inner_class": has_inner_class,
         "eligible": eligible,
         "gap_lane": gap_lane,
     }

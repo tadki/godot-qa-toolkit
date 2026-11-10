@@ -248,12 +248,12 @@ def test_file_profile_flags_t_not_equal_i(monkeypatch):
     keep the file ineligible even without any gap-lane marker."""
     import godot_qa_toolkit.registry.manifest as manifest_mod
 
-    real = manifest_mod._collect_executable_lines
+    real = manifest_mod.collect_executable_lines
 
     def drop_if_line(src_arg):
         return [row for row in real(src_arg) if row.line != 2]
 
-    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", drop_if_line)
+    monkeypatch.setattr(manifest_mod, "collect_executable_lines", drop_if_line)
     from godot_qa_toolkit.risk.identity import file_profile
     profile = file_profile(_MULTILINE_FUNC, file_label="x.gd")
     assert profile["has_lambda"] is False and profile["has_inner_class"] is False
@@ -268,12 +268,12 @@ def test_file_profile_flags_probe_without_owner(monkeypatch):
     incomplete — the file must never enter the eligible lane."""
     import godot_qa_toolkit.registry.manifest as manifest_mod
 
-    real = manifest_mod._collect_executable_lines
+    real = manifest_mod.collect_executable_lines
 
     def with_orphan(src_arg):
         return real(src_arg) + [ExecutableLine(line=99, node="expr_stmt")]
 
-    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", with_orphan)
+    monkeypatch.setattr(manifest_mod, "collect_executable_lines", with_orphan)
     from godot_qa_toolkit.risk.identity import file_profile
     profile = file_profile(GD_SNIPPET, file_label="x.gd")
     assert profile["t_equal_i"] is False
@@ -495,12 +495,12 @@ def test_probe_plan_ownership_flags_cover_all_states(monkeypatch):
     owned = build_probe_manifest_v2("func a():\n\treturn []\n", snap)
     assert owned["probe_plan"][0]["ownership"] == "owned"
 
-    real = manifest_mod._collect_executable_lines
+    real = manifest_mod.collect_executable_lines
 
     def with_orphan(src_arg):
         return real(src_arg) + [ExecutableLine(line=99, node="expr_stmt")]
 
-    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", with_orphan)
+    monkeypatch.setattr(manifest_mod, "collect_executable_lines", with_orphan)
     orphan = build_probe_manifest_v2(GD_SNIPPET, snap)
     assert any(
         row["ownership"] == "unowned" and row["fid"] is None

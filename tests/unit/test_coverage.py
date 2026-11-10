@@ -54,20 +54,14 @@ class TestRunCoverage:
     def test_full_coverage_ok(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
         # Simulate: hits file gets every executable line
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            self._fake_run_writing_hits(proj, {0, 1, 2, 3}),
-        )
+        self._fake_run_writing_hits(proj, {0, 1, 2, 3}, monkeypatch, captured := {})
         result = run_coverage(str(target), str(proj), min_percent=80.0)
         assert result["ok"] is True
         assert result["summary"]["coverage_percent"] == 100.0
 
     def test_below_threshold_fails(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            self._fake_run_writing_hits(proj, {0}),
-        )
+        self._fake_run_writing_hits(proj, {0}, monkeypatch, captured := {})
         result = run_coverage(str(target), str(proj), min_percent=80.0)
         assert result["ok"] is False
         assert result["failures"]
@@ -76,10 +70,7 @@ class TestRunCoverage:
     def test_original_file_restored(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
         before = target.read_text()
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            self._fake_run_writing_hits(proj, set()),
-        )
+        self._fake_run_writing_hits(proj, set(), monkeypatch, captured := {})
         run_coverage(str(target), str(proj))
         assert target.read_text() == before
 
@@ -99,10 +90,7 @@ class TestRunCoverage:
 
     def test_unified_contract_shape(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            self._fake_run_writing_hits(proj, set()),
-        )
+        self._fake_run_writing_hits(proj, set(), monkeypatch, captured := {})
         result = run_coverage(str(target), str(proj))
         assert set(result) >= {"tool", "ok", "summary", "failures"}
         assert result["tool"] == "coverage"
@@ -131,12 +119,24 @@ class TestRunCoverage:
         from godot_qa_toolkit.coverage import runner as c
         assert c.GUT_SCRIPT_RES_PATH == "res://addons/gut/gut_cmdln.gd"
 
-    def _fake_run_writing_hits(self, proj, ids):
-        # SEE-1312: sink 为 ID-keyed 数据面 + run 唯一（pid 后缀）——
-        # fake 写 probe_id 而非行号
-        hits_file = os.path.join(proj, f"qa-coverage-hits-{os.getpid()}.txt")
+    def _fake_run_writing_hits(self, proj, ids, monkeypatch, captured):
+        # SEE-1312: sink 为 ID-keyed 数据面 + run 唯一——fake 写 probe_id。
+        # PR-B (§SPEC-025): sink is per-run UUID, unpredictable before the
+        # run — a spy on _instrument captures this run's sink path at
+        # instrumentation time, and the subprocess fake writes the ids into
+        # exactly that sink (the old PID-name pre-write is gone).
+        import godot_qa_toolkit.coverage.runner as c
+
+        real_instrument = c._instrument
+
+        def spy(src, sink_name):
+            captured["sink"] = os.path.join(proj, sink_name)
+            return real_instrument(src, sink_name)
+
+        monkeypatch.setattr(c, "_instrument", spy)
+
         def fake(*args, **kwargs):
-            with open(hits_file, "w") as f:
+            with open(captured["sink"], "w") as f:
                 for pid in sorted(ids):
                     f.write(f"{pid}\n")
             class R:
@@ -144,4 +144,5 @@ class TestRunCoverage:
                 stdout = ""
                 stderr = ""
             return R()
-        return fake
+        monkeypatch.setattr(c.subprocess, "run", fake)
+        return captured

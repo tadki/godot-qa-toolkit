@@ -16,11 +16,11 @@ from __future__ import annotations
 from gdtoolkit.parser import parser as gdtoolkit_parser
 from lark import Tree
 
-from ..coverage.runner import (
-    _EXECUTABLE_NODE_NAMES,
-    _collect_executable_lines,
-    _node_line,
-    _paren_depths,
+from .lines import (
+    EXECUTABLE_NODE_NAMES,
+    collect_executable_lines,
+    node_line,
+    paren_depths,
 )
 
 MANIFEST_VERSION = "probe-manifest/2"
@@ -38,8 +38,8 @@ def _statement_lines(
         current = stack.pop()
         if current.data in skip_subtrees:
             continue
-        if current.data in _EXECUTABLE_NODE_NAMES:
-            line = _node_line(current)
+        if current.data in EXECUTABLE_NODE_NAMES:
+            line = node_line(current)
             if line and line <= len(depths) and depths[line - 1] == 0:
                 found.append(line)
         stack.extend(
@@ -50,7 +50,7 @@ def _statement_lines(
 
 def _reparse_source(gd_source: str) -> tuple[Tree, list[int]]:
     tree = gdtoolkit_parser.parse(gd_source, gather_metadata=True)
-    return tree, _paren_depths(gd_source)
+    return tree, paren_depths(gd_source)
 
 
 def _node_by_span(tree: Tree, start: int) -> Tree | None:
@@ -148,7 +148,7 @@ def build_probe_manifest_v2(gd_source: str, registry: dict) -> dict:
     other entry keeps its own T/I decomposition and stays fully usable.
     """
     tree, depths = _reparse_source(gd_source)
-    executable = _collect_executable_lines(gd_source)
+    executable = collect_executable_lines(gd_source)
     plan_lines = [entry.line for entry in executable]
 
     instrumentable_entries = [

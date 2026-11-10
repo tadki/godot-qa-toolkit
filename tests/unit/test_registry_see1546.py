@@ -355,3 +355,20 @@ def test_scope_escape_rules_and_governance_net(tmp_path: Path):
         summary["added"] - summary["scope_escape"]
     )
     assert summary["governance_net"]["escape_added"] == 3
+
+
+# --------------------------------------------------------------------------
+# §SPEC-028: read-failure isolation (latin-1 bytes in the scan tree)
+# --------------------------------------------------------------------------
+
+
+def test_file_registry_latin1_bytes_is_read_error(tmp_path: Path):
+    """SPEC-028: non-UTF-8 bytes classify as read_error at the source_io
+    layer (parity/risk route from there into their gap lanes)."""
+    from godot_qa_toolkit.source_io import read_gd_source
+
+    p = tmp_path / "latin.gd"
+    p.write_bytes(b"func f():\n\treturn 1\n\xff\xfe invalid\n")
+    text, error = read_gd_source(p)
+    assert text is None
+    assert error is not None and "unreadable" in error

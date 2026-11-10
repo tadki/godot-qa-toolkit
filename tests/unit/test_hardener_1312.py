@@ -119,9 +119,26 @@ class TestH3BranchLineMapping:
         # 构造 false 路径 hits：if_branch 头行(2，条件求值必点火) + else 头行(4)
         # + else 体首行(5)；if 体首行(3)不命中
         false_path_hits = {2, 4, 5} & exec_lines
-        sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
         id_hits = [str(line_to_id[l]) for l in sorted(false_path_hits)]
-        (proj / sink_name).write_text("\n".join(id_hits) + "\n")
+        captured = {}
+        real_instrument = c._instrument
+
+        def sink_spy(src, sink_name):
+            captured["sink"] = os.path.join(proj, sink_name)
+            return real_instrument(src, sink_name)
+
+        monkeypatch.setattr(c, "_instrument", sink_spy)
+
+        def fake_run(*args, **kwargs):
+            with open(captured["sink"], "w") as f:
+                f.write("\n".join(id_hits) + "\n")
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        monkeypatch.setattr(c.subprocess, "run", fake_run)
         result = c.run_coverage(str(target), str(proj))
         s = result["summary"]
         # 2 分支中只有 else 被覆盖（observational 字段但数值必须正确）
@@ -152,13 +169,33 @@ class TestH4StaleSinkPriority:
             c.subprocess, "run",
             lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         )
-        # 项目根陈旧残留：只命中 id 0
-        (proj / f"qa-coverage-hits-{os.getpid()}.txt").write_text("0\n")
-        # user:// 新鲜 sink：全量命中 id 0、1
+        # 项目根陈旧残留：只命中 id 0（PR-B: 写入 spy 捕获的 UUID sink 名，
+        # 恢复 H4 的 stale-root-vs-fresh-user:// 优先级语义）
+        captured = {}
+        real_instrument = c._instrument
+
+        def sink_spy(src, sink_name):
+            captured["sink"] = os.path.join(proj, sink_name)
+            return real_instrument(src, sink_name)
+
+        monkeypatch.setattr(c, "_instrument", sink_spy)
+        stale_root = proj / "qa-coverage-hits-stale-probe.txt"
+        stale_root.write_text("0\n")
+        # user:// 新鲜 sink：全量命中 id 0、1（_resolve_user_sink stub 惰性
+        # 把 hits 写到 user:// 侧的同一 sink 名——H4 语义：root 陈旧残留不得
+        # 遮蔽新鲜 user:// 数据）
         user_dir = tmp_path / "fake_user"
         user_dir.mkdir()
-        (user_dir / f"qa-coverage-hits-{os.getpid()}.txt").write_text("0\n1\n")
-        monkeypatch.setattr(c, "_resolve_user_sink", lambda root, name: str(user_dir / name))
+        written = {"done": False}
+
+        def fake_user_sink(root, name):
+            target_user_sink = user_dir / name
+            if not written["done"] and not target_user_sink.is_file():
+                target_user_sink.write_text("0\n1\n", encoding="utf-8")
+                written["done"] = True
+            return str(target_user_sink)
+
+        monkeypatch.setattr(c, "_resolve_user_sink", fake_user_sink)
         result = c.run_coverage(str(target), str(proj))
         assert result["summary"]["covered_lines"] == 2, (
             f"stale root sink shadowed fresh user:// sink: {result['summary']}")

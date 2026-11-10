@@ -90,6 +90,25 @@ class TestInstrumentStatementLevel:
                 result["summary"]["error"]
 
 
+
+def _sink_writer_spy(monkeypatch, proj, content: str) -> dict:
+    """PR-B: capture this run's UUID sink name at _instrument time and write
+    `content` into it (the fake GUT would produce the hits)."""
+    import godot_qa_toolkit.coverage.runner as c
+
+    captured = {"written": False}
+    real = c._instrument
+
+    def spy(src, sink_name):
+        captured["sink"] = proj / sink_name
+        captured["sink"].write_text(content, encoding="utf-8")
+        captured["written"] = True
+        return real(src, sink_name)
+
+    monkeypatch.setattr(c, "_instrument", spy)
+    return captured
+
+
 class TestProbeSinkRobustness:
     """SPEC-002: 追加写 + run 唯一 sink + ID-keyed 数据面 + user:// 优先。"""
 
@@ -126,11 +145,17 @@ class TestProbeSinkRobustness:
             c.subprocess, "run",
             lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         )
-        (proj / f"qa-coverage-hits-{os.getpid()}.txt").write_text("0\n")
         c.run_coverage(str(target), str(proj))
-        # sink 名必须含 run 唯一性成分（进程 id），不能是固定文件名
+        # PR-B sink 名必须含 run 唯一性成分（per-run UUID），不能是固定名，
+        # 也不能只靠进程 id（同进程顺序 run 会互相污染——D-候选-1）
         assert "qa-coverage-hits" in captured["sink"]
-        assert str(os.getpid()) in captured["sink"]
+        sink_id = captured["sink"][len("qa-coverage-hits-"):-len(".txt")]
+        import uuid as uuid_mod
+        uuid_mod.UUID(sink_id)  # raises if not a valid UUID
+        first_sink = captured["sink"]
+        captured.clear()
+        c.run_coverage(str(target), str(proj))
+        assert captured["sink"] != first_sink
 
     def test_probe_writes_ids_not_paths(self):
         # ID-keyed 数据面：探针写整数 probe_id，路径信息不进数据面
@@ -152,12 +177,11 @@ class TestProbeSinkRobustness:
             "godot_qa_toolkit.coverage.runner.subprocess.run",
             lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         )
-        # 模拟 sink 文件（run_coverage 的 pid 派生名）：id 0 两次 + id 1 一次
-        sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
-        sink_path = proj / sink_name
-        with open(sink_path, "w") as f:
-            f.write("0\n0\n1\n")
+        # 模拟 sink 文件（PR-B per-run UUID 名——spy 在 _instrument 时写入）：
+        # id 0 两次 + id 1 一次
+        spy = _sink_writer_spy(monkeypatch, proj, "0\n0\n1\n")
         result = run_coverage(str(target), str(proj))
+        assert spy["written"], "spy never saw the sink name"
         assert result["summary"]["covered_lines"] == 2  # 两个不同 id，重复去重
 
 
@@ -193,10 +217,10 @@ class TestSentinels:
             "godot_qa_toolkit.coverage.runner.subprocess.run",
             lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         )
-        # 手工放一个 sink：id 0 命中一次（sink 名 = run_coverage 的 pid 派生名）
-        sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
-        (proj / sink_name).write_text("0\n")
+        # 手工放 sink：id 0 命中一次（PR-B UUID 名——spy 在 _instrument 时写入）
+        spy = _sink_writer_spy(monkeypatch, proj, "0\n")
         result = run_coverage(str(target), str(proj))
+        assert spy["written"], "spy never saw the sink name"
         assert result["summary"].get("probes_fired") == 1
 
     def test_no_executable_lines_is_vacuous(self, tmp_path, monkeypatch):
@@ -254,9 +278,9 @@ func f(x):
             "godot_qa_toolkit.coverage.runner.subprocess.run",
             lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         )
-        sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
-        (proj / sink_name).write_text("0\n1\n")
+        spy = _sink_writer_spy(monkeypatch, proj, "0\n1\n")
         result = run_coverage(str(target), str(proj))
+        assert spy["written"], "spy never saw the sink name"
         s = result["summary"]
         # observational：字段必须在，且不影响 ok 判定
         assert "branch_coverage_percent" in s

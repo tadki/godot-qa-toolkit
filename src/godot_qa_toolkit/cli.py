@@ -378,6 +378,18 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("coverage", args)
     if early is not None:
         return early
+    from .coverage.evidence import prune_sinks as _prune, recover_bundle as _recover
+    from pathlib import Path as _P
+
+    if getattr(args, "recover", None):
+        result = _recover(_P(args.recover))
+        result.update({"tool": "coverage", "ok": True})
+        return _emit(result)
+    if getattr(args, "prune_sinks", None):
+        result = _prune(args.project_root,
+                        retention_days=getattr(args, "retain_days", 7))
+        result.update({"tool": "coverage", "ok": True})
+        return _emit(result)
     try:
         result = run_coverage(
             file_path=args.file,
@@ -387,6 +399,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             timing_store=TimingStore(args.project_root, args.file,
                                      "coverage", None),
             tests_glob=args.tests,
+            evidence_out=getattr(args, "evidence_out", None),
         )
     except FileNotFoundError as e:
         result = {
@@ -584,6 +597,17 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--tests", default=None,
                    help="scoped GUT dir or single .gd path for per-suite attribution, "
                         "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
+    v.add_argument("--evidence-out", default=None,
+                   help="§SPEC-025/026: write coverage-evidence/2 bundles + run records "
+                        "here; omit for the legacy stdout-only contract (zero drift)")
+    v.add_argument("--recover", default=None,
+                   help="§SPEC-025: recover started-but-unfinished runs from this "
+                        "evidence dir without re-running GUT")
+    v.add_argument("--prune-sinks", action="store_true",
+                   help="§SPEC-025/W1: delete qa-coverage-hits-* sinks older than "
+                        "--retain-days (default 7) under user:// and project root")
+    v.add_argument("--retain-days", type=int, default=7,
+                   help="retention period for --prune-sinks (default 7)")
     _add_godot_bin_arg(v)
     v.set_defaults(func=cmd_coverage)
 

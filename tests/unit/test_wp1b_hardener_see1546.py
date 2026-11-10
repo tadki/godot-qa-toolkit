@@ -207,12 +207,12 @@ def test_manifest_unowned_probe_is_counted(monkeypatch):
     import godot_qa_toolkit.registry.manifest as manifest_mod
     from godot_qa_toolkit.coverage.runner import ExecutableLine
 
-    real = manifest_mod._collect_executable_lines
+    real = manifest_mod.collect_executable_lines
 
     def with_orphan(src_arg):
         return real(src_arg) + [ExecutableLine(line=99, node="expr_stmt")]
 
-    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", with_orphan)
+    monkeypatch.setattr(manifest_mod, "collect_executable_lines", with_orphan)
     registry = build_file_registry(GD_SNIPPET, file_label="x.gd")
     result = build_probe_manifest_v2(GD_SNIPPET, registry)
     assert result["census"]["unowned"] == 1

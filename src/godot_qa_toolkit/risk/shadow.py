@@ -320,9 +320,24 @@ def partition_sources(
     can resolve the real file path."""
     eligible: dict[str, str] = {}
     negatives: dict[str, str] = {}
+    read_errors: list[str] = []
     root = Path(project_root).resolve() if project_root else None
     for path in paths:
-        source = path.read_text(encoding="utf-8")
+        from ..source_io import read_gd_source
+
+        source, read_error = read_gd_source(path)
+        if read_error is not None:
+            # §SPEC-028: unreadable files route to the read_error gap lane —
+            # the scan continues for the remaining files, never crashes
+            label = (
+                str(path.resolve().relative_to(Path(project_root).resolve()))
+                if project_root and path.resolve().is_relative_to(
+                    Path(project_root).resolve())
+                else path.name
+            )
+            negatives[label] = ""
+            read_errors.append(label)
+            continue
         if root is not None:
             try:
                 label = str(path.resolve().relative_to(root))
@@ -335,6 +350,8 @@ def partition_sources(
             eligible[label] = source
         else:
             negatives[label] = source
+    for label in read_errors:
+        negatives.setdefault(label, "")
     return eligible, negatives
 
 

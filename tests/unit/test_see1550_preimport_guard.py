@@ -19,7 +19,9 @@ from godot_qa_toolkit.mutation.shadow import SlotProvisionError
 from godot_qa_toolkit.mutation import runner as mrunner
 
 
-def _real_project(tmp_path, godot_dir=False, artifacts=False):
+def _real_project(tmp_path, godot_dir=False, artifacts=False, partial=None):
+    """构建测试工程；`partial` 为缺省三产物（uid_cache.bin / imported /
+    global_script_class_cache.cfg）的子集名列表，模拟部分导入形态。"""
     proj = tmp_path / "proj"
     (proj / "addons" / "gut").mkdir(parents=True)
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
@@ -30,6 +32,14 @@ def _real_project(tmp_path, godot_dir=False, artifacts=False):
         if artifacts:
             (g / "uid_cache.bin").write_bytes(b"x")
             (g / "imported").mkdir()
+            (g / "global_script_class_cache.cfg").write_text("[class]\n")
+        for name in (partial or []):
+            p = g / name
+            if name == "imported":
+                p.mkdir(exist_ok=True)
+            else:
+                p.parent.mkdir(exist_ok=True)
+                p.write_text("stub")
     return proj
 
 
@@ -48,16 +58,39 @@ class TestRequireImportCache:
         proj = _real_project(tmp_path, godot_dir=True, artifacts=False)
         with pytest.raises(SlotProvisionError) as ei:
             shadow.require_import_cache(str(proj))
-        assert "not imported" in str(ei.value)
+        assert "incompletely imported" in str(ei.value)
 
-    def test_uid_cache_artifact_passes(self, tmp_path):
+    def test_all_three_artifacts_pass(self, tmp_path):
+        """G-1 修正判据：三产物俱在才放行。"""
         proj = _real_project(tmp_path, godot_dir=True, artifacts=True)
         shadow.require_import_cache(str(proj))  # 不抛
 
-    def test_imported_dir_alone_passes(self, tmp_path):
-        proj = _real_project(tmp_path, godot_dir=True, artifacts=False)
-        (proj / ".godot" / "imported").mkdir()
-        shadow.require_import_cache(str(proj))  # 不抛
+    def test_uid_cache_alone_fails_fast(self, tmp_path):
+        """G-1：单产物部分导入 → fail-fast（原钉点方向相反，已裁定翻转）。"""
+        proj = _real_project(tmp_path, godot_dir=True,
+                             partial=["uid_cache.bin"])
+        with pytest.raises(SlotProvisionError) as ei:
+            shadow.require_import_cache(str(proj))
+        assert "incompletely imported" in str(ei.value)
+
+    def test_imported_dir_alone_fails_fast(self, tmp_path):
+        """G-1：imported/ 单产物部分导入 → fail-fast（原钉点方向相反，
+        已裁定翻转）。"""
+        proj = _real_project(tmp_path, godot_dir=True,
+                             partial=["imported"])
+        with pytest.raises(SlotProvisionError) as ei:
+            shadow.require_import_cache(str(proj))
+        assert "incompletely imported" in str(ei.value)
+
+    def test_two_of_three_fails_fast(self, tmp_path):
+        """G-1 变体：三缺一（缺 imported/）→ fail-fast——`any()` 语义会
+        放行该形态（QA 实证缺陷），俱在判据下必须拦。"""
+        proj = _real_project(tmp_path, godot_dir=True,
+                             partial=["uid_cache.bin",
+                                      "global_script_class_cache.cfg"])
+        with pytest.raises(SlotProvisionError) as ei:
+            shadow.require_import_cache(str(proj))
+        assert "incompletely imported" in str(ei.value)
 
     def test_toy_project_without_project_godot_is_noop(self, tmp_path):
         """无 project.godot 的玩具工程（既有替身测试形态）不设门。"""

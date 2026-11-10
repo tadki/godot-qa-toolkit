@@ -186,3 +186,13 @@ class TestSuspectedOrphanDisclosure:
         pool_copy.mkdir(parents=True)
         (pool_copy / "orphan_form.gd").write_text("extends Node\n")
         assert suspected_orphan(str(proj), "res://orphan_form.gd") is True
+
+    def test_stem_word_reference_defeats_orphan(self, tmp_path):
+        """无 res:// 字面量、但其他脚本按词干提及目标 → 非孤儿（动态 load
+        构造路径的引用只能由词干层捕获）。"""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "inventory.gd").write_text("extends Node\n")
+        (proj / "game.gd").write_text(
+            "extends Node\n# inventory keeps the item state\n")
+        assert suspected_orphan(str(proj), "res://inventory.gd") is False

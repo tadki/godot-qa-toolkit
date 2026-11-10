@@ -121,6 +121,18 @@ class TestIdentityPack:
             'const S := preload("res://scenes/main.tscn")\n')
         assert boot_wiring_hash(str(proj)) != h1
 
+    def test_wiring_hash_ignores_non_tscn_refs(self, tmp_path):
+        """wiring hash 只收 .tscn 字面量——.gd 字面量与普通字符串不触发
+        接线失效（.gd 内容漂移由 killer 证书与差分 scope hash 承接）。"""
+        proj = _write_project(tmp_path)
+        h1 = boot_wiring_hash(str(proj))
+        tests = proj / "tests"
+        tests.mkdir()
+        (tests / "test_nonscene.gd").write_text(
+            'const H := preload("res://helpers/h.gd")\n'
+            'var note := "res://helpers/h.gd mentioned in prose"\n')
+        assert boot_wiring_hash(str(proj)) == h1
+
     def test_gut_addon_hash_missing_and_content_sensitive(self, tmp_path):
         proj = _write_project(tmp_path, with_gut=False)
         assert gut_addon_hash(str(proj)) == "missing"
@@ -196,6 +208,16 @@ class TestKillCertificate:
         # 依赖文件内容变化 → 闭包哈希变化（helper 修改触发重跑的依据）
         (proj / "helpers" / "h.gd").write_text("extends RefCounted\n# chg\n")
         assert deps_closure_sha1(str(proj), "res://tests/test_x.gd") != sha
+
+    def test_deps_closure_missing_dependency_returns_none(self, tmp_path):
+        """闭包内文件缺失（字面量指向不存在路径）→ None（闭包不确定即
+        不签发证书——容忍缺失 = 带残缺闭包的证书永久通过校验）。"""
+        proj = self._fixture(tmp_path)
+        (proj / "tests" / "test_miss.gd").write_text(
+            'extends GutTest\n\nconst M := preload("res://helpers/gone.gd")\n\n'
+            "func test_miss():\n\tpass\n")
+        assert deps_closure_sha1(str(proj),
+                                 "res://tests/test_miss.gd") is None
 
     def test_cert_valid_matrix(self, tmp_path):
         proj = self._fixture(tmp_path)

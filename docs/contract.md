@@ -248,3 +248,27 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 ### 9.4 契约增量分类
 
 上列三面均为 **capability**（新能力面，加法向后兼容）；`coverage/runner.py` 与 mutation 零改动（§SPEC-021 零漂移承诺）。
+
+## 10. coverage evidence 契约（SEE-1546 WP2 PR-B，diagnostic-only）
+
+### 10.1 `gqt coverage <file> --project-root <root> --evidence-out <dir>`
+
+开启 `coverage-evidence/2` 生命周期（可选旁路；不传则 stdout 契约与 011b87d 逐字节一致——零漂移承诺，§SPEC-026 冻结门）：
+
+- sink 升级为 per-run UUID：`qa-coverage-hits-{run_uuid}.txt`（同进程顺序 run/并发进程/CLI 与 risk 内嵌全部互斥，修 D-候选-1）；
+- GUT 前原子写 run 记录 `{run_uuid}.record.json`（status=started，含 probe manifest inline 与 sink_path）；status 生命周期 started→gut_done→bundle_written（或 run_error/timeout/no_probe 终态）；
+- bundle `<run_uuid>.json`：evidence_version=coverage-evidence/2，逐条目 T/I/C（T/I 来自 probe-manifest/2，C=hits 按 fid 归属）、census_gaps、sentinels（probes_fired/vacuous/run_error/timeout/zero_tests/gut_ok/transport_anomaly）、entry_states（measured/partial_instrumentation/attribution_gap）、file_state；**无 score 字段**（纯证据，unknown 不出分纪律）；
+- bundle 落盘后删除本 run sink；失败路径保留 sink 供恢复；
+- 四异常态（run_error/timeout/zero_tests/vacuous）bundle 仍落盘且不出分。
+
+### 10.2 `gqt coverage --recover <evidence-dir>`
+
+重读 started/bundle_written 之外的 record + 对应 UUID sink，按 record 内 probe manifest 重新归属产出 bundle（recovered=true），**不重跑 GUT**；status 迁移至 bundle_written。sink 缺失的 run 记入 errors（fail-loud）。
+
+### 10.3 `gqt coverage --prune-sinks [--retain-days N]`
+
+显式清理（W1 裁决：user:// 在用户 HOME 下，不做隐式清扫）：只删 `qa-coverage-hits-*` 前缀且 mtime 超保留期（默认 7 天）的文件；user:// 目录与项目根两处都扫。
+
+### 10.4 契约增量分类
+
+sink 名 PID→UUID 属私有传输面变更（对外 stdout 契约零影响——§10 冻结门兜底）= **comparability**（PR-B 前的 run 间数据不可比，PR-B 起可比较）；evidence bundle/生命周期/恢复/清理 = **capability**（加法）。`coverage/runner.py` 的插桩判定面（EXECUTABLE_NODE_NAMES/括号深度/class_def 剪枝）语义不变；行收集符号反向公开化至 `registry/lines.py`（§SPEC-029 债务收敛，runner 保留向后兼容别名）。

@@ -290,3 +290,45 @@ sink 名 PID→UUID 属私有传输面变更（对外 stdout 契约零影响—�
 ### 11.2 契约增量分类
 
 `gqt recipe` 子命令 + canonical-recipe/1 快照 = **capability**（新能力面，加法向后兼容）；`coverage/runner.py` 插桩判定面、`mutation/`、`risk/` 域本 PR 零触碰。
+
+## 12. accept 私有目录管线契约（SEE-1546 WP3 PR-B，acceptance-suite/1）
+
+### 12.1 `gqt accept compile <feature> --project-root R [--out-dir D]` / `[--keys k1,k2] [--out-dir D]`
+
+选择在编译期完成：`--keys` 把选中 features 逐个编译进一次性私有目录
+`acceptance/generated/.gqt-run-<uuid>/`（不传 `--out-dir` 则自动创建；
+传入则写入该目录）。**目录即选择集**——私有目录只含选中 keys 的产物，
+run 侧整目录执行，绕开 GUT `-gselect` 子串碰撞（选 `{save}` 不会误吸
+`test_save_roundtrip.gd`）。私有目录非空即拒（`suite_error`，绝不复用
+旧目录）；主 `acceptance/ir|generated` 全程只读不碰；单 feature 不带
+`--out-dir` 时缺省行为与 PR-A 前逐字节一致。
+
+### 12.2 `gqt accept run --project-root R --suite-dir D`（与 `--acceptance-probe-keys` 互斥）
+
+重放(R5) → 整目录 GUT 执行（`-gdir` 指向私有目录 generated）→
+acceptance-suite/1 对账五项 → 全过清理（零残留：父目录为本管线创建且
+已空才一并移除）；重放失配 = `run_error`（先于 GUT，不执行不可信产物）；
+对账任一不过 = `ok:false` 且私有目录保留现场。对账五项：
+
+| 规则 | 字段 | 语义 |
+|------|------|------|
+| R1 | `generated_eq_selected` | 生成 `test_*.gd` 集合 == 选中 keys |
+| R2 | `executed_scripts_eq_generated` | 运行流脚本段（真机 GUT 9.6 锚定：整行 `res://….gd` 头）文件名集合 == 生成集合 |
+| R3 | `executed_count_eq_expected` | 脚本段内测试条目数（钩子 `before_all` 等排除、跨脚本同名不塌缩）== manifest attribution 总数 |
+| R4 | `unselected_absent` | 私有目录无未选/多余产物 + 主 ir/generated 字节级快照前后一致 |
+| R5 | `replay_checked` | 私有目录内每份 manifest 三件哈希绑定重放通过 |
+
+### 12.3 `gqt accept run --project-root R --acceptance-probe-keys [k1,k2]`（W4 成本探针）
+
+缺省 `aidomain_integration`。编译+执行私有目录管线实测墙钟，产出
+`performance.acceptance_probe` 记录
+`{keys, compile_s, run_s, extrapolation_assumption: "linear-in-feature-count", suite_ok, reconciliation}`；
+`risk --performance-file` 外部喂入通道保持不变（向后兼容）。
+
+### 12.4 契约增量分类
+
+`compile --keys/--out-dir`、`run --suite-dir`、`--acceptance-probe-keys`、
+acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省行为不变）；
+`compile.py` 仅新增 `out_dir` 分支（主路径代码逐字节未动）、`run.py`
+仅 `replay_check` 新增 `suite_dir` keyword（缺省路径不变）；`mutation/`、
+`risk/`、`coverage/` 域本 PR 零触碰。

@@ -60,11 +60,48 @@ def _add_godot_bin_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def _accept_compile(args: argparse.Namespace) -> int:
-    from .accept.compile import compile_feature
+    from pathlib import Path as _P
 
+    from .accept.compile import compile_feature
+    from .accept.suite import (SuiteError, compile_keys_to_suite,
+                               create_suite_dir)
+
+    keys = getattr(args, "keys", None)
+    out_dir = getattr(args, "out_dir", None)
+    if not args.feature and keys:
+        # §SPEC-035 keys 模式：目录即选择集——私有目录缺省自动创建
+        try:
+            suite_dir = (_P(out_dir).resolve() if out_dir
+                         else create_suite_dir(args.project_root))
+            rec = compile_keys_to_suite(args.project_root,
+                                        [k.strip() for k in keys.split(",")
+                                         if k.strip()], suite_dir)
+        except SuiteError as e:
+            return _emit({
+                "tool": "accept", "ok": False,
+                "summary": {"error": str(e), "suite_error": True},
+                "failures": [{"reason": f"suite_error: {e}"}],
+            })
+        return _emit({
+            "tool": "accept", "ok": True,
+            "summary": {
+                "mode": "private-suite",
+                "keys": rec["keys"],
+                "suite_dir": rec["suite_dir"],
+                "wrote": [f"generated/test_{k}.gd" for k in rec["keys"]],
+            },
+            "failures": [],
+        })
+    if not args.feature:
+        return _emit({
+            "tool": "accept", "ok": False,
+            "summary": {"error": "accept compile needs <feature> or --keys"},
+            "failures": [{"reason": "accept compile needs <feature> or "
+                                    "--keys"}],
+        })
     suite, error = compile_feature(
         args.feature, args.project_root,
-        write=args.write, clean=not args.no_clean)
+        write=args.write, clean=not args.no_clean, out_dir=out_dir)
     if error is not None:
         return _emit({
             "tool": "accept", "ok": False,
@@ -73,12 +110,23 @@ def _accept_compile(args: argparse.Namespace) -> int:
         })
     wrote = []
     if args.write:
-        wrote = [
-            f"acceptance/ir/{suite.feature_key}.json",
-            f"acceptance/generated/test_{suite.feature_key}.gd",
-            "acceptance/generated/accept_worker.gd",
-            f"acceptance/generated/{suite.feature_key}.manifest.json",
-        ]
+        if out_dir:
+            from pathlib import Path as _P
+            base = _P(out_dir).resolve().relative_to(
+                _P(args.project_root).resolve()).as_posix()
+            wrote = [
+                f"{base}/ir/{suite.feature_key}.json",
+                f"{base}/generated/test_{suite.feature_key}.gd",
+                f"{base}/generated/accept_worker.gd",
+                f"{base}/generated/{suite.feature_key}.manifest.json",
+            ]
+        else:
+            wrote = [
+                f"acceptance/ir/{suite.feature_key}.json",
+                f"acceptance/generated/test_{suite.feature_key}.gd",
+                "acceptance/generated/accept_worker.gd",
+                f"acceptance/generated/{suite.feature_key}.manifest.json",
+            ]
     return _emit({
         "tool": "accept", "ok": True,
         "summary": {
@@ -94,6 +142,7 @@ def _accept_compile(args: argparse.Namespace) -> int:
 
 def cmd_accept(args: argparse.Namespace) -> int:
     from .accept.run import AcceptRunError, run_suite
+    from .accept.suite import SuiteError, run_acceptance_probe, run_suite_dir
 
     if args.accept_command == "compile":
         return _accept_compile(args)
@@ -101,6 +150,54 @@ def cmd_accept(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("accept", args)
     if early is not None:
         return early
+    probe_keys = getattr(args, "acceptance_probe_keys", None)
+    suite_dir_arg = getattr(args, "suite_dir", None)
+    if args.accept_command == "run" and (probe_keys or suite_dir_arg):
+        if probe_keys and suite_dir_arg:
+            return _emit({
+                "tool": "accept", "ok": False,
+                "summary": {"error": "--acceptance-probe-keys compiles its "
+                                     "own private suite dir; --suite-dir "
+                                     "is mutually exclusive"},
+                "failures": [{"reason": "mutually exclusive flags"}],
+            })
+        try:
+            if probe_keys:
+                keys = [k.strip() for k in probe_keys.split(",")
+                        if k.strip()]
+                if not keys:
+                    return _emit({
+                        "tool": "accept", "ok": False,
+                        "summary": {"error": "no keys parsed"},
+                        "failures": [{"reason": "no keys parsed"}],
+                    })
+                probe = run_acceptance_probe(args.project_root, keys,
+                                             timeout_s=args.timeout)
+                return _emit({"tool": "accept", "ok": probe["suite_ok"],
+                              "summary": probe, "failures": []})
+            record = run_suite_dir(args.project_root, suite_dir_arg,
+                                   timeout_s=args.timeout)
+            return _emit({"tool": "accept", "ok": record["ok"],
+                          "summary": record, "failures": []})
+        except AcceptRunError as e:
+            return _emit({
+                "tool": "accept", "ok": False,
+                "summary": {"error": str(e), "run_error": True},
+                "failures": [{"reason": f"run_error: {e}"}],
+            })
+        except SuiteError as e:
+            return _emit({
+                "tool": "accept", "ok": False,
+                "summary": {"error": str(e), "suite_error": True},
+                "failures": [{"reason": f"suite_error: {e}"}],
+            })
+    if not args.key:
+        return _emit({
+            "tool": "accept", "ok": False,
+            "summary": {"error": "--key is required without "
+                                 "--suite-dir/--acceptance-probe-keys"},
+            "failures": [{"reason": "--key is required"}],
+        })
     try:
         if args.accept_command == "mutate":
             from .accept.mutate_runner import run_mutate
@@ -476,7 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
     acsub = ac.add_subparsers(dest="accept_command", required=True)
 
     acc = acsub.add_parser("compile", help=".feature -> versioned IR + generated GUT tests")
-    acc.add_argument("feature", help="path to the .feature file")
+    acc.add_argument("feature", nargs="?", default=None,
+                     help="path to the .feature file (omit when --keys "
+                          "selects the private-suite set, §SPEC-035)")
     acc.add_argument("--project-root", required=True,
                      help="target Godot project root (writes acceptance/ir + acceptance/generated)")
     acc.add_argument("--write", action="store_true",
@@ -484,6 +583,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "whitelist dirs; omitted = dry compile, summary only)")
     acc.add_argument("--no-clean", action="store_true",
                      help="keep existing generated artifacts instead of clean-then-generate")
+    acc.add_argument("--keys", default=None,
+                     help="§SPEC-035: comma-separated feature keys — "
+                          "compile the selected set into a private suite "
+                          "dir (dir = selection set); pairs with --out-dir, "
+                          "or creates a fresh .gqt-run-<uuid> dir")
+    acc.add_argument("--out-dir", default=None,
+                     help="private suite dir to write into instead of "
+                          "acceptance/ir + acceptance/generated")
     acc.set_defaults(func=cmd_accept)
 
     acr = acsub.add_parser("run", help="replay-check + headless-run the generated suite")
@@ -491,8 +598,19 @@ def build_parser() -> argparse.ArgumentParser:
                      help="alternative project root (default: --project-root)")
     acr.add_argument("--project-root", required=True,
                      help="target Godot project root containing addons/gut/")
-    acr.add_argument("--key", required=True,
-                     help="feature key the suite was compiled under")
+    acr.add_argument("--key", default=None,
+                     help="feature key the suite was compiled under "
+                          "(required without --suite-dir/--acceptance-probe-keys)")
+    acr.add_argument("--suite-dir", default=None,
+                     help="§SPEC-035 private suite dir — run the whole dir "
+                          "(dir = selection set) with acceptance-suite/1 "
+                          "reconciliation")
+    acr.add_argument("--acceptance-probe-keys", nargs="?",
+                     const="aidomain_integration", default=None,
+                     help="W4 cost probe: compile+run these comma-separated "
+                          "keys via the private-dir pipeline and emit a "
+                          "performance.acceptance_probe record (default: "
+                          "aidomain_integration)")
     acr.add_argument("--timeout", type=int, default=120,
                      help="GUT timeout seconds (default 120)")
     _add_godot_bin_arg(acr)

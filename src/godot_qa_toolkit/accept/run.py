@@ -32,8 +32,14 @@ def _project_gd_path(project_root: Path, res: str) -> Path:
     return project_root / res.removeprefix("res://")
 
 
-def replay_check(project_root: str | Path, feature_key: str) -> dict:
+def replay_check(project_root: str | Path, feature_key: str,
+                 *, suite_dir: str | Path | None = None) -> dict:
     """三件哈希绑定重放校验。失配 raise AcceptRunError。返回 manifest。
+
+    suite_dir 给定时读私有目录（§SPEC-035）：manifest/生成 .gd/worker 都取
+    `<suite_dir>/generated/`，IR 仍按 manifest.ir_path（项目相对 res://
+    路径）解析——私有目录在 acceptance/generated/.gqt-run-<uuid>/ 内，
+    res:// 语义不变。
 
     §SPEC-1426-24 重锚防线：manifest 可被整体替换为攻击者自造的三件一致
     组合（重锚），故 run 侧额外把 manifest.source_path 指向的源 .feature
@@ -42,7 +48,9 @@ def replay_check(project_root: str | Path, feature_key: str) -> dict:
     source_check 形参为参数化旁路面，已移除）。
     """
     root = Path(project_root)
-    man_path = root / GENERATED_DIR / f"{feature_key}.manifest.json"
+    gen_dir = (Path(suite_dir) / "generated") if suite_dir is not None \
+        else root / GENERATED_DIR
+    man_path = gen_dir / f"{feature_key}.manifest.json"
     if not man_path.is_file():
         raise AcceptRunError(f"manifest missing: {man_path}")
     manifest = json.loads(man_path.read_text(encoding="utf-8"))
@@ -52,7 +60,7 @@ def replay_check(project_root: str | Path, feature_key: str) -> dict:
     ir_path = _project_gd_path(root, manifest["ir_path"])
     if not ir_path.is_file():
         raise AcceptRunError(f"IR file missing: {ir_path}")
-    gd_path = root / GENERATED_DIR / f"test_{feature_key}.gd"
+    gd_path = gen_dir / f"test_{feature_key}.gd"
     if not gd_path.is_file():
         raise AcceptRunError(f"generated test missing: {gd_path}")
     ir_hash = sha256_of(ir_path.read_text(encoding="utf-8"))
@@ -66,7 +74,7 @@ def replay_check(project_root: str | Path, feature_key: str) -> dict:
             f"generated test hash mismatch — acceptance/generated was modified "
             f"after compile (expected {manifest['generated_hash'][:12]}, "
             f"got {gd_hash[:12]})")
-    worker_path = root / GENERATED_DIR / "accept_worker.gd"
+    worker_path = gen_dir / "accept_worker.gd"
     if worker_path.is_file():
         # worker 以生成产物形态随 compile 落盘并进哈希绑定——在场即核对
         # （不存在 = 旧版产物，由 recompile 核对兜底）。

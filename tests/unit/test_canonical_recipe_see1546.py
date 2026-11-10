@@ -185,3 +185,48 @@ def test_exclude_res_scheme_entry_parses_colons_correctly():
     assert error is None
     assert recipe["exclusions"][0]["entry"] == "res://tests/unit/quarantine/**"
     assert recipe["exclusions"][0]["reason"] == "known flaky — SEE-1234"
+
+
+def test_recipe_hash_is_sensitive_to_harness_bytes(kol_like: Path):
+    """B-W3A-1/H3: harness content is a hashed input — changing harness.gd
+    by one appended line must change recipe_hash (never a harness-blind
+    hash basis)."""
+    import hashlib
+
+    from godot_qa_toolkit.canonical.recipe import build_recipe
+
+    harness = kol_like / "acceptance" / "harness" / "harness.gd"
+    harness.parent.mkdir(parents=True, exist_ok=True)
+    harness.write_text("# harness v1\n", encoding="utf-8")
+
+    before, error = build_recipe(kol_like, exclusions=[])
+    assert error is None
+    assert before["acceptance_face"]["harness"]["wiring_sha256"] == (
+        hashlib.sha256(b"# harness v1\n").hexdigest()
+    )
+
+    harness.write_text("# harness v1\n# harness v2\n", encoding="utf-8")
+    after, error = build_recipe(kol_like, exclusions=[])
+    assert error is None
+    assert after["recipe_hash"] != before["recipe_hash"]
+
+
+def test_wiring_sha256_is_the_harness_file_digest(kol_like: Path):
+    """B-W3A-1/H2: wiring_sha256 must be the digest of harness.gd itself —
+    not of any other file (e.g. the gutconfig) and not a constant."""
+    import hashlib
+
+    from godot_qa_toolkit.canonical.recipe import build_recipe
+
+    root = kol_like
+    harness = root / "acceptance" / "harness" / "harness.gd"
+    harness.parent.mkdir(parents=True, exist_ok=True)
+    harness.write_text("# harness\n", encoding="utf-8")
+
+    recipe, error = build_recipe(root, exclusions=[])
+    assert error is None
+    expected = hashlib.sha256(harness.read_bytes()).hexdigest()
+    assert expected != hashlib.sha256(
+        (root / _gutconfig_name()).read_bytes()
+    ).hexdigest()  # guard: the two files really differ here
+    assert recipe["acceptance_face"]["harness"]["wiring_sha256"] == expected

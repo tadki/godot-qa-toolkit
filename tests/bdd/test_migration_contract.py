@@ -55,8 +55,11 @@ EXPECTED_SCENARIO_COUNTS = {
 }
 EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
-EXPECTED_STEPS = 172
-EXPECTED_DEFINITIONS = 163
+# 合并账本（rebase SEE-1546 WP 系列后）：base 142/133
+# + SEE-1550 §SPEC-002 see1550_forms（+29 步 / +4 唯一定义）
+# + SEE-1546 WP1b/WP2/WP3（master 侧 +30 步 / +30 定义）→ 201 / 167。
+EXPECTED_STEPS = 201
+EXPECTED_DEFINITIONS = 167
 CONTRACT_MARKER = '{\n  "tool": "gherkin"'
 
 
@@ -143,8 +146,10 @@ def test_dual_source_scenario_count_matches_ledger(request: pytest.FixtureReques
     # SEE-1468 M5-a：see1288_fork_cli 4 场景收编后双源对账 17 -> 21。
     # SEE-1546 WP1a：see1546_wp1a 11 场景接入后对账 21 -> 32。
     # SEE-1546 M2：see1546_shadow 8 场景接入后对账 32 -> 40。
+    # SEE-1550 §SPEC-002：see1550_forms 8 场景接入后对账 40 -> 48——总量
+    # 断言去字面量化（单一口径 = EXPECTED_SCENARIOS，杜绝双源漂移复发）。
     collection = _full_collection(request)
-    assert len(collection.items) == EXPECTED_SCENARIOS == 48
+    assert len(collection.items) == EXPECTED_SCENARIOS
     for name, expected in EXPECTED_SCENARIO_COUNTS.items():
         assert _source_scenario_count(name) == expected, name
         prefix = f"tests/bdd/test_{name}.py::"

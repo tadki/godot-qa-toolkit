@@ -45,7 +45,7 @@ source of truth.
 | **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
 | **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
 | **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
-| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N] [--godot-bin <path>]` | shipped |
+| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N] [--no-reuse-coverage] [--godot-bin <path>]` | shipped |
 | **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S] [--godot-bin <path>]` | shipped |
 | **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp runtime addon | planned |
 
@@ -154,10 +154,16 @@ alone still pass.
 ## Mutation runner
 
 Runs baseline GUT on the untouched source (always measured — it is the
-verdict anchor), plans the execution face differentially, then per-mutant
-rewrites the file in-memory (restoring it after every run, SIGTERM/atexit
-cleanup included — an interrupted run leaves no `.gqt_mutation_*` temp files
-behind).
+verdict anchor), plans the execution face differentially, then runs every
+mutant through an isolated **disk shadow slot** (SEE-1550 default): each
+worker owns a hardlink copy-on-write shadow of the project (real copy where
+hardlinks are unavailable; `.godot` copied per slot), the mutant lands in the
+shadow's target `.gd` via temp-file + atomic `os.replace` *before* the engine
+starts, and the real repository is never written. A four-level reachability
+beacon (disk read-back hash → load/compile assert → autoload same-source
+assert → GUT run evidence) guarantees the engine actually executed the
+mutant. The former in-memory injection path is retired — there is no
+`--injection` switch.
 
 ```bash
 gqt mutation src/save/save_manager.gd --project-root /path/to/project \
@@ -186,6 +192,17 @@ contract):
   retry face) without running GUT.
 - `ok = survived == 0 AND timeout == 0 AND run_errors == 0 AND suspect == 0`
   (`suspect` = cannot prove the mutant was killed — gated same as survived).
+- **Mechanism disclosures (SEE-1550, additive only)**: `summary` carries
+  `inject_scheme` (always present, `disk-farm/1`), `slot_mode`
+  (`fresh`|`warm`), `freshness` (layered freshness verdicts),
+  `killed_by_certificates` and `suspected_orphans` when those semantics
+  apply.
+- **Suspected orphans are disclosed, never skipped**: a target with zero
+  static references (autoload wiring / `.tscn` / test literals / other
+  script refs) that still has survivors gets each survivor flagged
+  `suspected_orphan: true` and listed in `summary.suspected_orphans`;
+  statically undecidable faces (dynamic `load`, uid indirection) never
+  become a verdict and never skip execution.
 
 ### Differential mutation core (on by default)
 
@@ -209,16 +226,46 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   diff reuse and the coverage prefilter.
 - `--mutation-warning N` (default 50) warns on pre-truncation site count;
   sites > budget always disclose `total_sites/executed`.
-- `--reuse-coverage` pre-filters sites by the last `gqt coverage` run for
-  the file (own-JSON store, provenance-checked): uncovered sites are marked
-  verdict `uncovered` (explicit, not in the ok gate, never executed, do not
-  consume budget).
-- **CI migration (one-time)**: first run after upgrade re-executes
-  everything — the v1 resume store is neither read, written, nor deleted
-  (disclosed on stderr), and diff changes the red/green surface from
+- The coverage prefilter is **on by default** (SEE-1550 L1): sites are
+  pre-filtered by the last `gqt coverage` run for the file (own-JSON store,
+  provenance- and identity-checked — any drift disables the prefilter with
+  a stderr disclosure). Uncovered sites are marked verdict `uncovered`
+  (explicit, not in the ok gate, never executed, do not consume budget).
+  `--no-reuse-coverage` turns it off; the legacy `--reuse-coverage` flag is
+  still accepted (a no-op synonym of the default).
+- **CI migration (one-time)**: the SEE-1550 OPS bump (`see1550/1`)
+  invalidates pre-existing resume/coverage stores in one shot — they are
+  neither read, written, nor deleted (disclosed on stderr) and the first
+  run re-executes everything. Diff then changes the red/green surface from
   "every run is full" to "every run re-runs unproven kills".
   `--mutation-warning` / `--timeout-factor` / `timeout_streak` never enter
   any resume key.
+
+### Disk shadow execution layer & cache identity (SEE-1550)
+
+- **Execution layers by platform**: win64/DrvFS uses a persistent warm slot
+  pool under `.qa-cache/mutation-pool/` (built once on first run, then
+  per-run `git status` delta sync + targeted relink; pool-ledger + per-slot
+  flock against concurrent gqt processes); Linux/ext4 uses a fresh farm
+  per run (built and released every run). Either way the mutant only ever
+  touches the shadow slot.
+- **Freshness authority**: repo-side git delta is taken once per run;
+  single-site/caliper runs (`--mutation`/`--lines`) do a targeted
+  three-way check (repo stat vs slot stat vs run record) instead of a full
+  sweep — this is also what catches SIGKILL-leftover mutants. Any
+  ambiguity rebuilds the whole slot. A full census only runs on explicit
+  `GQT_MUTATION_FULL_CENSUS=1`.
+- **Cache identity package**: resume/coverage keys fold in `inject_scheme`
+  (`disk-farm/1`), the exact Godot version string, a boot/wiring hash
+  (normalized `project.godot` + autoload manifest + referenced `.tscn`
+  manifest), and the GUT addon content hash — any drift means old keys
+  never match again (no migration, no dirty merges).
+- **Kill certificates**: every killed entry carries the full failing-test
+  set (`killed_by`, disclosed via `summary.killed_by_certificates`). A
+  cached kill is reused only while every killer test still exists with an
+  unchanged script/dependency closure: killer edited/deleted/deps drifted →
+  only that entry re-runs; certificate missing/unresolvable → conservative
+  re-run; **new tests never invalidate old kills**.
 
 ### Survivor location in the report
 
@@ -283,6 +330,13 @@ always forces serial.
   two un-capped processes at 8 workers each = 16 godot instances fighting
   over 16 cores. On platforms without `fcntl` the gate warns once and steps
   aside (never blocks).
+- `GQT_MUTATION_POOL_BUDGET_MB` — disk budget of the win64 persistent warm
+  slot pool (default 512 MB; slot cap 8; LRU-pruned when exceeded — see
+  "Disk shadow execution layer" above). Linux uses a fresh per-run farm,
+  so the budget applies to the persistent pool only.
+- `GQT_MUTATION_FULL_CENSUS=1` — force a full census of the warm pool;
+  by default census runs only for slot validation/ambiguity, and
+  single-site runs take the targeted three-way channel instead.
 - **Progress (SEE-1525)** — every mutant verdict prints one line to
   **stderr** (`[12/361] killed L123 calc.gd#func:add#1 2.3s`, plus
   `worker=wN` on parallel shards or `worker=serial` on the baseline-fallback
@@ -302,15 +356,15 @@ always forces serial.
   snapshot fails, the file falls back to serial execution and says so on
   stderr (`baseline snapshot failed … falls back to serial …`) instead of
   degrading silently.
-- `--resume` — every run already writes each mutant's verdict to
-  `.qa-cache/gqt-mutation-resume/<fingerprint>/` as it lands. If a run is
-  cancelled, rerun the same command with `--resume`: completed mutants are
-  skipped and the merged report is identical in shape to a full run
-  (`summary.resumed` counts the skips). The fingerprint is
-  `sha1(target realpath + source sha1 + effective tests_glob + budget + ops
-  version)` — change any component and the stale verdicts are ignored
-  (re-run, never dirty-merged). A corrupt or unreadable store degrades
-  honestly to "no history". `--dry-run` stays zero-IO.
+- `--resume` — every run already writes each mutant's verdict to the v2
+  store `.qa-cache/gqt-mutation-resume-v2/<file-key>/` as it lands. If a
+  run is cancelled, rerun the same command with `--resume`: completed
+  mutants are skipped and the merged report is identical in shape to a
+  full run (`summary.resumed` counts the skips). The file-key is
+  `sha1(project-relative path + tests_glob + ops version + binary kind +
+  identity digest)` — change any component and the stale verdicts are
+  ignored (re-run, never dirty-merged). A corrupt or unreadable store
+  degrades honestly to "no history". `--dry-run` stays zero-IO.
 
 Auto-scan note: when a mutation target is referenced by
 exactly one test file, the scanner now scopes to that file (GUT `-gselect`)

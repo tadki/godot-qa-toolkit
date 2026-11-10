@@ -13,7 +13,7 @@
 | L1 | 单文件靶向 + `--scan` + 大文件警告熔断 | 先算清要跑多少，别盲跑 | **部分采纳**：拒绝单文件靶向（多文件 + worker 池是 gqt 既有优势）；`--dry-run` 升级为差分计数预估；新增 `--mutation-warning`（默认 50，截断前全量计数）+ 截断 N/M 强制披露 | 警告熔断的语义保留；靶向的机制与 gqt 域优势冲突 |
 | L2 | 函数级 SHA-256 差分 + 快照持久化 | 没变的东西不重跑 | **采纳（核心）**：scope 级哈希差分 + per-file manifest + 差分跳过规则 + survived 永不缓存信任 | 语义完全同构；哈希粒度按 GDScript 结构重定义（见 §2） |
 | L3 | 覆盖率前置过滤 + `--reuse-coverage` | 没被测试覆盖的 mutant 不用跑 | **采纳**：复用 `gqt coverage` 自家行级事实（不引 LCOV 外部格式），provenance 校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 数据面自有；"外部格式互操作"机制被拒绝 |
-| L4 | 沙盒目录克隆 + 多进程 worker 池 | 隔离变异副作用 + 并行执行 | **拒绝沙盒，保留 worker 池**：内存注入（磁盘目标文件全程原始内容）严格优于目录克隆——中断无残骸、无文件系统拷贝税 | 沙盒是 JVM 生态"进程内改字节码不可行"的妥协；GDScript 源码级内存注入无此约束 |
+| L4 | 沙盒目录克隆 + 多进程 worker 池 | 隔离变异副作用 + 并行执行 | **SEE-1420 拒绝沙盒（内存注入）；SEE-1550 反转为 per-worker 隔离磁盘影子槽**（hardlink COW，无硬链接 FS 退真拷贝；`.godot` 整树实拷贝） | take_over_path 内存注入存在可达性缺口：启动前完成的 autoload / preload / 组合根装配继续持有旧 Script（KOL 23 autoload 实证，假 survived）；hardlink COW 把拷贝税压到被改写文件本身，槽归还断言保留「中断无残骸」性质 |
 | L5 | baseline 动态超时熔断 | 超时判定要随基线耗时自适应 | **采纳（小改）**：自适应上限 = `max(timeout, baseline×F+1)`，`--timeout-factor` 默认 2.0 只放大不收紧；**拒绝 UB 默认 10**（JVM 抖动所迫，gqt 域无此噪声） | 倍数是环境参数不是语义 |
 | L6 | Babashka 快启动 / no-mutate / 常驻热 worker | 削启动税 + 跳过不可变区域 | **no-mutate 采纳**（`# gqt: no-mutate` 函数级 + 行级）；**Babashka 不适用**（gqt 是 Python 常驻 CLI，无冷启动问题）；**常驻热 worker 拒绝本轮降 backlog**（Godot 引擎级状态泄漏风险，重启条件量化见定案 §五） | 快启动语义在 gqt 域不存在；热 worker 的假 verdict 代价不对称 |
 | L7 | `--mutation` / `--lines` 单点重跑 | 秒级复核单个位点 | **采纳**：`--mutation <file>#<scope_id>#<n>` / `--lines`，1 baseline + N selected，绕过差分复用与 coverage 前置过滤（防假阴性的公平抽查通道） | 直接采纳，id 寻址按 D3 重定义 |
@@ -24,7 +24,7 @@
 源文件 ─▶ ① scope manifest 提取 ─▶ ② 差分引擎 ─▶ ③ 预算规划 ─▶ ④ worker 池执行 ─▶ ⑤ resume v2 持久化
               │                      │               │               │                  │
         scopemanifest.py        diffengine.py    planner.py     executor.py          resume2.py
-        （ops.py 产 mutant）   （resume2 读盘）  （timing 协商）  （+gutrun/inject）  （coverlink 供锚）
+        （ops.py 产 mutant）   （resume2 读盘）  （timing 协商）  （+gutrun/shadow·shadowpool/beacon）  （coverlink 供锚）
 ```
 
 ### ① scope manifest 提取 — `scopemanifest.py`（+ `ops.py` 变异点收集）
@@ -48,7 +48,7 @@
 ### ④ worker 池执行 — `executor.py`（+ `gutrun.py` / `inject.py` / `godot_gate.py`）
 
 - 默认并行（jobs = `max(2, cpu//2)`），单文件同样 per-mutant 分片；变异点 ≤ jobs 自动退串行；共享 baseline 快照（worker 自跑 baseline 会 N 倍放大启动税且污染 timeout 锚）。
-- 内存注入：变异产物经 host 脚本以 env 指路，磁盘目标文件全程原始内容，每轮后幂等恢复；SIGTERM handler 先恢复再终止。
+- 磁盘影子注入（SEE-1550 M0，反转 SEE-1420 内存注入）：每 worker 隔离 hardlink COW 影子槽（`.godot` 整树实拷贝），mutant 经「临时文件 + `os.replace`」于引擎启动前写入影子内目标 `.gd`，真实仓零写入；四级 beacon（磁盘读回哈希 → load 编译 → autoload 同源 → GUT 运行证据）钉住全加载形态可达性；win64 持久 warm 池 / Linux fresh 农场分域执行（`shadow.py` / `shadowpool.py` / `beacon.py`）。
 - kill 判定 = 失败测试名集合相对 baseline 的差集（不看 exit code）；`godot_gate` 跨进程 flock 槽位闸统一 mutation/coverage 的 Godot 并发上限。
 - `gutrun.py` 承担 GUT 子进程调用与 launch-failure 甄别（毒条目防护：启动失败类 run_error 不落盘，防 `--resume` 误复用）。
 
@@ -65,7 +65,7 @@
 2. **差分保真（宁重跑不假绿）**：加速必须以不产生假绿为前提。survived / timeout / timeout_pinned / run_error 永不缓存信任——缓存只加速"已证明的杀死"，从不加速"未证明的存活"。红线优先于任何性能收益。
 3. **卡尺闭环**：单点重跑是差分体系的"卡尺"——补测迭代里 survivor → 补断言 → `--mutation <id>` 秒级确认，把"验证一个修复"的成本从全量轮降到 1 baseline + 1 mutant；它同时是差分与覆盖率过滤的防假阴性抽查通道（被过滤位点的公平复核）。
 4. **质量不降的显式化**：每一次跳过都必须留下机器可查的痕迹——`diff_skipped` 逐条 id、`untouched_ranges` 行号区间、`uncovered` 独立 verdict、verdict 全签名五元组防 id 漂移、timeout_pinned 永不洗白进 killed。**信息不披露 = 优化不合法**。
-5. **机制适配性（语义 vs 机制分离）**：UB 的沙盒克隆、Babashka 启动器、JVM timeout×10 都是各自生态约束的产物；gqt 的内存注入、常驻 CLI、自适应 ×2 是 GDScript/GUT 域的同语义重造。跨体系移植时先问"这是问题还是解法"——问题可移植，解法未必。
+5. **机制适配性（语义 vs 机制分离）**：UB 的沙盒克隆、Babashka 启动器、JVM timeout×10 都是各自生态约束的产物；gqt 的磁盘影子注入（SEE-1550 起；更早的内存注入被可达性缺口证伪）、常驻 CLI、自适应 ×2 是 GDScript/GUT 域的同语义重造。跨体系移植时先问"这是问题还是解法"——问题可移植，解法未必。
 6. **预算协商与负面清单**：配置参数（警告阈值、超时系数）是每 run 的执行策略，不是 verdict 的身份成分——凡不改变"这个 mutant 是否已死"判断的东西绝不进缓存 key，否则调一次配置全库重跑。
 
 ## 4. 决策沉淀（D1–D7）
@@ -82,7 +82,7 @@
 
 ### 拒绝项与理由（定案 §六）
 
-沙盒目录克隆（内存注入严格优于——中断无残骸、无拷贝税）；单文件靶向（放弃多文件 worker 池优势）；Babashka 启动器（常驻 CLI 无冷启动问题）；源文件尾 manifest 注入；LCOV 外部格式（复用自家 JSON + provenance）；UB 默认 timeout-factor=10（JVM 抖动所迫）；timeout 判 killed（UB 语义，gqt 以 timeout=存疑 + pinned 降级链替代）；文件全局 MNN 编号（插入位移不稳定）；嵌套 scope 方法级粒度（本期，KOL 实测无场景）；lazy adopt 迁移器（复杂度买回收益恒零，S1 自攻撤销）；budget 轮转/默认重估（D6）。
+沙盒目录克隆（SEE-1420 以内存注入严格优于为由拒绝；**SEE-1550 反转**——per-worker 磁盘影子隔离重新采纳文件级隔离语义，理由与形态见 §1 L4 与 §2 ④）；单文件靶向（放弃多文件 worker 池优势）；Babashka 启动器（常驻 CLI 无冷启动问题）；源文件尾 manifest 注入；LCOV 外部格式（复用自家 JSON + provenance）；UB 默认 timeout-factor=10（JVM 抖动所迫）；timeout 判 killed（UB 语义，gqt 以 timeout=存疑 + pinned 降级链替代）；文件全局 MNN 编号（插入位移不稳定）；嵌套 scope 方法级粒度（本期，KOL 实测无场景）；lazy adopt 迁移器（复杂度买回收益恒零，S1 自攻撤销）；budget 轮转/默认重估（D6）。
 
 ### 演进留白（重启条件，定案 §五）
 

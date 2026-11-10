@@ -369,3 +369,158 @@ def test_run_shadow_flags_unstable_rerun():
     )
     assert report["noise"][0]["rerun_identical"] is False
     assert report["noise"][0]["status"] == "unstable"
+
+
+# --------------------------------------------------------------------------
+# WP2 PR-A: identity delegation adapter guards (§SPEC-024 surface)
+# --------------------------------------------------------------------------
+
+
+def test_build_probe_manifest_infers_label_from_identities():
+    from godot_qa_toolkit.risk.identity import build_probe_manifest
+
+    rows, lines = build_probe_manifest(
+        GD_SNIPPET, identities=[{"function_id": "my.gd::a"}], file_label=None
+    )
+    assert lines and rows
+    assert rows[0]["function_id"].startswith("my.gd::")
+
+
+def test_build_probe_manifest_explicit_label_skips_inference():
+    from godot_qa_toolkit.risk.identity import build_probe_manifest
+
+    rows, lines = build_probe_manifest(GD_SNIPPET, identities=None, file_label="x.gd")
+    assert lines and rows
+    assert rows[0]["function_id"].startswith("x.gd::")
+
+
+def test_uses_sanitized_projection_survives_conversion_failure(monkeypatch):
+    """A gd2py conversion failure must read as 'no sanitized projection'
+    (never crash the eligibility walk)."""
+    import godot_qa_toolkit.risk.identity as identity_mod
+
+    def boom(_src):
+        raise RuntimeError("conversion exploded")
+
+    monkeypatch.setattr(identity_mod, "convert_code", boom)
+    assert identity_mod._uses_sanitized_projection(GD_SNIPPET) is False
+    profile = identity_mod.file_profile(GD_SNIPPET, file_label="x.gd")
+    assert profile["gap_lane"] is None
+
+
+def test_build_probe_rows_shape_is_pinned():
+    from godot_qa_toolkit.risk.identity import build_probe_manifest
+
+    rows, _ = build_probe_manifest(GD_SNIPPET, identities=None, file_label="x.gd")
+    assert set(rows[0]) == {
+        "probe_id",
+        "line",
+        "function_id",
+        "owner_ambiguous",
+        "owner_kind",
+    }
+
+
+def test_probe_rows_carry_lambda_owner_kind():
+    from godot_qa_toolkit.risk.identity import build_probe_manifest
+
+    lam = "func a():\n\tvar f := func():\n\t\treturn 1\n\treturn f\n"
+    rows, _ = build_probe_manifest(lam, identities=None, file_label="x.gd")
+    kinds = {r["owner_kind"] for r in rows}
+    assert kinds == {"func", "lambda"}
+    lam_rows = [r for r in rows if r["owner_kind"] == "lambda"]
+    assert all(r["function_id"].endswith("<lambda#1>") for r in lam_rows)
+
+
+def test_span_closure_ends_before_next_structure():
+    from godot_qa_toolkit.registry.functions import build_file_registry
+
+    src = "func a():\n\treturn 1\n\nfunc b():\n\treturn 2\n"
+    snapshot = build_file_registry(src, "x.gd")
+    spans = {e["name"]: (e["start_line"], e["end_line"]) for e in snapshot["entries"]}
+    assert spans == {"a": (1, 3), "b": (4, 5)}
+
+
+def test_span_closure_keeps_pure_punctuation_body_owned():
+    """§SPEC-024 span-closure guard, independently reproduced: a body line
+    with zero leaf tokens (`return []`) must stay inside the closed span, so
+    its probe keeps an owner instead of silently going unowned."""
+    from godot_qa_toolkit.registry.functions import build_file_registry
+    from godot_qa_toolkit.registry.manifest import build_probe_manifest_v2
+
+    src = "func a():\n\treturn []\n"
+    snapshot = build_file_registry(src, "x.gd")
+    row = snapshot["entries"][0]
+    assert (row["start_line"], row["end_line"]) == (1, 2)
+    manifest = build_probe_manifest_v2(src, snapshot)
+    assert manifest["census"]["unowned"] == 0
+    probe = manifest["probe_plan"][0]
+    assert probe["fid"] == "x.gd::a"
+    assert probe["ownership"] == "owned"
+
+
+def test_probe_plan_ownership_flags_cover_all_states(monkeypatch):
+    """probe-manifest/2 per-line ownership flag: owned / unowned / ambiguous
+    must be emitted verbatim for consumers (WP2 PR-A contract)."""
+    import godot_qa_toolkit.registry.manifest as manifest_mod
+    from godot_qa_toolkit.coverage.runner import ExecutableLine
+    from godot_qa_toolkit.registry.functions import build_file_registry
+    from godot_qa_toolkit.registry.manifest import build_probe_manifest_v2
+
+    dup_entries = [
+        {
+            "fid": "x.gd::dup1",
+            "kind": "func_def",
+            "instrumentable": True,
+            "start_line": 1,
+            "end_line": 2,
+        },
+        {
+            "fid": "x.gd::dup2",
+            "kind": "func_def",
+            "instrumentable": True,
+            "start_line": 1,
+            "end_line": 2,
+        },
+    ]
+    ambiguous = build_probe_manifest_v2(
+        GD_SNIPPET, {"file": "x.gd", "entries": dup_entries}
+    )
+    assert all(
+        row["ownership"] == "ambiguous" and row["fid"] is None
+        for row in ambiguous["probe_plan"]
+    )
+
+    snap = build_file_registry("func a():\n\treturn []\n", "x.gd")
+    owned = build_probe_manifest_v2("func a():\n\treturn []\n", snap)
+    assert owned["probe_plan"][0]["ownership"] == "owned"
+
+    real = manifest_mod._collect_executable_lines
+
+    def with_orphan(src_arg):
+        return real(src_arg) + [ExecutableLine(line=99, node="expr_stmt")]
+
+    monkeypatch.setattr(manifest_mod, "_collect_executable_lines", with_orphan)
+    orphan = build_probe_manifest_v2(GD_SNIPPET, snap)
+    assert any(
+        row["ownership"] == "unowned" and row["fid"] is None
+        for row in orphan["probe_plan"]
+    )
+
+
+def test_spec024_private_census_symbol_debt_gate():
+    """§SPEC-024 debt gate as a suite assertion: no private coverage.runner
+    census symbol may be imported under risk/ (public run_coverage is the
+    only legal measurement adapter until PR-C removes it)."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parent.parent.parent
+    pattern = (
+        r"from ..coverage.runner import .*( _EXECUTABLE_NODE_NAMES"
+        r"|_collect_executable_lines|_node_line|_paren_depths)"
+    )
+    proc = subprocess.run(
+        ["grep", "-rnE", pattern, "src/godot_qa_toolkit/risk/"],
+        cwd=str(repo), capture_output=True,
+    )
+    assert proc.returncode == 1, proc.stdout.decode()

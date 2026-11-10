@@ -27,6 +27,8 @@ from pathlib import Path
 
 # preload("res://x") / load("res://x") 字面量（与 testscan 同源形态）
 _RES_REF_PATTERN = re.compile(r'\b(?:preload|load)\s*\(\s*"([^"]+)"\s*\)')
+# 顶层 class_name 声明（compile-time 全局类；内嵌 class X 不匹配）
+_CLASS_NAME_DECL = re.compile(r"^class_name\s+([A-Za-z_]\w*)", re.MULTILINE)
 # .tscn/.tres ext_resource 的 path 属性
 _EXT_RESOURCE_PATH = re.compile(r'path\s*=\s*"(res://[^"]+)"')
 GUT_DOMAIN_PREFIX = "res://addons/gut/"
@@ -87,19 +89,31 @@ def build_reference_graph(
 
     边来源：.gd 的 preload/load 字面量、.tscn/.tres 的 ext_resource path、
     autoload 裸名使用（compile-time 绑定语义——B2 探针实证不随 free/register
-    更新，静态保守计入）。方向：引用者 → 被引用物。
+    更新，静态保守计入）、class_name 裸名使用（同 compile-time 绑定族——
+    D-W2 根因修复：缺此边时消费者不进 reload 闭包，跨腿持有首腿编译绑定，
+    mutant 对测试不可见 → 漏杀/过杀双向分歧）。方向：引用者 → 被引用物。
     """
     root = Path(project_root)
     if files is None:
         files = _iter_project_sources(project_root)
     autoload_table = parse_autoload_table(project_root)
     name_to_res = {v: k for k, v in autoload_table.items()}
-    graph: dict[str, set[str]] = {}
+    # pass 1：顶层 class_name 声明表（全局类名 → 声明脚本 res 路径）
+    class_decls: dict[str, str] = {}
+    texts: dict[Path, str] = {}
     for p in files:
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        texts[p] = text
+        if p.suffix == ".gd":
+            m = _CLASS_NAME_DECL.search(text)
+            if m is not None:
+                class_decls.setdefault(m.group(1),
+                                       _file_res_path(project_root, p))
+    graph: dict[str, set[str]] = {}
+    for p, text in texts.items():
         holder_res = _file_res_path(project_root, p)
         refs: set[str] = set()
         if p.suffix == ".gd":
@@ -107,6 +121,11 @@ def build_reference_graph(
             # autoload 裸名使用：compile-time 绑定（B2 探针实证不可重定向）
             for name, res in name_to_res.items():
                 if re.search(r"\b" + re.escape(name) + r"\b", text):
+                    refs.add(res)
+            # class_name 裸名使用：compile-time 全局类绑定（同绑定语义族）
+            for name, res in class_decls.items():
+                if res != holder_res and re.search(r"\b" + re.escape(name)
+                                                   + r"\b", text):
                     refs.add(res)
         else:
             refs.update(_EXT_RESOURCE_PATH.findall(text))

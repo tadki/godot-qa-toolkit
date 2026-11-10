@@ -54,8 +54,10 @@ _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 # 旧 v2 store 条目不读不写不删并 stderr 披露（Owner 裁决菜单 B：一次性全失效）。
 # see1550/2（§SPEC-014）：变异收集语义变更——mdr_expr（`*`/`/`/`%`）并入
 # 扫描面 + `%` 算子入表。位点集合变化 = stable_id 序与 verdict 域变化，
-# 旧 store 条目同样不读不写不删并披露（identity.disclose_superseded）。
-OPS_VERSION = "see1550/2"
+# 旧 store 条目不读不写不删并披露（identity.disclose_superseded）。
+# see1550/3（§SPEC-020）：身份包增 exec_scheme（cold-shadow/1 vs
+# worker-reset/1）——file_key 全量换域，旧 store 一次性失效并披露。
+OPS_VERSION = "see1550/3"
 
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {

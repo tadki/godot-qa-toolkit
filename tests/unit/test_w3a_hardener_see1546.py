@@ -240,3 +240,36 @@ def test_gutconfig_config_sha256_ties_bytes_to_recipe(kol_like):
     recipe, error = build_recipe(kol_like, exclusions=[])
     assert error is None
     assert recipe["gut_face"]["config_sha256"] == expected
+
+
+def test_cmd_recipe_rejects_illegal_scope_fail_loud(kol_like, capsys):
+    """§SPEC-041 target 1 (CLI-side anchor): an illegal exclusion scope (e.g.
+    `gut_dirs`) passed through cmd_recipe's REAL path must produce ok=false
+    with an enumeration hint — never silently accepted into the recipe."""
+    args = _parse(
+        "recipe", "--project-root", str(kol_like),
+        "--exclude", "gut_dirs:res://tests/x/**:reason",
+    )
+    rc = cli_mod.cmd_recipe(args)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert out["ok"] is False and out["tool"] == "recipe"
+    assert "illegal exclusion scope" in out["summary"]["error"]
+    assert "must be one of" in out["summary"]["error"]
+
+
+def test_cmd_recipe_legal_scope_still_accepted(kol_like, tmp_path, capsys):
+    """§SPEC-041 companion: the legal-scope success path is unaffected by the
+    enumeration gate."""
+    out_path = tmp_path / "recipe.json"
+    args = _parse(
+        "recipe", "--project-root", str(kol_like),
+        "--exclude", "gut_dir:tests/old/:retired face",
+        "--out", str(out_path),
+    )
+    rc = cli_mod.cmd_recipe(args)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["ok"] is True
+    recipe = json.loads(out_path.read_text(encoding="utf-8"))
+    assert len(recipe["exclusions"]) == 1
+    assert recipe["exclusions"][0]["scope"] == "gut_dir"

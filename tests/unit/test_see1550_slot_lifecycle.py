@@ -460,9 +460,6 @@ class TestReleaseMarkDead:
         rec = pool["slots"][slot.slot_id]
         assert rec["path"] == "", "标死：树路径必须清空"
 
-    @pytest.mark.xfail(strict=True, reason="D-1 登记缺陷：标死记录 path='' "
-                       "经 Path('')→'.' 使 is_dir() 恒真，缺失树重建通道不触发，"
-                       "槽以 CWD 为根被复活并做 CWD 相对重链——待 Leader 裁定修复")
     def test_marked_dead_slot_rebuilds_on_next_acquire(self, tmp_path,
                                                        monkeypatch):
         """契约：标死槽（path=''）下次获取必须按缺失树重建，绝不复活

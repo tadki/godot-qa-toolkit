@@ -336,7 +336,11 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
             slot.slot_id = slot_id
             slot._slot_lock_fd = fd
             rec["in_use"] = True
-            if not Path(slot.root).is_dir():
+            # D-1（hardener P6 实证）：标死记录 path="" 经 Path("")→'.'
+            # 使 is_dir() 恒真，「缺失树→整槽重建」通道不触发——槽以 CWD
+            # 为根复活并做 CWD 相对重链，写穿真实仓根。空 path 必须显式
+            # 走重建通道。
+            if not rec.get("path") or not Path(slot.root).is_dir():
                 slot.freshness.append("slot_tree:missing")
                 _rebuild_locked(project_root, pool, slot, rec, wiring_hash, now)
                 return slot
@@ -380,7 +384,13 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
 def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
                     rec: dict, wiring_hash: str, now: float) -> None:
     """整槽重建（锁内）：删旧树 → 新建 → 重写记录（任何歧义整槽重建）。"""
-    shutil.rmtree(slot.root, ignore_errors=True)
+    # D-1 同族：标死记录 path="" 时 slot.root 不指向旧树——旧树恒在
+    # canonical slots/<slot_id> 下，按槽 id 清理（残留树不得被 overlay
+    # 式半重建复活）。
+    legacy = _pool_dir(project_root) / "slots" / slot.slot_id
+    shutil.rmtree(legacy, ignore_errors=True)
+    if slot.root and Path(slot.root) != legacy:
+        shutil.rmtree(slot.root, ignore_errors=True)
     root, provision = shadow.create_slot(
         project_root, "win64",
         slot_dir=_pool_dir(project_root) / "slots" / slot.slot_id)
@@ -413,7 +423,11 @@ def _prune_pool_locked(project_root: str, pool: dict, now: float) -> None:
         rec = slots.pop(slot_id, None)
         size = int(rec.get("size_bytes") or 0) if rec else 0
         if rec:
+            # D-1 同族：标死记录 path="" 不得因空 path 静默残留树——
+            # canonical 位置按槽 id 兜底清理（零残留/磁盘预算门）。
             shutil.rmtree(rec.get("path") or "", ignore_errors=True)
+            shutil.rmtree(_pool_dir(project_root) / "slots" / slot_id,
+                          ignore_errors=True)
         try:
             (_pool_dir(project_root) / "slots" / f"{slot_id}.lock").unlink(
                 missing_ok=True)

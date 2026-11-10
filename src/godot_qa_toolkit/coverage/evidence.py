@@ -40,8 +40,6 @@ def sink_name_for(run_uuid: str) -> str:
 
 
 def sha256_text(text: str) -> str:
-    import hashlib
-
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -215,103 +213,111 @@ def write_bundle(evidence_dir: Path, bundle: dict) -> Path:
     return out
 
 
+def _recover_record(
+    evidence_dir: Path, record_path: Path
+) -> tuple[dict | None, str | None]:
+    """Recover one started-but-unfinished run record into a bundle. Returns
+    (result_row, None) on success, (None, error) on a recoverable-record
+    failure, and (None, None) for records that need no recovery. The sink is
+    kept — recovery only reads it."""
+    # stem of "<uuid>.record.json" still carries the ".record" suffix —
+    # reading by path (not by stem) avoids the double-suffix miss
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except ValueError:
+        record = None
+    if not isinstance(record, dict):
+        return None, f"unreadable record: {record_path.name}"
+    if record.get("status") == "bundle_written":
+        return None, None
+    run_uuid = record.get("run_uuid")
+    manifest = record.get("probe_manifest") or {}
+    plan_by_id = {p["probe_id"]: p for p in manifest.get("probe_plan", [])}
+    sink = _find_sink(evidence_dir, record, run_uuid)
+    if sink is None:
+        return None, (
+            f"run {run_uuid}: sink {SINK_PREFIX}{run_uuid}.txt missing — "
+            "cannot recover without hits data"
+        )
+    valid_ids = set(plan_by_id)
+    hits_raw = [
+        int(ln.strip())
+        for ln in Path(sink).read_text(encoding="utf-8").splitlines()
+        if ln.strip().isdigit()
+    ]
+    covered_by_fid: dict[str, list[int]] = {}
+    for pid in hits_raw:
+        if pid in valid_ids:
+            covered_by_fid.setdefault(plan_by_id[pid]["fid"], []).append(
+                plan_by_id[pid]["line"]
+            )
+    per_function = {p["fid"]: p for p in manifest.get("per_function", [])}
+    bundle = {
+        "evidence_version": EVIDENCE_VERSION,
+        "run_uuid": run_uuid,
+        "recovered": True,
+        "target": record.get("target", {}),
+        "recipe": record.get("recipe", {}),
+        "probe_manifest": {
+            "manifest_version": "probe-manifest/2",
+            "inline": manifest,
+        },
+        "T": [
+            {
+                "fid": fid,
+                "t_lines": pf.get("t_lines", 0),
+                "line_ids": pf.get("t_line_ids", []),
+            }
+            for fid, pf in per_function.items()
+        ],
+        "I": [
+            {"fid": fid, "i_lines": pf.get("i_lines", 0)}
+            for fid, pf in per_function.items()
+        ],
+        "C": [
+            {
+                "fid": fid,
+                "covered": len(sorted(set(lines))),
+                "covered_line_ids": sorted(set(lines)),
+            }
+            for fid, lines in covered_by_fid.items()
+        ],
+        "census_gaps": record.get("census_gaps", []),
+        "sentinels": {
+            "probes_fired": len([p for p in hits_raw if p in valid_ids]),
+            "vacuous": False,
+            "run_error": False,
+            "timeout": False,
+            "zero_tests": False,
+            "gut_ok": True,
+            "transport_anomaly": len(
+                [p for p in hits_raw if p not in valid_ids]
+            ),
+        },
+        "entry_states": record.get("entry_states", []),
+        "file_state": "recovered",
+    }
+    out = write_bundle(evidence_dir, bundle)
+    update_run_record(evidence_dir, run_uuid, status="bundle_written")
+    return {"run_uuid": run_uuid, "bundle": str(out)}, None
+
+
 def recover_bundle(evidence_dir: Path) -> dict:
     """Rebuild bundles for started-but-unfinished runs on disk, WITHOUT
     re-running GUT: the started record carries the probe manifest inline, so
     the UUID sink's raw probe ids can be re-attributed to fids exactly like
     the online path. The sink is kept (recovery only reads it)."""
-    errors: list[str] = []
     recovered: list[dict] = []
+    errors: list[str] = []
     if not evidence_dir.is_dir():
         return {"recovered": recovered, "errors": ["evidence dir missing"]}
 
     for record_path in sorted(evidence_dir.glob("*.record.json")):
-        # stem of "<uuid>.record.json" still carries the ".record" suffix —
-        # reading by path (not by stem) avoids the double-suffix miss
-        try:
-            record = json.loads(record_path.read_text(encoding="utf-8"))
-        except ValueError:
-            record = None
-        if not isinstance(record, dict):
-            errors.append(f"unreadable record: {record_path.name}")
-            continue
-        if record.get("status") == "bundle_written":
-            continue
-        run_uuid = record.get("run_uuid")
-        manifest = record.get("probe_manifest") or {}
-        plan = manifest.get("probe_plan", [])
-        plan_by_id = {p["probe_id"]: p for p in plan}
-        sink = _find_sink(evidence_dir, record, run_uuid)
-        if sink is None:
-            errors.append(
-                f"run {run_uuid}: sink {SINK_PREFIX}{run_uuid}.txt missing — "
-                "cannot recover without hits data"
-            )
-            continue
-        valid_ids = set(plan_by_id)
-        hits_raw = [
-            int(ln.strip())
-            for ln in Path(sink).read_text(encoding="utf-8").splitlines()
-            if ln.strip().isdigit()
-        ]
-        hits_lines = sorted(
-            {plan_by_id[pid]["line"] for pid in hits_raw if pid in valid_ids}
-        )
-        covered_by_fid: dict[str, list[int]] = {}
-        for pid in hits_raw:
-            if pid in valid_ids:
-                covered_by_fid.setdefault(plan_by_id[pid]["fid"], []).append(
-                    plan_by_id[pid]["line"]
-                )
-        per_function = {p["fid"]: p for p in manifest.get("per_function", [])}
-        bundle = {
-            "evidence_version": EVIDENCE_VERSION,
-            "run_uuid": run_uuid,
-            "recovered": True,
-            "target": record.get("target", {}),
-            "recipe": record.get("recipe", {}),
-            "probe_manifest": {
-                "manifest_version": "probe-manifest/2",
-                "inline": manifest,
-            },
-            "T": [
-                {
-                    "fid": fid,
-                    "t_lines": pf.get("t_lines", 0),
-                    "line_ids": pf.get("t_line_ids", []),
-                }
-                for fid, pf in per_function.items()
-            ],
-            "I": [
-                {"fid": fid, "i_lines": pf.get("i_lines", 0)}
-                for fid, pf in per_function.items()
-            ],
-            "C": [
-                {
-                    "fid": fid,
-                    "covered": len(sorted(set(lines))),
-                    "covered_line_ids": sorted(set(lines)),
-                }
-                for fid, lines in covered_by_fid.items()
-            ],
-            "census_gaps": record.get("census_gaps", []),
-            "sentinels": {
-                "probes_fired": len([p for p in hits_raw if p in valid_ids]),
-                "vacuous": False,
-                "run_error": False,
-                "timeout": False,
-                "zero_tests": False,
-                "gut_ok": True,
-                "transport_anomaly": len(
-                    [p for p in hits_raw if p not in valid_ids]
-                ),
-            },
-            "entry_states": record.get("entry_states", []),
-            "file_state": "recovered",
-        }
-        out = write_bundle(evidence_dir, bundle)
-        update_run_record(evidence_dir, run_uuid, status="bundle_written")
-        recovered.append({"run_uuid": run_uuid, "bundle": str(out)})
+        result, error = _recover_record(evidence_dir, record_path)
+        if error is not None:
+            errors.append(error)
+        elif result is not None:
+            recovered.append(result)
     return {"recovered": recovered, "errors": errors}
 
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -92,6 +93,28 @@ def canary_due(leg_index: int, every: int | None = None) -> bool:
     return leg_index == 0 or leg_index % k == 0
 
 
+def prepare_scene_refresh(slot_root: str, closure: list[str],
+                          leg: int) -> list[dict]:
+    """场景/资源成员的旁路刷新对（D-W2）：PackedScene 缓存持有加载时解析的
+    脚本对象，正典路径单步 REPLACE 不重读磁盘、IGNORE 两步在宿主会话内
+    挂死。字节复制到每腿唯一旁路路径（首次加载必 fresh，ext_resource 绑
+    当前缓存的新脚本对象），引擎侧 take_over_path 接管正典路径。"""
+    out: list[dict] = []
+    for res in closure:
+        if res.endswith(".gd"):
+            continue
+        src = Path(slot_root) / res.removeprefix("res://")
+        if not src.is_file():
+            continue
+        side_dir = Path(slot_root) / WORKER_DIRNAME
+        side_dir.mkdir(parents=True, exist_ok=True)
+        side = side_dir / f"refresh-{leg}-{src.name}"
+        shutil.copy2(src, side)
+        out.append({"canonical": res,
+                    "side": f"res://{WORKER_DIRNAME}/{side.name}"})
+    return out
+
+
 @dataclass
 class WorkerLegResult:
     """单腿结果（引擎回报 + Python 侧解析）。"""
@@ -120,6 +143,8 @@ class _SessionState:
     legs_run: int = 0
     last_canary_leg: int = -1
     gate_ctx: object | None = None
+    ref_connections: list | None = None
+    ref_user_files: list | None = None
 
 
 class WorkerSession:
@@ -247,7 +272,8 @@ class WorkerSession:
     # -- 单腿执行 -------------------------------------------------------
 
     def run_leg(self, leg: int, target_res: str, mutant_sha256: str,
-                closure: list[str], tests_glob: str | None) -> WorkerLegResult:
+                closure: list[str], tests_glob: str | None,
+                scene_refresh: list[dict] | None = None) -> WorkerLegResult:
         """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。"""
         if not self.dead:
             self.start()  # 惰性启动（同一 run 进程只 spawn 一次）
@@ -261,6 +287,7 @@ class WorkerSession:
             "mutant_sha256": mutant_sha256,
             "closure": list(closure),
             "tests_glob": tests_glob or "res://tests/",
+            "scene_refresh": list(scene_refresh or []),
         }
         req_name = f"req-{leg}-{uuid.uuid4().hex[:8]}.json"
         (work / req_name).write_text(json.dumps(req), encoding="utf-8")
@@ -317,6 +344,8 @@ class WorkerSession:
         )
         r.failing_tests = self._leg_failing_names(leg)
         reason = self._fatal_reason(r)
+        if not reason:
+            reason = self._state_drift(r)
         if reason:
             r.fatal = True
             r.fatal_reason = reason
@@ -340,6 +369,28 @@ class WorkerSession:
             if disk is None or disk != sha:
                 return (f"loaded-source hash gate fired on {member} "
                         f"(disk={disk} loaded={sha}) — cache/disk divergence")
+        return ""
+
+    def _state_drift(self, r: WorkerLegResult) -> str:
+        """腿间状态漂移门（D-W2 canary 拦截面扩大）：冷通道每 mutant 一个
+        全新进程，连接指纹与 user:// 树逐腿天然全等；worker 常驻进程必须
+        达到同一不变量，否则判定不可信（污染 → 假 kill / 假 survived）。
+        参考基线取首腿（boot 后干净态）；此后任一腿漂移即会话致命。"""
+        st = self.state
+        if st.ref_connections is None:
+            st.ref_connections = list(r.connections)
+            st.ref_user_files = list(r.user_files)
+            return ""
+        if r.connections != st.ref_connections:
+            return (f"connection fingerprint drift at leg {r.leg} "
+                    f"(ref={len(st.ref_connections)} entries, "
+                    f"now={len(r.connections)}) — inter-leg state pollution, "
+                    f"session fatal")
+        if r.user_files != st.ref_user_files:
+            return (f"user:// tree drift at leg {r.leg} "
+                    f"(ref={len(st.ref_user_files)} files, "
+                    f"now={len(r.user_files)}) — inter-leg state pollution, "
+                    f"session fatal")
         return ""
 
     def _leg_failing_names(self, leg: int) -> set[str]:
@@ -419,6 +470,7 @@ func _run_leg(req: Dictionary) -> void:
 	var target_res := String(req["target_res"])
 	var expected := String(req.get("mutant_sha256", ""))
 	var members: Array = req.get("closure", [])
+	_wipe_user()
 	print("GQT_WORKER_LEG_BEGIN ", leg)
 	var resp := {"leg": leg, "hash_ok": false, "reload": {},
 		"source_sha": {}, "autoload_in_closure": [], "gut_ran": false,
@@ -428,20 +480,50 @@ func _run_leg(req: Dictionary) -> void:
 	var all_ok := true
 	var t_reload := Time.get_ticks_msec()
 	for res in members:
-		var rc := _reload_member(String(res))
-		resp["reload"][String(res)] = rc
-		if rc != 0:
+		var member := String(res)
+		if member.ends_with(".gd"):
+			var rc := _reload_member(member)
+			resp["reload"][member] = rc
+			if rc != 0:
+				all_ok = false
+			else:
+				var scr = load(member)
+				if scr != null:
+					resp["source_sha"][member] = scr.source_code.sha1_text()
+		else:
+			# 场景/资源成员经 scene_refresh 旁路对刷新（Python 侧逐腿字节复制
+			# 到唯一旁路路径）——见 prepare_scene_refresh；此处不再直接 load
+			# 正典路径（REPLACE 不重读已缓存资源、IGNORE 在宿主内挂死）。
+			pass
+	var refresh_list = req.get("scene_refresh")
+	if refresh_list == null:
+		refresh_list = []
+	for rf in refresh_list:
+		var canonical := String(rf.get("canonical", ""))
+		var side := String(rf.get("side", ""))
+		if side == "" or canonical == "":
+			continue
+		var fresh = ResourceLoader.load(side, "")
+		if fresh == null:
+			resp["reload"][canonical] = 43
 			all_ok = false
 		else:
-			var scr = load(String(res))
-			if scr != null:
-				resp["source_sha"][String(res)] = scr.source_code.sha1_text()
+			fresh.take_over_path(canonical)
+			resp["reload"][canonical] = 0
 	resp["timings"] = {"reload_ms": Time.get_ticks_msec() - t_reload}
 	var t_gut := 0
 	if bool(resp["hash_ok"]) and all_ok and resp["autoload_in_closure"].is_empty():
 		t_gut = Time.get_ticks_msec()
 		var gut: Node = load("res://addons/gut/gut.gd").new()
 		get_root().add_child(gut)
+		# 直驱对齐 GutRunner.run_tests 预跑面（D-W2 模式分歧根因）：error_tracker
+		# 必须注册为 OS logger 才能捕获 push_warning/push_error——缺注册时
+		# warning 断言全数假失败（KOL 真实套件实测坐实，与 gut_cmdln 判定分裂）。
+		# headless pause 跳过选项与 GutRunner.is_headless 分支同款。
+		var GutUtils = load("res://addons/gut/utils.gd")
+		var GutErrorTracker = load("res://addons/gut/error_tracker.gd")
+		GutErrorTracker.register_logger(GutUtils.get_error_tracker())
+		gut._ignore_pause_before_teardown = true
 		_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
 		var done := [false]
 		gut.end_run.connect(func() -> void: done[0] = true)
@@ -478,6 +560,30 @@ func _reload_member(res: String) -> int:
 		return 43
 	var replaced = ResourceLoader.load(res, "", ResourceLoader.CACHE_MODE_REPLACE)
 	return 0 if replaced != null else 43
+
+
+func _wipe_user() -> void:
+	# 腿间 user:// 清场：冷通道每 mutant 一个全新进程（user:// 天然干净），
+	# worker 常驻进程须逐腿恢复同一基线，否则上一腿的存档/缓存文件污染
+	# 下一腿判定（D-W2 残留逃逸面之一；目录本身为本次 run 私有，清场安全）。
+	var dir := DirAccess.open("user://")
+	if dir == null:
+		return
+	for fname in dir.get_files():
+		dir.remove(fname)
+	for subname in dir.get_directories():
+		_wipe_user_recursive("user://" + subname + "/")
+
+
+func _wipe_user_recursive(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	for fname in dir.get_files():
+		dir.remove(path + fname)
+	for subname in dir.get_directories():
+		_wipe_user_recursive(path + subname + "/")
+	dir.remove(path.trim_suffix("/"))
 
 
 func _file_sha256(res: String) -> String:
@@ -559,7 +665,8 @@ func _walk_connections(node: Node, out: Array, depth: int) -> void:
 
 def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                     tests_glob, inject_fn, cold_runner, record_fn,
-                    classify_fn, leg_timeout_s):
+                    classify_fn, leg_timeout_s,
+                    baseline_failures=None, parity_inject_fn=None):
     """§SPEC-020 W 通道逐腿执行（R-C 硬序 + 门消费 + 会话致命处置）。
 
     会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门 fire / autoload
@@ -567,6 +674,12 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
     整批作废 + 冷重跑** + stderr 披露（定案硬规则，禁止静默改道/继续）。
     首腿与每 k 腿双通道 canary（三层门时序）：cold oracle 与 worker 判定
     必须同档，失配按会话致命处置。
+
+    会话前置 parity 门（D-W2，baseline_failures + parity_inject_fn 在场时
+    启用）：直驱 GUT 与 gut_cmdln 对同一代码必须产出同一失败集，否则腿判定
+    不可迁移（KOL 真实套件实测：error_tracker 未注册时 warning 断言假失败
+    → 双向分歧）。以原始源跑零 mutant 腿比对冷 baseline 失败集，失配 →
+    披露 + 整文件冷降级（等价性守恒）。
 
     编排/会话/门居本模块；verdict 语义（classify_fn）、冷重跑
     （cold_runner）、注入（inject_fn）与记录（record_fn）由 runner 注入
@@ -576,18 +689,20 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
     fatal_events: list[str] = []
     window_start = 0
     session_failures = 0  # 防抖：respwan 连续失败 → 剩余腿全冷降级
+    degrade_all = False  # parity 门失配：本文件剩余全部冷跑（非会话级）
 
-    def _record(m, verdict):
+    def _record(m, verdict, elapsed_s=0.0):
         raw_pairs.append((m, verdict))
-        record_fn(m, verdict)
+        record_fn(m, verdict, elapsed_s)
 
     def _recast_cold(start: int) -> None:
         """整批作废：窗口内 worker 判定全部改冷重跑（权威回归冷通道）。"""
         for idx in range(start, len(raw_pairs)):
             m, _old = raw_pairs[idx]
+            t0 = time.monotonic()
             verdict = cold_runner(m, idx)
             raw_pairs[idx] = (m, verdict)
-            record_fn(m, verdict)
+            record_fn(m, verdict, time.monotonic() - t0)
 
     def _new_session() -> WorkerSession:
         return WorkerSession(slot.root, slot.project_root, kind,
@@ -595,18 +710,55 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
 
     session = _new_session()
     try:
+        if baseline_failures is not None and parity_inject_fn is not None:
+            parity_sha, parity_err = parity_inject_fn()
+            if parity_err is not None or session.dead:
+                degrade_all = True
+                fatal_events.append(
+                    f"parity leg unavailable: {parity_err or session.dead_reason}")
+                print("mutation worker: PARITY GATE unavailable — degrading "
+                      "this file to the cold channel (disclosed, not "
+                      "silently)", file=sys.stderr)
+            else:
+                pleg = session.run_leg(-1, target_res, parity_sha,
+                                       list(closure), tests_glob,
+                                       scene_refresh=prepare_scene_refresh(
+                                           slot.root, closure, -1))
+                if pleg.fatal:
+                    degrade_all = True
+                    fatal_events.append(f"parity leg fatal: {pleg.fatal_reason}")
+                    print(f"mutation worker: PARITY GATE fatal — "
+                          f"{pleg.fatal_reason}; degrading this file to the "
+                          f"cold channel (disclosed, not silently)",
+                          file=sys.stderr)
+                elif pleg.gut_ran and pleg.failing_tests != baseline_failures:
+                    degrade_all = True
+                    fatal_events.append(
+                        "mode parity gate: direct-drive failing set diverges "
+                        f"from cold baseline (worker={sorted(pleg.failing_tests)[:4]} "
+                        f"cold={sorted(baseline_failures)[:4]})")
+                    print("mutation worker: PARITY MISMATCH — direct-drive "
+                          "failing set differs from cold baseline on this "
+                          "suite; degrading this file to the cold channel "
+                          "(equivalence preserved, disclosed)", file=sys.stderr)
         for seq, m in enumerate(mutants):
             mutant_sha, inject_error = inject_fn(m)
             if inject_error is not None:
                 _record(m, inject_error)
                 continue
             canary_cold = cold_runner(m, seq) if canary_due(seq) else None
-            if session_failures >= 2 or session.dead:
-                # 会话不可用（respawn 连续失败）：剩余腿全冷降级（degrade）
-                _record(m, cold_runner(m, seq))
+            if degrade_all or session_failures >= 2 or session.dead:
+                # parity 失配 / 会话不可用（respawn 连续失败）：剩余腿全冷降级
+                t_cold = time.monotonic()
+                v = cold_runner(m, seq)
+                _record(m, v, time.monotonic() - t_cold)
                 continue
+            t_leg = time.monotonic()
             leg = session.run_leg(seq, target_res, mutant_sha, list(closure),
-                                  tests_glob)
+                                  tests_glob,
+                                  scene_refresh=prepare_scene_refresh(
+                                      slot.root, closure, seq))
+            leg_elapsed = time.monotonic() - t_leg
             if leg.fatal:
                 fatal_events.append(leg.fatal_reason)
                 session_failures += 1
@@ -618,7 +770,9 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                 session.close()
                 session = _new_session()
                 window_start = len(raw_pairs)
-                _record(m, cold_runner(m, seq))
+                t_cold = time.monotonic()
+                v = cold_runner(m, seq)
+                _record(m, v, time.monotonic() - t_cold)
                 if session_failures >= 2:
                     print("mutation worker: respawn failed twice — "
                           "degrading remaining legs to the cold channel "
@@ -634,16 +788,22 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                         f"worker={verdict['verdict']}")
                     print(f"mutation worker: CANARY MISMATCH at leg {seq} "
                           f"(cold={canary_cold['verdict']} "
-                          f"worker={verdict['verdict']}) — window invalidated, "
-                          f"cold rerun", file=sys.stderr)
+                          f"worker={verdict['verdict']}) — channel "
+                          f"disqualified for this file: window invalidated "
+                          f"and ALL remaining legs degraded to cold "
+                          f"(disclosed, equivalence preserved)",
+                          file=sys.stderr)
+                    # canary 失配 = 双通道等价性被实证否证（D-W2 KOL 实测：
+                    # mutant 才触发的 autoload 状态污染无法静态预判，且
+                    # 「作废窗口后继续 worker」会让后续未验证判定静默出货）
+                    # ——窗口内改冷权威 + 剩余全部冷降级，不再继续 worker。
                     _recast_cold(window_start)
                     session.close()
-                    session = _new_session()
-                    window_start = len(raw_pairs)
+                    degrade_all = True
                     verdict = canary_cold  # 本腿已有冷权威判定
                 else:
                     session.note_canary()
-            _record(m, verdict)
+            _record(m, verdict, leg_elapsed)
     finally:
         session.close()
     return raw_pairs, fatal_events
@@ -681,9 +841,16 @@ def execute_worker_branch(path, project_root, original_src, mutants,
             auto_name=auto_name, ownership_fn=ownership_fn,
             target_rel=target_rel, target_res=target_res)
 
-    def _record(m, verdict):
+    def _parity_inject():
+        try:
+            return shadow.inject_mutant(slot.root, target_rel, original_src), \
+                None
+        except (OSError, SlotProvisionError) as e:
+            return None, f"parity injection failed for {target_res}: {e}"
+
+    def _record(m, verdict, elapsed_s=0.0):
         if reporter is not None:
-            reporter.record(m, verdict, 0.0)
+            reporter.record(m, verdict, elapsed_s)
         if store2 is not None:
             from .diffengine import make_entry, streak_for
             prior = prior_entries.get(m.stable_id)
@@ -698,5 +865,7 @@ def execute_worker_branch(path, project_root, original_src, mutants,
         lambda m, leg: classify_worker_leg(
             m, leg, baseline_failures, baseline_dirty, ownership_fn,
             project_root, original_src),
-        max(60, int(_runner._adaptive_timeout or 60)))
+        max(60, int(_runner._adaptive_timeout or 60)),
+        baseline_failures=set(baseline_failures or ()),
+        parity_inject_fn=_parity_inject)
 

@@ -120,6 +120,7 @@ class TestDefaultParallelRouting:
             "adaptive_timeout_s", "scoped", "baseline_reused",
             "timing_source", "samples_n", "baseline_p90", "jobs",
             "inject_scheme", "slot_mode", "freshness",
+            "exec_scheme",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")

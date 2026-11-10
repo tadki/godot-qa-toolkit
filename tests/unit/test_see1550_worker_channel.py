@@ -65,7 +65,8 @@ class FakeSession:
         self.closed += 1
         self.dead = False
 
-    def run_leg(self, leg, target_res, sha, closure, tests_glob):
+    def run_leg(self, leg, target_res, sha, closure, tests_glob,
+                scene_refresh=None):
         item = self.script.pop(0) if self.script else _leg(leg)
         if getattr(item, "fatal", False):
             self.dead = True
@@ -162,7 +163,7 @@ def _run_legs(script, mutants=None, cold_verdicts=None, classify=None):
         return {"verdict": (classify or {}).get(leg.leg, "killed"),
                 "reason": "worker", "id": m.stable_id}
 
-    def _record(m, verdict):
+    def _record(m, verdict, elapsed_s=0.0):
         recorded.append((m.stable_id, verdict["verdict"]))
 
     orig = worker_channel.WorkerSession
@@ -227,6 +228,8 @@ class TestSessionFatal:
         assert 2 in out["cold"]
 
     def test_canary_mismatch_invalidates(self, monkeypatch):
+        """canary 失配 = 通道资格否证（D-W2）：窗口改冷权威 + 剩余全部冷
+        降级，不再 respawn 后继续 worker（未验证判定禁止出货）。"""
         monkeypatch.setenv(worker_channel.ENV_CANARY_EVERY, "1")
         out = _run_legs(
             script=[[_leg(0), _leg(1)]],
@@ -236,7 +239,9 @@ class TestSessionFatal:
         assert out["fatals"] and "canary mismatch" in out["fatals"][0]
         verdicts = dict(out["recorded"])
         assert verdicts["x.gd#f#1"] == "survived"  # 冷权威
-        assert verdicts["x.gd#f#2"] == "survived"
+        assert verdicts["x.gd#f#2"] == "survived"  # 冷降级
+        assert 0 in out["cold"] and 1 in out["cold"]
+        assert len(out["sessions"]) == 1 and out["sessions"][0].closed >= 1
 
     def test_canary_match_notes_window(self, monkeypatch):
         monkeypatch.setenv(worker_channel.ENV_CANARY_EVERY, "1")
@@ -266,7 +271,7 @@ class TestSessionFatal:
                                             "reason": "disk inject failed",
                                             "id": m.stable_id}),
                 cold_runner=lambda m, s: {"verdict": "killed", "id": m.stable_id},
-                record_fn=lambda m, v: recorded.append(v["verdict"]),
+                record_fn=lambda m, v, elapsed_s=0.0: recorded.append(v["verdict"]),
                 classify_fn=lambda m, leg: {"verdict": "killed",
                                             "id": m.stable_id},
                 leg_timeout_s=10)

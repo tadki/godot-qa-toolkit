@@ -42,14 +42,15 @@ _PREWARM_TIMEOUT_S = 300
 def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                       tests_glob, resume, binary_kind, timing_store,
                       mutation_warning, timeout_factor, reuse_coverage,
-                      identity) -> dict:
+                      identity, worker_channel=None) -> dict:
     """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。"""
     r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
                      dry_run=dry_run, tests_glob=tests_glob, resume=resume,
                      binary_kind=binary_kind, timing_store=timing_store,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
-                     reuse_coverage=reuse_coverage, identity=identity)
+                     reuse_coverage=reuse_coverage, identity=identity,
+                     worker_channel=worker_channel)
     r["summary"].setdefault("jobs", 1)
     return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
 
@@ -172,7 +173,8 @@ def run_mutation_files(
         return _serial_fast_path(files[0], project_root, budget, timeout_s,
                                  dry_run, tests_glob, resume, binary_kind,
                                  timing_store, mutation_warning,
-                                 timeout_factor, reuse_coverage, identity)
+                                 timeout_factor, reuse_coverage, identity,
+                                 worker_channel=worker_channel)
     if dry_run:
         return _dry_run_list(files, project_root, budget, timeout_s,
                              tests_glob, binary_kind, mutation_warning,
@@ -202,7 +204,8 @@ def run_mutation_files(
                              timing_store=timing_store,
                              mutation_warning=mutation_warning,
                              timeout_factor=timeout_factor,
-                             mutate_all=mutate_all)
+                             mutate_all=mutate_all,
+                             worker_channel=worker_channel)
             r["summary"].setdefault("jobs", 1)
             return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                     "results": [r]}
@@ -362,7 +365,7 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     """
     passthrough_keys = (
         "adaptive_timeout_s", "timing_source", "samples_n", "baseline_p90",
-        "run_error", "error", "inject_scheme", "slot_mode",
+        "run_error", "error", "inject_scheme", "slot_mode", "exec_scheme",
     )
     per_file: dict[str, dict] = {}
     resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
@@ -562,7 +565,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                          progress={"run_id": run_id, "worker": "serial",
                                    "total": 0},
                          reuse_coverage=reuse_coverage,
-                         identity=identity)
+                         identity=identity,
+                         worker_channel=worker_channel)
         r["summary"].setdefault("jobs", 1)
         return [], None, r
     ids = [m.stable_id for m in executed_list]

@@ -164,6 +164,7 @@ def then_summary_keys(bdd_state: dict) -> None:
         "jobs",
         # SEE-1550 只加不改披露面（机制标签恒在场 + 槽位/新鲜度在影子轮在场）
         "inject_scheme",
+        "exec_scheme",
         "slot_mode",
         "freshness",
     }

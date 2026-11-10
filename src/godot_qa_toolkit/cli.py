@@ -111,7 +111,6 @@ def _accept_compile(args: argparse.Namespace) -> int:
     wrote = []
     if args.write:
         if out_dir:
-            from pathlib import Path as _P
             base = _P(out_dir).resolve().relative_to(
                 _P(args.project_root).resolve()).as_posix()
             wrote = [

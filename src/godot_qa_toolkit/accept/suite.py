@@ -31,7 +31,7 @@ import uuid
 from pathlib import Path
 
 from .compile import compile_feature
-from .run import AcceptRunError, _EXECUTED_TEST_RE, _strip_ansi, replay_check
+from .run import AcceptRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.gutrun import _looks_like_godot_launch_failure
 from ..mutation.inject import godot_command
@@ -100,13 +100,6 @@ def compile_keys_to_suite(project_root: str | Path, keys: list[str],
                 raise SuiteError(f"compile wrote no {must} for key {key}")
     return {"keys": selected, "suite_dir": str(suite_dir),
             "manifests": manifests}
-
-
-def _executed_names(gut_output: str) -> set[str]:
-    seen: set[str] = set()
-    for m in _EXECUTED_TEST_RE.finditer(_strip_ansi(gut_output)):
-        seen.add(m.group(0).split()[1])
-    return seen
 
 
 # 真机 GUT 9.6 输出锚定（lab 实跑证据）：运行流按脚本分段，脚本头是独占

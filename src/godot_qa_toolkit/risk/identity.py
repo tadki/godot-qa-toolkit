@@ -150,6 +150,8 @@ def file_profile(gd_source: str, file_label: str) -> dict:
             "cc": e["cc_oracle"],
             "kind": e["kind"],
             "body_hash": e["body_hash"],
+            # §SPEC-027 derivation input: host lambda_gap > 0 → cc_unmeasured
+            "lambda_gap": e["lambda_gap"],
         }
         for e in func_entries
     ]

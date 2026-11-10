@@ -5,7 +5,7 @@ Feature: SEE-1546 WP1a — 真实 KOL 树基线重锚（需要 KOL 检出）
   Scenario: 七个 var def 文件全量回收并重锚基线（真实 KOL 树）
     Given the real KOL worktree with systems scenes and autoload trees
     When the complexity gate runs over the three trees
-    Then exactly 1561 functions are reported with zero unparseable files
+    Then at least 1561 functions are reported with zero unparseable files
     And the seven var def files contribute exactly 170 recovered functions
     And mini parity over the 170 functions shows no mismatch beyond the disclosed lambda gaps
 

@@ -407,8 +407,9 @@ def _feature_key_conflict(root: Path, feature_key: str,
 
 
 def compile_feature(feature_path: str | Path, project_root: str | Path,
-                    *, write: bool = True,
-                    clean: bool = True) -> tuple[CompiledSuite | None, dict]:
+                    *, write: bool = True, clean: bool = True,
+                    out_dir: str | Path | None = None
+                    ) -> tuple[CompiledSuite | None, dict]:
     """编译一个 .feature。write=False 时纯内存（golden-file 单测用）。
 
     Returns (suite, error) — error 非空 = parse 失败等 caller 错误。
@@ -427,7 +428,22 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
 
     feature_key = re.sub(r"[^A-Za-z0-9_]", "_", p.stem)
     ir_json = json.dumps(ir, ensure_ascii=False, indent=2, sort_keys=True)
-    ir_rel = f"{IR_DIR}/{feature_key}.json"
+    # 私有目录（§SPEC-035）：res:// 路径仍相对 project_root——私有目录必须
+    # 位于项目内，生成 .gd 嵌入的 IR 读取路径才能被 Godot 解析。
+    root = Path(project_root)
+    if out_dir is not None:
+        out = Path(out_dir).resolve()
+        try:
+            base = out.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None, {"reason": f"out_dir must live inside the project "
+                                    f"for res:// resolution: {out_dir}"}
+        ir_rel = f"{base}/ir/{feature_key}.json"
+        gd_rel = f"{base}/generated/test_{feature_key}.gd"
+    else:
+        out = None
+        ir_rel = f"{IR_DIR}/{feature_key}.json"
+        gd_rel = f"{GENERATED_DIR}/test_{feature_key}.gd"
     # GUT 目录扫描按文件名前缀过滤（默认 test_，本机 GUT 9.6 实测：非
     # test_ 前缀脚本直接被扫描忽略、Nothing was run）——生成文件名必须
     # 以 test_ 开头。
@@ -448,6 +464,21 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
         return None, {"reason": f"GUT runner not found: {gut}"}
+    if out is not None:
+        # 私有目录分支（§SPEC-035）：目录即选择集——不清理主目录、不做主树
+        # key 冲突检查（私有目录与主 generated 相互隔离）。
+        ir_out = out / "ir"
+        gen_out = out / "generated"
+        ir_out.mkdir(parents=True, exist_ok=True)
+        gen_out.mkdir(parents=True, exist_ok=True)
+        (ir_out / f"{feature_key}.json").write_text(ir_json, encoding="utf-8")
+        (gen_out / f"test_{feature_key}.gd").write_text(gd,
+                                                        encoding="utf-8")
+        (gen_out / "accept_worker.gd").write_text(worker_gd,
+                                                  encoding="utf-8")
+        (gen_out / f"{feature_key}.manifest.json").write_text(
+            manifest_json, encoding="utf-8")
+        return suite, None
     error = _feature_key_conflict(root, feature_key, p)
     if error is not None:
         return None, error

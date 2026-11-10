@@ -4,6 +4,7 @@ and the performance field contract (§SPEC-014)."""
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -713,3 +714,66 @@ def test_derive_per_entry_signature_helper_exists():
     assert all(e["state"] == "scored" for e in per_entry.values())
     assert per_entry["x.gd::one"]["covered"] == 1
     assert per_entry["x.gd::two"]["covered"] == 3
+
+
+def test_default_measure_consumes_real_bundle_by_snapshot_diff(
+    tmp_path: Path, monkeypatch
+):
+    """D-WP2C-1 real-path integration: mock only the GUT execution layer —
+    the runner's real evidence path lands the bundle, and default_measure
+    locates it by snapshot diff (summary carries NO run_uuid). RED before the
+    snapshot-diff fix: the adapter looked up None.json and silently dropped
+    the bundle key."""
+    import os
+
+    import godot_qa_toolkit.coverage.runner as c
+    from godot_qa_toolkit.risk import shadow as shadow_mod
+
+    proj = tmp_path / "proj"
+    (proj / "addons" / "gut").mkdir(parents=True)
+    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+    target = proj / "calc.gd"
+    target.write_text("func add(a, b):\n\treturn a + b\n")
+    ev = tmp_path / "ev"
+    ev.mkdir()
+
+    captured = {}
+    real_instrument = c._instrument
+
+    def sink_spy(src, sink_name):
+        captured["sink"] = os.path.join(str(proj), sink_name)
+        return real_instrument(src, sink_name)
+
+    monkeypatch.setattr(c, "_instrument", sink_spy)
+
+    def fake_gut(*args, **kwargs):
+        # mock ONLY the GUT execution layer: after the runner instruments and
+        # writes the run record, the probes write hits into the real sink —
+        # everything else (run record, bundle, sink cleanup) is the real path
+        with open(captured["sink"], "w") as f:
+            f.write("0\n1\n2\n")
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(c.subprocess, "run", fake_gut)
+
+    measure = shadow_mod.default_measure(str(proj), evidence_out=str(ev))
+    out = measure("calc.gd", target.read_text(encoding="utf-8"),
+                  "res://tests/unit/")
+    assert "bundle" in out, (
+        "bundle key silently dropped — adapter cannot locate the evidence "
+        f"bundle (summary keys: {sorted(out['summary'])})"
+    )
+    bundle = out["bundle"]
+    assert bundle["evidence_version"] == "coverage-evidence/2"
+    assert bundle["recovered"] is False
+    on_disk = json.loads(
+        next(p for p in ev.glob("*.json") if not p.name.endswith(".record.json"))
+    .read_text(encoding="utf-8"))
+    assert on_disk == bundle
+    # bundle landed → this run's sink was cleared (evidence moved)
+    assert not any(p.name.startswith("qa-coverage-hits-")
+                   for p in proj.iterdir())

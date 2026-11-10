@@ -777,3 +777,38 @@ def test_default_measure_consumes_real_bundle_by_snapshot_diff(
     # bundle landed → this run's sink was cleared (evidence moved)
     assert not any(p.name.startswith("qa-coverage-hits-")
                    for p in proj.iterdir())
+
+
+def test_recipe_cli_res_scheme_exclude_survives_colons(tmp_path: Path, monkeypatch):
+    """D-W3A-1 real-path pin: `gqt recipe --exclude
+    gut_dir:res://tests/unit/quarantine/**:known flaky` — the entry contains
+    `://`, so the OLD split(":", 2) truncated entry to `res` and swallowed the
+    path into the reason (silent wrong recipe). The fixed parser takes scope
+    at the FIRST colon and entry/reason at the LAST colon."""
+    import argparse
+    import godot_qa_toolkit.cli as cli_mod
+    import godot_qa_toolkit.canonical.recipe as recipe_mod
+
+    captured: dict = {}
+
+    def spy_build(project_root, exclusions=None, **kwargs):
+        captured["exclusions"] = list(exclusions or [])
+        return {"recipe_version": "canonical-recipe/1", "recipe_hash": "x",
+                "gut_face": {"dirs": ["res://tests/unit/"]},
+                "acceptance_face": {"features": [], "count": 1,
+                                    "excluded": [], "harness": {}},
+                "toolchain": {}, "exclusions": [], "failures": []}, None
+
+    monkeypatch.setattr(recipe_mod, "build_recipe", spy_build)
+    argv = ["recipe", "--project-root", str(tmp_path),
+            "--exclude", "gut_dir:res://tests/unit/quarantine/**:known flaky"]
+    args = cli_mod.build_parser().parse_args(argv)
+    cli_mod.cmd_recipe(args)
+    rows = captured["exclusions"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["scope"] == "gut_dir"
+    assert row["entry"] == "res://tests/unit/quarantine/**", (
+        f"entry truncated by colon split: {row}"
+    )
+    assert row["reason"] == "known flaky"

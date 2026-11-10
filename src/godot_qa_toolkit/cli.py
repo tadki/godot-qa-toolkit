@@ -374,15 +374,20 @@ def cmd_recipe(args: argparse.Namespace) -> int:
 
     exclusions = []
     for raw in args.exclude:
-        parts = raw.split(":", 2)
-        if len(parts) != 3:
+        # D-W3A-1: entry may contain `://` (res://… schemes) — take scope at
+        # the FIRST colon and reason at the LAST; everything between is the
+        # entry. Missing any of the three segments stays fail-loud.
+        scope, _, remainder = raw.partition(":")
+        entry, sep, reason = remainder.rpartition(":")
+        if not scope or not sep or not entry or not reason:
+            error = (f"--exclude expects scope:entry:reason (entry may contain "
+                     f"':' as in res://…), got {raw!r}")
             return _emit({
                 "tool": "recipe",
                 "ok": False,
-                "summary": {"error": f"--exclude expects scope:entry:reason, got {raw!r}"},
-                "failures": [{"reason": f"--exclude expects scope:entry:reason, got {raw!r}"}],
+                "summary": {"error": error},
+                "failures": [{"reason": error}],
             })
-        scope, entry, reason = parts
         exclusions.append({"scope": scope, "entry": entry, "reason": reason})
     recipe, error = build_recipe(
         args.project_root, exclusions=exclusions,

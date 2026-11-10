@@ -172,13 +172,7 @@ def build_recipe(
     }
     # normalized JSON minus recipe_hash itself → sha256; sort_keys + compact
     # separators give "same input, same hash, any byte change changes it"
-    hash_basis = {
-        k: v for k, v in recipe.items() if k != "recipe_hash"
-    }
-    recipe["recipe_hash"] = _sha256_text(
-        json.dumps(hash_basis, ensure_ascii=False, sort_keys=True,
-                   separators=(",", ":"))
-    )
+    recipe["recipe_hash"] = recipe_hash(recipe)
     return recipe, None
 
 

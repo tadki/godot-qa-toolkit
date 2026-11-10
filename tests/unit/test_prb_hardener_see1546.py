@@ -474,3 +474,134 @@ def test_bundle_measured_row_reports_t_ne_i_false(monkeypatch):
     # never a pinned True (E10)
     assert f_state["state"] == "partial_instrumentation"
     assert f_state["t_equal_i"] is False
+
+
+# --------------------------------------------------------------------------
+# D-性能-1 (§SPEC-030): single-parse reuse guards
+# --------------------------------------------------------------------------
+
+
+def test_build_bundle_uses_injected_registry_and_manifest(monkeypatch):
+    """§SPEC-030 (D-性能-1): when the run path injects registry/probe_manifest,
+    build_bundle must NOT re-derive them (a second lark parse per run is the
+    cost this optimization removes)."""
+    from godot_qa_toolkit.coverage import evidence as evidence_mod
+    from godot_qa_toolkit.coverage.evidence import build_bundle
+
+    calls = {"registry": 0, "manifest": 0}
+    real_registry = evidence_mod.build_file_registry
+    real_manifest = evidence_mod.build_probe_manifest_v2
+
+    def counting_registry(src, file_label):
+        calls["registry"] += 1
+        return real_registry(src, file_label)
+
+    def counting_manifest(src, registry):
+        calls["manifest"] += 1
+        return real_manifest(src, registry)
+
+    monkeypatch.setattr(evidence_mod, "build_file_registry", counting_registry)
+    monkeypatch.setattr(evidence_mod, "build_probe_manifest_v2", counting_manifest)
+
+    registry = real_registry(GD, file_label="x.gd")
+    manifest = real_manifest(GD, registry)
+    bundle = build_bundle(
+        run_uuid="u-inject", file_path="x.gd", gd_source=GD,
+        tests_glob=None, hits_lines=[2], probes_fired=1, gut_ok=True,
+        run_error=False, timeout=False, zero_tests=False, vacuous=False,
+        registry=registry, probe_manifest=manifest,
+    )
+    assert calls == {"registry": 0, "manifest": 0}
+    f_row = next(s for s in bundle["entry_states"] if s["fid"] == "x.gd::f")
+    assert f_row["state"] == "measured"
+
+
+def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch):
+    """Three consumption points (run record, abort/success bundles) must share
+    ONE registry build per run — a second build is the doubled lark parse
+    D-性能-1 removed (mutation ②)."""
+    import godot_qa_toolkit.registry.functions as registry_functions
+    from godot_qa_toolkit import coverage as coverage_pkg
+    from godot_qa_toolkit.coverage import runner as runner_mod
+    import io
+    from contextlib import redirect_stdout
+
+    proj = tmp_path / "proj"
+    (proj / "addons" / "gut").mkdir(parents=True)
+    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
+    target = proj / "calc.gd"
+    target.write_text(GD, encoding="utf-8")
+    ev = tmp_path / "ev"
+    ev.mkdir(exist_ok=True)
+
+    real_build = registry_functions.build_file_registry
+    builds = []
+
+    def counting_build(src, file_label):
+        builds.append(1)
+        return real_build(src, file_label=file_label)
+
+    # count across BOTH namespaces: runner's direct call and any build_bundle
+    # re-derivation (evidence holds its own module-level binding)
+    monkeypatch.setattr(registry_functions, "build_file_registry", counting_build)
+    monkeypatch.setattr(coverage_pkg.evidence, "build_file_registry", counting_build)
+    monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", lambda *a, **k: None)
+    monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
+
+    args = build_parser().parse_args([
+        "coverage", str(target), "--project-root", str(proj),
+        "--min-percent", "0", "--evidence-out", str(ev),
+    ])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = args.func(args)
+    assert rc == 0
+    assert len(builds) == 1
+
+
+def test_recover_finds_user_sink_via_project_root(tmp_path, monkeypatch):
+    """D-性能-1 wiring: recovery resolves the run's user:// sink through
+    project_root and rebuilds the probe-manifest/2-shaped attribution (C rows
+    keyed by fid with plan lines) — never a degraded row list (mutation ③)."""
+    from godot_qa_toolkit.coverage.evidence import (
+        build_run_record,
+        recover_bundle,
+        sink_name_for,
+        write_run_record,
+    )
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "project.godot").write_text(
+        'config/name = "See1546RecoverApp"\n', encoding="utf-8"
+    )
+    home = tmp_path / "home"
+    user_dir = home / ".local" / "share" / "godot" / "app_userdata" / "See1546RecoverApp"
+    user_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    uuid = "u-user-sink"
+    record = build_run_record(
+        run_uuid=uuid, file_path="x.gd", gd_source=GD, tests_glob=None,
+        probe_manifest={"probe_plan": [
+            {"probe_id": 0, "line": 2, "fid": "x.gd::f", "owner_kind": "func"},
+        ], "per_function": [
+            {"fid": "x.gd::f", "t_lines": 1, "i_lines": 1, "t_equal_i": True,
+             "t_line_ids": [2]},
+        ]},
+    )
+    evidence = tmp_path / "ev"
+    evidence.mkdir()
+    write_run_record(evidence, record)
+    (user_dir / sink_name_for(uuid)).write_text("0\n", encoding="utf-8")
+
+    result = recover_bundle(evidence, project_root=str(proj))
+    assert result["errors"] == []
+    assert len(result["recovered"]) == 1
+    bundle = json.loads(
+        Path(result["recovered"][0]["bundle"]).read_text(encoding="utf-8")
+    )
+    assert bundle["recovered"] is True
+    assert [c["fid"] for c in bundle["C"]] == ["x.gd::f"]
+    assert [c["covered"] for c in bundle["C"]] == [1]
+    assert bundle["probe_manifest"]["inline"]["probe_plan"][0]["fid"] == "x.gd::f"

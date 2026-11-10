@@ -381,8 +381,16 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage.evidence import prune_sinks as _prune, recover_bundle as _recover
     from pathlib import Path as _P
 
+    if not getattr(args, "recover", None) and not getattr(args, "prune_sinks", None)             and not args.file:
+        return _emit({
+            "tool": "coverage",
+            "ok": False,
+            "summary": {"error": "measure mode requires a target file "
+                               "(or --recover/--prune-sinks)"},
+            "failures": [{"reason": "measure mode requires a target file"}],
+        })
     if getattr(args, "recover", None):
-        result = _recover(_P(args.recover))
+        result = _recover(_P(args.recover), project_root=args.project_root)
         result.update({"tool": "coverage", "ok": True})
         return _emit(result)
     if getattr(args, "prune_sinks", None):
@@ -589,7 +597,8 @@ def build_parser() -> argparse.ArgumentParser:
     rd.set_defaults(func=cmd_registry)
 
     v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
-    v.add_argument("file", help="the .gd file to measure")
+    v.add_argument("file", nargs="?", default=None,
+                   help="the .gd file to measure (required unless --recover/--prune-sinks)")
     v.add_argument("--project-root", required=True, help="project root containing addons/gut/")
     v.add_argument("--min-percent", type=float, default=80.0,
                    help="min coverage percent (default 80)")

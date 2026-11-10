@@ -388,6 +388,18 @@ def run_coverage(
     run_uuid = make_run_uuid()
     sink_name = sink_name_for(run_uuid)
     evidence_dir = evidence_dir_for(evidence_out) if evidence_out else None
+    # §SPEC-030 (D-性能-1): build the registry + probe-manifest/2 ONCE on the
+    # evidence path — run record, bundle and recover all consume this single
+    # parse; build_bundle receives them instead of re-deriving (which doubled
+    # the lark parse cost per evidence run)
+    evidence_registry = None
+    evidence_probe_manifest = None
+    if evidence_dir is not None:
+        from ..registry.functions import build_file_registry
+        from ..registry.manifest import build_probe_manifest_v2
+
+        evidence_registry = build_file_registry(original_src, file_label=str(path))
+        evidence_probe_manifest = build_probe_manifest_v2(original_src, evidence_registry)
     instrumented, manifest = _instrument(original_src, sink_name)
 
     # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug → 显式 run_error，
@@ -404,7 +416,7 @@ def run_coverage(
             file_path=str(path),
             gd_source=original_src,
             tests_glob=tests_glob,
-            probe_manifest=manifest,
+            probe_manifest=evidence_probe_manifest,
         )
         run_record["sink_path"] = str(
             evidence_dir / sink_name
@@ -430,6 +442,8 @@ def run_coverage(
                 file_path=str(path),
                 gd_source=original_src,
                 tests_glob=tests_glob,
+                registry=evidence_registry,
+                probe_manifest=evidence_probe_manifest,
                 hits_lines=[],
                 probes_fired=0,
                 gut_ok=False,
@@ -455,6 +469,8 @@ def run_coverage(
             file_path=str(path),
             gd_source=original_src,
             tests_glob=tests_glob,
+            registry=evidence_registry,
+            probe_manifest=evidence_probe_manifest,
             hits_lines=sorted(hits),
             probes_fired=probes_fired,
             gut_ok=True,
@@ -478,6 +494,8 @@ def run_coverage(
                 file_path=str(path),
                 gd_source=original_src,
                 tests_glob=tests_glob,
+                registry=evidence_registry,
+                probe_manifest=evidence_probe_manifest,
                 hits_lines=sorted(hits),
                 probes_fired=0,
                 gut_ok=True,

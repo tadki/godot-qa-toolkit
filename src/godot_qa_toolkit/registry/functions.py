@@ -32,7 +32,7 @@ from lark import Tree
 from lark.lexer import Token
 
 from ..complexity.gd_ast_oracle import DECISION_POINT_NODES
-from ..mutation.scopemanifest import _max_leaf_line
+from ..gd_ast_utils import max_leaf_line as _max_leaf_line
 
 REGISTRY_VERSION = "func-registry/1"
 

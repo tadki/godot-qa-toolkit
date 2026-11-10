@@ -31,6 +31,15 @@ from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggest
 # GQT_GODOT_BIN 对 coverage 无效，且路径转换与二进制类型脱钩。
 from ..mutation.inject import godot_command
 from ..mutation.inject import godot_project_path as _unified_godot_project_path
+from ..registry.lines import (
+    EXECUTABLE_NODE_NAMES as _EXECUTABLE_NODE_NAMES,
+    IF_BRANCH_NODES as _IF_BRANCH_NODES,
+    ExecutableLine,
+    collect_executable_lines as _collect_executable_lines,
+    node_line as _node_line,
+    paren_depths as _paren_depths,
+    tree_depth_walk as _tree_depth_walk,
+)
 
 # 与 mutation runner 同一套判定：godot 进程级失败（-s 脚本没加载起来）≠
 # 测试结果。res:// 是唯一可靠的 -s 形式（Revy QA FAIL 实证）。
@@ -83,22 +92,6 @@ _PROBE_PREFIX = "__qa_cov_probe_"
 # （`else:` / `elif cond:` 不是独立语句），在其前插同缩进探针会产出语法非法
 # 的插桩文件（硬化 反例实证：含 else 的文件 coverage 全体 run_error）。
 # 分支执行语义由 _derive_branches 的体首语句行锚定承担。
-_EXECUTABLE_NODE_NAMES = {
-    "if_branch",
-    "for_stmt",
-    "while_stmt",
-    "return_stmt",
-    "func_var_stmt",
-    "func_var_inf",
-    "expr_stmt",
-    "match_stmt",
-    "break_stmt",
-    "continue_stmt",
-    "pass_stmt",
-}
-
-# if_stmt 下的分支子节点（与 match_stmt 的 match_branch 对应）。
-_IF_BRANCH_NODES = ("if_branch", "elif_branch", "else_branch")
 
 
 @dataclass(frozen=True)
@@ -316,24 +309,68 @@ def run_coverage(
     timeout_s: int = 120,
     timing_store=None,
     tests_glob: str | None = None,
+    evidence_out: str | None = None,
 ) -> dict:
     """对单个 .gd 文件算行覆盖（跑 GUT 后统计命中行）并出统一 JSON 契约。
 
     min_percent 阈值 gate（P0' 机器判定：覆盖率≥阈值=ok）。
     返回 {"tool":"coverage", "ok", "summary", "failures"}；
-    ok=True 表示覆盖率达标。
+    ok=True 表示覆盖率达标。`evidence_out`（§SPEC-025/026，可选）开启
+    coverage-evidence/2 生命周期：per-run UUID sink + run 记录 + bundle
+    落盘即清 sink；不传则 stdout 契约与 011b87d 逐字节一致（零漂移）。
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"coverage target not found: {file_path}")
 
-    original_src = path.read_text(encoding="utf-8")
+    from .evidence import (
+        build_bundle,
+        build_run_record,
+        clear_sink,
+        evidence_dir_for,
+        make_run_uuid,
+        sink_name_for,
+        update_run_record,
+        write_bundle,
+        write_run_record,
+    )
+    from ..source_io import read_gd_source
+
+    original_src, read_error = read_gd_source(file_path)
+    if read_error is not None:
+        # §SPEC-028: single-file reads fail structurally, never crash
+        return {
+            "tool": "coverage",
+            "ok": False,
+            "summary": {
+                "file": str(path),
+                "run_error": True,
+                "error": read_error,
+            },
+            "failures": [{"reason": read_error}],
+        }
     backup = original_src
 
     executable_lines = _collect_executable_lines(original_src)
     total_lines = len(executable_lines)
 
     if total_lines == 0:
+        # §SPEC-026: vacuous bundles land too (no sink was created yet —
+        # zero executable lines means zero probes, nothing to recover)
+        if evidence_out:
+            from .evidence import (
+                build_bundle as _bb, make_run_uuid as _mru,
+                sink_name_for as _snf, evidence_dir_for as _edf,
+                write_bundle as _wb,
+            )
+            uuid0 = _mru()
+            _edf(evidence_out).mkdir(parents=True, exist_ok=True)
+            _wb(_edf(evidence_out), _bb(
+                run_uuid=uuid0, file_path=str(path), gd_source=original_src,
+                tests_glob=tests_glob, hits_lines=[], probes_fired=0,
+                gut_ok=True, run_error=False, timeout=False, zero_tests=False,
+                vacuous=True,
+            ))
         return _vacuous_result(str(path), min_percent)
 
     # SEE-1356 L1：coverage 同 timing store 接入——缓存只喂预算锚，GUT 永远
@@ -347,8 +384,12 @@ def run_coverage(
         timing_meta["samples_n"] = hist["samples_n"] if hist else 0
         timing_meta["baseline_p90"] = hist["p90"] if hist else None
 
-    # run 唯一 sink：跨 run 不残留、并发 run 不互踩（SEE-1152 并发覆写同款教训）。
-    sink_name = f"qa-coverage-hits-{os.getpid()}.txt"
+    # run 唯一 sink（§SPEC-025）：per-run UUID——同进程顺序 run、并发进程、
+    # CLI 与 risk 内嵌路径全部天然互斥（修 D-候选-1：PID sink 在同进程
+    # 顺序 run 间累积命中，窄 glob 结果被上一 run 污染）。
+    run_uuid = make_run_uuid()
+    sink_name = sink_name_for(run_uuid)
+    evidence_dir = evidence_dir_for(evidence_out) if evidence_out else None
     instrumented, manifest = _instrument(original_src, sink_name)
 
     # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug → 显式 run_error，
@@ -358,20 +399,98 @@ def run_coverage(
     except Exception as e:
         return _reparse_error_result(str(path), total_lines, min_percent, e)
 
+    if evidence_dir is not None:
+        from .evidence import sha256_text
+        run_record = build_run_record(
+            run_uuid=run_uuid,
+            file_path=str(path),
+            gd_source=original_src,
+            tests_glob=tests_glob,
+            probe_manifest=manifest,
+        )
+        run_record["sink_path"] = str(
+            evidence_dir / sink_name
+        )  # record BOTH the sink name and a recovery-side path candidate
+        run_record["probe_plan_inline_note"] = (
+            "probe manifest inline carries fid materialization; the recovery "
+            "path re-attributes raw probe ids exactly like the online path"
+        )
+        write_run_record(evidence_dir, run_record)
+
     t0 = time.monotonic()
     gut_outcome = _run_gut_for_coverage(path, project_root, backup, instrumented,
                                         total_lines, min_percent, effective_timeout,
                                         tests_glob=tests_glob)
     gut_elapsed = time.monotonic() - t0
     if gut_outcome is not None:
+        # §SPEC-026: failure bundles land too (sink KEPT for --recover), with
+        # the abort class mapped into the sentinels
+        if evidence_dir is not None:
+            summary = gut_outcome.get("summary", {})
+            bundle = build_bundle(
+                run_uuid=run_uuid,
+                file_path=str(path),
+                gd_source=original_src,
+                tests_glob=tests_glob,
+                hits_lines=[],
+                probes_fired=0,
+                gut_ok=False,
+                run_error=bool(summary.get("run_error")),
+                timeout=bool(summary.get("timeout")),
+                zero_tests=False,
+                vacuous=False,
+            )
+            write_bundle(evidence_dir, bundle)
+            update_run_record(
+                evidence_dir, run_uuid,
+                status="run_error" if summary.get("run_error") else "timeout",
+            )
         return gut_outcome
     if timing_store is not None:
         timing_store.record(gut_elapsed)
 
     hits, probes_fired = _read_hits(project_root, sink_name, manifest)
 
+    if evidence_dir is not None:
+        bundle = build_bundle(
+            run_uuid=run_uuid,
+            file_path=str(path),
+            gd_source=original_src,
+            tests_glob=tests_glob,
+            hits_lines=sorted(hits),
+            probes_fired=probes_fired,
+            gut_ok=True,
+            run_error=False,
+            timeout=False,
+            zero_tests=False,
+            vacuous=False,
+        )
+        write_bundle(evidence_dir, bundle)
+        update_run_record(evidence_dir, run_uuid, status="bundle_written")
+        clear_sink(None, project_root, sink_name)
+
     # 哨兵：GUT 正常退出但探针从未点火 ≠ 真实 0% 覆盖——数据不可信。
     if probes_fired == 0:
+        # §SPEC-026: no-probe bundles land (zero_tests/probe-transport failure
+        # is the consumer's lane call); sink KEPT — the hits file is the only
+        # forensic evidence for why probes never fired
+        if evidence_dir is not None:
+            bundle = build_bundle(
+                run_uuid=run_uuid,
+                file_path=str(path),
+                gd_source=original_src,
+                tests_glob=tests_glob,
+                hits_lines=sorted(hits),
+                probes_fired=0,
+                gut_ok=True,
+                run_error=False,
+                timeout=False,
+                zero_tests=False,
+                vacuous=False,
+            )
+            write_bundle(evidence_dir, bundle)
+            update_run_record(evidence_dir, run_uuid,
+                              status="no_probe", zero_tests=False)
         return _no_probe_result(str(path), total_lines, min_percent)
 
     # SEE-1420 P2（L3/D7）：成功 run 的行级事实落盘（自家 JSON 超集，
@@ -610,6 +729,15 @@ def _windows_appdata_from_wsl() -> str | None:
             continue
         if users:
             return str(users[0] / "AppData" / "Roaming")
+    return None
+
+
+def _resolve_user_sink_dir(project_root: str) -> str | None:
+    """user:// sink DIRECTORY for the project (prune-sinks sweeps here)."""
+    sink = _resolve_user_sink(project_root, "qa-coverage-hits-probe.txt")
+    if sink:
+        from pathlib import Path as _P
+        return str(_P(sink).parent)
     return None
 
 

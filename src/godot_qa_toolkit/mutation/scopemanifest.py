@@ -51,23 +51,8 @@ def _span_text(lines: list[str], start_line: int, end_line: int) -> str:
     return "\n".join(lines[start_line - 1:end_line])
 
 
-def _max_leaf_line(node) -> int:
-    """子树叶 token 最大行号——span 终点唯一可信来源。
+from ..gd_ast_utils import max_leaf_line as _max_leaf_line  # WP2 PR-B: extracted to the neutral utils layer
 
-    gdtoolkit 容器节点（func_def/class_def/根）的 meta.end_line 会溢出到
-    文件尾（实测：4 行 func 报 end_line=6）——容器的 end 绝不采信，只有
-    叶 token 的行号与数据节点的起始行可用。
-    """
-    best = 0
-    meta = getattr(node, "meta", None)
-    if meta is not None and not meta.empty:
-        best = max(best, getattr(meta, "line", 0) or 0)
-    for child in getattr(node, "children", []):
-        if hasattr(child, "data"):
-            best = max(best, _max_leaf_line(child))
-        else:
-            best = max(best, getattr(child, "line", 0) or 0)
-    return best
 
 
 def _disambiguate(names_in_order: list[str], kind: str = "") -> dict[int, str]:

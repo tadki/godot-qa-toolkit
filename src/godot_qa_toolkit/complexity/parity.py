@@ -232,12 +232,15 @@ def _aggregate_results(
         "inner_class_files": 0,
         "lambda_gap_total": 0,
         "unparseable": 0,
+        "read_error": 0,
         **{lane: 0 for lane in LANES},
     }
     for rel, report, registry in results:
         summary["files"] += 1
         summary["func_entries"] += report["func_entries"]
         summary["lambda_entries"] += report["lambda_entries"]
+        if report["parse"] == "read_error":
+            summary["read_error"] = summary.get("read_error", 0) + 1
         if report["parse"] != "ok":
             summary["unparseable"] += 1
         for lane, count in report["lanes"].items():
@@ -258,9 +261,16 @@ def _aggregate_results(
         snapshot_files[rel] = registry
 
     lanes_total = sum(summary[lane] for lane in LANES)
-    summary["closure_ok"] = lanes_total == (
-        summary["func_entries"] + summary["lambda_entries"]
+    # read_error files route one cc_unmeasured lane row each but contribute no
+    # AST entries (parse errors contribute neither a lane row nor entries, so
+    # they close at 0==0) — the baseline counts one pseudo-entry per
+    # read-error file to keep the invariant exact
+    closure_baseline = (
+        summary["func_entries"]
+        + summary["lambda_entries"]
+        + summary.get("read_error", 0)
     )
+    summary["closure_ok"] = lanes_total == closure_baseline
     file_reports.sort(key=lambda r: r["file"])
     return file_reports, snapshot_files, summary
 
@@ -273,7 +283,24 @@ def _parity_file_task(task: tuple[str, str]) -> tuple[str, dict, dict]:
     independent per file.
     """
     path, label = task
-    gd_source = Path(path).read_text(encoding="utf-8")
+    from ..source_io import read_gd_source
+
+    gd_source, read_error = read_gd_source(path)
+    if read_error is not None:
+        # §SPEC-028: a read failure isolates to this file and routes to the
+        # cc_unmeasured lane exactly like a parse error (closure-compatible)
+        report = {
+            "file": label,
+            "parse": "read_error",
+            "reason": read_error,
+            "rows": [
+                _row(f"{label}::<read_error>", "<read_error>", "cc_unmeasured")
+            ],
+            "lanes": {"cc_unmeasured": 1},
+            "func_entries": 0,
+            "lambda_entries": 0,
+        }
+        return label, report, {"entries": [], "inner_classes": []}
     registry = build_file_registry(gd_source, file_label=label)
     report = parity_file(gd_source, file_label=label, registry=registry)
     return label, report, registry

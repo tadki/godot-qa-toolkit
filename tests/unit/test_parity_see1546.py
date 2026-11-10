@@ -279,3 +279,22 @@ def test_run_tasks_falls_back_serial_on_broken_pool(monkeypatch, tmp_path: Path)
     serial = [parity_mod._parity_file_task(t) for t in tasks]
     assert results == serial
     assert [r[0] for r in results] == ["a.gd", "b.gd"]
+
+
+def test_parity_read_error_isolated_as_cc_unmeasured(tmp_path: Path, monkeypatch):
+    """§SPEC-028: a latin-1 fixture inside the scan tree lands in the
+    cc_unmeasured lane (read_error) while sibling files still report."""
+    from godot_qa_toolkit.complexity.parity import parity_paths
+
+    bad = tmp_path / "latin.gd"
+    bad.write_bytes(b"func f():\n\treturn 1\n\xff\xfe invalid\n")
+    good = tmp_path / "good.gd"
+    good.write_text("func g() -> int:\n\treturn 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    report = parity_paths([tmp_path], project_root=str(tmp_path))
+    summary = report["summary"]
+    assert summary["read_error"] == 1
+    assert summary["cc_unmeasured"] == 1
+    assert summary["closure_ok"] is True  # read_error is closure-accounted
+    files_by_name = {r["file"] for r in report["files"]}
+    assert "good.gd" in files_by_name

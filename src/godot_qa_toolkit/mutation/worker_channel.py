@@ -663,6 +663,68 @@ func _walk_connections(node: Node, out: Array, depth: int) -> void:
 
 
 
+def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
+                     baseline_failures, parity_inject_fn):
+    """会话前置 parity 门（D-W2）：直驱失败集必须逐位等于冷 baseline 失败集。
+
+    返回 (degrade_all, fatal_event)；披露（stderr）在本函数内完成，事件串
+    由调用方汇入 fatal_events。门未启用（参数缺省）直接放行。"""
+    if baseline_failures is None or parity_inject_fn is None:
+        return False, None
+    parity_sha, parity_err = parity_inject_fn()
+    if parity_err is not None or session.dead:
+        print("mutation worker: PARITY GATE unavailable — degrading "
+              "this file to the cold channel (disclosed, not "
+              "silently)", file=sys.stderr)
+        return True, (f"parity leg unavailable: "
+                      f"{parity_err or session.dead_reason}")
+    pleg = session.run_leg(-1, target_res, parity_sha, list(closure),
+                           tests_glob,
+                           scene_refresh=prepare_scene_refresh(
+                               slot.root, closure, -1))
+    if pleg.fatal:
+        print(f"mutation worker: PARITY GATE fatal — "
+              f"{pleg.fatal_reason}; degrading this file to the "
+              f"cold channel (disclosed, not silently)", file=sys.stderr)
+        return True, f"parity leg fatal: {pleg.fatal_reason}"
+    if pleg.gut_ran and pleg.failing_tests != baseline_failures:
+        print("mutation worker: PARITY MISMATCH — direct-drive "
+              "failing set differs from cold baseline on this "
+              "suite; degrading this file to the cold channel "
+              "(equivalence preserved, disclosed)", file=sys.stderr)
+        return True, ("mode parity gate: direct-drive failing set diverges "
+                      f"from cold baseline (worker="
+                      f"{sorted(pleg.failing_tests)[:4]} "
+                      f"cold={sorted(baseline_failures)[:4]})")
+    return False, None
+
+
+def _apply_canary(canary_cold, verdict, seq, session):
+    """canary 双通道比对（D-W2 通道资格否证语义）。
+
+    返回 (verdict, mismatch_event, mismatch)。失配时 stderr 披露在本函数
+    内完成；窗口改冷权威 + 会话关闭 + 剩余冷降级由调用方执行（编排状态居
+    编排层）。"""
+    if canary_cold is None:
+        return verdict, None, False
+    if canary_cold["verdict"] == verdict["verdict"]:
+        session.note_canary()
+        return verdict, None, False
+    print(f"mutation worker: CANARY MISMATCH at leg {seq} "
+          f"(cold={canary_cold['verdict']} "
+          f"worker={verdict['verdict']}) — channel "
+          f"disqualified for this file: window invalidated "
+          f"and ALL remaining legs degraded to cold "
+          f"(disclosed, equivalence preserved)", file=sys.stderr)
+    # canary 失配 = 双通道等价性被实证否证（D-W2 KOL 实测：mutant 才触发
+    # 的 autoload 状态污染无法静态预判，且「作废窗口后继续 worker」会让
+    # 后续未验证判定静默出货）——窗口内改冷权威 + 剩余全部冷降级。
+    event = (f"canary mismatch leg {seq}: cold="
+             f"{canary_cold['verdict']} "
+             f"worker={verdict['verdict']}")
+    return canary_cold, event, True  # 本腿已有冷权威判定
+
+
 def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                     tests_glob, inject_fn, cold_runner, record_fn,
                     classify_fn, leg_timeout_s,
@@ -672,18 +734,17 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
     会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门 fire / autoload
     交叠 / 腿挂死）→ 不再执行后续 mutant：respawn + **自上次 canary 窗口
     整批作废 + 冷重跑** + stderr 披露（定案硬规则，禁止静默改道/继续）。
-    首腿与每 k 腿双通道 canary（三层门时序）：cold oracle 与 worker 判定
-    必须同档，失配按会话致命处置。
+    首腿与每 k 腿双通道 canary：cold oracle 与 worker 判定必须同档，失配
+    = 通道资格否证（窗口冷权威 + 剩余全部冷降级，披露）。
 
-    会话前置 parity 门（D-W2，baseline_failures + parity_inject_fn 在场时
-    启用）：直驱 GUT 与 gut_cmdln 对同一代码必须产出同一失败集，否则腿判定
-    不可迁移（KOL 真实套件实测：error_tracker 未注册时 warning 断言假失败
-    → 双向分歧）。以原始源跑零 mutant 腿比对冷 baseline 失败集，失配 →
-    披露 + 整文件冷降级（等价性守恒）。
+    会话前置 parity 门（D-W2，`_parity_gate_leg`）：直驱 GUT 与 gut_cmdln
+    对同一代码必须产出同一失败集，否则腿判定不可迁移；失配 → 披露 +
+    整文件冷降级（等价性守恒）。
 
     编排/会话/门居本模块；verdict 语义（classify_fn）、冷重跑
     （cold_runner）、注入（inject_fn）与记录（record_fn）由 runner 注入
-    ——避免反向依赖。
+    ——避免反向依赖。复杂度纪律（R-DW5）：门判定下沉
+    `_parity_gate_leg` / `_apply_canary`，编排循环只留状态迁移。
     """
     raw_pairs: list[tuple] = []
     fatal_events: list[str] = []
@@ -695,52 +756,47 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
         raw_pairs.append((m, verdict))
         record_fn(m, verdict, elapsed_s)
 
+    def _run_cold(m, seq):
+        t0 = time.monotonic()
+        return cold_runner(m, seq), time.monotonic() - t0
+
     def _recast_cold(start: int) -> None:
         """整批作废：窗口内 worker 判定全部改冷重跑（权威回归冷通道）。"""
         for idx in range(start, len(raw_pairs)):
             m, _old = raw_pairs[idx]
-            t0 = time.monotonic()
-            verdict = cold_runner(m, idx)
+            verdict, elapsed = _run_cold(m, idx)
             raw_pairs[idx] = (m, verdict)
-            record_fn(m, verdict, time.monotonic() - t0)
+            record_fn(m, verdict, elapsed)
 
     def _new_session() -> WorkerSession:
         return WorkerSession(slot.root, slot.project_root, kind,
                              godot_bin=None, leg_timeout_s=leg_timeout_s)
 
+    def _recover_fatal(seq, leg, m):
+        """会话致命处置：窗口作废冷重跑 + respawn；返回 (verdict, elapsed)。"""
+        nonlocal session, window_start, session_failures
+        session_failures += 1
+        print(f"mutation worker: SESSION FATAL at leg {seq} — "
+              f"{leg.fatal_reason}; window {window_start}.."
+              f"{len(raw_pairs)} invalidated, cold rerun", file=sys.stderr)
+        _recast_cold(window_start)
+        session.close()
+        session = _new_session()
+        window_start = len(raw_pairs)
+        verdict, elapsed = _run_cold(m, seq)
+        if session_failures >= 2:
+            print("mutation worker: respawn failed twice — "
+                  "degrading remaining legs to the cold channel "
+                  "(disclosed, not silently)", file=sys.stderr)
+        return verdict, elapsed
+
     session = _new_session()
     try:
-        if baseline_failures is not None and parity_inject_fn is not None:
-            parity_sha, parity_err = parity_inject_fn()
-            if parity_err is not None or session.dead:
-                degrade_all = True
-                fatal_events.append(
-                    f"parity leg unavailable: {parity_err or session.dead_reason}")
-                print("mutation worker: PARITY GATE unavailable — degrading "
-                      "this file to the cold channel (disclosed, not "
-                      "silently)", file=sys.stderr)
-            else:
-                pleg = session.run_leg(-1, target_res, parity_sha,
-                                       list(closure), tests_glob,
-                                       scene_refresh=prepare_scene_refresh(
-                                           slot.root, closure, -1))
-                if pleg.fatal:
-                    degrade_all = True
-                    fatal_events.append(f"parity leg fatal: {pleg.fatal_reason}")
-                    print(f"mutation worker: PARITY GATE fatal — "
-                          f"{pleg.fatal_reason}; degrading this file to the "
-                          f"cold channel (disclosed, not silently)",
-                          file=sys.stderr)
-                elif pleg.gut_ran and pleg.failing_tests != baseline_failures:
-                    degrade_all = True
-                    fatal_events.append(
-                        "mode parity gate: direct-drive failing set diverges "
-                        f"from cold baseline (worker={sorted(pleg.failing_tests)[:4]} "
-                        f"cold={sorted(baseline_failures)[:4]})")
-                    print("mutation worker: PARITY MISMATCH — direct-drive "
-                          "failing set differs from cold baseline on this "
-                          "suite; degrading this file to the cold channel "
-                          "(equivalence preserved, disclosed)", file=sys.stderr)
+        degrade_all, parity_event = _parity_gate_leg(
+            session, slot, target_res, closure, tests_glob,
+            baseline_failures, parity_inject_fn)
+        if parity_event is not None:
+            fatal_events.append(parity_event)
         for seq, m in enumerate(mutants):
             mutant_sha, inject_error = inject_fn(m)
             if inject_error is not None:
@@ -749,9 +805,8 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
             canary_cold = cold_runner(m, seq) if canary_due(seq) else None
             if degrade_all or session_failures >= 2 or session.dead:
                 # parity 失配 / 会话不可用（respawn 连续失败）：剩余腿全冷降级
-                t_cold = time.monotonic()
-                v = cold_runner(m, seq)
-                _record(m, v, time.monotonic() - t_cold)
+                verdict, elapsed = _run_cold(m, seq)
+                _record(m, verdict, elapsed)
                 continue
             t_leg = time.monotonic()
             leg = session.run_leg(seq, target_res, mutant_sha, list(closure),
@@ -760,49 +815,19 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                                       slot.root, closure, seq))
             leg_elapsed = time.monotonic() - t_leg
             if leg.fatal:
+                verdict, elapsed = _recover_fatal(seq, leg, m)
                 fatal_events.append(leg.fatal_reason)
-                session_failures += 1
-                print(f"mutation worker: SESSION FATAL at leg {seq} — "
-                      f"{leg.fatal_reason}; window {window_start}.."
-                      f"{len(raw_pairs)} invalidated, cold rerun",
-                      file=sys.stderr)
-                _recast_cold(window_start)
-                session.close()
-                session = _new_session()
-                window_start = len(raw_pairs)
-                t_cold = time.monotonic()
-                v = cold_runner(m, seq)
-                _record(m, v, time.monotonic() - t_cold)
-                if session_failures >= 2:
-                    print("mutation worker: respawn failed twice — "
-                          "degrading remaining legs to the cold channel "
-                          "(disclosed, not silently)", file=sys.stderr)
+                _record(m, verdict, elapsed)
                 continue
             session_failures = 0
             verdict = classify_fn(m, leg)
-            if canary_cold is not None:
-                if canary_cold["verdict"] != verdict["verdict"]:
-                    fatal_events.append(
-                        f"canary mismatch leg {seq}: cold="
-                        f"{canary_cold['verdict']} "
-                        f"worker={verdict['verdict']}")
-                    print(f"mutation worker: CANARY MISMATCH at leg {seq} "
-                          f"(cold={canary_cold['verdict']} "
-                          f"worker={verdict['verdict']}) — channel "
-                          f"disqualified for this file: window invalidated "
-                          f"and ALL remaining legs degraded to cold "
-                          f"(disclosed, equivalence preserved)",
-                          file=sys.stderr)
-                    # canary 失配 = 双通道等价性被实证否证（D-W2 KOL 实测：
-                    # mutant 才触发的 autoload 状态污染无法静态预判，且
-                    # 「作废窗口后继续 worker」会让后续未验证判定静默出货）
-                    # ——窗口内改冷权威 + 剩余全部冷降级，不再继续 worker。
-                    _recast_cold(window_start)
-                    session.close()
-                    degrade_all = True
-                    verdict = canary_cold  # 本腿已有冷权威判定
-                else:
-                    session.note_canary()
+            verdict, canary_event, mismatch = _apply_canary(
+                canary_cold, verdict, seq, session)
+            if mismatch:
+                fatal_events.append(canary_event)
+                _recast_cold(window_start)
+                session.close()
+                degrade_all = True
             _record(m, verdict, leg_elapsed)
     finally:
         session.close()

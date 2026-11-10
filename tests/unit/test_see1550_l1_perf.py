@@ -223,6 +223,14 @@ class TestBudgetPrune:
         total = sum(int(v.get("size_bytes") or 0) for v in pool["slots"].values())
         assert total <= 1 * 1024 * 1024
 
+    def test_pool_budget_floor_rejects_zero_and_negative(self, monkeypatch):
+        """预算下限：ENV 0/负数按 1MB 下限钳制（0 预算 = 每轮清空池，
+        warm 池永久失效）。"""
+        monkeypatch.setenv(shadow.ENV_POOL_BUDGET_MB, "0")
+        assert shadow.pool_budget_bytes() >= 1024 * 1024
+        monkeypatch.setenv(shadow.ENV_POOL_BUDGET_MB, "-5")
+        assert shadow.pool_budget_bytes() >= 1024 * 1024
+
     def test_locked_slot_never_pruned(self, tmp_path, monkeypatch):
         proj, _ = _write_project(tmp_path)
         monkeypatch.setattr(shadow, "DEFAULT_POOL_MAX_SLOTS", 1)

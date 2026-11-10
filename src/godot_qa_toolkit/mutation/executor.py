@@ -56,7 +56,7 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
 
 def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                   binary_kind, mutation_warning, timeout_factor,
-                  reuse_coverage, identity) -> dict:
+                  reuse_coverage, identity, worker_channel=None) -> dict:
     """多文件 dry-run 清点（零 GUT/零预热/零 baseline）。"""
     results = [
         run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
@@ -64,7 +64,8 @@ def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                      binary_kind=binary_kind,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
-                     reuse_coverage=reuse_coverage, identity=identity)
+                     reuse_coverage=reuse_coverage, identity=identity,
+                     worker_channel=worker_channel)
         for f in files
     ]
     for result in results:
@@ -144,6 +145,7 @@ def run_mutation_files(
     timeout_factor: float | None = None,
     mutate_all: bool = False,
     reuse_coverage: bool = True,
+    worker_channel: bool | None = None,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -174,7 +176,8 @@ def run_mutation_files(
     if dry_run:
         return _dry_run_list(files, project_root, budget, timeout_s,
                              tests_glob, binary_kind, mutation_warning,
-                             timeout_factor, reuse_coverage, identity)
+                             timeout_factor, reuse_coverage, identity,
+                             worker_channel=worker_channel)
 
     jobs = default_jobs(jobs)
     # SEE-1413 退串行判定：必须在任何 GUT 调用（prewarm / 共享 baseline
@@ -212,7 +215,8 @@ def run_mutation_files(
                                            timeout_factor=timeout_factor,
                                            mutate_all=mutate_all,
                                            reuse_coverage=reuse_coverage,
-                                           identity=identity)
+                                           identity=identity,
+                                           worker_channel=worker_channel)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -303,7 +307,8 @@ def _chunk_worker(payload: dict) -> dict:
             timeout_factor=timeout_factor,
             mutate_all=bool(payload.get("mutate_all")),
             progress=payload.get("progress"),
-            identity=identity)
+            identity=identity,
+            worker_channel=payload.get("worker_channel"))
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -313,6 +318,7 @@ def _chunk_worker(payload: dict) -> dict:
         timeout_factor=timeout_factor,
         progress=payload.get("progress"),
         identity=identity,
+        worker_channel=payload.get("worker_channel"),
     )
 
 
@@ -459,6 +465,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   mutate_all: bool = False,
                   reuse_coverage: bool = True,
                   identity: dict | None = None,
+                  worker_channel: bool | None = None,
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
@@ -483,7 +490,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             f, project_root, budget, timeout_s, tests_glob, jobs, resume,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
             reuse_coverage, baselines, baseline_failures, run_id,
-            identity=identity)
+            identity=identity, worker_channel=worker_channel)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
@@ -496,7 +503,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       resume, binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
                       baseline_failures=None, run_id=None,
-                      identity: dict | None = None):
+                      identity: dict | None = None,
+                      worker_channel: bool | None = None):
     """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
     budget → 分片。
 
@@ -576,6 +584,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             "progress": {"run_id": run_id, "worker": "serial",
                          "total": len(executed_list)},
             "identity": identity,
+            "worker_channel": worker_channel,
         }
         return [chunk], None, None
     ctx = {
@@ -587,7 +596,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
                               binary_kind, ids, baseline, resume,
                               timeout_factor, raw_total, attention, jobs,
-                              run_id=run_id, identity=identity)
+                              run_id=run_id, identity=identity,
+                              worker_channel=worker_channel)
     return chunks, ctx, None
 
 
@@ -638,7 +648,8 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
 
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
                      ids, baseline, resume, timeout_factor, raw_total,
-                     attention, jobs, run_id=None, identity=None):
+                     attention, jobs, run_id=None, identity=None,
+                     worker_channel=None):
     """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。
 
     progress（SEE-1525）：各分片共用同一 run_id 与**全局分母** `len(ids)`，
@@ -668,6 +679,7 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
             "progress": {"run_id": run_id, "worker": f"w{i}",
                          "total": len(ids)},
             "identity": identity,
+            "worker_channel": worker_channel,
         })
     return chunks
 

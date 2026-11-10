@@ -9,6 +9,8 @@ re-export 保持既有 import / monkeypatch 名称空间稳定。SEE-1550 tidy �
 
 from __future__ import annotations
 
+import sys
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -256,26 +258,30 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
 def _apply_mechanism_disclosures(summary: dict, results: list[dict],
                                  slot_info: dict | None,
                                  original_src: str | None) -> None:
-    """SEE-1550 stdout 只加不改披露面：注入机制标签、槽位/新鲜度、killed
-    证书、疑似孤儿诊断（unreachable 不进 verdict——只披露）。
-
-    - killed_by_certificates：每个 killed 条目的完整失败集证书（撤除旧
-      [:3] 截断；reason 仍保留短预览供人读）。
-    - suspected_orphan：目标脚本零静态引用 ∧ 存在 survived → 幸存记录逐条
-      打 ``suspected_orphan`` 标记 + summary 名单——静态不可判定面（动态
-      load/uid 间接引用）只披露不判定、不 skip。
-    """
+    """SEE-1550 stdout 只加不改披露面：机制标签、槽位/新鲜度、killed
+    证书、疑似孤儿诊断（unreachable 不进 verdict——只披露）。"""
     info = slot_info or {}
     summary["inject_scheme"] = info.get("inject_scheme", INJECT_SCHEME)
+    if info.get("exec_scheme"):
+        summary["exec_scheme"] = info["exec_scheme"]
     if info.get("slot_mode"):
         summary["slot_mode"] = info["slot_mode"]
     if info.get("freshness"):
         summary["freshness"] = info["freshness"]
+    _emit_killed_certificates(summary, results)
+    _emit_suspected_orphans(summary, results, info)
+
+
+def _emit_killed_certificates(summary: dict, results: list[dict]) -> None:
     certs = [{"id": r["id"], "killed_by": r["killed_by"]}
              for r in results
              if r.get("verdict") == "killed" and r.get("killed_by")]
     if certs:
         summary["killed_by_certificates"] = certs
+
+
+def _emit_suspected_orphans(summary: dict, results: list[dict],
+                            info: dict) -> None:
     if info.get("suspected_orphan") and any(
             r.get("verdict") == "survived" for r in results):
         for r in results:
@@ -283,3 +289,74 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
                 r["suspected_orphan"] = True
         summary["suspected_orphans"] = [r["id"] for r in results
                                         if r.get("verdict") == "survived"]
+
+
+def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
+                        ownership_fn, project_root, original_src) -> dict:
+    """worker 腿 → verdict（与冷通道同一 kill 语义：失败名差集 + 同档分类）。
+
+    worker 腿的 L1/L4 beacon 失败 → run_error（数据不可信，绝不 killed/
+    survived）；killed 走与冷通道相同的 killer 证书签发面。
+    """
+    from .identity import killer_certificate
+
+    if not leg.hash_ok:
+        return _mutant_record(
+            m, "run_error",
+            f"worker beacon: disk hash mismatch for {m.kind} "
+            f"{m.original}→{m.mutated}", src=original_src)
+    if not leg.gut_ran:
+        return _mutant_record(
+            m, "run_error",
+            f"worker leg: no GUT run stream for {m.kind} "
+            f"{m.original}→{m.mutated}", src=original_src)
+    if leg.fail_count == 0:
+        return _mutant_record(
+            m, "survived",
+            f"tests passed after {m.kind} {m.original}→{m.mutated} "
+            f"(worker leg)", src=original_src)
+    new_failures = leg.failing_tests - baseline_failures
+    if new_failures:
+        record = _mutant_record(
+            m, "killed",
+            f"new failures after {m.kind} {m.original}→{m.mutated}: "
+            f"{sorted(new_failures)[:3]}", src=original_src)
+        if ownership_fn is not None:
+            cert = killer_certificate(new_failures, ownership_fn(),
+                                      project_root)
+            if cert is not None:
+                record["killed_by"] = cert
+        return record
+    if baseline_dirty:
+        return _mutant_record(
+            m, "suspect",
+            f"dirty baseline ∧ empty diff after {m.kind} "
+            f"{m.original}→{m.mutated} (worker leg)", src=original_src)
+    return _mutant_record(
+        m, "survived",
+        f"only pre-existing failures after {m.kind} "
+        f"{m.original}→{m.mutated} (worker leg)", src=original_src)
+
+
+def _require_baseline_snapshot(mutant_slice, retry_ids,
+                               precomputed_baseline) -> None:
+    """worker 注入契约：分片/重试面必须携带共享 baseline 快照（各自跑
+    baseline 会 N 倍放大启动税且污染 timeout 锚）。"""
+    if ((mutant_slice is not None or retry_ids is not None)
+            and precomputed_baseline is None):
+        raise ValueError(
+            "slice/retry_ids workers require a precomputed baseline snapshot — "
+            "each worker running its own baseline would multiply the startup "
+            f"tax N-fold and pollute the adaptive timeout anchor: {mutant_slice}")
+
+
+def _attention_note(mutation_warning: int | None, total_sites: int,
+                    file_label: str) -> str | None:
+    """§SPEC-1420-01：按截断前全量位点数的告警（stderr + summary.attention）。"""
+    if mutation_warning is None or total_sites <= mutation_warning:
+        return None
+    note = (f"{total_sites} mutation sites exceed "
+            f"--mutation-warning {mutation_warning} — consider "
+            f"splitting this file")
+    print(f"mutation-warning: {note} in {file_label}", file=sys.stderr)
+    return note

@@ -207,7 +207,8 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         mutation_warning=args.mutation_warning,
         timeout_factor=args.timeout_factor,
         mutate_all=args.mutate_all,
-        reuse_coverage=_reuse_coverage_flag(args))
+        reuse_coverage=_reuse_coverage_flag(args),
+        worker_channel=getattr(args, "worker_channel", False))
     if len(files) == 1 and args.jobs is None:
         # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
         envelope = result
@@ -244,6 +245,7 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         select_lines=([args.lines] if getattr(args, "lines", None)
                       else None),
         reuse_coverage=_reuse_coverage_flag(args),
+        worker_channel=getattr(args, "worker_channel", False),
     )
     result["summary"].setdefault("jobs", 1)
     return result
@@ -449,6 +451,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "prefilter is ON by default when a fresh coverage "
                         "store with a matching identity pack exists; "
                         "uncovered sites never enter the ok gate)")
+    m.add_argument("--worker-channel", action="store_true",
+                   help="opt in to the resident worker channel (SEE-1550 "
+                        "§SPEC-020 worker-reset/1, A9 opt-in): eligible "
+                        "targets run in a persistent GUT-direct-drive worker; "
+                        "autoload/GUT-domain targets stay on the cold M0 "
+                        "channel; default is cold")
     _add_godot_bin_arg(m)
     m.set_defaults(func=cmd_mutation)
 

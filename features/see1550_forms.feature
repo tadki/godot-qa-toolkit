@@ -44,3 +44,8 @@ Feature: SEE-1550 M0 — 真实 Godot 加载形态矩阵（§SPEC-002）
     Given a real 8-form fixture project with the GUT addon
     When the default mutation command runs on "res://forms/orphan_form.gd"
     Then mutants survive with the suspected-orphan disclosure
+
+  Scenario: vendored addon 显式指定目标 mutant 被杀死（§SPEC-017）
+    Given a real 8-form fixture project with the GUT addon
+    When the default mutation command runs on "res://addons/gqt_forms_vendor/vendor_calc.gd"
+    Then every mutant is killed with zero survivors

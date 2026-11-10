@@ -158,6 +158,10 @@ def main() -> int:
     # A 侧 = master 旧机制的独立 worktree（零改动本工作树）
     awt = outdir / "a-worktree"
     if not awt.exists():
+        # §SPEC-016（O-2 收口）：目录被手工清理后元数据仍登记在案，
+        # `worktree add` 恒 128（本机实证）——add 前先 prune 陈旧登记。
+        subprocess.run(["git", "worktree", "prune"], cwd=str(REPO_ROOT),
+                       capture_output=True, check=False)
         subprocess.run(["git", "worktree", "add", str(awt), args.master_ref],
                        cwd=str(REPO_ROOT), capture_output=True, check=True)
     a_src, b_src = awt.resolve(), REPO_ROOT

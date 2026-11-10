@@ -46,15 +46,17 @@ EXPECTED_SCENARIO_COUNTS = {
     # HIGH-1 拆分：8 个自足场景 + 3 个真实 KOL 树场景独立模块守卫）。
     "see1546_wp1a": 8,
     "see1546_wp1a_kol": 3,
-    # SEE-1550 §SPEC-002：8 形态真实引擎加载矩阵（7 killed + orphan 披露）。
-    "see1550_forms": 8,
+    # SEE-1550 §SPEC-002+017：真实引擎加载矩阵 8 形态 + vendored 显式目标
+    # （7 killed + orphan 披露 + vendored killed）。
+    "see1550_forms": 9,
     # SEE-1546 M2：最小 exploratory shadow（CRAP-Line 诊断排序器）。
     "see1546_shadow": 8,
 }
 EXPECTED_FEATURE_NAMES = tuple(EXPECTED_SCENARIO_COUNTS)
 EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
-# SEE-1550 §SPEC-002：see1550_forms 8 场景 26 步接入后 142 -> 168。
-EXPECTED_STEPS = 168
+# SEE-1550 §SPEC-002：see1550_forms 8 场景 26 步接入后 142 -> 168；
+# §SPEC-017：vendored 显式目标场景复用既有步文本（+3 步）→ 171。
+EXPECTED_STEPS = 171
 # SEE-1550：forms 模块新增 4 个唯一 step 定义（given×1/when×1/then×2，
 # 文本 SEE-1550 专属零碰撞）——133 -> 137。
 EXPECTED_DEFINITIONS = 137

@@ -14,12 +14,15 @@ from gdtoolkit.parser import parser as gdtoolkit_parser
 # 变异算子表
 # ---------------------------------------------------------------------------
 
-# AOR: 算术运算符互换（两两排列足够——加法/减法/乘法/除法）
+# AOR: 算术运算符互换（两两排列足够——加法/减法/乘法/除法/取模）
+# SEE-1550 §SPEC-014：`%` 入表——此前 mdr_expr 节点（`*`/`/`/`%` 的
+# gdtoolkit 归宿）整族不被扫描端访问，`*`/`/`/`%` 三方向全暗（Harti 实证）。
 _ARITHMETIC_MUTATIONS = {
     "+": ["-", "*", "/"],
     "-": ["+", "*", "/"],
     "*": ["+", "-", "/"],
     "/": ["+", "-", "*"],
+    "%": ["+", "-", "*"],
 }
 
 # ROR: 关系运算符互换（保语义对称性——等价类中最常见的陷阱是边界）
@@ -49,7 +52,10 @@ _MEMBERSHIP_MUTATIONS = {"in": ["not in"]}
 # see1550/1（SEE-1550 M0 磁盘影子注入定案）：注入机制由内存注入改为磁盘影子
 # 注入（disk-farm/1）——旧 verdict 由假注入面产生，跨机制复用 = 脏合并；
 # 旧 v2 store 条目不读不写不删并 stderr 披露（Owner 裁决菜单 B：一次性全失效）。
-OPS_VERSION = "see1550/1"
+# see1550/2（§SPEC-014）：变异收集语义变更——mdr_expr（`*`/`/`/`%`）并入
+# 扫描面 + `%` 算子入表。位点集合变化 = stable_id 序与 verdict 域变化，
+# 旧 store 条目同样不读不写不删并披露（identity.disclose_superseded）。
+OPS_VERSION = "see1550/2"
 
 # 边界常量翻转（Token 级精确匹配——值相等才算，杜绝 10 被当成 1 的子串误配）
 _CONSTANT_MUTATIONS = {
@@ -61,7 +67,7 @@ _CONSTANT_MUTATIONS = {
 
 # 守卫取反去重：条件子树含这些节点（自带可变异算子）时，守卫取反冗余——跳过。
 _MUTABLE_COND_NODES = {
-    "arith_expr", "comparison", "asless_comparison",
+    "arith_expr", "mdr_expr", "comparison", "asless_comparison",
     "and_test", "asless_and_test", "or_test", "asless_or_test",
     "content_test", "type_test", "asless_actual_not_test",
     "test_expr", "unary_expr",
@@ -253,9 +259,13 @@ def _token_mutants_for(src: str, offs: list[int], node, data: str) -> list[Mutan
                           original=original, mutated=mutated, kind=kind,
                           start_pos=sp, end_pos=ep))
 
-    if data in ("arith_expr", "comparison", "asless_comparison"):
-        table = (_ARITHMETIC_MUTATIONS if "arith" in data else _COMPARISON_MUTATIONS)
-        kind = "AOR" if "arith" in data else "ROR"
+    if data in ("arith_expr", "mdr_expr", "comparison", "asless_comparison"):
+        # §SPEC-014：mdr_expr（`*`/`/`/`%` 的 gdtoolkit 归宿，STAR/SLASH/
+        # PERCENT Token）并入 token 系扫描——此前整族 0 位点。
+        table = (_ARITHMETIC_MUTATIONS
+                 if data in ("arith_expr", "mdr_expr")
+                 else _COMPARISON_MUTATIONS)
+        kind = "AOR" if data in ("arith_expr", "mdr_expr") else "ROR"
         for child in node.children:
             tok = getattr(child, "value", None)
             if tok not in table:

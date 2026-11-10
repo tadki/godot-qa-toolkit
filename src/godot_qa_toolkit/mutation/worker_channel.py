@@ -28,10 +28,8 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -112,14 +110,13 @@ class WorkerLegResult:
     failing_tests: set[str] = field(default_factory=set)
     user_files: list[str] = field(default_factory=list)
     connections: list[list] = field(default_factory=list)
+    timings: dict = field(default_factory=dict)
 
 
 @dataclass
 class _SessionState:
     proc: subprocess.Popen | None = None
-    reader: threading.Thread | None = None
-    lines: queue.Queue | None = None
-    buffer: list[str] = field(default_factory=list)
+    log_fh: object | None = None
     legs_run: int = 0
     last_canary_leg: int = -1
     gate_ctx: object | None = None
@@ -184,20 +181,13 @@ class WorkerSession:
         argv = [self.godot_bin or self._godot_command(), "--headless",
                 "--path", self._project_path(), "-s",
                 "res://" + HOST_SCRIPT_NAME]
+        # stdout 落盘（诊断面）：崩溃时 boot 失败错误带回尾段
+        self._log_path = work / "worker-log.txt"
+        log_fh = open(self._log_path, "w", encoding="utf-8")
         self.state.proc = subprocess.Popen(
             argv, cwd=self.slot_root, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            bufsize=1)
-        self.state.lines = queue.Queue()
-
-        def _pump(proc, q):
-            for line in proc.stdout:
-                q.put(line)
-
-        self.state.reader = threading.Thread(
-            target=_pump, args=(self.state.proc, self.state.lines),
-            daemon=True)
-        self.state.reader.start()
+            stdout=log_fh, stderr=subprocess.STDOUT, text=True)
+        self.state.log_fh = log_fh
         self._await_boot()
 
     def _godot_command(self) -> str:
@@ -215,9 +205,16 @@ class WorkerSession:
             if boot.exists():
                 return
             if self.state.proc.poll() is not None:
+                tail = ""
+                log_path = Path(self.slot_root) / WORKER_DIRNAME / "worker-log.txt"
+                try:
+                    tail = log_path.read_text(encoding="utf-8",
+                                              errors="replace")[-800:]
+                except OSError:
+                    pass
                 raise RuntimeError(
-                    f"worker exited before boot (rc={self.state.proc.returncode}) "
-                    f"— see worker stdin/stdout log")
+                    f"worker exited before boot "
+                    f"(rc={self.state.proc.returncode}) — log tail:\n{tail}")
             time.sleep(0.01)
         raise RuntimeError(f"worker boot timeout after {timeout_s}s")
 
@@ -233,6 +230,12 @@ class WorkerSession:
                     self.state.proc.kill()
                     self.state.proc.wait(timeout=5)
         finally:
+            try:
+                if getattr(self.state, "log_fh", None) is not None:
+                    self.state.log_fh.close()
+                    self.state.log_fh = None
+            except Exception:
+                pass
             if self.state.gate_ctx is not None:
                 try:
                     self.state.gate_ctx.__exit__(None, None, None)
@@ -309,7 +312,8 @@ class WorkerSession:
             pass_count=int(resp.get("pass", 0)),
             fail_count=int(resp.get("fail", 0)),
             user_files=list(resp.get("user_files") or []),
-            connections=resp.get("connections") or [],
+            connections=list(resp.get("connections") or []),
+            timings=dict(resp.get("timings") or {}),
         )
         r.failing_tests = self._leg_failing_names(leg)
         reason = self._fatal_reason(r)
@@ -339,34 +343,26 @@ class WorkerSession:
         return ""
 
     def _leg_failing_names(self, leg: int) -> set[str]:
-        """从 stdout 缓冲抽取该腿分段并解析失败测试名（M0 同判据）。"""
+        """从 worker 日志文件抽取该腿分段并解析失败测试名（M0 同判据）。"""
         from .gutrun import _parse_failing_tests
+        seg: list[str] = []
         begin = f"GQT_WORKER_LEG_BEGIN {leg}"
         end = f"GQT_WORKER_LEG_END {leg} "
-        lines = self._drain_lines()
-        seg: list[str] = []
-        inside = False
-        for line in lines:
-            if begin in line:
-                inside = True
-                continue
-            if inside and end in line:
-                break
-            if inside:
-                seg.append(line)
+        try:
+            for line in self._log_path.read_text(encoding="utf-8",
+                                                 errors="replace").splitlines():
+                if end in line:
+                    if seg:
+                        break
+                    continue
+                if begin in line:
+                    seg = [line]
+                    continue
+                if seg:
+                    seg.append(line)
+        except OSError:
+            return set()
         return _parse_failing_tests("\n".join(seg))
-
-    def _drain_lines(self) -> list[str]:
-        """把已到达的 stdout 行并入会话缓冲（按腿号 marker 分段消费）。"""
-        if self.state.lines is not None:
-            while True:
-                try:
-                    self.state.buffer.append(self.state.lines.get_nowait())
-                except queue.Empty:
-                    break
-            if len(self.state.buffer) > 200000:
-                self.state.buffer = self.state.buffer[-200000:]
-        return self.state.buffer
 
     def _mark_dead(self, reason: str) -> None:
         self.dead = True
@@ -430,6 +426,7 @@ func _run_leg(req: Dictionary) -> void:
 	resp["hash_ok"] = _file_sha256(target_res) == expected
 	resp["autoload_in_closure"] = _autoload_intersection(members)
 	var all_ok := true
+	var t_reload := Time.get_ticks_msec()
 	for res in members:
 		var rc := _reload_member(String(res))
 		resp["reload"][String(res)] = rc
@@ -439,7 +436,10 @@ func _run_leg(req: Dictionary) -> void:
 			var scr = load(String(res))
 			if scr != null:
 				resp["source_sha"][String(res)] = scr.source_code.sha1_text()
+	resp["timings"] = {"reload_ms": Time.get_ticks_msec() - t_reload}
+	var t_gut := 0
 	if bool(resp["hash_ok"]) and all_ok and resp["autoload_in_closure"].is_empty():
+		t_gut = Time.get_ticks_msec()
 		var gut: Node = load("res://addons/gut/gut.gd").new()
 		get_root().add_child(gut)
 		_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
@@ -455,11 +455,16 @@ func _run_leg(req: Dictionary) -> void:
 		resp["fail"] = gut.get_fail_count()
 		get_root().remove_child(gut)
 		gut.free()
+	resp["timings"]["gut_ms"] = Time.get_ticks_msec() - t_gut
 	resp["user_files"] = _user_files()
 	resp["connections"] = _connection_fingerprint()
 	print("GQT_WORKER_LEG_END ", leg, " pass=", resp["pass"],
 		" fail=", resp["fail"], " gut_ran=", resp["gut_ran"],
 		" hash_ok=", resp["hash_ok"], " reload_ok=", all_ok)
+	_emit_resp(resp)
+
+
+func _emit_resp(resp: Dictionary) -> void:
 	var f := FileAccess.open(RESP_TMP, FileAccess.WRITE)
 	f.store_string(JSON.stringify(resp))
 	f = null

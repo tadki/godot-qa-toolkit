@@ -304,7 +304,7 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         timeout_factor=args.timeout_factor,
         mutate_all=args.mutate_all,
         reuse_coverage=_reuse_coverage_flag(args),
-        worker_channel=getattr(args, "worker_channel", False))
+        worker_channel=True if getattr(args, "worker_channel", False) else None)
     if len(files) == 1 and args.jobs is None:
         # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
         envelope = result
@@ -341,7 +341,7 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         select_lines=([args.lines] if getattr(args, "lines", None)
                       else None),
         reuse_coverage=_reuse_coverage_flag(args),
-        worker_channel=getattr(args, "worker_channel", False),
+        worker_channel=True if getattr(args, "worker_channel", False) else None,
     )
     result["summary"].setdefault("jobs", 1)
     return result
@@ -708,7 +708,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "§SPEC-020 worker-reset/1, A9 opt-in): eligible "
                         "targets run in a persistent GUT-direct-drive worker; "
                         "autoload/GUT-domain targets stay on the cold M0 "
-                        "channel; default is cold")
+                        "channel; default is cold; env GQT_MUTATION_WORKER=1 "
+                        "is equivalent and honored on every execution path "
+                        "(serial, auto-serial, parallel sharding)")
     _add_godot_bin_arg(m)
     m.set_defaults(func=cmd_mutation)
 

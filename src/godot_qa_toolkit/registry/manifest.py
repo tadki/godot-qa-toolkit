@@ -71,8 +71,10 @@ def _resolve_ownership(
     i_by_fid: dict[str, int] = {}
     for probe_id, line in enumerate(plan_lines):
         hits = [s for s in spans if s[0] < line <= s[1]]
+        ownership = "owned"
         if not hits:
             unowned += 1
+            ownership = "unowned"
             fid, kind = None, None
         else:
             # spans are pre-sorted innermost-first; lambda⊂host nesting is the
@@ -84,6 +86,7 @@ def _resolve_ownership(
                 innermost[1],
             ):
                 ambiguous += 1
+                ownership = "ambiguous"
                 fid, kind = None, None
             else:
                 fid, kind = innermost[2], innermost[3]
@@ -95,6 +98,9 @@ def _resolve_ownership(
                 "fid": fid,
                 # contract naming: func_def → func, lambda → lambda
                 "owner_kind": "func" if kind == "func_def" else kind,
+                # §SPEC-024: per-line ownership flag for consumers that must
+                # distinguish unowned vs ambiguous without re-deriving spans
+                "ownership": ownership,
             }
         )
     return probe_plan, unowned, ambiguous, i_by_fid

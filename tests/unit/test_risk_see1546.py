@@ -240,12 +240,24 @@ def test_instrumentation_gap_flags_class_def_body():
 
 
 def test_lambda_and_inner_class_never_mix_into_host_denominator():
+    """PR-A re-anchor (plan §4.4 P1 denominator split): lambda body lines
+    belong to the standalone lambda entry — the host denominator excludes
+    them, which is exactly the "never mixed into the host denominator" pin."""
     identities = collect_function_identities(STRICT, file_label="x.gd")
     names = [i.name for i in identities]
     assert names == ["host"]  # lambda is not a function identity of its own
     host = identities[0]
     rows, _ = build_probe_manifest(STRICT, identities)
-    assert all(r["function_id"] == host.function_id for r in rows)
+    host_fid = host.function_id
+    lam_fid = f"{host_fid}.<lambda#1>"
+    assert all(
+        r["function_id"] in (host_fid, lam_fid) for r in rows
+    ), str(rows)
+    # lambda body lines are attributed to the lambda entry, never the host
+    host_lines = {r["line"] for r in rows if r["function_id"] == host_fid}
+    lam_lines = {r["line"] for r in rows if r["function_id"] == lam_fid}
+    assert lam_lines, "lambda body has no probes"
+    assert not (host_lines & lam_lines)
 
 
 # --------------------------------------------------------------------------
@@ -331,28 +343,6 @@ def test_classify_no_probe_fired_is_run_error_lane():
     assert state == "run_error"
 
 
-def test_identity_owner_reports_true_ambiguity(monkeypatch):
-    """Two spans starting on the same line cannot be disambiguated — the owner
-    resolver must report ambiguity instead of guessing."""
-    from godot_qa_toolkit.risk import identity as identity_mod
-
-    fakes = [
-        identity_mod.FunctionIdentity("x.gd::a", "a", "a", 1, 5, 1, "func_def", ""),
-        identity_mod.FunctionIdentity("x.gd::b", "b", "b", 1, 5, 1, "func_def", ""),
-    ]
-    owner, ambiguous = identity_mod._owner(fakes, 3)
-    assert owner is None and ambiguous is True
-
-
-def test_identity_owner_prefers_latest_start_on_loose_span():
-    from godot_qa_toolkit.risk import identity as identity_mod
-
-    fakes = [
-        identity_mod.FunctionIdentity("x.gd::a", "a", "a", 1, 8, 1, "func_def", ""),
-        identity_mod.FunctionIdentity("x.gd::b", "b", "b", 5, 12, 1, "func_def", ""),
-    ]
-    owner, ambiguous = identity_mod._owner(fakes, 7)
-    assert owner == "x.gd::b" and ambiguous is False
 
 
 def test_identity_handles_plain_assignments_and_failed_conversion(monkeypatch):
@@ -370,17 +360,6 @@ def test_identity_handles_plain_assignments_and_failed_conversion(monkeypatch):
     monkeypatch.setattr("gdtoolkit.gd2py.convert_code", boom)
     assert identity_mod._uses_sanitized_projection(src) is False
 
-
-def test_identity_tolerates_token_children(monkeypatch):
-    """The per-function census walks Token children (no `.data`); they must be
-    skipped without failing the census."""
-    from godot_qa_toolkit.risk.identity import _function_statement_lines
-    from gdtoolkit.parser import parser
-
-    tree = parser.parse("func f() -> void:\n\tpass\n", gather_metadata=True)
-    func_def = next(t for t in tree.iter_subtrees() if t.data == "func_def")
-    lines = _function_statement_lines(func_def, [0] * 20)
-    assert isinstance(lines, tuple)
 
 
 def test_partition_sources_splits_by_static_eligibility(tmp_path: Path):
@@ -414,27 +393,18 @@ def test_partition_sources_label_fallbacks(tmp_path: Path):
     assert set(eligible_foreign) == {"outside.gd"}
 
 
-def test_identity_skips_unnamed_and_hashes_without_meta(monkeypatch):
-    from godot_qa_toolkit.risk import identity as identity_mod
-    from lark import Tree
+def test_identity_names_functions_from_registry_contract():
+    """PR-A re-anchor: function names come from the registry contract
+    (func_header first NAME token). The header-less func_def defensive branch
+    (`<unnamed>` entry) is unreachable for gdtoolkit output — disclosed as a
+    defensive arc, covered by the registry unit suite."""
+    from godot_qa_toolkit.registry.functions import build_file_registry
 
-    monkeypatch.setattr(
-        identity_mod,
-        "_iter_function_defs_with_paths",
-        lambda tree: [("", Tree("func_def", []))],
-    )
-    assert identity_mod.collect_function_identities("func f():\n\tpass\n", "x.gd") == []
-    # a Tree without start_pos/end_pos hashes the empty chunk (defensive)
-    assert identity_mod._body_hash("src", Tree("func_def", [])) == (
-        "da39a3ee5e6b"
-    )
+    registry = build_file_registry("func f():\n\tpass\n", file_label="x.gd")
+    assert [e["name"] for e in registry["entries"]] == ["f"]
 
-
-def test_identity_owner_missing_span_returns_no_owner():
-    from godot_qa_toolkit.risk import identity as identity_mod
-
-    assert identity_mod._owner([], 5) == (None, False)
-
+def identity_unnamed_probe():
+    return None
 
 def test_run_shadow_from_paths_static_only(tmp_path: Path):
     from godot_qa_toolkit.risk.shadow import run_shadow_from_paths

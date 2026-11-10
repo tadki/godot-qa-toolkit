@@ -561,15 +561,17 @@ def test_seven_files_mini_parity_all_recovered():
     not KOL_ROOT, reason="KOL_ROOT not set — real-tree reconciliation skipped"
 )
 def test_seven_files_recover_170_functions_and_rebaseline():
-    """Baseline side-effects of §SPEC-003: the 7 files contribute 170 functions,
-    the systems/scenes/autoload totals re-anchor to 1561/0, the full-scan gate
-    stays ok=false ONLY because of the 5 pre-existing violations, and the
-    lambda decision gap stays visible (not written off) in the parity oracle."""
+    """Baseline side-effects of §SPEC-003 (§SPEC-042 anti-regression): the 7
+    files contribute 170 functions, systems/scenes/autoload re-anchor to
+    >= 1561 functions / 0 unparseable — 1561 is the FLOOR (KOL master growth
+    is allowed, a drop below it is a regression) — the full-scan gate stays
+    ok=false ONLY because of the 5 pre-existing violations, and the lambda
+    decision gap stays visible (not written off) in the parity oracle."""
     from godot_qa_toolkit.complexity.gate import run_gate
 
     dirs = [str(Path(KOL_ROOT) / d) for d in ("systems", "scenes", "autoload")]
     result = run_gate(dirs)
-    assert result["summary"]["functions"] == 1561
+    assert result["summary"]["functions"] >= 1561
     assert result["summary"]["unparseable"] == 0
     assert result["summary"]["violations"] == 5
     assert result["ok"] is False  # pre-existing violations only — never new ones

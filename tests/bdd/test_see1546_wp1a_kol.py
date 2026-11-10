@@ -92,12 +92,15 @@ def when_gate(bdd_state: dict) -> None:
     bdd_state["gate"] = run_gate(dirs)
 
 
-@then("exactly 1561 functions are reported with zero unparseable files")
+@then("at least 1561 functions are reported with zero unparseable files")
 def then_rebaseline(bdd_state: dict) -> None:
+    # §SPEC-042 anti-regression: 1561 is the FLOOR — growth is allowed
+    # (KOL master moves), only a drop below the floor fails the step
     summary = bdd_state["gate"]["summary"]
-    if summary["functions"] != 1561 or summary["unparseable"] != 0:
+    if summary["functions"] < 1561 or summary["unparseable"] != 0:
         _fail(
-            "baseline re-anchor mismatch",
+            "baseline regression — functions dropped below the 1561 floor "
+            "or unparseable files reappeared",
             f"functions={summary['functions']} unparseable={summary['unparseable']}",
         )
 

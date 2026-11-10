@@ -62,6 +62,9 @@ def scan_acceptance_features(project_root: Path) -> tuple[list[dict], int, str |
     return rows, len(rows), None
 
 
+LEGAL_SCOPES = frozenset({"gut_dir", "acceptance_feature"})
+
+
 def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
     normalized: list[dict] = []
     for row in exclusions:
@@ -71,6 +74,13 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
         if not scope or not entry_text:
             return [], (
                 f"exclusion missing scope/entry: {row!r}"
+            )
+        # §SPEC-041 L3: scope is an enum — a typo like `gut_dirs` would
+        # silently exclude nothing; fail loud instead
+        if scope not in LEGAL_SCOPES:
+            return [], (
+                f"illegal exclusion scope {scope!r} — "
+                f"must be one of {sorted(LEGAL_SCOPES)}"
             )
         if not reason:
             # plan §4.6: an exclusion without a stated reason is an illegal
@@ -177,9 +187,12 @@ def build_recipe(
 
 
 def recipe_hash(recipe: dict) -> str:
-    """Recompute the hash over the recipe minus its own recipe_hash — the
+    """Recompute the hash over the recipe minus its own recipe_hash AND
+    project_root — the checkout path is provenance, not a measured face
+    (§SPEC-041 L2: same content at any path must hash identically). The
     canonical verification for loaded/recovered recipes."""
-    basis = {k: v for k, v in recipe.items() if k != "recipe_hash"}
+    basis = {k: v for k, v in recipe.items()
+             if k not in ("recipe_hash", "project_root")}
     return _sha256_text(
         json.dumps(basis, ensure_ascii=False, sort_keys=True,
                    separators=(",", ":"))

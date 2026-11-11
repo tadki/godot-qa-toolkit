@@ -48,10 +48,13 @@ HOST_SCRIPT_NAME = ".gqt_worker_host.gd"
 
 
 def worker_enabled(flag: bool | None = None) -> bool:
-    """A9 opt-in：显式 flag 或 env 才启用；默认冷通道。"""
+    """默认启用（Owner 裁决实测轮）：eligible 目标自动走 worker，全部自动
+    降级护栏（parity/漂移/canary 否证/会话致命整批作废/两连失败冷降级）
+    保留。显式 flag 仍最高优先；env `GQT_MUTATION_WORKER=0|false|no` 为
+    关断逃生门（冷通道回退），其余取值不再需要——默认即启用。"""
     if flag is not None:
         return flag
-    return os.environ.get(ENV_WORKER, "").strip() in ("1", "true", "yes")
+    return os.environ.get(ENV_WORKER, "").strip() not in ("0", "false", "no")
 
 
 def canary_every() -> int:
@@ -63,16 +66,29 @@ def canary_every() -> int:
         return DEFAULT_CANARY_EVERY
 
 
+def gut_direct_drive_available(project_root: str) -> bool:
+    """直驱宿主可用性（R-DW6 默认启用实测轮）：常驻 worker 需要**真实**
+    GUT addon（gut.gd）——仅 gut_cmdln.gd 存根的项目（如 BDD toy fixture）
+    结构性不可用，必须回冷（禁止 parity 腿盲跑挂死）。"""
+    return os.path.isfile(os.path.join(project_root, "addons", "gut",
+                                       "gut.gd"))
+
+
 def resolve_exec_scheme(project_root: str, target_res: str,
                         worker_flag: bool | None = None
                         ) -> tuple[str, object]:
-    """(exec_scheme, route)：worker 显式启用且路由判 worker 才走
-    worker-reset/1，否则冷通道（A9 opt-in）。route=None = 未启用未路由。"""
+    """(exec_scheme, route)：默认启用下 eligible 且直驱可用才 worker-reset/1；
+    路由排除（autoload/接线链/GUT 域/场景持有）或 gut.gd 缺失 → 冷通道。
+    身份与执行必须同源解析（coverage/resume store file_key 一致性）。"""
     if not worker_enabled(worker_flag):
         return COLD_SCHEME, None
     route = route_target(project_root, target_res)
     if route.channel == CHANNEL_WORKER:
-        return WORKER_SCHEME, route
+        if gut_direct_drive_available(project_root):
+            return WORKER_SCHEME, route
+        print("mutation worker: GUT addon gut.gd not found — resident "
+              "direct-drive unavailable, using the cold channel "
+              "(disclosed, not silently)", file=sys.stderr)
     return COLD_SCHEME, route
 
 

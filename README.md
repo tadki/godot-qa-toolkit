@@ -267,13 +267,17 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   only that entry re-runs; certificate missing/unresolvable → conservative
   re-run; **new tests never invalidate old kills**.
 
-### Worker channel (opt-in, SEE-1550 §SPEC-020)
+### Worker channel (default-on, SEE-1550 §SPEC-020)
 
-- **Default is the cold channel** (`cold-shadow/1`) — behavior without the
-  flag is unchanged. The resident worker channel (`worker-reset/1`) is
-  **strictly opt-in**: pass `--worker-channel` or set `GQT_MUTATION_WORKER=1`
-  (equivalent, honored on every execution path — serial, auto-serial and
-  parallel sharding).
+- **The resident worker channel (`worker-reset/1`) is default-on** for
+  statically eligible targets — no flag needed. Static routing sends
+  autoload / GUT-domain / scene-held targets to the cold channel
+  (`cold-shadow/1`), and runtime equivalence gates (parity pre-flight,
+  state-drift, canary disqualification) automatically degrade any
+  misbehaving target back to cold with stderr disclosure. Opt out with
+  `GQT_MUTATION_WORKER=0` (cold; honored on every execution path — serial,
+  auto-serial and parallel sharding); `--worker-channel` forces the worker
+  regardless of routing for diagnostics.
 - **What it does**: eligible targets run in a per-slot persistent
   GUT-direct-drive worker; mutant shadow-disk writes keep the exact M0
   timing, and per-leg state is reset by the R-C protocol (in-place IGNORE +

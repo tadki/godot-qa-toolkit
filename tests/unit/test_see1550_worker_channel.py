@@ -77,17 +77,63 @@ class FakeSession:
 
 
 class TestSchemeResolution:
-    def test_opt_in_worker_scheme_on_eligible_target(self):
-        scheme, route = resolve_exec_scheme(
-            FIXTURE, "res://forms/runtime_load.gd", worker_flag=True)
+    """解析层判定（R-DW6 默认启用 + gut.gd 直驱可用性同源解析）。
+
+    worker 期望用例须用**带真实 gut.gd** 的 tmp 项目——see1550_forms fixture
+    本身无 GUT addon（电池运行时才拷入），解析正确回冷（fixture 缺 GUT 的
+    行为由 test_gut_addon_missing_routes_cold 钉住）。"""
+
+    @staticmethod
+    def _gut_project(tmp_path):
+        proj = tmp_path / "proj"
+        (proj / "addons" / "gut").mkdir(parents=True)
+        (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n",
+                                                        encoding="utf-8")
+        (proj / "forms").mkdir()
+        (proj / "forms" / "runtime_load.gd").write_text(
+            "extends RefCounted\nfunc f() -> int:\n\treturn 1\n",
+            encoding="utf-8")
+        (proj / "project.godot").write_text("config_version=5\n",
+                                            encoding="utf-8")
+        return str(proj), "res://forms/runtime_load.gd"
+
+    def test_opt_in_worker_scheme_on_eligible_target(self, tmp_path):
+        proj, target = self._gut_project(tmp_path)
+        scheme, route = resolve_exec_scheme(proj, target, worker_flag=True)
         assert scheme == WORKER_SCHEME
         assert route is not None and route.channel == "worker"
 
-    def test_default_is_cold(self, monkeypatch):
+    def test_default_is_worker_for_eligible(self, monkeypatch, tmp_path):
+        """默认启用（Owner 裁决实测轮）：无旗标 + env 未设 → eligible 且
+        gut.gd 在场 → 直接 worker-reset/1。"""
         monkeypatch.delenv(worker_channel.ENV_WORKER, raising=False)
-        scheme, _route = resolve_exec_scheme(
-            FIXTURE, "res://forms/runtime_load.gd", worker_flag=None)
+        proj, target = self._gut_project(tmp_path)
+        scheme, _route = resolve_exec_scheme(proj, target, worker_flag=None)
+        assert scheme == WORKER_SCHEME
+
+    def test_env_zero_opts_out_to_cold(self, monkeypatch, tmp_path):
+        """env 关断逃生门：GQT_MUTATION_WORKER=0 → 默认路径回退冷通道。"""
+        monkeypatch.setenv(worker_channel.ENV_WORKER, "0")
+        proj, target = self._gut_project(tmp_path)
+        scheme, _route = resolve_exec_scheme(proj, target, worker_flag=None)
         assert scheme == COLD_SCHEME
+
+    def test_gut_addon_missing_routes_cold(self, tmp_path):
+        """fixture 无 GUT addon → 直驱结构性不可用 → 解析冷（身份/执行
+        同源；披露由 resolve 的 stderr 承接）。"""
+        scheme, route = resolve_exec_scheme(
+            FIXTURE, "res://forms/runtime_load.gd", worker_flag=True)
+        assert scheme == COLD_SCHEME
+        assert route is not None and route.channel == "worker"
+
+    def test_default_cold_for_ineligible_route(self, monkeypatch):
+        """默认启用不越过路由排除：场景持有目标默认仍冷（谓词权威）。"""
+        monkeypatch.delenv(worker_channel.ENV_WORKER, raising=False)
+        scheme, route = resolve_exec_scheme(
+            FIXTURE, "res://forms/scene_script.gd", worker_flag=None)
+        assert scheme == COLD_SCHEME
+        assert route is not None
+        assert any(r.startswith("closure_scene_cached") for r in route.reasons)
 
     def test_cold_route_target_stays_cold_even_opted_in(self):
         scheme, route = resolve_exec_scheme(
@@ -101,10 +147,11 @@ class TestSchemeResolution:
         assert identity_sha1(cold) != identity_sha1(worker), \
             "killed 证书按 scheme 隔离 → 身份 key 必须不同"
 
-    def test_identity_for_target_overrides_scheme(self):
-        base = identity_pack(FIXTURE, "linux", godot_bin="/no/g")
+    def test_identity_for_target_overrides_scheme(self, tmp_path):
+        proj, target = self._gut_project(tmp_path)
+        base = identity_pack(proj, "linux", godot_bin="/no/g")
         ident, route, scheme = identity_for_target(
-            base, FIXTURE, "res://forms/runtime_load.gd", worker_flag=True)
+            base, proj, target, worker_flag=True)
         assert scheme == WORKER_SCHEME
         assert ident["exec_scheme"] == WORKER_SCHEME
         assert base["exec_scheme"] == COLD_SCHEME  # 原 dict 不被改（不可变）

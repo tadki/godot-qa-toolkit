@@ -309,6 +309,23 @@ def test_gut_lifecycle_hooks_not_counted_as_tests(project: Path):
     assert record["rules"]["executed_count_eq_expected"] is True
 
 
+def test_gut_orphan_report_lines_not_counted_as_tests(project: Path):
+    """真机锚定（KOL 全量 36 特性）：GUT 把孤儿节点报告也打成 `*` 行
+    （`* [Class:<Node#id>(script)]`，单特性可注水数百条）——非 test_
+    前缀条目不是测试，对账必须排除，否则 R3 假红、臂被误判 invalid。"""
+    rec = _compile_keys(project, ["demo"], create_suite_dir(project))
+    man = rec["manifests"]["demo"]
+    lines = ["res://acceptance/generated/.gqt-run-x/generated/test_demo.gd",
+             "* [LikeHeartComputer:<Node2D#1355984946042>(likeheart_computer.gd)]",
+             "* [DecorMode:<CanvasItem#42>(decor_mode.gd)]"]
+    lines += [f"* {a['test_name']}" for a in man["attribution"]]
+    _fake_gut("\n".join(lines) + "\n")
+    record = run_suite_dir(project, Path(rec["suite_dir"]))
+    assert record["ok"] is True
+    assert record["rules"]["executed_count_eq_expected"] is True
+    assert record["unknown_executed"] == []
+
+
 # ------------------------------------------------------------------
 # W4 acceptance 成本探针
 # ------------------------------------------------------------------

@@ -621,6 +621,62 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                                [{"reason": "union invalid or arms invalid"}])})
 
 
+def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
+    """§SPEC-048 diagnostic-only acceptance 计时模式。"""
+    import json as _json
+
+    from pathlib import Path as _P
+
+    from .canonical.orchestrator import CanonicalError, run_canonical_diagnose
+    from .canonical.recipe import verify_recipe
+
+    recipe_path = _P(args.recipe)
+    try:
+        recipe = _json.loads(recipe_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return _emit({"tool": "canonical-diagnose", "ok": False,
+                      "summary": {"error": f"recipe load failed: {e}"},
+                      "failures": [{"reason": f"recipe load failed: {e}"}]})
+    ok, reason = verify_recipe(recipe)
+    if not ok:
+        return _emit({"tool": "canonical-diagnose", "ok": False,
+                      "summary": {"error": f"recipe invalid: {reason}"},
+                      "failures": [{"reason": f"recipe invalid: {reason}"}]})
+    roots = [_P(r) for r in args.roots]
+    targets = sorted({str(p) for root in roots
+                      for p in root.rglob("*.gd") if p.is_file()})
+    if not targets:
+        return _emit({"tool": "canonical-diagnose", "ok": False,
+                      "summary": {"error": "no .gd targets under roots"},
+                      "failures": [{"reason": "no .gd targets"}]})
+    keys = [k.strip() for k in args.features.split(",") if k.strip()]
+    try:
+        report = run_canonical_diagnose(
+            args.project_root, targets, recipe, keys,
+            timeout_s=args.timeout, progress_out=args.out)
+    except CanonicalError as e:
+        return _emit({"tool": "canonical-diagnose", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    _P(args.out).write_text(
+        _json.dumps(report, ensure_ascii=False, indent=1) + "\n",
+        encoding="utf-8")
+    summary = {
+        "report_version": report["report_version"],
+        "instrumentation": report["instrumentation"],
+        "features": [
+            {"key": f["key"],
+             "baseline_wall_s": f["baseline"].get("wall_s"),
+             "instrumented_wall_s": f["instrumented"].get("wall_s"),
+             "instrumented_timed_out": f["instrumented"].get("timed_out"),
+             "wait_commands": f["wait_commands"],
+             "attribution": f["attribution"]}
+            for f in report["features"]],
+    }
+    return _emit({"tool": "canonical-diagnose", "ok": True,
+                  "summary": summary, "failures": []})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gqt", description="godot-qa-toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -824,6 +880,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_godot_bin_arg(r)
     r.set_defaults(func=cmd_risk)
+
+    cd = sub.add_parser(
+        "canonical-diagnose",
+        help="diagnostic-only per-feature acceptance timing under flags "
+             "instrumentation (§SPEC-048)",
+    )
+    cd.add_argument("roots", nargs="+",
+                    help="directories whose .gd files are instrumented")
+    cd.add_argument("--project-root", required=True,
+                    help="target Godot project root")
+    cd.add_argument("--recipe", required=True,
+                    help="canonical recipe json (verify + feature lookup)")
+    cd.add_argument("--features", required=True,
+                    help="comma-separated acceptance feature keys")
+    cd.add_argument("--out", required=True,
+                    help="diagnostic report json path (progress written "
+                         "after each feature)")
+    cd.add_argument("--timeout", type=int, default=480,
+                    help="per-leg GUT timeout seconds (default 480)")
+    _add_godot_bin_arg(cd)
+    cd.set_defaults(func=cmd_canonical_diagnose)
 
     p = sub.add_parser(
         "parity",

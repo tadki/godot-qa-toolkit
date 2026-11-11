@@ -240,6 +240,28 @@ def test_gut_launch_failure_makes_arm_invalid(project: Path, tmp_path: Path):
     assert report["union"]["valid"] is False
 
 
+def test_gut_timeout_records_wall_and_sentinel(project, tmp_path, monkeypatch):
+    """超时墙钟如实记录（首跑缺陷修复锚）：wall_s>0、timed_out 哨兵进
+    bundle、invalid_reason=timeout——超时本身也是 §SPEC-039 门量证据。"""
+    import time as _t
+
+    from godot_qa_toolkit.canonical import orchestrator as orch
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+
+    def fake_gut(root, gut_args, timeout_s):
+        _t.sleep(0.01)
+        raise orch.CanonicalError(f"GUT timed out after {timeout_s}s")
+
+    monkeypatch.setattr(orch, "_run_one_gut", fake_gut)
+    report = run_canonical(project, _targets(project), recipe)
+    for arm in report["arms"]:
+        assert arm["timed_out"] is True
+        assert arm["wall_s"] > 0
+        assert arm["invalid_reason"] == "timeout"
+    assert report["ok"] is False
+
+
 def test_evidence_arm_injection_explicit_and_default():
     from godot_qa_toolkit.coverage.evidence import build_bundle, build_run_record
     b = build_bundle(

@@ -108,24 +108,6 @@ def test_inner_class_declaration_not_matched(cname_proj):
 
 # -- ② 腿间状态漂移门 ----------------------------------------------------------
 
-def test_prepare_scene_refresh_unique_side_paths(tmp_path):
-    """场景成员逐腿唯一旁路路径（首次加载必 fresh），.gd 成员不进刷新对。"""
-    from godot_qa_toolkit.mutation.worker_channel import prepare_scene_refresh
-    slot = tmp_path / "slot"
-    (slot / "scenes/ui").mkdir(parents=True)
-    (slot / "scenes/ui/panel.tscn").write_text("[node]\n", encoding="utf-8")
-    (slot / "scenes/ui/panel.gd").write_text("extends Node\n", encoding="utf-8")
-    items = prepare_scene_refresh(str(slot),
-                                  ["res://scenes/ui/panel.tscn",
-                                   "res://scenes/ui/panel.gd"], 3)
-    assert len(items) == 1
-    assert items[0]["canonical"] == "res://scenes/ui/panel.tscn"
-    assert (slot / items[0]["side"].removeprefix("res://")).is_file()
-    other = prepare_scene_refresh(str(slot),
-                                  ["res://scenes/ui/panel.tscn"], 4)
-    assert other[0]["side"] != items[0]["side"], "腿间旁路路径必须唯一"
-
-
 def _session(tmp_path):
     s = WorkerSession(slot_root=str(tmp_path / "slot"),
                       project_root=str(tmp_path), kind="linux")

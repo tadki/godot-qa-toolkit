@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -91,28 +90,6 @@ def canary_due(leg_index: int, every: int | None = None) -> bool:
     """三层门时序（synthesis §4）：首 mutant 强制双通道预检 + 周期 renew。"""
     k = canary_every() if every is None else every
     return leg_index == 0 or leg_index % k == 0
-
-
-def prepare_scene_refresh(slot_root: str, closure: list[str],
-                          leg: int) -> list[dict]:
-    """场景/资源成员的旁路刷新对（D-W2）：PackedScene 缓存持有加载时解析的
-    脚本对象，正典路径单步 REPLACE 不重读磁盘、IGNORE 两步在宿主会话内
-    挂死。字节复制到每腿唯一旁路路径（首次加载必 fresh，ext_resource 绑
-    当前缓存的新脚本对象），引擎侧 take_over_path 接管正典路径。"""
-    out: list[dict] = []
-    for res in closure:
-        if res.endswith(".gd"):
-            continue
-        src = Path(slot_root) / res.removeprefix("res://")
-        if not src.is_file():
-            continue
-        side_dir = Path(slot_root) / WORKER_DIRNAME
-        side_dir.mkdir(parents=True, exist_ok=True)
-        side = side_dir / f"refresh-{leg}-{src.name}"
-        shutil.copy2(src, side)
-        out.append({"canonical": res,
-                    "side": f"res://{WORKER_DIRNAME}/{side.name}"})
-    return out
 
 
 @dataclass
@@ -272,8 +249,7 @@ class WorkerSession:
     # -- 单腿执行 -------------------------------------------------------
 
     def run_leg(self, leg: int, target_res: str, mutant_sha256: str,
-                closure: list[str], tests_glob: str | None,
-                scene_refresh: list[dict] | None = None) -> WorkerLegResult:
+                closure: list[str], tests_glob: str | None) -> WorkerLegResult:
         """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。"""
         if not self.dead:
             self.start()  # 惰性启动（同一 run 进程只 spawn 一次）
@@ -287,7 +263,6 @@ class WorkerSession:
             "mutant_sha256": mutant_sha256,
             "closure": list(closure),
             "tests_glob": tests_glob or "res://tests/",
-            "scene_refresh": list(scene_refresh or []),
         }
         req_name = f"req-{leg}-{uuid.uuid4().hex[:8]}.json"
         (work / req_name).write_text(json.dumps(req), encoding="utf-8")
@@ -481,35 +456,19 @@ func _run_leg(req: Dictionary) -> void:
 	var t_reload := Time.get_ticks_msec()
 	for res in members:
 		var member := String(res)
-		if member.ends_with(".gd"):
-			var rc := _reload_member(member)
-			resp["reload"][member] = rc
-			if rc != 0:
-				all_ok = false
-			else:
-				var scr = load(member)
-				if scr != null:
-					resp["source_sha"][member] = scr.source_code.sha1_text()
-		else:
-			# 场景/资源成员经 scene_refresh 旁路对刷新（Python 侧逐腿字节复制
-			# 到唯一旁路路径）——见 prepare_scene_refresh；此处不再直接 load
-			# 正典路径（REPLACE 不重读已缓存资源、IGNORE 在宿主内挂死）。
-			pass
-	var refresh_list = req.get("scene_refresh")
-	if refresh_list == null:
-		refresh_list = []
-	for rf in refresh_list:
-		var canonical := String(rf.get("canonical", ""))
-		var side := String(rf.get("side", ""))
-		if side == "" or canonical == "":
+		# reload 集只含 .gd（compile-time 绑定唯一载体）；场景持有成员已被
+		# 路由器 closure_scene_cached 谓词排除出 worker 通道（R-DW4 Owner
+		# 裁决：PackedScene 缓存持有加载时脚本对象，腿间重置不可达）。
+		if not member.ends_with(".gd"):
 			continue
-		var fresh = ResourceLoader.load(side, "")
-		if fresh == null:
-			resp["reload"][canonical] = 43
+		var rc := _reload_member(member)
+		resp["reload"][member] = rc
+		if rc != 0:
 			all_ok = false
 		else:
-			fresh.take_over_path(canonical)
-			resp["reload"][canonical] = 0
+			var scr = load(member)
+			if scr != null:
+				resp["source_sha"][member] = scr.source_code.sha1_text()
 	resp["timings"] = {"reload_ms": Time.get_ticks_msec() - t_reload}
 	var t_gut := 0
 	if bool(resp["hash_ok"]) and all_ok and resp["autoload_in_closure"].is_empty():
@@ -679,9 +638,7 @@ def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
         return True, (f"parity leg unavailable: "
                       f"{parity_err or session.dead_reason}")
     pleg = session.run_leg(-1, target_res, parity_sha, list(closure),
-                           tests_glob,
-                           scene_refresh=prepare_scene_refresh(
-                               slot.root, closure, -1))
+                           tests_glob)
     if pleg.fatal:
         print(f"mutation worker: PARITY GATE fatal — "
               f"{pleg.fatal_reason}; degrading this file to the "
@@ -810,9 +767,7 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                 continue
             t_leg = time.monotonic()
             leg = session.run_leg(seq, target_res, mutant_sha, list(closure),
-                                  tests_glob,
-                                  scene_refresh=prepare_scene_refresh(
-                                      slot.root, closure, seq))
+                                  tests_glob)
             leg_elapsed = time.monotonic() - t_leg
             if leg.fatal:
                 verdict, elapsed = _recover_fatal(seq, leg, m)

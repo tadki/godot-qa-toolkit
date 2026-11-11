@@ -251,15 +251,66 @@ def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
     return [l.line for l in executable_lines]
 
 
-def _probe_calls(src: str, line_to_id: dict[int, int]) -> list[str]:
-    """每个可执行语句前插一行探针调用（整数 probe_id）。"""
+def _probe_calls(src: str, line_to_id: dict[int, int],
+                 buffered: bool = False) -> list[str]:
+    """每个可执行语句前插一行探针调用（整数 probe_id）。
+
+    buffered 形态调用点直传 id（单一 static func），消除逐行 static func
+    的解析/膨胀成本（§SPEC-040）；direct 形态保持既有逐 id 函数形态，
+    单文件/risk 路径字节不变。"""
     out = []
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
         if idx in line_to_id:
             indent = re.match(r"^(\s*)", line_text).group(1)
-            out.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
+            if buffered:
+                out.append(f"{indent}{_PROBE_PREFIX}hit({line_to_id[idx]})\n")
+            else:
+                out.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
         out.append(line_text)
     return out
+
+
+# buffered 探针内存缓冲的刷盘阈值：每次刷盘 = 1 次 open/seek/写批/close，
+# 事件量 ÷ 阈值即刷盘次数，I/O 与命中量解耦（§SPEC-040 传输成本根因）。
+_PROBE_BUFFER_FLUSH_N = 1024
+
+
+def _buffered_probe_block(sink_name: str) -> str:
+    """buffered 探针机制：静态缓冲注册进 Engine meta（供注入的 flusher
+    autoload 在退出时刷掉尾部），调用点只 append + 阈值刷盘。尾部不丢的
+    前提是 flusher 在场——只在 canonical 注入窗口使用（buffered=True）。"""
+    block = (
+        f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
+        f"static var {_PROBE_PREFIX}buf: Array = {_PROBE_PREFIX}reg()\n"
+        f"\n"
+        f"static func {_PROBE_PREFIX}reg() -> Array:\n"
+        f"\tvar d: Dictionary = Engine.get_meta(\"gqt_cov_bufs\")"
+        f" if Engine.has_meta(\"gqt_cov_bufs\") else {{}}\n"
+        f"\tvar arr: Array = d.get(\"{sink_name}\", [])\n"
+        f"\td[\"{sink_name}\"] = arr\n"
+        f"\tEngine.set_meta(\"gqt_cov_bufs\", d)\n"
+        f"\treturn arr\n"
+        f"\n"
+        f"static func {_PROBE_PREFIX}hit(id: int) -> void:\n"
+        f"\t{_PROBE_PREFIX}buf.append(id)\n"
+        f"\tif {_PROBE_PREFIX}buf.size() >= {_PROBE_BUFFER_FLUSH_N}:\n"
+        f"\t\t{_PROBE_PREFIX}flush()\n"
+        f"\n"
+        f"static func {_PROBE_PREFIX}flush() -> void:\n"
+        f"\tif {_PROBE_PREFIX}buf.is_empty():\n"
+        f"\t\treturn\n"
+        f"\tvar f = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.READ_WRITE)\n"
+        f"\tif f == null:\n"
+        f"\t\tf = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.WRITE)\n"
+        f"\telse:\n"
+        f"\t\tf.seek_end()\n"
+        f"\tif f:\n"
+        f"\t\tfor pid in {_PROBE_PREFIX}buf:\n"
+        f"\t\t\tf.store_line(str(pid))\n"
+        f"\t\tf.close()\n"
+        f"\t{_PROBE_PREFIX}buf.clear()\n"
+    )
+    return block
 
 
 def _probe_func(sink_name: str, count: int) -> str:
@@ -293,12 +344,23 @@ def _probe_func(sink_name: str, count: int) -> str:
     return code
 
 
-def _instrument(src: str, sink_name: str) -> tuple[str, list[int]]:
+def _instrument(src: str, sink_name: str,
+                buffered: bool = False) -> tuple[str, list[int]]:
     """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
-    文件尾追加探针函数。返回 (插桩源码, probe_id→行号 manifest)。"""
+    文件尾追加探针机制。返回 (插桩源码, probe_id→行号 manifest)。
+
+    buffered=True（§SPEC-040 canonical 批式臂）：调用点直传 id、静态缓冲
+    阈值刷盘——尾部刷盘依赖编排器注入的 flusher autoload（见
+    canonical.orchestrator），故仅限注入窗口使用；direct（缺省）保持既有
+    逐命中追加写形态，单文件/risk 路径行为与产物字节不变。"""
     manifest = _build_manifest(_collect_executable_lines(src))
     line_to_id = {line: i for i, line in enumerate(manifest)}
-    body = "".join(_probe_calls(src, line_to_id))
+    if buffered and not manifest:
+        # 零可执行行：无探针面，插桩产物 = 原文（vacuous 车道在编排器落）
+        return src, manifest
+    body = "".join(_probe_calls(src, line_to_id, buffered))
+    if buffered:
+        return body + _buffered_probe_block(sink_name), manifest
     return body + _probe_func(sink_name, len(manifest)), manifest
 
 

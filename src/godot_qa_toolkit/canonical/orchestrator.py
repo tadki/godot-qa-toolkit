@@ -715,12 +715,13 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         for u in unions:
             u["comparable"] = False
             u["comparable_reason"] = "subset_targets"
-    baseline_lines = (_load_baseline_lines(stability_baseline)
-                      if stability_baseline else {})
+    baseline_lines, baseline_records = (
+        _load_baseline_report(stability_baseline)
+        if stability_baseline else ({}, {}))
     unstable_keys = (_unstable_keys(unions, baseline_lines)
                      if baseline_lines else set())
     crap_records, crap_lanes, crap_version = _crap_records_for_report(
-        unions, prepared, recipe_hash, unstable_keys)
+        unions, prepared, recipe_hash, unstable_keys, baseline_records)
     # §SPEC-043 measurable 子集披露：vacuous / no_probe_fired 文件归
     # unmeasurable（本就无可测数据），其余 union 无效仍属 measurable 失败
     # （超时/契约违约等），禁止静默排除——measurable + unmeasurable == 全集。
@@ -814,7 +815,8 @@ def _lane_from_reason(reason: str | None) -> str:
 
 
 def _crap_records_for_report(unions, prepared, recipe_hash,
-                             unstable_keys: set | None = None):
+                             unstable_keys: set | None = None,
+                             baseline_records: dict | None = None):
     """§SPEC-053：函数级 CRAP 记录——union 行集（C/I）与 registry 的
     identity/CC 按 fid 连接；任何失败/无分母车道一律 score=None。"""
     from ..risk.contract import build_shadow_record
@@ -854,8 +856,13 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
         if u is None or not u.get("valid"):
             lane = (_lane_from_reason(u.get("invalid_reason"))
                     if u is not None else "unknown")
+            # §SPEC-057：基线内该文件曾有覆盖、本轮 union 消失 → 整文件
+            # unstable（显式车道，不出分）
+            unstable_file = (f"res://{rel}", "__file_vanished__") \
+                in (unstable_keys or set())
             for e in entries:
-                _emit(rel, e, state=lane)
+                _emit(rel, e,
+                      state=("unstable" if unstable_file else lane))
             continue
         per = {row["fid"]: row for row in u["union"]["per_fid"]}
         for e in entries:
@@ -872,35 +879,68 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
                 _emit(rel, e, state="scored",
                       covered=int(row["covered"]),
                       total=int(row["total"]))
+    # §SPEC-057：基线 scored 但本轮缺席的函数（目标集/union 变化）→
+    # 从基线记录回放为显式 unstable（不出分），杜绝静默消失
+    if baseline_records:
+        emitted_fids = {r["function_id"] for r in records}
+        for fid, brec in baseline_records.items():
+            if fid in emitted_fids:
+                continue
+            if brec.get("score_status") != "scored":
+                continue
+            nr = dict(brec)
+            nr["score_status"] = "unstable"
+            cl = dict(brec.get("crap_line") or {})
+            cl["score"] = None
+            cl["score_status"] = "unstable"
+            nr["crap_line"] = cl
+            nr["provenance"] = dict(brec.get("provenance") or {},
+                                    stability="baseline_vanished_this_run")
+            records.append(nr)
+            lanes["unstable"] = lanes.get("unstable", 0) + 1
     return records, lanes, CRAP_LINE_VERSION
 
 
-def _load_baseline_lines(path: str) -> dict:
-    """§SPEC-056 stability baseline：读取历史 canonical 报告的逐 fid 行集。"""
+def _load_baseline_report(path: str) -> tuple[dict, dict]:
+    """§SPEC-056/057 stability baseline：读取历史 canonical 报告的逐 fid
+    行集与函数级 CRAP 记录。"""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise CanonicalError(
             f"stability baseline unreadable: {path}: {e}") from e
-    out: dict = {}
+    lines: dict = {}
     for u in doc.get("unions") or []:
         if u.get("union") is None:
             continue
-        out[u["file"]] = {row["fid"]: frozenset(row["covered_line_ids"])
-                          for row in u["union"].get("per_fid") or []}
-    return out
+        lines[u["file"]] = {row["fid"]: frozenset(row["covered_line_ids"])
+                            for row in u["union"].get("per_fid") or []}
+    records = {r["function_id"]: r for r in doc.get("crap", {}).get(
+        "records") or []}
+    return lines, records
 
 
 def _unstable_keys(unions, baseline_lines: dict) -> set:
+    """§SPEC-057：比较 fid 集合本身与状态迁移——基线消失/新增/行集变化
+    全部捕获，杜绝「只比较当前仍存在 fid」的漏报。"""
     keys: set = set()
+    cur_files = {}
     for u in unions:
         if u.get("union") is None:
             continue
+        cur = {row["fid"]: frozenset(row["covered_line_ids"])
+               for row in u["union"].get("per_fid") or []}
+        cur_files[u["file"]] = cur
         base = baseline_lines.get(u["file"], {})
-        for row in u["union"].get("per_fid") or []:
-            fid = row["fid"]
-            if fid in base and base[fid] != frozenset(row["covered_line_ids"]):
+        for fid in set(base) | set(cur):
+            b = base.get(fid, frozenset())
+            c = cur.get(fid, frozenset())
+            if b != c:
                 keys.add((u["file"], fid))
+    # 基线中存在但本轮 union 完全消失的文件（整文件不可复现）
+    for bfile, bper in baseline_lines.items():
+        if bfile not in cur_files and bper:
+            keys.add((bfile, "__file_vanished__"))
     return keys
 
 

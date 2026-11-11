@@ -758,3 +758,49 @@ def test_stability_baseline_routes_jitter_to_unstable_lane(project,
                if r["function_id"] == changed_fid)
     assert rec["crap_line"]["score"] is None
     assert rerun["crap"]["stability"]["unstable_functions"] >= 1
+
+
+def test_unstable_keys_captures_fid_set_changes():
+    """§SPEC-057 反例：基线消失/新增/行集变化必须全部捕获（漏报缺陷回归）。"""
+    from godot_qa_toolkit.canonical.orchestrator import _unstable_keys
+
+    base = {"f.gd": {"a": frozenset({1, 2}), "b": frozenset({3}),
+                     "gone": frozenset({4})}}
+    cur_unions = [
+        {"file": "f.gd", "union": {"per_fid": [
+            {"fid": "a", "covered_line_ids": [1]},
+            {"fid": "b", "covered_line_ids": [3]},
+            {"fid": "new", "covered_line_ids": [9]},
+        ]}},
+        {"file": "vanished.gd", "union": None},  # 基线有、本轮消失的文件
+    ]
+    keys = _unstable_keys(cur_unions, base)
+    assert ("f.gd", "a") in keys          # 行集变化
+    assert ("f.gd", "gone") in keys       # 基线消失
+    assert ("f.gd", "new") in keys        # 新增
+    # union=None 的文件由调用方按 file-vanished 处理（哨兵键另测）
+
+
+def test_crap_records_mark_vanished_file_unstable(project, tmp_path):
+    """§SPEC-057 反例：基线中 scored 的文件在 rerun 中 union 消失 →
+    其全部函数显式 unstable 且不出分。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    all_targets = _targets(project)
+    base = run_canonical(project, all_targets, recipe)
+    # 基线含全部文件（cell.gd scored）；rerun 仅跑其余目标（cell.gd 本轮
+    # 缺席）→ 基线 scored 函数必须回放为显式 unstable
+    doc = json.loads(json.dumps(base))
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(doc), encoding="utf-8")
+    rerun_targets = [t for t in all_targets if "cell.gd" not in t]
+    assert len(rerun_targets) == len(all_targets) - 1
+    rerun = run_canonical(project, rerun_targets, recipe,
+                          stability_baseline=str(baseline_path))
+    lost = [r for r in rerun["crap"]["records"]
+            if r["function_id"].startswith("src_game/cell.gd")]
+    assert lost, "baseline-scored file must still disclose functions"
+    for r in lost:
+        assert r["score_status"] == "unstable", (
+            f"vanishing scored file must be unstable, got {r['score_status']}")
+        assert r["crap_line"]["score"] is None

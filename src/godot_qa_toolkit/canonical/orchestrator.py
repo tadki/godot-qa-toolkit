@@ -236,6 +236,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             json.dumps(started, ensure_ascii=False), encoding="utf-8")
         gut_ok = True
         run_error = False
+        timed_out = False
         output = ""
         wall_s = 0.0
         try:
@@ -246,6 +247,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 suite_rel = Path(acceptance["suite_dir"]).relative_to(root)
                 gut_args.append(
                     "-gdir=res://" + suite_rel.as_posix() + "/generated")
+            t_gut = time.monotonic()
             try:
                 r, wall_s = _run_one_gut(root, gut_args, timeout_s)
                 output = (r.stdout or "") + "\n" + (r.stderr or "")
@@ -256,8 +258,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     gut_ok = False
                     run_error = True
             except CanonicalError as e:
+                # 超时：墙钟如实记录（超时也是门量证据），哨兵记 timeout
                 gut_ok = False
                 run_error = True
+                timed_out = True
+                wall_s = time.monotonic() - t_gut
                 output = str(e)
         finally:
             for abs_path, original in started["files"].items():
@@ -266,13 +271,15 @@ def run_canonical(project_root: str | Path, target_files: list[str],
 
         reconciliation = None
         arm_valid = not run_error
-        invalid_reason = "run_error" if run_error else None
-        if acceptance is not None:
+        invalid_reason = ("timeout" if timed_out
+                          else ("run_error" if run_error else None))
+        if acceptance is not None and not run_error:
             # §SPEC-035 对账五项：任一 false → 臂 invalid；对账后清理私有
-            # 目录（canonical 零残留，不保留现场）
+            # 目录（canonical 零残留，不保留现场）。run_error（含超时）时
+            # 运行流证据不可信，对账不产生误导性记录，直接落 run_error。
             reconciliation = reconcile(
                 root, acceptance["suite_dir"], acceptance["keys"], output,
-                replay_ok=not run_error,
+                replay_ok=True,
                 main_snapshot=acceptance["snapshot"])
             if not reconciliation["ok"]:
                 arm_valid = False
@@ -290,7 +297,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 registry=item["registry"],
                 probe_manifest=item["probe_manifest"],
                 hits_lines=sorted(hits), probes_fired=probes_fired,
-                gut_ok=gut_ok, run_error=run_error, timeout=False,
+                gut_ok=gut_ok, run_error=run_error, timeout=timed_out,
                 zero_tests=False, vacuous=False, arm=name)
             bundles[rel] = bundle
             if evidence_dir is not None:
@@ -306,7 +313,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             clear_sink(None, str(root), sink)
         return {
             "arm": name, "run_uuid": run_uuid, "wall_s": round(wall_s, 3),
-            "gut_ok": gut_ok, "state": ("valid" if arm_valid else "invalid"),
+            "gut_ok": gut_ok, "timed_out": timed_out,
+            "state": ("valid" if arm_valid else "invalid"),
             "invalid_reason": invalid_reason,
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
@@ -331,7 +339,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         if suite_dir is not None:
             _cleanup_suite_dir(suite_dir)
         arm_b = {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
-                 "gut_ok": False, "state": "invalid",
+                 "gut_ok": False, "timed_out": False, "state": "invalid",
                  "invalid_reason": f"suite_error:{e}", "bundles": 0,
                  "bundles_data": {}, "reconciliation": None}
 

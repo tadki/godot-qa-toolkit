@@ -1,9 +1,10 @@
-"""SEE-1550 §SPEC-020 ③——W 通道六形态等价电池（真实引擎，资格期判据）。
+"""SEE-1550 §SPEC-020 ③——W 通道等价电池（真实引擎，资格期判据）。
 
-六个 worker-eligible 形态（runtime_load / preload_late / class_name /
-inner_class / scene_script / composition_root）：worker 通道与冷 oracle
-逐位对比——verdict / kill 集合 / stable-id 必须全等（§SPEC-020 DoD）。
-autoload / preload_boot 按定案 J3 回退归冷（路由单测已钉，此处不重跑）。
+worker-eligible 形态（R-DW4 Owner 裁决后收敛为三：runtime_load /
+class_name / inner_class）：worker 通道与冷 oracle 逐位对比——verdict /
+kill 集合 / stable-id 必须全等（§SPEC-020 DoD）。scene_script /
+composition_root（场景缓存持有）与 preload_late（闭包传递场景持有）按
+closure_scene_cached 谓词回退归冷（路由单测已钉，此处不重跑）。
 
 环境守卫（CI 无引擎 → 模块级 skip，非红）与 forms BDD 同型。
 """
@@ -31,11 +32,8 @@ _GUT_SOURCES = [
 
 ELIGIBLE_FORMS = (
     "res://forms/runtime_load.gd",
-    "res://forms/preload_late.gd",
     "res://forms/class_name_form.gd",
     "res://forms/inner_class_form.gd",
-    "res://forms/scene_script.gd",
-    "res://forms/composition_root.gd",
 )
 
 

@@ -1,7 +1,8 @@
 """SEE-1550 §SPEC-020 ①——静态路由器单测（定案 A1–A9 排除语义）。
 
-8 形态 fixture 断言：autoload_form / preload_boot 必判冷（目标入表 /
-闭包成员入表），六形态必判 worker；GUT 域排除；reason 码全量披露。
+8 形态 fixture 断言：autoload_form / preload_boot / scene_script /
+composition_root / preload_late 必判冷（目标入表 / 闭包成员入表 /
+场景缓存持有谓词），四形态必判 worker；GUT 域排除；reason 码全量披露。
 """
 
 import sys
@@ -16,6 +17,7 @@ from godot_qa_toolkit.mutation.channel_router import (
     CHANNEL_WORKER,
     REASON_CLOSURE_INTERSECTS_GUT_DOMAIN,
     REASON_CLOSURE_MEMBER_IN_AUTOLOAD,
+    REASON_CLOSURE_SCENE_CACHED,
     REASON_ELIGIBLE_WORKER,
     REASON_TARGET_IN_AUTOLOAD,
     REASON_TARGET_IN_GUT_DOMAIN,
@@ -52,8 +54,8 @@ def _route(env, target_key):
 
 
 class TestFixtureRouting:
-    """§SPEC-020 目标1 判据：autoload_form/preload_boot 必判冷，
-    其余形态必判 worker。"""
+    """§SPEC-020 目标1 判据（R-DW4 修订）：autoload_form/preload_boot/
+    scene_script/composition_root/preload_late 必判冷，四形态必判 worker。"""
 
     def test_autoload_form_target_in_table_is_cold(self, router_env):
         d = _route(router_env, "autoload_form")
@@ -71,18 +73,38 @@ class TestFixtureRouting:
         assert any("autoload_form" in r for r in member_reasons)
 
     @pytest.mark.parametrize("key", [
-        "runtime_load", "class_name_form", "inner_class_form",
-        "scene_script", "composition_root", "orphan_form",
+        "runtime_load", "class_name_form", "inner_class_form", "orphan_form",
     ])
-    def test_six_forms_eligible_worker(self, router_env, key):
+    def test_four_forms_eligible_worker(self, router_env, key):
         d = _route(router_env, key)
         assert d.channel == CHANNEL_WORKER, (key, d.reasons)
         assert REASON_ELIGIBLE_WORKER in d.reasons
 
-    def test_preload_late_eligible_worker(self, router_env):
-        """晚期 preload（const 在测试脚本与组合根）——不触 autoload 表。"""
+    def test_scene_script_scene_held_is_cold(self, router_env):
+        """R-DW4：scene_script 被 scene.tscn ext_resource 持有（场景缓存
+        形态）→ 冷 + closure_scene_cached 披露。"""
+        d = _route(router_env, "scene_script")
+        assert d.is_cold
+        scene = [r for r in d.reasons
+                 if r.startswith(REASON_CLOSURE_SCENE_CACHED)]
+        assert scene and "scene_script.gd" in scene[0]
+
+    def test_composition_root_scene_held_is_cold(self, router_env):
+        """R-DW4：composition_root 被 main.tscn ext_resource 持有 → 冷。"""
+        d = _route(router_env, "composition_root")
+        assert d.is_cold
+        scene = [r for r in d.reasons
+                 if r.startswith(REASON_CLOSURE_SCENE_CACHED)]
+        assert scene and "composition_root.gd" in scene[0]
+
+    def test_preload_late_scene_held_closure_is_cold(self, router_env):
+        """R-DW4：preload_late 闭包含场景持有成员（composition_root ←
+        main.tscn）→ 传递冷（保守方向：丢速度不丢正确性）。"""
         d = _route(router_env, "preload_late")
-        assert d.channel == CHANNEL_WORKER
+        assert d.is_cold
+        scene = [r for r in d.reasons
+                 if r.startswith(REASON_CLOSURE_SCENE_CACHED)]
+        assert scene and "composition_root.gd" in scene[0]
 
     def test_closure_of_runtime_load_contains_test_holder(self, router_env):
         d = _route(router_env, "runtime_load")
@@ -137,3 +159,58 @@ class TestCensus:
     def test_census_share_bounds(self, router_env):
         census = route_project_census(router_env["root"])
         assert 0.0 <= census["worker_share"] <= 1.0
+
+
+class TestSceneCachedPredicate:
+    """R-DW4 场景缓存持有谓词（Owner 裁决：场景持有者全路由冷通道）。"""
+
+    def _proj(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "project.godot").write_text("config_version=5\n")
+        return proj
+
+    def test_scene_held_target_is_cold_with_reason(self, tmp_path):
+        proj = self._proj(tmp_path)
+        (proj / "widget.gd").write_text(
+            "extends RefCounted\nfunc f() -> int:\n\treturn 1\n",
+            encoding="utf-8")
+        (proj / "panel.tscn").write_text(
+            '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" '
+            'path="res://widget.gd" id="1"]\n\n[node name="W" type="Node"]\n',
+            encoding="utf-8")
+        d = route_target(str(proj), "res://widget.gd")
+        assert d.is_cold
+        scene = [r for r in d.reasons
+                 if r.startswith(REASON_CLOSURE_SCENE_CACHED)]
+        assert scene and "widget.gd" in scene[0]
+
+    def test_gd_only_holders_stay_worker(self, tmp_path):
+        proj = self._proj(tmp_path)
+        (proj / "a.gd").write_text(
+            "extends RefCounted\nfunc f() -> int:\n\treturn 1\n",
+            encoding="utf-8")
+        (proj / "b.gd").write_text(
+            'extends RefCounted\nconst A := preload("res://a.gd")\n',
+            encoding="utf-8")
+        d = route_target(str(proj), "res://a.gd")
+        assert d.channel == CHANNEL_WORKER, d.reasons
+
+    def test_transitive_scene_held_closure_member_is_cold(self, tmp_path):
+        """闭包传递：目标仅被 .gd 引用，但闭包成员被场景持有 → 冷。"""
+        proj = self._proj(tmp_path)
+        (proj / "leaf.gd").write_text(
+            "extends RefCounted\nfunc f() -> int:\n\treturn 1\n",
+            encoding="utf-8")
+        (proj / "mid.gd").write_text(
+            'extends RefCounted\nconst L := preload("res://leaf.gd")\n',
+            encoding="utf-8")
+        (proj / "host.tscn").write_text(
+            '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" '
+            'path="res://mid.gd" id="1"]\n\n[node name="M" type="Node"]\n',
+            encoding="utf-8")
+        d = route_target(str(proj), "res://leaf.gd")
+        assert d.is_cold, d.reasons
+        scene = [r for r in d.reasons
+                 if r.startswith(REASON_CLOSURE_SCENE_CACHED)]
+        assert scene and "mid.gd" in scene[0]

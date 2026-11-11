@@ -176,13 +176,13 @@ def test_executed_scripts_stops_at_run_summary_marker():
     """Run Summary 之后的段不再计入运行流（Summary 段 `-` 前缀会重复）。"""
     out = (
         "res://a/test_demo.gd\n"
-        "* t1\n"
+        "* test_t1\n"
         "Run Summary\n"
         "res://a/test_demo.gd\n"
-        "* t2\n"
+        "* test_t2\n"
     )
     flow = _executed_scripts(out)
-    assert flow == {"res://a/test_demo.gd": ["t1"]}
+    assert flow == {"res://a/test_demo.gd": ["test_t1"]}
 
 
 def test_cleanup_preserves_preexisting_main_artifacts(project: Path):

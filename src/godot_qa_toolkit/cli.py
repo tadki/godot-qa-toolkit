@@ -572,9 +572,78 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return _emit(result)
 
 
+def cmd_canonical(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from pathlib import Path as _P
+
+    from .canonical.orchestrator import CanonicalError, run_canonical
+    from .canonical.recipe import verify_recipe
+
+    recipe_path = _P(args.recipe)
+    try:
+        recipe = _json.loads(recipe_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return _emit({"tool": "canonical", "ok": False,
+                      "summary": {"error": f"recipe load failed: {e}"},
+                      "failures": [{"reason": f"recipe load failed: {e}"}]})
+    ok, reason = verify_recipe(recipe)
+    if not ok:
+        return _emit({"tool": "canonical", "ok": False,
+                      "summary": {"error": f"recipe invalid: {reason}"},
+                      "failures": [{"reason": f"recipe invalid: {reason}"}]})
+    roots = [_P(r) for r in args.roots]
+    targets = sorted({str(p) for root in roots
+                      for p in root.rglob("*.gd") if p.is_file()})
+    if not targets:
+        return _emit({"tool": "canonical", "ok": False,
+                      "summary": {"error": "no .gd targets under roots"},
+                      "failures": [{"reason": "no .gd targets"}]})
+    probe_keys = (args.acceptance_probe_keys or None)
+    if probe_keys:
+        probe_keys = [k.strip() for k in probe_keys.split(",") if k.strip()]
+    try:
+        report = run_canonical(
+            args.project_root, targets, recipe,
+            probe_keys=probe_keys, timeout_s=args.timeout,
+            evidence_out=getattr(args, "evidence_dir", None))
+    except CanonicalError as e:
+        return _emit({"tool": "canonical", "ok": False,
+                      "summary": {"error": str(e), "canonical_error": True},
+                      "failures": [{"reason": f"canonical_error: {e}"}]})
+    out_path = _P(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(_json.dumps(report, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    return _emit({"tool": "canonical", "ok": report["ok"],
+                  "summary": report,
+                  "failures": ([] if report["ok"] else
+                               [{"reason": "union invalid or arms invalid"}])})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gqt", description="godot-qa-toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    can = sub.add_parser("canonical", help="dual-arm batch coverage orchestration (SEE-1546 WP3 PR-C)")
+    can.add_argument("roots", nargs="+",
+                     help="target .gd roots (recursive glob); arms run the "
+                          "full gutconfig face + acceptance suite over them")
+    can.add_argument("--project-root", required=True,
+                     help="Godot project root (addons/gut + .gutconfig.json)")
+    can.add_argument("--recipe", required=True,
+                     help="canonical-recipe/1 JSON (from `gqt recipe --out`)")
+    can.add_argument("--out", required=True,
+                     help="canonical-report/1 output JSON path")
+    can.add_argument("--acceptance-probe-keys", nargs="?",
+                     const="aidomain_integration", default=None,
+                     help="W4 cost probe keys (default: aidomain_integration)")
+    can.add_argument("--timeout", type=int, default=180,
+                     help="GUT timeout seconds per arm (default 180)")
+    can.add_argument("--evidence-dir", default=None,
+                     help="optional coverage-evidence/2 output dir for "
+                          "per-arm bundles")
+    can.set_defaults(func=cmd_canonical)
 
     ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")
     acsub = ac.add_subparsers(dest="accept_command", required=True)

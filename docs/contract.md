@@ -358,3 +358,30 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 `compile.py` 仅新增 `out_dir` 分支（主路径代码逐字节未动）、`run.py`
 仅 `replay_check` 新增 `suite_dir` keyword（缺省路径不变）；`mutation/`、
 `risk/`、`coverage/` 域本 PR 零触碰。
+
+## 13. canonical 双源编排契约（SEE-1546 WP3 PR-C，canonical-report/1 + coverage-union/1）
+
+### 13.1 `gqt canonical <roots...> --project-root R --recipe recipe.json --out canonical.json [--acceptance-probe-keys [k1,k2]] [--timeout N] [--evidence-dir D]`
+
+批式臂双源编排（§SPEC-037；目标全集一次插桩 → 每臂 1 次 GUT → 逐文件 sink 读回 → bundle → union）：
+
+- **臂 gut_full**：.gutconfig 面（无 `-gdir`——GUT 缺省读配置，GUT 9.6 实测锚定）；
+- **臂 acceptance**：`acceptance/features` 全量 keys 编译进私有目录 `.gqt-run-<uuid>/`（§12 管线）+ 重放校验 + 重新插桩（新 run_uuid+sink 名）→ 1 次 GUT → **对账五项**（任一 false → 臂 invalid）→ 私有目录清理零残留；
+- **逐文件 sink** `qa-coverage-hits-{run_uuid}-{file_key8}.txt`（`file_key8 = sha1(relpath)[:8]`），落盘即清、沿 §10 prune 纪律；
+- **在树插桩**：备份 `/tmp/gqt-canonical-backups/<run_uuid>/`（started-record + 逐文件原文），finally 恢复；启动时回收同项目陈旧备份（崩溃恢复，恢复前不信任任何 sink）；KOL 生产树零残留；
+- 两臂共用同一 registry/probe manifest（同源码、同 manifest），run UUID 每臂独立；
+- `recipe.arm` 显式注入（`gut_full|gut_core|acceptance`）；缺省不传 arm 保留 tests_glob 推断（既有 stdout 契约零漂移）；
+- **certification.status="not_certified"**、`evidence_level="exploratory"`、`diagnostic_only=true`、`dynamic_cache=false`（单轮 exploratory；WP5 拥有双轮认证）；
+- W4 探针（缺省 `aidomain_integration`）实测墙钟写入 `performance.acceptance_probe`；`risk --performance-file` 兼容保留。
+
+### 13.2 `coverage-union/1` 有效性矩阵（§SPEC-036）
+
+同源码 sha256、同 probe manifest 哈希、两臂 run_uuid 不同、两臂 bundle 均 valid（run_error/timeout/zero_tests/vacuous/no_probe 任一 → 臂 invalid）、两臂臂名不同（整臂替换禁拼接）、**禁平均**（`coverage=|∪C|/total`，行集并集）；任一不满足 → `valid=false` + `invalid_reason`，union=null 不出分。`comparable` 仅在两臂 recipe_hash 一致且等于 canonical recipe_hash 时 true（子集配方 false）。
+
+### 13.3 性能门（§SPEC-039）
+
+端到端墙钟（插桩 + 两臂 GUT + union，recipe 构建与 W4 探针不计）对「现有 GUT + acceptance 序贯基线」3+3 交错中位数 ≤1.5×；**不达标=停下汇报、不得合并**；loadavg+CPU 双记录（§SPEC-022 协议）随交付。
+
+### 13.4 契约增量分类
+
+`gqt canonical` 子命令 + coverage-union/1 + canonical-report/1 = **capability**（新能力面，加法）；`evidence.py` 仅新增 `arm` keyword（缺省推断不变——零漂移）；`shadow/1` 与 `gqt risk` stdout 契约零触碰；`mutation/` 域零触碰。

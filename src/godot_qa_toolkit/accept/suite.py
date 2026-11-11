@@ -126,7 +126,11 @@ def _executed_scripts(gut_output: str) -> dict[str, list[str]]:
             flow.setdefault(current, [])
         elif current is not None and s.startswith("*"):
             parts = s.split()
-            if len(parts) >= 2 and parts[1] not in _GUT_HOOKS:
+            # GUT 运行流 `*` 行不止测试：孤儿节点报告 `* [Class:<Node#id>`
+            # 也走同前缀（真机全量 36 特性实证：5 脚本 630 条 vs 154 期望）。
+            # 只计数 GUT 命名约定的 test_ 前缀条目，孤儿/杂行不入对账。
+            if len(parts) >= 2 and parts[1].startswith("test_") \
+                    and parts[1] not in _GUT_HOOKS:
                 flow[current].append(parts[1])
     return flow
 

@@ -118,7 +118,7 @@ class FakeGodot:
                 # 三种传输形态的探针点数：direct 逐 id 函数 / R3 store_string /
                 # R4 内存 flag 标记
                 probe_ids = set(re.findall(r"__qa_cov_probe_(\d+)\(\)", src)) | set(
-                    re.findall(r"__qa_cov_probe_m\[(\d+)\] = 1", src))
+                    re.findall(r"__qa_cov_probe_m_[0-9a-f]{8}\[(\d+)\] = 1", src))
                 count = len(probe_ids)
                 ids = list(range(count))
                 if on_gdir and self.mode == "half_on_gdir":
@@ -392,13 +392,14 @@ def test_flag_instrument_zero_io_hit_lines_and_substitution():
     inst_a, manifest_a = _instrument(
         TARGET_SRC, "qa-coverage-hits-aaaa-12345678.txt", flags=True)
     hit_lines = re.findall(
-        r"^\s*__qa_cov_probe_m\[(\d+)\] = 1$", inst_a, re.M)
+        r"^\s*__qa_cov_probe_m_[0-9a-f]{8}\[(\d+)\] = 1$", inst_a, re.M)
     assert sorted(map(int, hit_lines)) == list(range(len(manifest_a)))
     # 零 I/O / 零自定义函数调用 token（§SPEC-046 静态扫描）
     for token in ("FileAccess", "store_string", "store_line", "append",
                   ".close(", "__qa_cov_probe_hit(", "__qa_cov_probe_1"):
         assert token not in inst_a, f"forbidden token {token!r} in hit path"
-    assert "static var __qa_cov_probe_m: Array = __qa_cov_probe_reg()" in inst_a
+    assert re.search(r"static var __qa_cov_probe_m_[0-9a-f]{8}: Array = "
+                      r"__qa_cov_probe_reg_[0-9a-f]{8}\(\)", inst_a)
     assert "arr.resize(%d)" % len(manifest_a) in inst_a
     inst_b = inst_a.replace("qa-coverage-hits-aaaa-12345678.txt",
                             "qa-coverage-hits-bbbb-12345678.txt")
@@ -421,3 +422,60 @@ def test_flag_drain_io_bounded_by_files_not_events():
     fa_uses = re.findall(r"FileAccess\.\w+", _FLUSHER_GD)
     assert sorted(fa_uses) == ["FileAccess.READ_WRITE", "FileAccess.WRITE",
                                "FileAccess.open", "FileAccess.open"]
+
+
+def test_canonical_diagnose_shape_and_restore(project: Path,
+                                              tmp_path: Path):
+    """§SPEC-048：诊断模式逐 feature 输出基线/插桩两腿墙钟、wait 步数与
+    归因；运行后树零残留（插桩与 finalizer 全部恢复）。"""
+    from godot_qa_toolkit.canonical.orchestrator import (
+        run_canonical_diagnose)
+
+    recipe, _ = _recipe(project, tmp_path)
+    fake = FakeGodot(project)
+    sp.run = fake
+    out = tmp_path / "diag.json"
+    before = {p: p.read_bytes() for p in (project / "src_game").glob("*.gd")}
+    report = run_canonical_diagnose(
+        project, _targets(project), recipe, ["demo"],
+        timeout_s=60, progress_out=str(out))
+    assert report["report_version"] == "canonical-diagnostic/1"
+    assert report["instrumentation"]["files"] == 2
+    f = report["features"][0]
+    assert f["key"] == "demo"
+    assert f["baseline"]["wall_s"] >= 0
+    assert f["instrumented"]["wall_s"] >= 0
+    assert f["instrumented"]["timed_out"] is False
+    assert f["wait_commands"] == 0  # demo.feature 无 wait 步骤
+    assert f["attribution"]
+    assert f["instrumented"]["hit_files"] >= 1
+    assert out.is_file()
+    for path, data in before.items():
+        assert path.read_bytes() == data  # 零残留
+    assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
+    import glob as g
+    assert g.glob("/tmp/gqt-canonical-backups/*") == []
+
+
+def test_flag_var_names_unique_per_file_no_inheritance_collision():
+    """R5 实证缺陷回归：static var 同名在插桩的父/子类脚本间触发
+    "member already exists in parent class" Parse Error，且子类探针经继承
+    解析到父类数组造成索引越界。per-file 唯一变量名必须消除两者。"""
+    import re as _re
+
+    from godot_qa_toolkit.coverage.runner import _instrument
+
+    parent_src = "extends Node\n\nfunc p() -> void:\n\tpass\n"
+    child_src = "extends \"res://parent.gd\"\n\nfunc c() -> void:\n\tpass\n"
+    inst_p, _ = _instrument(
+        parent_src, "qa-coverage-hits-u1-aaaaaaaa.txt", flags=True)
+    inst_c, _ = _instrument(
+        child_src, "qa-coverage-hits-u1-bbbbbbbb.txt", flags=True)
+    var_p = _re.search(r"static var (__qa_cov_probe_m_\w+): Array", inst_p)
+    var_c = _re.search(r"static var (__qa_cov_probe_m_\w+): Array", inst_c)
+    assert var_p and var_c
+    assert var_p.group(1) != var_c.group(1), (
+        "per-file static var names must differ (parent/child collision)")
+    # 命中线必须引用本文件的唯一名
+    assert f"{var_p.group(1)}[" in inst_p
+    assert f"{var_c.group(1)}[" in inst_c

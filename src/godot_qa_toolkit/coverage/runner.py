@@ -252,7 +252,7 @@ def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
 
 
 def _probe_calls(src: str, line_to_id: dict[int, int],
-                 flags: bool = False) -> list[str]:
+                 flags: bool = False, sink_name: str = "") -> list[str]:
     """每个可执行语句前插一行探针调用（整数 probe_id）。
 
     flags 形态（§SPEC-046）：语句前只做内存 flag 标记（预置尺寸静态 Array
@@ -264,23 +264,41 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
         if idx in line_to_id:
             indent = re.match(r"^(\s*)", line_text).group(1)
             if flags:
-                out.append(f"{indent}{_PROBE_PREFIX}m[{line_to_id[idx]}] = 1\n")
+                out.append(
+                    f"{indent}{_flag_var_name(sink_name)}"
+                    f"[{line_to_id[idx]}] = 1\n")
             else:
                 out.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
         out.append(line_text)
     return out
 
 
+def _flag_var_suffix(sink_name: str) -> str:
+    """从 sink 名提取 per-file key8（`...-<key8>.txt`），用于静态变量名
+    唯一化——父/子类脚本同时插桩时同名 static var 触发 GDScript
+    "member already exists in parent class" Parse Error，且子类探针经继承
+    解析到父类数组造成索引越界（R5 真机实证缺陷）。"""
+    m = re.search(r"-([0-9a-f]{8})\.txt$", sink_name)
+    return m.group(1) if m else hashlib.sha1(sink_name.encode()).hexdigest()[:8]
+
+
+def _flag_var_name(sink_name: str) -> str:
+    return f"{_PROBE_PREFIX}m_{_flag_var_suffix(sink_name)}"
+
+
 def _flag_probe_block(sink_name: str, count: int) -> str:
-    """flag 标记注册块：per-file 预置尺寸静态 Array，经 Engine meta 注册
-    （Godot 4.6 实证：脚本 reload 重跑不发生但 static Array 身份保留——
-    跨 reload 合并由共享引用自然成立）。落盘由注入的 finalizer 在 suite
-    结束统一完成：写次数 = 文件数，与命中事件数无关。"""
+    """flag 标记注册块：per-file 预置尺寸静态 Array（变量名带文件 key8
+    去继承冲突），经 Engine meta 注册（Godot 4.6 实证：脚本 reload 重跑
+    不发生但 static Array 身份保留——跨 reload 合并由共享引用自然成立）。
+    落盘由注入的 finalizer 在 suite 结束统一完成：写次数 = 文件数，与
+    命中事件数无关。"""
+    var = _flag_var_name(sink_name)
+    reg = f"{_PROBE_PREFIX}reg_{_flag_var_suffix(sink_name)}"
     return (
         f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
-        f"static var {_PROBE_PREFIX}m: Array = {_PROBE_PREFIX}reg()\n"
+        f"static var {var}: Array = {reg}()\n"
         f"\n"
-        f"static func {_PROBE_PREFIX}reg() -> Array:\n"
+        f"static func {reg}() -> Array:\n"
         f"\tvar d: Dictionary = Engine.get_meta(\"gqt_cov_marks\")"
         f" if Engine.has_meta(\"gqt_cov_marks\") else {{}}\n"
         f"\tvar arr: Array = d.get(\"{sink_name}\", [])\n"
@@ -336,7 +354,7 @@ def _instrument(src: str, sink_name: str,
     if flags and not manifest:
         # 零可执行行：无探针面，插桩产物 = 原文（vacuous 车道在编排器落）
         return src, manifest
-    body = "".join(_probe_calls(src, line_to_id, flags))
+    body = "".join(_probe_calls(src, line_to_id, flags, sink_name))
     if flags:
         return body + _flag_probe_block(sink_name, len(manifest)), manifest
     return body + _probe_func(sink_name, len(manifest)), manifest

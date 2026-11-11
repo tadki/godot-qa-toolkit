@@ -598,9 +598,11 @@ def test_canonical_subset_marks_not_comparable(project, tmp_path):
         assert u["comparable_reason"] == "subset_targets"
 
 
-def test_prep_cache_roundtrip_equivalence(project: Path, tmp_path: Path):
+def test_prep_cache_roundtrip_equivalence(project: Path, tmp_path: Path,
+                                          monkeypatch):
     """§SPEC-054：第二次运行命中缓存；fresh/cache 输出核心字段逐字段
     等价（unions/crap 语义零变化）。"""
+    monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     first = run_canonical(project, _targets(project), recipe)
@@ -625,7 +627,9 @@ def test_prep_cache_roundtrip_equivalence(project: Path, tmp_path: Path):
     assert first["union"] == second["union"]
 
 
-def test_prep_cache_invalidates_on_source_and_recipe(project, tmp_path):
+def test_prep_cache_invalidates_on_source_and_recipe(project, tmp_path,
+                                                     monkeypatch):
+    monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     run_canonical(project, _targets(project), recipe)
@@ -651,7 +655,9 @@ def test_prep_cache_invalidates_on_source_and_recipe(project, tmp_path):
 
 
 def test_prep_cache_corrupt_entry_quarantined_and_rebuilt(project,
-                                                          tmp_path):
+                                                          tmp_path,
+                                                          monkeypatch):
+    monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     run_canonical(project, _targets(project), recipe)
@@ -665,11 +671,13 @@ def test_prep_cache_corrupt_entry_quarantined_and_rebuilt(project,
     assert g.glob(entries[0] + ".bad"), "corrupt entry must be quarantined"
 
 
-def test_prep_cache_never_stores_dynamic_data(project: Path, tmp_path: Path):
+def test_prep_cache_never_stores_dynamic_data(project: Path, tmp_path: Path,
+                                              monkeypatch):
     """§SPEC-054：动态 hits/union/bundles 永不入缓存。"""
     import glob as g
 
     from godot_qa_toolkit.canonical import prepcache
+    monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     run_canonical(project, _targets(project), recipe)

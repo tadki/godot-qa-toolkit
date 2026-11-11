@@ -115,10 +115,10 @@ class FakeGodot:
             src = gd.read_text(encoding="utf-8")
             names = set(re.findall(r'qa-coverage-hits-[0-9a-f-]+-[0-9a-f]{8}\.txt', src))
             for sink in names:
-                # 三种传输形态的探针点数：direct 逐 id 函数 / R2 hit 调用 /
-                # R3 inline store_string
+                # 三种传输形态的探针点数：direct 逐 id 函数 / R3 store_string /
+                # R4 内存 flag 标记
                 probe_ids = set(re.findall(r"__qa_cov_probe_(\d+)\(\)", src)) | set(
-                    re.findall(r'__qa_cov_probe_f\.store_string\("(\d+)\\n"\)', src))
+                    re.findall(r"__qa_cov_probe_m\[(\d+)\] = 1", src))
                 count = len(probe_ids)
                 ids = list(range(count))
                 if on_gdir and self.mode == "half_on_gdir":
@@ -362,10 +362,11 @@ def test_measurable_subset_and_unmeasurable_disclosure(
     assert all(r for r in reasons.values())  # 原因非空——禁止静默排除
 
 
-def test_inline_transport_needs_no_injection(project: Path,
-                                             tmp_path: Path):
-    """§SPEC-044：inline 直写形态无需注入 flusher autoload / 改
-    project.godot——运行全程树零额外文件、配置零改动（R2 注入机制已废弃）。"""
+def test_flag_mode_injects_finalizer_and_restores(project: Path,
+                                                  tmp_path: Path):
+    """§SPEC-046：flag 形态的统一落盘由注入的 finalizer autoload 在树退出
+    时完成——GUT 调用窗口内 project.godot 含注册行且 finalizer 在场；run
+    结束后两者恢复零残留。"""
     recipe, _ = _recipe(project, tmp_path)
     before_pg = (project / "project.godot").read_text(encoding="utf-8")
     fake = FakeGodot(project)
@@ -373,28 +374,32 @@ def test_inline_transport_needs_no_injection(project: Path,
     run_canonical(project, _targets(project), recipe)
     assert len(fake.pg_at_gut) == 2
     for pg_text, flusher in zip(fake.pg_at_gut, fake.flusher_at_gut):
-        assert "GqtCovFlusher" not in pg_text
-        assert flusher is False
+        assert "GqtCovFlusher" in pg_text
+        assert flusher is True
     assert (project / "project.godot").read_text(
         encoding="utf-8") == before_pg
     assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
 
 
-def test_inline_instrument_direct_write_and_sink_substitution():
-    """§SPEC-044：inline 形态语句前直插持久句柄 store_string（无函数调用、
-    无 append/阈值刷盘）、文件尾仅静态句柄开饰；sink 名等长替换后除 sink
+def test_flag_instrument_zero_io_hit_lines_and_substitution():
+    """§SPEC-046 静态扫描门：命中点只允许 `__qa_cov_probe_m[id] = 1` 内存
+    flag 标记——生成物任何位置不得出现 FileAccess/store/write/append 等
+    I/O token，也不得出现自定义 probe 函数调用；sink 名等长替换后除 sink
     名外逐字节一致且插桩产物仍合法。"""
     from gdtoolkit.parser import parser as gd_parser
     from godot_qa_toolkit.coverage.runner import _instrument
 
     inst_a, manifest_a = _instrument(
-        TARGET_SRC, "qa-coverage-hits-aaaa-12345678.txt", inline=True)
-    call_ids = set(re.findall(
-        r'__qa_cov_probe_f\.store_string\("(\d+)\\n"\)', inst_a))
-    assert call_ids == {str(i) for i in range(len(manifest_a))}
-    assert not re.search(r"static func __qa_cov_probe_\d+\(\):", inst_a)
-    assert "static var __qa_cov_probe_f =" in inst_a
-    assert "__qa_cov_probe_hit(" not in inst_a
+        TARGET_SRC, "qa-coverage-hits-aaaa-12345678.txt", flags=True)
+    hit_lines = re.findall(
+        r"^\s*__qa_cov_probe_m\[(\d+)\] = 1$", inst_a, re.M)
+    assert sorted(map(int, hit_lines)) == list(range(len(manifest_a)))
+    # 零 I/O / 零自定义函数调用 token（§SPEC-046 静态扫描）
+    for token in ("FileAccess", "store_string", "store_line", "append",
+                  ".close(", "__qa_cov_probe_hit(", "__qa_cov_probe_1"):
+        assert token not in inst_a, f"forbidden token {token!r} in hit path"
+    assert "static var __qa_cov_probe_m: Array = __qa_cov_probe_reg()" in inst_a
+    assert "arr.resize(%d)" % len(manifest_a) in inst_a
     inst_b = inst_a.replace("qa-coverage-hits-aaaa-12345678.txt",
                             "qa-coverage-hits-bbbb-12345678.txt")
     assert inst_b.count("qa-coverage-hits-bbbb-12345678.txt") == \
@@ -402,3 +407,17 @@ def test_inline_instrument_direct_write_and_sink_substitution():
     assert inst_b.replace("qa-coverage-hits-bbbb-12345678.txt",
                           "qa-coverage-hits-aaaa-12345678.txt") == inst_a
     gd_parser.parse(inst_b)
+
+
+def test_flag_drain_io_bounded_by_files_not_events():
+    """§SPEC-046：统一落盘只在 finalizer 的 _exit_tree 单循环里进行——
+    FileAccess 每 sink 恰好一次 open（主+回退两形态）、一次写循环；写入
+    次数由文件数决定，不随命中事件数增长。"""
+    from godot_qa_toolkit.canonical.orchestrator import _FLUSHER_GD
+    assert _FLUSHER_GD.count("FileAccess.open") == 2  # 主 + 回退
+    assert _FLUSHER_GD.count("store_line") == 1
+    assert _FLUSHER_GD.count("func _exit_tree") == 1
+    # 除 open（主+回退）与模式枚举外无任何其他 FileAccess 用法
+    fa_uses = re.findall(r"FileAccess\.\w+", _FLUSHER_GD)
+    assert sorted(fa_uses) == ["FileAccess.READ_WRITE", "FileAccess.WRITE",
+                               "FileAccess.open", "FileAccess.open"]

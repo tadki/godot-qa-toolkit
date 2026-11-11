@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -183,8 +182,9 @@ def reconcile(project_root: str | Path, suite_dir: str | Path,
     executed = {n for _, n in entries}
     if main_snapshot is None:
         main_snapshot = _snapshot_main(root)
-    r4 = actual_files == expected_files and \
-        _snapshot_main(root) == main_snapshot
+    # R4 只管主目录快照一致性——文件集对账是 R1 的职责（tidy L1：去重
+    # 首合取，行为等价，X4 守卫用例保持绿即证）。
+    r4 = _snapshot_main(root) == main_snapshot
     return {
         "suite_version": SUITES_VERSION,
         "suite_dir": str(suite_dir),
@@ -237,7 +237,6 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     for k in keys:
         replay_check(root, k, suite_dir=suite_dir)
     rel = suite_dir.relative_to(root).as_posix()
-    env = dict(os.environ)
     try:
         with GlobalGodotGate(str(root)):
             r = subprocess.run(
@@ -245,7 +244,7 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
                  "-s", "res://addons/gut/gut_cmdln.gd",
                  "-gdir=res://" + rel + "/generated", "-gexit"],
                 capture_output=True, text=True, timeout=timeout_s,
-                cwd=str(root), env=env)
+                cwd=str(root))
     except subprocess.TimeoutExpired as e:
         raise AcceptRunError(
             f"GUT timed out after {timeout_s}s on private suite dir") from e

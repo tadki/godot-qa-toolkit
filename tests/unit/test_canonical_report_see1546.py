@@ -84,6 +84,7 @@ class FakeGodot:
     -gdir（acceptance 私有目录臂）写前半 ids——union=|∪C| 端到端可断言。"""
 
     def __init__(self, project_root: Path, mode: str = "half_on_gdir"):
+        self.real_run = sp.run  # 构造时的真实 subprocess.run（shadow cp 等需真执行）
         self.calls: list[list[str]] = []
         self.root = project_root
         self.returncode = 0
@@ -98,13 +99,9 @@ class FakeGodot:
         argv = a[0]
         self.calls.append(list(argv))
         cmd = " ".join(argv)
-        # 非测试执行类子进程（如 compile 探针等）直接放行成功
+        # 非测试执行类子进程（compile 探针/cp -al 建 shadow 等）真实执行
         if "gut_cmdln.gd" not in cmd:
-            class R0:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-            return R0()
+            return self.real_run(*a, **k)
         on_gdir = ".gqt-run-" in cmd  # acceptance 私有套件臂
         pg = self.root / "project.godot"
         self.pg_at_gut.append(pg.read_text(encoding="utf-8")
@@ -285,7 +282,7 @@ def test_gut_timeout_records_wall_and_sentinel(project, tmp_path, monkeypatch):
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
 
-    def fake_gut(root, gut_args, timeout_s, env=None):
+    def fake_gut(root, gut_args, timeout_s, env=None, gate_root=None):
         _t.sleep(0.01)
         raise orch.CanonicalError(f"GUT timed out after {timeout_s}s")
 
@@ -728,3 +725,36 @@ def test_block_compression_zero_drift_vs_flags(project, tmp_path):
     # 块形态插桩更紧凑（同文件模板更小）
     assert (blocks["preparation"]["cache"]["algo"]
             != flags["preparation"]["cache"]["algo"])
+
+
+def test_stability_baseline_routes_jitter_to_unstable_lane(project,
+                                                           tmp_path):
+    """§SPEC-056：跨 run 抖动 fid 必须转 unstable 车道且不出分。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    base = run_canonical(project, _targets(project), recipe)
+    doc = json.loads(json.dumps(base))
+    # 人为制造一个 fid 的行集漂移
+    changed_fid = None
+    for u in doc["unions"]:
+        if u.get("union") is None:
+            continue
+        for row in u["union"]["per_fid"]:
+            if row["covered_line_ids"]:
+                row["covered_line_ids"] = row["covered_line_ids"][:-1]
+                changed_fid = row["fid"]
+                break
+        if changed_fid:
+            break
+    assert changed_fid
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(doc), encoding="utf-8")
+    rerun = run_canonical(project, _targets(project), recipe,
+                          stability_baseline=str(baseline_path))
+    lane = {r["function_id"]: r["score_status"]
+            for r in rerun["crap"]["records"]}
+    assert lane[changed_fid] == "unstable"
+    rec = next(r for r in rerun["crap"]["records"]
+               if r["function_id"] == changed_fid)
+    assert rec["crap_line"]["score"] is None
+    assert rerun["crap"]["stability"]["unstable_functions"] >= 1

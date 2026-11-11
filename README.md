@@ -45,7 +45,7 @@ source of truth.
 | **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
 | **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
 | **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
-| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N] [--no-reuse-coverage] [--godot-bin <path>]` | shipped |
+| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N] [--no-reuse-coverage] [--worker-channel] [--godot-bin <path>]` | shipped |
 | **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S] [--godot-bin <path>]` | shipped |
 | **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp runtime addon | planned |
 
@@ -266,6 +266,36 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   unchanged script/dependency closure: killer edited/deleted/deps drifted →
   only that entry re-runs; certificate missing/unresolvable → conservative
   re-run; **new tests never invalidate old kills**.
+
+### Worker channel (opt-in, SEE-1550 §SPEC-020)
+
+- **Default is the cold channel** (`cold-shadow/1`) — behavior without the
+  flag is unchanged. The resident worker channel (`worker-reset/1`) is
+  **strictly opt-in**: pass `--worker-channel` or set `GQT_MUTATION_WORKER=1`
+  (equivalent, honored on every execution path — serial, auto-serial and
+  parallel sharding).
+- **What it does**: eligible targets run in a per-slot persistent
+  GUT-direct-drive worker; mutant shadow-disk writes keep the exact M0
+  timing, and per-leg state is reset by the R-C protocol (in-place IGNORE +
+  replace reload of the closure) under equivalence gates.
+- **Static routing decides eligibility** (converged to cold before any
+  execution): targets in the `[autoload]` table, reload closures touching an
+  autoload member, a scene-cached holder or the GUT domain stay cold —
+  machine-readable reason codes (`target_in_autoload_table`,
+  `closure_member_in_autoload_table`, `closure_scene_cached`,
+  `target_in_gut_domain`, `closure_intersects_gut_domain`) are disclosed
+  additively.
+- **Equivalence discipline**: first-mutant + periodic dual-channel canaries
+  (every `GQT_WORKER_CANARY_EVERY` legs, default 25); any reload failure or
+  hash-gate mismatch makes the session fatal — no further mutants in that
+  process, the window is invalidated and re-run cold, never silently
+  re-routed. `exec_scheme` joins the identity package, so resume stores and
+  kill certificates are isolated per channel.
+- **Measured (final HEAD, not estimates)**: the equivalence-provable fixture
+  suite runs ~1.14× faster on the worker channel; the worker-reachable share
+  of a KOL census is ~50% after scene-holder cold routing. win64 keeps the
+  worker channel forced cold with disclosure (verdict equivalence holds,
+  leg availability does not).
 
 ### Survivor location in the report
 

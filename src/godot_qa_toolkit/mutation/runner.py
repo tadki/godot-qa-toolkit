@@ -54,7 +54,8 @@ from .identity import (COLD_SCHEME, INJECT_SCHEME, TestOwnershipIndex,
                        WORKER_SCHEME, identity_pack, killer_certificate,
                        suspected_orphan)
 from .channel_router import CHANNEL_WORKER, route_target
-from .worker_channel import identity_for_target, run_worker_legs, worker_enabled
+from .worker_channel import (identity_for_target, resolve_exec_scheme,
+                             run_worker_legs, worker_enabled)
 # 统一 mutant 明细记录形态（SEE-1416 扩列）、结果塑形契约与统一报告构建
 # （SEE-1550 tidy 迁入）在 reporting.py（<800 行纪律拆分先例）；调用方留在
 # runner，by-value import 经本命名空间解析——既有 monkeypatch seam 零变化。
@@ -610,10 +611,13 @@ def _run_mutant_loop(
                 ownership_holder.append(TestOwnershipIndex(project_root))
             return ownership_holder[0]
 
-        use_worker = (worker_enabled(worker_channel)
-                      and route_target(project_root,
-                                       target_res).channel == CHANNEL_WORKER)
-        slot_info["exec_scheme"] = WORKER_SCHEME if use_worker else COLD_SCHEME
+        # R-DW6 默认启用实测轮：身份与执行同源解析（resolve_exec_scheme 统一
+        # 路由排除 + gut.gd 直驱可用性）——coverage/resume store file_key 与
+        # 实际执行通道一致，杜绝 scheme 漂移性 store-miss。
+        exec_scheme_resolved, _route_resolved = resolve_exec_scheme(
+            project_root, target_res, worker_channel)
+        use_worker = exec_scheme_resolved == WORKER_SCHEME
+        slot_info["exec_scheme"] = exec_scheme_resolved
         try:
             beacon.seed_beacon_script(slot.root)
             if use_worker:

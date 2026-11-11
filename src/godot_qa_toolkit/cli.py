@@ -704,12 +704,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "store with a matching identity pack exists; "
                         "uncovered sites never enter the ok gate)")
     m.add_argument("--worker-channel", action="store_true",
-                   help="opt in to the resident worker channel (SEE-1550 "
-                        "§SPEC-020 worker-reset/1, A9 opt-in): eligible "
-                        "targets run in a persistent GUT-direct-drive worker; "
-                        "autoload/GUT-domain targets stay on the cold M0 "
-                        "channel; default is cold; env GQT_MUTATION_WORKER=1 "
-                        "is equivalent and honored on every execution path "
+                   help="force the resident worker channel (SEE-1550 "
+                        "§SPEC-020 worker-reset/1): eligible targets run in "
+                        "a persistent GUT-direct-drive worker under "
+                        "equivalence gates (parity/state-drift/canary "
+                        "disqualification with automatic cold degrade); "
+                        "worker is DEFAULT-ON — static routing sends "
+                        "autoload/GUT-domain/scene-held targets to the cold "
+                        "M0 channel; env GQT_MUTATION_WORKER=0 opts out "
+                        "(cold) and is honored on every execution path "
                         "(serial, auto-serial, parallel sharding)")
     _add_godot_bin_arg(m)
     m.set_defaults(func=cmd_mutation)

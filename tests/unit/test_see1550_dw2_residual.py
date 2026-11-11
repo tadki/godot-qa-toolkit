@@ -279,3 +279,20 @@ def test_parity_inject_failure_degrades_to_cold(monkeypatch):
         parity_inject_fn=lambda: (None, "disk error"))
     assert fatals and "unavailable" in fatals[0]
     assert records == ["killed"]
+
+
+def test_worker_requires_real_gut_addon(monkeypatch, tmp_path):
+    """R-DW6 默认启用守卫：仅 gut_cmdln.gd 存根（无 gut.gd）→ 直驱不可用，
+    结构性回退冷（披露面由 runner stderr 承接，此处钉判定函数语义）。"""
+    from godot_qa_toolkit.mutation import runner as _runner
+    proj = tmp_path / "proj"
+    (proj / "addons" / "gut").mkdir(parents=True)
+    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n",
+                                                          encoding="utf-8")
+    ok_full = (proj / "addons" / "gut" / "gut.gd")
+    ok_full.write_text("extends Node\n", encoding="utf-8")
+    assert _runner.os.path.isfile(
+        _runner.os.path.join(str(proj), "addons", "gut", "gut.gd"))
+    ok_full.unlink()
+    assert not _runner.os.path.isfile(
+        _runner.os.path.join(str(proj), "addons", "gut", "gut.gd"))

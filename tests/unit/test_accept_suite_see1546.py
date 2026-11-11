@@ -224,7 +224,9 @@ def test_reverse_probe_extra_script_fails_reconcile(project: Path):
     assert record["ok"] is False
     rules = record["rules"]
     assert rules["generated_eq_selected"] is False
-    assert rules["unselected_absent"] is False
+    # tidy L1（§SPEC-035 R4 语义收窄）：杂散文件对账归 R1 文件集管道——
+    # R4 只管主目录快照一致性（X4 守卫用例保持绿即证）
+    assert rules["unselected_absent"] is True
     assert rules["executed_scripts_eq_generated"] is False
     assert record["cleanup"] == "kept-on-failure"
     assert d.is_dir()  # 失败保留现场

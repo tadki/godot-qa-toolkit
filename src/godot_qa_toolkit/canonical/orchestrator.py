@@ -60,10 +60,60 @@ CERTIFICATION = {
 }
 _BACKUP_BASE = Path(tempfile.gettempdir()) / "gqt-canonical-backups"
 
-# §SPEC-044：inline 探针形态——语句前直插持久句柄 store_string（无
-# GDScript 函数调用、无 append/阈值刷盘），写穿持久由内核保证，reload 续写
-# 不截断；无需注入/收尾（R2 flusher 方案因长跑臂尾部丢失 + 覆盖语义漂移
-# 已废弃）。
+# §SPEC-046：flag 形态的统一落盘由注入的 finalizer autoload 承担——GUT
+# 退出（SceneTree 拆卸 _exit_tree）时逐 sink 排空标记数组（每 sink 一次
+# open+写循环），落盘次数 = 文件数、与命中事件数无关。仅存在于插桩窗口，
+# finally 恢复零残留。
+_AUTOLOAD_NAME = "GqtCovFlusher"
+_FLUSHER_RELPATH = "addons/gqt_cov_flusher.gd"
+_FLUSHER_GD = """extends Node
+# qa-toolkit canonical flag-mode probe finalizer (auto-injected, never in
+# production). At tree exit, drains every registered per-file flag array to
+# its sink: one open + one write loop per file — sink I/O is bounded by file
+# count and never grows with hit event count (§SPEC-046).
+func _exit_tree() -> void:
+\tif not Engine.has_meta("gqt_cov_marks"):
+\t\treturn
+\tvar d: Dictionary = Engine.get_meta("gqt_cov_marks")
+\tfor sink_name in d.keys():
+\t\tvar arr: Array = d[sink_name]
+\t\tvar f = FileAccess.open("user://" + sink_name, FileAccess.READ_WRITE)
+\t\tif f == null:
+\t\t\tf = FileAccess.open("user://" + sink_name, FileAccess.WRITE)
+\t\telse:
+\t\t\tf.seek_end()
+\t\tif f == null:
+\t\t\tpush_error("gqt coverage probe sink open failed: user://" + sink_name)
+\t\t\tcontinue
+\t\tfor i in arr.size():
+\t\t\tif arr[i] == 1:
+\t\t\t\tf.store_line(str(i))
+\t\tf.close()
+"""
+
+
+def _patch_autoload(text: str, entry: str) -> str:
+    """project.godot 的 [autoload] 段尾插入一行 autoload 注册；段缺失则
+    追加新段。只动文本结构，不改既有条目。"""
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == "[autoload]":
+            start = i
+            break
+    if start is None:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        return text + f"\n[autoload]\n{entry}\n"
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].lstrip().startswith("["):
+            end = j
+            break
+    lines.insert(end, entry + "\n")
+    return "".join(lines)
+
+
 
 
 class CanonicalError(Exception):
@@ -98,6 +148,11 @@ def _recover_stale_backups(project_root: Path) -> int:
             continue
         for src, original in record.get("files", {}).items():
             Path(src).write_text(original, encoding="utf-8")
+        pg = record.get("project_godot")
+        if pg is not None:
+            (project_root / "project.godot").write_text(pg, encoding="utf-8")
+        for created in record.get("created", []):
+            Path(created).unlink(missing_ok=True)
         shutil.rmtree(d, ignore_errors=True)
         restored += 1
     return restored
@@ -210,7 +265,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
 
     recovered = _recover_stale_backups(root)
 
-    # §SPEC-044 插桩复用：全集 inline 插桩一次（占位臂 sink 名，等长），
+    # §SPEC-044 插桩复用：全集 flags 插桩一次（占位臂 sink 名，等长），
     # 每臂仅做 sink 名替换，消除逐臂重复 collect/reparse 的 Python 成本。
     # 生成期 re-parse 预检（与单文件 run_coverage 同款）：插桩产物不合法 =
     # 插桩器 bug → 逐文件隔离，拒绝落盘跑假数据。
@@ -220,7 +275,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     inst_base: dict[str, tuple[str, list[int], str]] = {}
     for rel, item in prepared.items():
         sink0 = batch_sink_name(pre_uuid, rel)
-        inst0, manifest = _instrument(item["src"], sink0, inline=True)
+        inst0, manifest = _instrument(item["src"], sink0, flags=True)
         if manifest:
             try:
                 _gd_parser.parse(inst0)
@@ -260,6 +315,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             sink_by_rel[rel] = sink
             manifest_by_rel[rel] = manifest
             instrumented_files[item["abs"]] = inst
+        pg_path = root / "project.godot"
+        if not pg_path.is_file():
+            raise CanonicalError(
+                "cannot inject finalizer autoload: project.godot missing")
+        started["project_godot"] = pg_path.read_text(encoding="utf-8")
+        started["created"] = [str(root / _FLUSHER_RELPATH)]
         (backup_dir / "started.json").write_text(
             json.dumps(started, ensure_ascii=False), encoding="utf-8")
         gut_ok = True
@@ -270,6 +331,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         try:
             for abs_path, inst in instrumented_files.items():
                 Path(abs_path).write_text(inst, encoding="utf-8")
+            pg_path.write_text(
+                _patch_autoload(
+                    started["project_godot"],
+                    f'{_AUTOLOAD_NAME}="*res://{_FLUSHER_RELPATH}"'),
+                encoding="utf-8")
+            flusher_abs = root / _FLUSHER_RELPATH
+            flusher_abs.parent.mkdir(parents=True, exist_ok=True)
+            flusher_abs.write_text(_FLUSHER_GD, encoding="utf-8")
             gut_args: list[str] = []
             if acceptance is not None:
                 suite_rel = Path(acceptance["suite_dir"]).relative_to(root)
@@ -302,6 +371,10 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         finally:
             for abs_path, original in started["files"].items():
                 Path(abs_path).write_text(original, encoding="utf-8")
+            if "project_godot" in started:
+                pg_path.write_text(started["project_godot"], encoding="utf-8")
+            for created in started.get("created", []):
+                Path(created).unlink(missing_ok=True)
             shutil.rmtree(backup_dir, ignore_errors=True)
 
         reconciliation = None

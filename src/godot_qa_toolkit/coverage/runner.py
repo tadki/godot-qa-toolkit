@@ -252,44 +252,42 @@ def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
 
 
 def _probe_calls(src: str, line_to_id: dict[int, int],
-                 inline: bool = False) -> list[str]:
+                 flags: bool = False) -> list[str]:
     """每个可执行语句前插一行探针调用（整数 probe_id）。
 
-    inline 形态（§SPEC-044）：语句前直插持久句柄的 native 写（无 GDScript
-    函数调用、无 append、无阈值刷盘、无退出收尾——write-through 由内核
-    保证持久）。direct 形态保持既有逐 id 函数形态，单文件/risk 路径字节
-    不变。"""
+    flags 形态（§SPEC-046）：语句前只做内存 flag 标记（预置尺寸静态 Array
+    的索引写）——零 I/O、零函数调用、零 append，写入（落盘）次数由统一
+    收尾决定、不随事件数增长。direct 形态保持既有逐 id 函数形态，单文件/
+    risk 路径字节不变。"""
     out = []
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
         if idx in line_to_id:
             indent = re.match(r"^(\s*)", line_text).group(1)
-            if inline:
-                out.append(
-                    f"{indent}{_PROBE_PREFIX}f.store_string(\"{line_to_id[idx]}\\n\")\n")
+            if flags:
+                out.append(f"{indent}{_PROBE_PREFIX}m[{line_to_id[idx]}] = 1\n")
             else:
                 out.append(f"{indent}{_PROBE_PREFIX}{line_to_id[idx]}()\n")
         out.append(line_text)
     return out
 
 
-def _inline_probe_block(sink_name: str) -> str:
-    """inline 探针机制：文件级静态持久句柄（打开一次，进程退出由内核收
-    尾）。READ_WRITE+seek_end 的 append 语义——脚本 reload 重新初始化时
-    续写不截断（修 R2 buffered 的 reload 丢尾部问题）。打开失败 push_error
-    一次性显式暴露（写侧静默失败被禁止）。"""
+def _flag_probe_block(sink_name: str, count: int) -> str:
+    """flag 标记注册块：per-file 预置尺寸静态 Array，经 Engine meta 注册
+    （Godot 4.6 实证：脚本 reload 重跑不发生但 static Array 身份保留——
+    跨 reload 合并由共享引用自然成立）。落盘由注入的 finalizer 在 suite
+    结束统一完成：写次数 = 文件数，与命中事件数无关。"""
     return (
         f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
-        f"static var {_PROBE_PREFIX}f = {_PROBE_PREFIX}open_sink()\n"
+        f"static var {_PROBE_PREFIX}m: Array = {_PROBE_PREFIX}reg()\n"
         f"\n"
-        f"static func {_PROBE_PREFIX}open_sink():\n"
-        f"\tvar f = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.READ_WRITE)\n"
-        f"\tif f == null:\n"
-        f"\t\tf = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.WRITE)\n"
-        f"\telse:\n"
-        f"\t\tf.seek_end()\n"
-        f"\tif f == null:\n"
-        f"\t\tpush_error(\"gqt coverage probe sink open failed: {_SINK_DIR_MARKER}{sink_name}\")\n"
-        f"\treturn f\n"
+        f"static func {_PROBE_PREFIX}reg() -> Array:\n"
+        f"\tvar d: Dictionary = Engine.get_meta(\"gqt_cov_marks\")"
+        f" if Engine.has_meta(\"gqt_cov_marks\") else {{}}\n"
+        f"\tvar arr: Array = d.get(\"{sink_name}\", [])\n"
+        f"\tarr.resize({count})\n"
+        f"\td[\"{sink_name}\"] = arr\n"
+        f"\tEngine.set_meta(\"gqt_cov_marks\", d)\n"
+        f"\treturn arr\n"
     )
 
 
@@ -325,22 +323,22 @@ def _probe_func(sink_name: str, count: int) -> str:
 
 
 def _instrument(src: str, sink_name: str,
-                inline: bool = False) -> tuple[str, list[int]]:
+                flags: bool = False) -> tuple[str, list[int]]:
     """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
     文件尾追加探针机制。返回 (插桩源码, probe_id→行号 manifest)。
 
-    inline=True（§SPEC-044 canonical 批式臂）：语句前直插持久句柄
-    store_string（无 GDScript 函数调用、无缓冲/刷盘、写穿持久、reload
-    续写不截断）；direct（缺省）保持既有逐命中追加写形态，单文件/risk
+    flags=True（§SPEC-046 canonical 批式臂）：命中点只做内存 flag 标记
+    （预置尺寸静态 Array 索引写），落盘由编排器注入的 finalizer 在 suite
+    结束统一完成；direct（缺省）保持既有逐命中追加写形态，单文件/risk
     路径行为与产物字节不变。"""
     manifest = _build_manifest(_collect_executable_lines(src))
     line_to_id = {line: i for i, line in enumerate(manifest)}
-    if inline and not manifest:
+    if flags and not manifest:
         # 零可执行行：无探针面，插桩产物 = 原文（vacuous 车道在编排器落）
         return src, manifest
-    body = "".join(_probe_calls(src, line_to_id, inline))
-    if inline:
-        return body + _inline_probe_block(sink_name), manifest
+    body = "".join(_probe_calls(src, line_to_id, flags))
+    if flags:
+        return body + _flag_probe_block(sink_name, len(manifest)), manifest
     return body + _probe_func(sink_name, len(manifest)), manifest
 
 

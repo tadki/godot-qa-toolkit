@@ -162,7 +162,8 @@ def _recover_stale_backups(project_root: Path) -> int:
 
 def _run_one_gut(project_root: Path, gut_args: list[str],
                  timeout_s: int,
-                 env: dict | None = None
+                 env: dict | None = None,
+                 gate_root: Path | None = None
                  ) -> tuple[subprocess.CompletedProcess, float]:
     t0 = time.monotonic()
     gut = project_root / "addons" / "gut" / "gut_cmdln.gd"
@@ -170,7 +171,7 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
         raise CanonicalError(f"GUT runner not found: {gut}")
     argv = [godot_command(), "--headless", "--path", str(project_root),
             "-s", "res://addons/gut/gut_cmdln.gd", *gut_args, "-gexit"]
-    with GlobalGodotGate(str(project_root)):
+    with GlobalGodotGate(str(gate_root or project_root)):
         try:
             r = subprocess.run(argv, capture_output=True, text=True,
                                timeout=timeout_s, cwd=str(project_root),
@@ -215,13 +216,41 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
     return [g for g in groups if g]
 
 
+def _prepare_shadow(base_root: Path, run_uuid: str, idx: int) -> Path:
+    """§SPEC-056：分片独立 project shadow——源码/resource 状态与基准树
+    完全一致（hardlink farm，零拷贝成本），`.godot` 引擎缓存实拷贝隔离，
+    杜绝多 Godot 进程争用同一项目目录缓存。junit 硬链断开放分片自写。"""
+    import subprocess as _sp
+
+    shadow = Path(tempfile.mkdtemp(
+        prefix=f"gqt-shadow-{run_uuid[:8]}-{idx}-"))
+    entries = [e for e in base_root.iterdir() if e.name != ".godot"]
+    for e in entries:
+        _sp.run(["cp", "-al", str(e), str(shadow / e.name)], check=True)
+    godot_cache = base_root / ".godot"
+    if godot_cache.is_dir():
+        _sp.run(["cp", "-a", str(godot_cache),
+                 str(shadow / ".godot")], check=True)
+    junit = shadow / "tests" / "reports" / "junit_report.xml"
+    if junit.is_file():
+        junit.unlink()
+    return shadow
+
+
+def _cleanup_shadow(shadow: Path | None) -> None:
+    if shadow is not None:
+        shutil.rmtree(shadow, ignore_errors=True)
+
+
 def _shard_user_dir(xdg_home: str, project_name: str) -> Path:
     return Path(xdg_home) / "godot" / "app_userdata" / project_name
 
 
 def _read_hits_merged(root: Path, run_uuid: str, rel: str,
                       manifest: list[int],
-                      xdg_homes: list[str]) -> tuple[set[int], int]:
+                      xdg_homes: list[str],
+                      retain_dir: Path | None = None
+                      ) -> tuple[set[int], int]:
     """并行分片臂的合并读回：sink 名含进程 PID（`...-<uuid>-<pid>-<key8>`
     .txt），按 run_uuid+key8 模式跨全部分片 user:// 目录取并集。"""
     key8 = file_key8(rel)
@@ -235,7 +264,11 @@ def _read_hits_merged(root: Path, run_uuid: str, rel: str,
             files.extend(sorted(d.glob(name)))
     for f in files:
         try:
-            for ln in f.read_text(encoding="utf-8").splitlines():
+            text = f.read_text(encoding="utf-8")
+            if retain_dir is not None:
+                retain_dir.mkdir(parents=True, exist_ok=True)
+                (retain_dir / f.name).write_text(text, encoding="utf-8")
+            for ln in text.splitlines():
                 ln = ln.strip()
                 if ln.isdigit():
                     ids.append(int(ln))
@@ -288,7 +321,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   scope_roots: list[str] | None = None,
                   block_compress: bool = True,
                   shard_width: int = 6,
-                  acceptance_shards: int = 4) -> dict:
+                  acceptance_shards: int = 4,
+                  shard_log_dir: str | None = None,
+                  stability_baseline: str | None = None) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
@@ -474,20 +509,34 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-")
             env = dict(os.environ)
             env["XDG_DATA_HOME"] = xdg
+            shadow = None
             try:
-                r, _w = _run_one_gut(root, plan["args"], timeout_s, env=env)
-                return {"plan": plan, "xdg": xdg, "rc": r.returncode,
-                        "out": (r.stdout or "") + "\n" + (r.stderr or ""),
-                        "timed_out": False}
+                # §SPEC-056：分片独立 project shadow（独立 .godot）
+                shadow = _prepare_shadow(root, run_uuid, idx)
+                r, _w = _run_one_gut(shadow, plan["args"], timeout_s,
+                                     env=env, gate_root=root)
+                out = (r.stdout or "") + "\n" + (r.stderr or "")
+                rc = r.returncode
+                timed_out = False
             except CanonicalError as e:
                 te = getattr(e, "__cause__", None)
                 tail = ""
                 if te is not None:
                     tail = ((getattr(te, "stdout", "") or "") + "\n" +
                             (getattr(te, "stderr", "") or ""))
-                return {"plan": plan, "xdg": xdg, "rc": None,
-                        "out": str(e) + "\n" + tail[-2000:],
-                        "timed_out": True}
+                out = str(e) + "\n" + tail
+                rc = None
+                timed_out = True
+            finally:
+                _cleanup_shadow(shadow)
+            if shard_log_dir:
+                log_dir = Path(shard_log_dir)
+                log_dir.mkdir(parents=True, exist_ok=True)
+                (log_dir / f"{name}-shard{idx}.log").write_text(
+                    out, encoding="utf-8")
+            return {"plan": plan, "xdg": xdg, "rc": rc,
+                    "out": out[-6000:] if timed_out else out,
+                    "timed_out": timed_out}
 
         try:
             for abs_path, inst in instrumented_files.items():
@@ -551,8 +600,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         bundles: dict[str, dict] = {}
         for rel, sink in sink_by_rel.items():
             item = prepared[rel]
+            retain = (Path(shard_log_dir) / f"{name}-sinks"
+                      if shard_log_dir else None)
             hits, probes_fired = _read_hits_merged(
-                root, run_uuid, rel, manifest_by_rel[rel], xdg_homes)
+                root, run_uuid, rel, manifest_by_rel[rel], xdg_homes,
+                retain_dir=retain)
             block_map = prepared[rel].get("block_map") or {}
             if block_map:
                 # §SPEC-055：块入口命中 → 块内全部语句起始行
@@ -614,6 +666,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
             "shards": len(plans),
+            "shadowed": True,
         }
 
     # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
@@ -662,8 +715,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         for u in unions:
             u["comparable"] = False
             u["comparable_reason"] = "subset_targets"
+    baseline_lines = (_load_baseline_lines(stability_baseline)
+                      if stability_baseline else {})
+    unstable_keys = (_unstable_keys(unions, baseline_lines)
+                     if baseline_lines else set())
     crap_records, crap_lanes, crap_version = _crap_records_for_report(
-        unions, prepared, recipe_hash)
+        unions, prepared, recipe_hash, unstable_keys)
     # §SPEC-043 measurable 子集披露：vacuous / no_probe_fired 文件归
     # unmeasurable（本就无可测数据），其余 union 无效仍属 measurable 失败
     # （超时/契约违约等），禁止静默排除——measurable + unmeasurable == 全集。
@@ -723,6 +780,10 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             },
             "comparable": scope_complete,
             "comparable_reason": comparable_reason,
+            "stability": {
+                "baseline": stability_baseline,
+                "unstable_functions": len(unstable_keys),
+            },
         },
         "preparation": {
             "cache": {"hits": cache_hits, "misses": cache_misses,
@@ -752,7 +813,8 @@ def _lane_from_reason(reason: str | None) -> str:
     return "invalid"
 
 
-def _crap_records_for_report(unions, prepared, recipe_hash):
+def _crap_records_for_report(unions, prepared, recipe_hash,
+                             unstable_keys: set | None = None):
     """§SPEC-053：函数级 CRAP 记录——union 行集（C/I）与 registry 的
     identity/CC 按 fid 连接；任何失败/无分母车道一律 score=None。"""
     from ..risk.contract import build_shadow_record
@@ -761,6 +823,8 @@ def _crap_records_for_report(unions, prepared, recipe_hash):
     by_file = {u["file"]: u for u in unions}
     records: list[dict] = []
     lanes: dict[str, int] = {}
+
+    unstable_keys = unstable_keys or set()
 
     def _emit(rel: str, entry: dict, *, state: str,
               covered: int | None = None, total: int | None = None) -> None:
@@ -799,11 +863,45 @@ def _crap_records_for_report(unions, prepared, recipe_hash):
             if row is None or int(row.get("total") or 0) <= 0:
                 # 缺分母/未入 probe 面：unknown 不出分（不冒充 100%）
                 _emit(rel, e, state="unknown")
+            elif ("res://" + rel, e["fid"]) in unstable_keys:
+                # §SPEC-056：跨 run 抖动函数 → 显式 unstable 车道，不出分
+                _emit(rel, e, state="unstable",
+                      covered=int(row["covered"]),
+                      total=int(row["total"]))
             else:
                 _emit(rel, e, state="scored",
                       covered=int(row["covered"]),
                       total=int(row["total"]))
     return records, lanes, CRAP_LINE_VERSION
+
+
+def _load_baseline_lines(path: str) -> dict:
+    """§SPEC-056 stability baseline：读取历史 canonical 报告的逐 fid 行集。"""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise CanonicalError(
+            f"stability baseline unreadable: {path}: {e}") from e
+    out: dict = {}
+    for u in doc.get("unions") or []:
+        if u.get("union") is None:
+            continue
+        out[u["file"]] = {row["fid"]: frozenset(row["covered_line_ids"])
+                          for row in u["union"].get("per_fid") or []}
+    return out
+
+
+def _unstable_keys(unions, baseline_lines: dict) -> set:
+    keys: set = set()
+    for u in unions:
+        if u.get("union") is None:
+            continue
+        base = baseline_lines.get(u["file"], {})
+        for row in u["union"].get("per_fid") or []:
+            fid = row["fid"]
+            if fid in base and base[fid] != frozenset(row["covered_line_ids"]):
+                keys.add((u["file"], fid))
+    return keys
 
 
 def _safe_log_label(label: str) -> str:

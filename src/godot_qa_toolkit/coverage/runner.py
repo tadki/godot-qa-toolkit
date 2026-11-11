@@ -14,6 +14,7 @@ kill rate 与覆盖率均不进验收证据（owner-order L5 条文）。
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -286,24 +287,41 @@ def _flag_var_name(sink_name: str) -> str:
     return f"{_PROBE_PREFIX}m_{_flag_var_suffix(sink_name)}"
 
 
-def _flag_probe_block(sink_name: str, count: int) -> str:
+def _flag_probe_block(sink_name: str, count: int,
+                      runtime_sink: bool = False) -> str:
     """flag 标记注册块：per-file 预置尺寸静态 Array（变量名带文件 key8
     去继承冲突），经 Engine meta 注册（Godot 4.6 实证：脚本 reload 重跑
     不发生但 static Array 身份保留——跨 reload 合并由共享引用自然成立）。
     落盘由注入的 finalizer 在 suite 结束统一完成：写次数 = 文件数，与
-    命中事件数无关。"""
+    命中事件数无关。
+
+    runtime_sink=True（canonical 并行分片臂）：sink 名拼接进程 PID——
+    同一棵插桩树可被多个 GUT 进程并发执行而互不写串（每进程独立 sink，
+    读取侧按 run_uuid+key8 模式合并）。"""
     var = _flag_var_name(sink_name)
-    reg = f"{_PROBE_PREFIX}reg_{_flag_var_suffix(sink_name)}"
+    key8 = _flag_var_suffix(sink_name)
+    reg = f"{_PROBE_PREFIX}reg_{key8}"
+    if runtime_sink:
+        sink_var = f"{_PROBE_PREFIX}sink_{key8}"
+        head = sink_name.rsplit("-", 1)
+        sink_expr = (f"\"{head[0]}-\" + str(OS.get_process_id()) + "
+                     f"\"-{key8}.txt\"")
+        sink_decl = f"static var {sink_var}: String = {sink_expr}\n"
+        sink_ref = sink_var
+    else:
+        sink_decl = ""
+        sink_ref = f"\"{sink_name}\""
     return (
         f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
+        f"{sink_decl}"
         f"static var {var}: Array = {reg}()\n"
         f"\n"
         f"static func {reg}() -> Array:\n"
         f"\tvar d: Dictionary = Engine.get_meta(\"gqt_cov_marks\")"
         f" if Engine.has_meta(\"gqt_cov_marks\") else {{}}\n"
-        f"\tvar arr: Array = d.get(\"{sink_name}\", [])\n"
+        f"\tvar arr: Array = d.get({sink_ref}, [])\n"
         f"\tarr.resize({count})\n"
-        f"\td[\"{sink_name}\"] = arr\n"
+        f"\td[{sink_ref}] = arr\n"
         f"\tEngine.set_meta(\"gqt_cov_marks\", d)\n"
         f"\treturn arr\n"
     )
@@ -340,8 +358,71 @@ def _probe_func(sink_name: str, count: int) -> str:
     return code
 
 
-def _instrument(src: str, sink_name: str,
-                flags: bool = False) -> tuple[str, list[int]]:
+# §SPEC-055：基本块压缩——控制转移/控制结构/缩进变化处切块。同一直线段
+# 内语句总是一起执行，块入口探针命中即代表块内全部语句起始行被执行
+# （line-coverage 语义精确等价；运行期报错继续执行时亦然）。
+_BLOCK_BREAKER_NODES = frozenset(
+    {"return_stmt", "break_stmt", "continue_stmt"})
+_BLOCK_COMPOUND_NODES = frozenset(
+    {"if_branch", "elif_branch", "else_branch", "for_stmt", "while_stmt",
+     "match_stmt", "match_branch"})
+
+
+def _blocks_from_execs(execs, src: str) -> dict[int, list[int]]:
+    lines = src.splitlines()
+    blocks: dict[int, list[int]] = {}
+    run: list[int] = []
+
+    def _flush() -> None:
+        nonlocal run
+        if run:
+            blocks[run[0]] = run
+            run = []
+
+    prev = None
+    for e in sorted(execs, key=lambda x: x.line):
+        if not (0 < e.line <= len(lines)):
+            continue
+        indent = len(re.match(r"^(\s*)", lines[e.line - 1]).group(1))
+        start_new = prev is None
+        if not start_new:
+            p_line, p_node, p_indent = prev
+            if e.line != p_line + 1:
+                start_new = True
+            elif e.node in _BLOCK_COMPOUND_NODES:
+                start_new = True
+            elif indent != p_indent:
+                start_new = True
+            elif p_node in _BLOCK_BREAKER_NODES:
+                start_new = True
+        if start_new:
+            _flush()
+        run.append(e.line)
+        if e.node in _BLOCK_BREAKER_NODES:
+            _flush()
+        prev = (e.line, e.node, indent)
+    _flush()
+    return blocks
+
+
+def _instrument_blocks(src: str, sink_name: str,
+                       runtime_sink: bool = False
+                       ) -> tuple[str, list[int], dict[int, list[int]]]:
+    """§SPEC-055 块压缩插桩：仅块入口行插 flag 探针；返回
+    (插桩源码, 块入口行清单, 块入口→块内全部起始行映射)。"""
+    execs = list(_collect_executable_lines(src))
+    bmap = _blocks_from_execs(execs, src)
+    starts = sorted(bmap)
+    if not starts:
+        return src, [], {}
+    line_to_id = {ln: i for i, ln in enumerate(starts)}
+    fb = "".join(_probe_calls(src, line_to_id, True, sink_name))
+    return (fb + _flag_probe_block(sink_name, len(starts), runtime_sink),
+            starts, bmap)
+
+
+def _instrument(src: str, sink_name: str, flags: bool = False,
+                runtime_sink: bool = False) -> tuple[str, list[int]]:
     """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
     文件尾追加探针机制。返回 (插桩源码, probe_id→行号 manifest)。
 
@@ -356,7 +437,8 @@ def _instrument(src: str, sink_name: str,
         return src, manifest
     body = "".join(_probe_calls(src, line_to_id, flags, sink_name))
     if flags:
-        return body + _flag_probe_block(sink_name, len(manifest)), manifest
+        return (body + _flag_probe_block(sink_name, len(manifest),
+                                         runtime_sink), manifest)
     return body + _probe_func(sink_name, len(manifest)), manifest
 
 

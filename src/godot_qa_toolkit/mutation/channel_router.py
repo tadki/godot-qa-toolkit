@@ -31,6 +31,8 @@ _RES_REF_PATTERN = re.compile(r'\b(?:preload|load)\s*\(\s*"([^"]+)"\s*\)')
 _CLASS_NAME_DECL = re.compile(r"^class_name\s+([A-Za-z_]\w*)", re.MULTILINE)
 # .tscn/.tres ext_resource 的 path 属性
 _EXT_RESOURCE_PATH = re.compile(r'path\s*=\s*"(res://[^"]+)"')
+# 场景缓存持有形态的文件后缀（R-DW4：闭包成员持有者 → 冷）
+_SCENE_EXT = (".tscn", ".tres")
 GUT_DOMAIN_PREFIX = "res://addons/gut/"
 _EXCLUDED_DIRS = {".git", ".qa-cache", ".godot"}
 
@@ -38,6 +40,7 @@ REASON_TARGET_IN_AUTOLOAD = "target_in_autoload_table"
 REASON_CLOSURE_MEMBER_IN_AUTOLOAD = "closure_member_in_autoload_table"
 REASON_TARGET_IN_GUT_DOMAIN = "target_in_gut_domain"
 REASON_CLOSURE_INTERSECTS_GUT_DOMAIN = "closure_intersects_gut_domain"
+REASON_CLOSURE_SCENE_CACHED = "closure_scene_cached"
 REASON_ELIGIBLE_WORKER = "eligible_worker"
 
 CHANNEL_COLD = "cold"
@@ -168,6 +171,34 @@ def _cached_autoload_table(project_root: str) -> dict[str, str]:
     return parse_autoload_table(project_root)
 
 
+def _scene_cached_members(graph: dict[str, set[str]],
+                          closure: tuple[str, ...]) -> list[str]:
+    """被 .tscn/.tres ext_resource 持有的闭包成员（场景缓存持有形态）。
+
+    PackedScene 在加载时即把成员脚本对象绑定进缓存，常驻 worker 的腿间
+    重置对该缓存不可达（R-DW4 Owner 裁决：场景持有者全路由冷通道，指针
+    旁路彻底退役）。保守方向：命中任一场景持有者即冷（丢速度不丢正确性）。"""
+    return [m for m in closure
+            if any(h.endswith(_SCENE_EXT) for h in graph.get(m, ()))]
+
+
+def _collect_route_reasons(target_res, closure, graph, autoload_table):
+    """排除语义 reason 码全量收集（autoload 表 / GUT 域 / 场景缓存持有）。"""
+    reasons: list[str] = []
+    if target_res in autoload_table:
+        reasons.append(REASON_TARGET_IN_AUTOLOAD)
+    if target_res and _in_gut_domain(target_res):
+        reasons.append(REASON_TARGET_IN_GUT_DOMAIN)
+    for member in closure:
+        if member != target_res and member in autoload_table:
+            reasons.append(f"{REASON_CLOSURE_MEMBER_IN_AUTOLOAD}:{member}")
+        if member != target_res and _in_gut_domain(member):
+            reasons.append(f"{REASON_CLOSURE_INTERSECTS_GUT_DOMAIN}:{member}")
+    for member in _scene_cached_members(graph, closure):
+        reasons.append(f"{REASON_CLOSURE_SCENE_CACHED}:{member}")
+    return reasons
+
+
 def route_target(project_root: str, target_res: str,
                  graph: dict[str, set[str]] | None = None,
                  autoload_table: dict[str, str] | None = None,
@@ -179,16 +210,10 @@ def route_target(project_root: str, target_res: str,
         if graph is None:
             graph = _cached_graph(project_root)
         closure = compute_reload_closure(graph, target_res)
-    reasons: list[str] = []
-    if target_res in autoload_table:
-        reasons.append(REASON_TARGET_IN_AUTOLOAD)
-    if target_res and _in_gut_domain(target_res):
-        reasons.append(REASON_TARGET_IN_GUT_DOMAIN)
-    for member in closure:
-        if member != target_res and member in autoload_table:
-            reasons.append(f"{REASON_CLOSURE_MEMBER_IN_AUTOLOAD}:{member}")
-        if member != target_res and _in_gut_domain(member):
-            reasons.append(f"{REASON_CLOSURE_INTERSECTS_GUT_DOMAIN}:{member}")
+    if graph is None:
+        graph = _cached_graph(project_root)
+    reasons = _collect_route_reasons(target_res, closure, graph,
+                                     autoload_table)
     channel = CHANNEL_COLD if reasons else CHANNEL_WORKER
     if not reasons:
         reasons.append(REASON_ELIGIBLE_WORKER)

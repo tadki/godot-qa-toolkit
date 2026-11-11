@@ -60,6 +60,58 @@ CERTIFICATION = {
 }
 _BACKUP_BASE = Path(tempfile.gettempdir()) / "gqt-canonical-backups"
 
+# §SPEC-040：buffered 探针的尾部刷盘由注入的 flusher autoload 承担——GUT
+# 退出（SceneTree 拆卸 _exit_tree）时排空 Engine meta 里各文件注册的缓冲，
+# 阈值刷盘之间的尾部命中不因进程正常退出而丢失；超时 kill 场景尾部丢失，
+# 但该臂本就 invalid（timed_out）。仅存在于插桩窗口，finally 恢复零残留。
+_AUTOLOAD_NAME = "GqtCovFlusher"
+_FLUSHER_RELPATH = "addons/gqt_cov_flusher.gd"
+_FLUSHER_GD = """extends Node
+# qa-toolkit canonical buffered-probe tail flusher (auto-injected, never in
+# production). Drains every instrumented file's registered buffer at tree
+# exit; buffer Arrays are shared by reference via the Engine meta dict.
+func _exit_tree() -> void:
+\tif not Engine.has_meta("gqt_cov_bufs"):
+\t\treturn
+\tvar d: Dictionary = Engine.get_meta("gqt_cov_bufs")
+\tfor sink_name in d.keys():
+\t\tvar arr: Array = d[sink_name]
+\t\tif arr.is_empty():
+\t\t\tcontinue
+\t\tvar f = FileAccess.open("user://" + sink_name, FileAccess.READ_WRITE)
+\t\tif f == null:
+\t\t\tf = FileAccess.open("user://" + sink_name, FileAccess.WRITE)
+\t\telse:
+\t\t\tf.seek_end()
+\t\tif f:
+\t\t\tfor pid in arr:
+\t\t\t\tf.store_line(str(pid))
+\t\t\tf.close()
+\t\tarr.clear()
+"""
+
+
+def _patch_autoload(text: str, entry: str) -> str:
+    """project.godot 的 [autoload] 段尾插入一行 autoload 注册；段缺失则
+    追加新段。只动文本结构，不改既有条目。"""
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == "[autoload]":
+            start = i
+            break
+    if start is None:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        return text + f"\n[autoload]\n{entry}\n"
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].lstrip().startswith("["):
+            end = j
+            break
+    lines.insert(end, entry + "\n")
+    return "".join(lines)
+
 
 class CanonicalError(Exception):
     """canonical 编排入参/前置违例（recipe 非法、目标缺失、GUT 缺失）。"""
@@ -93,6 +145,11 @@ def _recover_stale_backups(project_root: Path) -> int:
             continue
         for src, original in record.get("files", {}).items():
             Path(src).write_text(original, encoding="utf-8")
+        pg = record.get("project_godot")
+        if pg is not None:
+            (project_root / "project.godot").write_text(pg, encoding="utf-8")
+        for created in record.get("created", []):
+            Path(created).unlink(missing_ok=True)
         shutil.rmtree(d, ignore_errors=True)
         restored += 1
     return restored
@@ -205,9 +262,30 @@ def run_canonical(project_root: str | Path, target_files: list[str],
 
     recovered = _recover_stale_backups(root)
 
+    # §SPEC-040 插桩复用：全集 buffered 插桩一次（占位臂 sink 名，等长），
+    # 每臂仅做 sink 名替换，消除逐臂重复 collect/reparse 的 Python 成本。
+    # 生成期 re-parse 预检（与单文件 run_coverage 同款）：插桩产物不合法 =
+    # 插桩器 bug → 逐文件隔离，拒绝落盘跑假数据。
+    from gdtoolkit.parser import parser as _gd_parser
+
+    pre_uuid = make_run_uuid()
+    inst_base: dict[str, tuple[str, list[int], str]] = {}
+    for rel, item in prepared.items():
+        sink0 = batch_sink_name(pre_uuid, rel)
+        inst0, manifest = _instrument(item["src"], sink0, buffered=True)
+        if manifest:
+            try:
+                _gd_parser.parse(inst0)
+            except Exception as e:  # noqa: BLE001 — 逐文件隔离，不阻断全集
+                unmeasured.append({"file": rel,
+                                   "reason": f"instrument_parse_error:{e}"})
+                continue
+        inst_base[rel] = (inst0, manifest, sink0)
+
     def _arm(name: str, acceptance: dict | None = None) -> dict:
-        """一条批式臂：全集插桩（臂专属 sink 名）→ 1 次 GUT → 逐文件
-        sink 读回 → bundle → 恢复/清理。"""
+        """一条批式臂：复用全集插桩（臂专属 sink 名替换）→ 1 次 GUT →
+        逐文件 sink 读回 → bundle → 恢复/清理。零可执行行文件进显式
+        vacuous 车道（§SPEC-042），不再误报 no_probe_fired。"""
         run_uuid = make_run_uuid()
         backup_dir = _BACKUP_BASE / run_uuid
         backup_dir.mkdir(parents=True)
@@ -216,22 +294,30 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         sink_by_rel: dict[str, str] = {}
         manifest_by_rel: dict[str, list[int]] = {}
         instrumented_files: dict[str, str] = {}
+        vacuous_rels: list[str] = []
         for rel, item in prepared.items():
-            sink = batch_sink_name(run_uuid, rel)
-            inst, manifest = _instrument(item["src"], sink)
-            # 生成期 re-parse 预检（与单文件 run_coverage 同款）：插桩产物
-            # 不合法 = 插桩器 bug → 逐文件隔离，拒绝落盘跑假数据
-            try:
-                from gdtoolkit.parser import parser as _gd_parser
-                _gd_parser.parse(inst)
-            except Exception as e:  # noqa: BLE001
-                unmeasured.append({"file": rel,
-                                   "reason": f"instrument_parse_error:{e}"})
+            if rel not in inst_base:
+                continue  # 插桩失败已隔离进 unmeasured
+            inst0, manifest, sink0 = inst_base[rel]
+            if not manifest:
+                vacuous_rels.append(rel)
                 continue
+            sink = batch_sink_name(run_uuid, rel)
+            inst = inst0.replace(sink0, sink)
+            if inst.count(sink) != inst0.count(sink0):
+                raise CanonicalError(
+                    f"sink substitution mismatch for {rel}: "
+                    f"{inst0.count(sink0)} -> {inst.count(sink)}")
             started["files"][item["abs"]] = item["src"]
             sink_by_rel[rel] = sink
             manifest_by_rel[rel] = manifest
             instrumented_files[item["abs"]] = inst
+        pg_path = root / "project.godot"
+        if not pg_path.is_file():
+            raise CanonicalError(
+                "cannot inject flusher autoload: project.godot missing")
+        started["project_godot"] = pg_path.read_text(encoding="utf-8")
+        started["created"] = [str(root / _FLUSHER_RELPATH)]
         (backup_dir / "started.json").write_text(
             json.dumps(started, ensure_ascii=False), encoding="utf-8")
         gut_ok = True
@@ -242,6 +328,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         try:
             for abs_path, inst in instrumented_files.items():
                 Path(abs_path).write_text(inst, encoding="utf-8")
+            pg_path.write_text(
+                _patch_autoload(
+                    started["project_godot"],
+                    f'{_AUTOLOAD_NAME}="*res://{_FLUSHER_RELPATH}"'),
+                encoding="utf-8")
+            flusher_abs = root / _FLUSHER_RELPATH
+            flusher_abs.parent.mkdir(parents=True, exist_ok=True)
+            flusher_abs.write_text(_FLUSHER_GD, encoding="utf-8")
             gut_args: list[str] = []
             if acceptance is not None:
                 suite_rel = Path(acceptance["suite_dir"]).relative_to(root)
@@ -258,15 +352,26 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     gut_ok = False
                     run_error = True
             except CanonicalError as e:
-                # 超时：墙钟如实记录（超时也是门量证据），哨兵记 timeout
+                # 超时：墙钟如实记录（超时也是门量证据），哨兵记 timeout；
+                # 保留子进程部分输出尾（诊断挂死阶段，不改变 invalid 判定）
                 gut_ok = False
                 run_error = True
                 timed_out = True
                 wall_s = time.monotonic() - t_gut
-                output = str(e)
+                partial_out = ""
+                partial_err = ""
+                if getattr(e, "__cause__", None) is not None:
+                    te = e.__cause__
+                    partial_out = getattr(te, "stdout", "") or ""
+                    partial_err = getattr(te, "stderr", "") or ""
+                output = str(e) + "\n" + (partial_out + partial_err)[-2000:]
         finally:
             for abs_path, original in started["files"].items():
                 Path(abs_path).write_text(original, encoding="utf-8")
+            if "project_godot" in started:
+                pg_path.write_text(started["project_godot"], encoding="utf-8")
+            for created in started.get("created", []):
+                Path(created).unlink(missing_ok=True)
             shutil.rmtree(backup_dir, ignore_errors=True)
 
         reconciliation = None
@@ -274,9 +379,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         invalid_reason = ("timeout" if timed_out
                           else ("run_error" if run_error else None))
         if acceptance is not None and not run_error:
-            # §SPEC-035 对账五项：任一 false → 臂 invalid；对账后清理私有
-            # 目录（canonical 零残留，不保留现场）。run_error（含超时）时
-            # 运行流证据不可信，对账不产生误导性记录，直接落 run_error。
+            # §SPEC-035 对账五项：任一 false → 臂 invalid。run_error（含
+            # 超时）时运行流证据不可信，对账不产生误导性记录，直接落
+            # run_error；私有目录的清理不再依赖该分支（超时同样零残留）。
             reconciliation = reconcile(
                 root, acceptance["suite_dir"], acceptance["keys"], output,
                 replay_ok=True,
@@ -284,6 +389,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             if not reconciliation["ok"]:
                 arm_valid = False
                 invalid_reason = "reconciliation_failed"
+        if acceptance is not None:
+            # 超时/run_error 臂同样清理私有目录——canonical 零残留不分区
+            # 成败（§SPEC-041 同款：残留即泄漏，首轮 R1 冒烟实证泄漏）。
             _cleanup_suite_dir(Path(acceptance["suite_dir"]))
 
         bundles: dict[str, dict] = {}
@@ -311,6 +419,28 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 update_run_record(evidence_dir, run_uuid,
                                   status="bundle_written")
             clear_sink(None, str(root), sink)
+        for rel in vacuous_rels:
+            # §SPEC-042：零可执行行 → 显式 vacuous 车道（bundle 落盘、
+            # union 按 §SPEC-036 严格语义仍 invalid，reason=vacuous）
+            item = prepared[rel]
+            bundle = build_bundle(
+                run_uuid=run_uuid, file_path="res://" + rel,
+                gd_source=item["src"], tests_glob=None,
+                registry=item["registry"],
+                probe_manifest=item["probe_manifest"],
+                hits_lines=[], probes_fired=0,
+                gut_ok=gut_ok, run_error=run_error, timeout=timed_out,
+                zero_tests=False, vacuous=True, arm=name)
+            bundles[rel] = bundle
+            if evidence_dir is not None:
+                record = build_run_record(
+                    run_uuid=run_uuid, file_path="res://" + rel,
+                    gd_source=item["src"], tests_glob=None,
+                    probe_manifest=item["probe_manifest"], arm=name)
+                write_run_record(evidence_dir, record)
+                write_bundle(evidence_dir, bundle)
+                update_run_record(evidence_dir, run_uuid,
+                                  status="bundle_written")
         return {
             "arm": name, "run_uuid": run_uuid, "wall_s": round(wall_s, 3),
             "gut_ok": gut_ok, "timed_out": timed_out,
@@ -355,6 +485,22 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                                    wall_s=arm_b["wall_s"])
         unions.append(union_file(a, b, canonical_recipe_hash=recipe_hash))
     union_valid = bool(unions) and all(u["valid"] for u in unions)
+    # §SPEC-043 measurable 子集披露：vacuous / no_probe_fired 文件归
+    # unmeasurable（本就无可测数据），其余 union 无效仍属 measurable 失败
+    # （超时/契约违约等），禁止静默排除——measurable + unmeasurable == 全集。
+    unmeasurable: list[dict] = []
+    measurable_files = 0
+    measurable_valid = 0
+    for u in unions:
+        if u["valid"]:
+            measurable_files += 1
+            measurable_valid += 1
+            continue
+        reason = u.get("invalid_reason") or ""
+        if "no_probe_fired" in reason or "vacuous" in reason:
+            unmeasurable.append({"file": u["file"], "reason": reason})
+        else:
+            measurable_files += 1
     # §SPEC-039 门量：插桩 + 两臂 GUT + union（recipe 构建与 W4 探针不计）
     gated_core_s = round(time.monotonic() - t_gated, 3)
     perf = _performance(root, probe_keys, timeout_s)
@@ -374,6 +520,13 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "files": len(unions),
             "valid_files": sum(1 for u in unions if u["valid"]),
             "method": "line_union",
+            "measurable": {
+                "files": measurable_files,
+                "valid": measurable_valid,
+                "all_valid": (bool(measurable_files)
+                              and measurable_valid == measurable_files),
+            },
+            "unmeasurable": unmeasurable,
         },
         "unmeasured": unmeasured,
         "recovered_stale_backups": recovered,

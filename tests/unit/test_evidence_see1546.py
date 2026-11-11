@@ -232,3 +232,51 @@ def test_clear_sink_missing_paths_stays_silent(tmp_path: Path):
     clear_sink(None, str(tmp_path), "qa-coverage-hits-never.txt")
     clear_sink(str(tmp_path / "missing" / "sink.txt"), str(tmp_path),
                "qa-coverage-hits-never.txt")
+
+
+def test_clear_sink_removes_user_sink_location(tmp_path: Path, monkeypatch):
+    """§SPEC-041 (D1 RED): probes write the sink under user:// — clearing
+    must remove that actual write location, not only the project-root
+    fallback. Before the fix every Linux-channel run leaked its sink
+    (user:// accumulated thousands of stale qa-coverage-hits files)."""
+    import godot_qa_toolkit.coverage.runner as runner_mod
+    from godot_qa_toolkit.coverage.evidence import clear_sink, sink_name_for
+
+    name = sink_name_for("u-user")
+    fake_user = tmp_path / "app_userdata" / "MyProj"
+    fake_user.mkdir(parents=True)
+    user_sink = fake_user / name
+    user_sink.write_text("1\n2\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_mod, "_resolve_user_sink",
+        lambda project_root, sink_name: str(fake_user / sink_name))
+
+    clear_sink(None, str(tmp_path / "proj"), name)
+
+    assert not user_sink.exists()
+
+
+def test_clear_sink_fails_loud_when_user_unlink_fails(
+        tmp_path: Path, monkeypatch):
+    """§SPEC-041: cleanup failure must be fail-loud, never silent — a sink
+    left behind poisons the next run's no-probe sentinel and accumulates
+    residue that --prune-sinks (7-day retention) will not touch."""
+    import godot_qa_toolkit.coverage.runner as runner_mod
+    from godot_qa_toolkit.coverage.evidence import clear_sink, sink_name_for
+
+    name = sink_name_for("u-stuck")
+    fake_user = tmp_path / "app_userdata" / "MyProj"
+    fake_user.mkdir(parents=True)
+    user_sink = fake_user / name
+    user_sink.write_text("1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner_mod, "_resolve_user_sink",
+        lambda project_root, sink_name: str(fake_user / sink_name))
+
+    def _boom(self):
+        raise PermissionError(f"stubbed unlink failure: {self}")
+
+    monkeypatch.setattr(Path, "unlink", _boom)
+    with pytest.raises(RuntimeError, match="clear_sink"):
+        clear_sink(None, str(tmp_path / "proj"), name)
+    assert user_sink.exists()

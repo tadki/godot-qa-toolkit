@@ -812,3 +812,15 @@ def test_recipe_cli_res_scheme_exclude_survives_colons(tmp_path: Path, monkeypat
         f"entry truncated by colon split: {row}"
     )
     assert row["reason"] == "known flaky"
+
+
+def test_crap_line_rejects_illegal_coverage_inputs():
+    """§SPEC-053：非法覆盖率（越界/NaN）不得静默 clamp —— 必须显式拒绝。"""
+    import math
+
+    for bad in (1.0001, -0.0001, float("nan")):
+        with pytest.raises(ValueError):
+            crap_line_score(6, bad)
+    # 合法边界仍精确
+    assert crap_line_score(6, 0.0) == pytest.approx(42.0)
+    assert crap_line_score(6, 1.0) == pytest.approx(6.0)

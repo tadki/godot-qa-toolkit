@@ -117,18 +117,57 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
     return r, time.monotonic() - t0
 
 
+def _inject_toolchain(root: Path, recipe: dict) -> dict:
+    """PR-A L1 预留的编排器职责：测量时注入真实 toolchain 版本并重算
+    recipe_hash（注入路径下版本变化即 recipe 变化）。加载态先 verify
+    （防篡改），注入后重 hash 再作为测量身份。"""
+    import re as _re
+
+    from ..accept import OPS_VERSION
+    toolchain = dict(recipe.get("toolchain", {}))
+    toolchain["ops_version"] = OPS_VERSION
+    try:
+        from importlib.metadata import version as _pkg_version
+        toolchain["gqt_version"] = _pkg_version("godot-qa-toolkit")
+    except Exception:  # noqa: BLE001 — editable 安装无 metadata 时回落
+        toolchain["gqt_version"] = "unknown"
+    cfg = root / "addons" / "gut" / "plugin.cfg"
+    if cfg.is_file():
+        m = _re.search(r'version\s*=\s*"([^"]+)"', cfg.read_text(encoding="utf-8"))
+        if m:
+            toolchain["gut_version"] = m.group(1)
+    try:
+        import subprocess as _sp
+        r = _sp.run([godot_command(), "--version"], capture_output=True,
+                    text=True, timeout=60)
+        if r.returncode == 0 and r.stdout.strip():
+            toolchain["godot_version"] = r.stdout.strip().splitlines()[0]
+    except Exception:  # noqa: BLE001 — 版本探测失败保持原值
+        pass
+    recipe = dict(recipe)
+    recipe["toolchain"] = toolchain
+    from .recipe import recipe_hash as _recipe_hash
+    recipe["recipe_hash"] = _recipe_hash(recipe)
+    return recipe
+
+
 def run_canonical(project_root: str | Path, target_files: list[str],
                   recipe: dict, *, acceptance_keys: list[str] | None = None,
                   probe_keys: list[str] | None = None, timeout_s: int = 180,
-                  evidence_out: str | None = None) -> dict:
+                  evidence_out: str | None = None,
+                  inject_toolchain: bool = True) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。"""
+    t_command = time.monotonic()
     root = Path(project_root).resolve()
     ok, reason = verify_recipe(recipe)
     if not ok:
         raise CanonicalError(f"recipe invalid: {reason}")
     if not target_files:
         raise CanonicalError("no target files given")
+    if inject_toolchain:
+        recipe = _inject_toolchain(root, recipe)
     recipe_hash = recipe["recipe_hash"]
+    t_gated = time.monotonic()
     evidence_dir = evidence_dir_for(evidence_out) if evidence_out else None
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -308,6 +347,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                                    wall_s=arm_b["wall_s"])
         unions.append(union_file(a, b, canonical_recipe_hash=recipe_hash))
     union_valid = bool(unions) and all(u["valid"] for u in unions)
+    # §SPEC-039 门量：插桩 + 两臂 GUT + union（recipe 构建与 W4 探针不计）
+    gated_core_s = round(time.monotonic() - t_gated, 3)
+    perf = _performance(root, probe_keys, timeout_s)
+    perf["gated_core_s"] = gated_core_s
+    perf["command_total_s"] = round(time.monotonic() - t_command, 3)
     return {
         "report_version": REPORT_VERSION,
         "project_root": str(root),
@@ -325,7 +369,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         },
         "unmeasured": unmeasured,
         "recovered_stale_backups": recovered,
-        "performance": _performance(root, probe_keys, timeout_s),
+        "performance": perf,
         "certification": dict(CERTIFICATION),
         "evidence_level": "exploratory",
         "diagnostic_only": True,

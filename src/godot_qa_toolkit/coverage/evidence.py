@@ -47,15 +47,18 @@ def evidence_dir_for(evidence_out: str | None) -> Path:
     return Path(evidence_out) if evidence_out else Path.cwd()
 
 
-def write_run_record(evidence_dir: Path, record: dict) -> None:
+def write_run_record(evidence_dir: Path, record: dict,
+                     name_suffix: str = "") -> None:
     """Atomic write: recovery treats a malformed record as failed-start and
-    reports it — it must never observe a half-written record as valid."""
+    reports it — it must never observe a half-written record as valid.
+    name_suffix disambiguates batch-mode records that share one run_uuid
+    across files (canonical: per-file key8 suffix)."""
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    tmp = evidence_dir / f"{record['run_uuid']}.record.tmp"
+    tmp = evidence_dir / f"{record['run_uuid']}{name_suffix}.record.tmp"
     tmp.write_text(
         json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    tmp.replace(evidence_dir / f"{record['run_uuid']}.record.json")
+    tmp.replace(evidence_dir / f"{record['run_uuid']}{name_suffix}.record.json")
 
 
 def read_run_record(evidence_dir: Path, run_uuid: str) -> dict | None:
@@ -68,10 +71,12 @@ def read_run_record(evidence_dir: Path, run_uuid: str) -> dict | None:
         return {"run_uuid": run_uuid, "status": "record_corrupt"}
 
 
-def update_run_record(evidence_dir: Path, run_uuid: str, **fields) -> None:
-    record = read_run_record(evidence_dir, run_uuid) or {"run_uuid": run_uuid}
+def update_run_record(evidence_dir: Path, run_uuid: str,
+                      name_suffix: str = "", **fields) -> None:
+    record = (read_run_record(evidence_dir, run_uuid)
+              or {"run_uuid": run_uuid})
     record.update(fields)
-    write_run_record(evidence_dir, record)
+    write_run_record(evidence_dir, record, name_suffix=name_suffix)
 
 
 def _resolve_arm(tests_glob: str | None, arm: str | None) -> str:
@@ -224,9 +229,12 @@ def build_bundle(
     }
 
 
-def write_bundle(evidence_dir: Path, bundle: dict) -> Path:
+def write_bundle(evidence_dir: Path, bundle: dict,
+                 name_suffix: str = "") -> Path:
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    out = evidence_dir / f"{bundle['run_uuid']}.json"
+    # name_suffix: batch 模式（canonical）同臂所有文件共享 run_uuid，无后缀
+    # 会互相覆盖——每臂只剩最后一份 bundle（R3 实证缺陷）。
+    out = evidence_dir / f"{bundle['run_uuid']}{name_suffix}.json"
     out.write_text(
         json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

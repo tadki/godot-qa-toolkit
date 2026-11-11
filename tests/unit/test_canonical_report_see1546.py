@@ -115,9 +115,10 @@ class FakeGodot:
             src = gd.read_text(encoding="utf-8")
             names = set(re.findall(r'qa-coverage-hits-[0-9a-f-]+-[0-9a-f]{8}\.txt', src))
             for sink in names:
-                # 两种传输形态的探针点数：buffered 直传 id / direct 逐 id 函数
-                probe_ids = set(re.findall(r"__qa_cov_probe_hit\((\d+)\)", src)) | set(
-                    re.findall(r"__qa_cov_probe_(\d+)\(\)", src))
+                # 三种传输形态的探针点数：direct 逐 id 函数 / R2 hit 调用 /
+                # R3 inline store_string
+                probe_ids = set(re.findall(r"__qa_cov_probe_(\d+)\(\)", src)) | set(
+                    re.findall(r'__qa_cov_probe_f\.store_string\("(\d+)\\n"\)', src))
                 count = len(probe_ids)
                 ids = list(range(count))
                 if on_gdir and self.mode == "half_on_gdir":
@@ -361,41 +362,43 @@ def test_measurable_subset_and_unmeasurable_disclosure(
     assert all(r for r in reasons.values())  # 原因非空——禁止静默排除
 
 
-def test_flusher_autoload_injected_and_restored(project: Path,
-                                                tmp_path: Path):
-    """§SPEC-040：buffered 探针的尾部刷盘依赖注入 flusher autoload——
-    GUT 调用窗口内 project.godot 含注入行且 flusher 文件在场；run 结束
-    后两者恢复零残留。"""
+def test_inline_transport_needs_no_injection(project: Path,
+                                             tmp_path: Path):
+    """§SPEC-044：inline 直写形态无需注入 flusher autoload / 改
+    project.godot——运行全程树零额外文件、配置零改动（R2 注入机制已废弃）。"""
     recipe, _ = _recipe(project, tmp_path)
     before_pg = (project / "project.godot").read_text(encoding="utf-8")
     fake = FakeGodot(project)
     sp.run = fake
     run_canonical(project, _targets(project), recipe)
-    assert len(fake.pg_at_gut) == 2  # 两臂各一次 GUT
+    assert len(fake.pg_at_gut) == 2
     for pg_text, flusher in zip(fake.pg_at_gut, fake.flusher_at_gut):
-        assert "GqtCovFlusher=" in pg_text
-        assert flusher is True
+        assert "GqtCovFlusher" not in pg_text
+        assert flusher is False
     assert (project / "project.godot").read_text(
         encoding="utf-8") == before_pg
     assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
 
 
-def test_buffered_instrument_direct_id_and_sink_substitution():
-    """§SPEC-040：buffered 形态调用点直传 id（不再逐行生成 static func）、
-    文件尾仅一组探针机制；sink 名等长替换后除 sink 名外逐字节一致。"""
+def test_inline_instrument_direct_write_and_sink_substitution():
+    """§SPEC-044：inline 形态语句前直插持久句柄 store_string（无函数调用、
+    无 append/阈值刷盘）、文件尾仅静态句柄开饰；sink 名等长替换后除 sink
+    名外逐字节一致且插桩产物仍合法。"""
+    from gdtoolkit.parser import parser as gd_parser
     from godot_qa_toolkit.coverage.runner import _instrument
 
-    inst_a, manifest_a = _instrument(TARGET_SRC, "qa-coverage-hits-aaaa-12345678.txt",
-                                     buffered=True)
-    call_ids = set(re.findall(r"__qa_cov_probe_hit\((\d+)\)", inst_a))
+    inst_a, manifest_a = _instrument(
+        TARGET_SRC, "qa-coverage-hits-aaaa-12345678.txt", inline=True)
+    call_ids = set(re.findall(
+        r'__qa_cov_probe_f\.store_string\("(\d+)\\n"\)', inst_a))
     assert call_ids == {str(i) for i in range(len(manifest_a))}
     assert not re.search(r"static func __qa_cov_probe_\d+\(\):", inst_a)
-    assert "static func __qa_cov_probe_hit(" in inst_a
+    assert "static var __qa_cov_probe_f =" in inst_a
+    assert "__qa_cov_probe_hit(" not in inst_a
     inst_b = inst_a.replace("qa-coverage-hits-aaaa-12345678.txt",
                             "qa-coverage-hits-bbbb-12345678.txt")
     assert inst_b.count("qa-coverage-hits-bbbb-12345678.txt") == \
         inst_a.count("qa-coverage-hits-aaaa-12345678.txt")
     assert inst_b.replace("qa-coverage-hits-bbbb-12345678.txt",
                           "qa-coverage-hits-aaaa-12345678.txt") == inst_a
-    from gdtoolkit.parser import parser as gd_parser
-    gd_parser.parse(inst_b)  # 替换后仍合法
+    gd_parser.parse(inst_b)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -46,6 +47,7 @@ from ..coverage.evidence import (
 )
 from ..coverage.runner import (
     _instrument,
+    _instrument_blocks,
     _looks_like_godot_launch_failure,
     _read_hits,
 )
@@ -159,7 +161,9 @@ def _recover_stale_backups(project_root: Path) -> int:
 
 
 def _run_one_gut(project_root: Path, gut_args: list[str],
-                 timeout_s: int) -> tuple[subprocess.CompletedProcess, float]:
+                 timeout_s: int,
+                 env: dict | None = None
+                 ) -> tuple[subprocess.CompletedProcess, float]:
     t0 = time.monotonic()
     gut = project_root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
@@ -169,12 +173,77 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
     with GlobalGodotGate(str(project_root)):
         try:
             r = subprocess.run(argv, capture_output=True, text=True,
-                               timeout=timeout_s, cwd=str(project_root))
+                               timeout=timeout_s, cwd=str(project_root),
+                               env=env)
         except subprocess.TimeoutExpired as e:
             raise CanonicalError(
                 f"GUT timed out after {timeout_s}s "
                 f"(args: {' '.join(gut_args)})") from e
     return r, time.monotonic() - t0
+
+
+def _project_name(root: Path) -> str:
+    pg = root / "project.godot"
+    if pg.is_file():
+        m = re.search(r'config/name\s*=\s*"([^"]+)"',
+                      pg.read_text(encoding="utf-8"))
+        if m:
+            return m.group(1)
+    return root.name
+
+
+def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
+    """按测试文件数 LPT 装箱把 config 目录分到 width 组（§SPEC-052 并行
+    分片臂）；weight 用 test_*.gd 文件数近似执行成本。"""
+    if not dirs:
+        return [[]]
+    if width <= 1:
+        return [list(dirs)]
+    weighted = []
+    for d in dirs:
+        rel = d[len("res://"):] if d.startswith("res://") else d
+        p = root / rel
+        w = len(list(p.rglob("test_*.gd"))) if p.is_dir() else 1
+        weighted.append((max(1, w), d))
+    n = min(width, len(weighted))
+    groups: list[list[str]] = [[] for _ in range(n)]
+    loads = [0] * n
+    for w, d in sorted(weighted, key=lambda x: -x[0]):
+        i = loads.index(min(loads))
+        groups[i].append(d)
+        loads[i] += w
+    return [g for g in groups if g]
+
+
+def _shard_user_dir(xdg_home: str, project_name: str) -> Path:
+    return Path(xdg_home) / "godot" / "app_userdata" / project_name
+
+
+def _read_hits_merged(root: Path, run_uuid: str, rel: str,
+                      manifest: list[int],
+                      xdg_homes: list[str]) -> tuple[set[int], int]:
+    """并行分片臂的合并读回：sink 名含进程 PID（`...-<uuid>-<pid>-<key8>`
+    .txt），按 run_uuid+key8 模式跨全部分片 user:// 目录取并集。"""
+    key8 = file_key8(rel)
+    name = f"qa-coverage-hits-{run_uuid}-*-{key8}.txt"
+    proj = _project_name(root)
+    ids: list[int] = []
+    files: list[Path] = []
+    for xdg in xdg_homes:
+        d = _shard_user_dir(xdg, proj)
+        if d.is_dir():
+            files.extend(sorted(d.glob(name)))
+    for f in files:
+        try:
+            for ln in f.read_text(encoding="utf-8").splitlines():
+                ln = ln.strip()
+                if ln.isdigit():
+                    ids.append(int(ln))
+        finally:
+            f.unlink(missing_ok=True)
+    valid = set(range(len(manifest)))
+    hits = {manifest[pid] for pid in ids if pid in valid}
+    return hits, sum(1 for pid in ids if pid in valid)
 
 
 def _inject_toolchain(root: Path, recipe: dict) -> dict:
@@ -215,7 +284,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   recipe: dict, *, acceptance_keys: list[str] | None = None,
                   probe_keys: list[str] | None = None, timeout_s: int = 180,
                   evidence_out: str | None = None,
-                  inject_toolchain: bool = True) -> dict:
+                  inject_toolchain: bool = True,
+                  scope_roots: list[str] | None = None,
+                  block_compress: bool = True,
+                  shard_width: int = 6,
+                  acceptance_shards: int = 4) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
@@ -232,11 +305,20 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
 
-    # 目标全集：registry + probe manifest 每文件只建一次（§SPEC-030 单次
-    # parse 纪律；两臂共用同一 manifest——同源码同 manifest 的 union 前提）。
-    # parse 失败逐文件隔离进 unmeasured（§2.3 步骤 3），不阻断全集。
+    # 目标全集：registry + probe manifest + 插桩模板每文件只建一次
+    # （§SPEC-030 单次 parse 纪律；两臂共用同一模板——同源码同 manifest 的
+    # union 前提）。§SPEC-054：命中静态准备缓存则跳过全部 parse；模板以
+    # uuid 占位符保存（臂间仅占位替换）。parse 失败逐文件隔离进 unmeasured。
+    from ..registry.functions import build_file_registry
+    from ..registry.manifest import build_probe_manifest_v2
+    from gdtoolkit.parser import parser as _gd_parser
+
+    from . import prepcache
+
     prepared: dict[str, dict] = {}
     unmeasured: list[dict] = []
+    cache_hits = 0
+    cache_misses = 0
     for path_str in target_files:
         p = Path(path_str)
         if not p.is_file():
@@ -248,47 +330,87 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             unmeasured.append({"file": path_str,
                                "reason": f"read_error:{e}"})
             continue
-        from ..registry.functions import build_file_registry
-        from ..registry.manifest import build_probe_manifest_v2
-        try:
-            registry = build_file_registry(src, file_label=str(p))
-            probe_manifest = build_probe_manifest_v2(src, registry)
-        except Exception as e:  # noqa: BLE001 — 逐文件隔离，不阻断全集
-            unmeasured.append({"file": path_str,
-                               "reason": f"registry_parse_error:{e}"})
-            continue
         rel = str(p.resolve().relative_to(root))
+        src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
+        prep_algo = (prepcache.PROBE_ALGO_VERSION if block_compress
+                     else "flags/4-pid")
+        entry = prepcache.load_entry(
+            root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
+            algo=prep_algo)
+        if entry is not None:
+            registry = entry["registry"]
+            probe_manifest = entry["probe_manifest"]
+            template = entry["instrumented_template"]
+            probe_lines = list(entry.get("probe_lines", []))
+            block_map = entry.get("block_map") or {}
+            cache_hits += 1
+        else:
+            try:
+                # §SPEC-053：relative-path fid——身份跨 checkout 稳定（绝对
+                # 路径会把检出位置混入函数身份）
+                registry = build_file_registry(src, file_label=rel)
+                probe_manifest = build_probe_manifest_v2(src, registry)
+            except Exception as e:  # noqa: BLE001 — 逐文件隔离，不阻断全集
+                unmeasured.append({"file": path_str,
+                                   "reason": f"registry_parse_error:{e}"})
+                continue
+            tpl_sink = (f"qa-coverage-hits-{prepcache.SINK_UUID_PLACEHOLDER}"
+                        f"-{file_key8(rel)}.txt")
+            if block_compress:
+                inst0, probe_lines, block_map = _instrument_blocks(
+                    src, tpl_sink, runtime_sink=True)
+            else:
+                inst0, probe_lines = _instrument(
+                    src, tpl_sink, flags=True, runtime_sink=True)
+                block_map = {}
+            if probe_lines:
+                # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug →
+                # 逐文件隔离，拒绝落盘跑假数据（缓存命中侧由校验和守卫）
+                try:
+                    _gd_parser.parse(inst0)
+                except Exception as e:  # noqa: BLE001
+                    unmeasured.append(
+                        {"file": rel,
+                         "reason": f"instrument_parse_error:{e}"})
+                    continue
+            template = inst0
+            cache_misses += 1
+            try:
+                prepcache.store_entry(
+                    root, rel=rel, src_sha256=src_sha,
+                    recipe_hash=recipe_hash, registry=registry,
+                    probe_manifest=probe_manifest,
+                    instrumented_template=template,
+                    probe_lines=probe_lines, source_plain=src,
+                    block_map=block_map, algo=prep_algo)
+            except OSError as e:
+                # 缓存写失败不阻断测量（只影响下一轮准备成本）
+                unmeasured.append({"file": rel,
+                                   "reason": f"cache_write_error:{e}"})
         prepared[rel] = {
             "abs": str(p.resolve()), "src": src,
             "registry": registry, "probe_manifest": probe_manifest,
+            "template": template, "probe_lines": probe_lines,
+            "block_map": block_map,
         }
 
+    # §SPEC-053：subset 不得标 comparable——目标集未覆盖 scope_roots 下全部
+    # .gd 时，union/评分的 comparable 一律降为 false 并给原因。
+    scope_complete = True
+    if scope_roots:
+        scope_files = {str(x) for sr in scope_roots
+                       for x in Path(sr).rglob("*.gd") if x.is_file()}
+        scope_complete = scope_files <= {str(Path(tf)) for tf in target_files}
     recovered = _recover_stale_backups(root)
 
-    # §SPEC-044 插桩复用：全集 flags 插桩一次（占位臂 sink 名，等长），
-    # 每臂仅做 sink 名替换，消除逐臂重复 collect/reparse 的 Python 成本。
-    # 生成期 re-parse 预检（与单文件 run_coverage 同款）：插桩产物不合法 =
-    # 插桩器 bug → 逐文件隔离，拒绝落盘跑假数据。
-    from gdtoolkit.parser import parser as _gd_parser
-
-    pre_uuid = make_run_uuid()
-    inst_base: dict[str, tuple[str, list[int], str]] = {}
-    for rel, item in prepared.items():
-        sink0 = batch_sink_name(pre_uuid, rel)
-        inst0, manifest = _instrument(item["src"], sink0, flags=True)
-        if manifest:
-            try:
-                _gd_parser.parse(inst0)
-            except Exception as e:  # noqa: BLE001 — 逐文件隔离，不阻断全集
-                unmeasured.append({"file": rel,
-                                   "reason": f"instrument_parse_error:{e}"})
-                continue
-        inst_base[rel] = (inst0, manifest, sink0)
 
     def _arm(name: str, acceptance: dict | None = None) -> dict:
-        """一条批式臂：复用全集插桩（臂专属 sink 名替换）→ 1 次 GUT →
-        逐文件 sink 读回 → bundle → 恢复/清理。零可执行行文件进显式
-        vacuous 车道（§SPEC-042），不再误报 no_probe_fired。"""
+        """一条批式臂（§SPEC-052 并行分片）：复用全集插桩 → 按目录/feature
+        组并行扇出 N 个 GUT 进程（每进程独立 XDG user:// 隔离 + 运行时
+        PID sink）→ 合并逐文件 sink 读回 → bundle → 恢复/清理。零可执行行
+        文件进显式 vacuous 车道（§SPEC-042）。"""
+        from concurrent.futures import ThreadPoolExecutor
+
         run_uuid = make_run_uuid()
         backup_dir = _BACKUP_BASE / run_uuid
         backup_dir.mkdir(parents=True)
@@ -299,18 +421,21 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         instrumented_files: dict[str, str] = {}
         vacuous_rels: list[str] = []
         for rel, item in prepared.items():
-            if rel not in inst_base:
+            template = item.get("template")
+            manifest = item.get("probe_lines") or []
+            if template is None:
                 continue  # 插桩失败已隔离进 unmeasured
-            inst0, manifest, sink0 = inst_base[rel]
             if not manifest:
                 vacuous_rels.append(rel)
                 continue
             sink = batch_sink_name(run_uuid, rel)
-            inst = inst0.replace(sink0, sink)
-            if inst.count(sink) != inst0.count(sink0):
+            n_ph = template.count(prepcache.SINK_UUID_PLACEHOLDER)
+            # §SPEC-054：模板以 uuid 占位符保存，臂间仅做占位替换
+            inst = template.replace(prepcache.SINK_UUID_PLACEHOLDER,
+                                    str(run_uuid))
+            if not n_ph:
                 raise CanonicalError(
-                    f"sink substitution mismatch for {rel}: "
-                    f"{inst0.count(sink0)} -> {inst.count(sink)}")
+                    f"sink placeholder missing for {rel} (stale cache?)")
             started["files"][item["abs"]] = item["src"]
             sink_by_rel[rel] = sink
             manifest_by_rel[rel] = manifest
@@ -323,11 +448,47 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         started["created"] = [str(root / _FLUSHER_RELPATH)]
         (backup_dir / "started.json").write_text(
             json.dumps(started, ensure_ascii=False), encoding="utf-8")
+        # 分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs
+        if acceptance is not None:
+            plans = [
+                {"args": ["-gdir=res://" + Path(g["suite_dir"]).relative_to(
+                    root).as_posix() + "/generated"],
+                 "keys": g["keys"], "suite_dir": Path(g["suite_dir"])}
+                for g in acceptance["groups"]]
+        else:
+            groups = _shard_groups(
+                root, list(recipe["gut_face"].get("dirs") or []),
+                shard_width)
+            plans = [{"args": ([("-gdir=" + ",".join(g))] if g else []),
+                      "keys": None, "suite_dir": None} for g in groups]
         gut_ok = True
         run_error = False
         timed_out = False
         output = ""
-        wall_s = 0.0
+        results: list[dict] = []
+        xdg_homes: list[str] = []
+
+        def _run_shard(ip):
+            idx, plan = ip
+            xdg = tempfile.mkdtemp(
+                prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-")
+            env = dict(os.environ)
+            env["XDG_DATA_HOME"] = xdg
+            try:
+                r, _w = _run_one_gut(root, plan["args"], timeout_s, env=env)
+                return {"plan": plan, "xdg": xdg, "rc": r.returncode,
+                        "out": (r.stdout or "") + "\n" + (r.stderr or ""),
+                        "timed_out": False}
+            except CanonicalError as e:
+                te = getattr(e, "__cause__", None)
+                tail = ""
+                if te is not None:
+                    tail = ((getattr(te, "stdout", "") or "") + "\n" +
+                            (getattr(te, "stderr", "") or ""))
+                return {"plan": plan, "xdg": xdg, "rc": None,
+                        "out": str(e) + "\n" + tail[-2000:],
+                        "timed_out": True}
+
         try:
             for abs_path, inst in instrumented_files.items():
                 Path(abs_path).write_text(inst, encoding="utf-8")
@@ -339,35 +500,21 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             flusher_abs = root / _FLUSHER_RELPATH
             flusher_abs.parent.mkdir(parents=True, exist_ok=True)
             flusher_abs.write_text(_FLUSHER_GD, encoding="utf-8")
-            gut_args: list[str] = []
-            if acceptance is not None:
-                suite_rel = Path(acceptance["suite_dir"]).relative_to(root)
-                gut_args.append(
-                    "-gdir=res://" + suite_rel.as_posix() + "/generated")
-            t_gut = time.monotonic()
-            try:
-                r, wall_s = _run_one_gut(root, gut_args, timeout_s)
-                output = (r.stdout or "") + "\n" + (r.stderr or "")
-                # rc≠0 ∧ 无 GUT 测试流证据 = 启动失败（run_error）；普通
-                # 测试失败仍产出有效命中（探针照常点火）
-                if r.returncode != 0 and _looks_like_godot_launch_failure(
-                        output):
+            t_arm = time.monotonic()
+            with ThreadPoolExecutor(max_workers=max(1, len(plans))) as ex:
+                results = list(ex.map(_run_shard, enumerate(plans)))
+            wall_s = time.monotonic() - t_arm
+            xdg_homes = [r["xdg"] for r in results]
+            for r in results:
+                if r["timed_out"]:
                     gut_ok = False
                     run_error = True
-            except CanonicalError as e:
-                # 超时：墙钟如实记录（超时也是门量证据），哨兵记 timeout；
-                # 保留子进程部分输出尾（诊断挂死阶段，不改变 invalid 判定）
-                gut_ok = False
-                run_error = True
-                timed_out = True
-                wall_s = time.monotonic() - t_gut
-                partial_out = ""
-                partial_err = ""
-                if getattr(e, "__cause__", None) is not None:
-                    te = e.__cause__
-                    partial_out = getattr(te, "stdout", "") or ""
-                    partial_err = getattr(te, "stderr", "") or ""
-                output = str(e) + "\n" + (partial_out + partial_err)[-2000:]
+                    timed_out = True
+                elif r["rc"] != 0 and _looks_like_godot_launch_failure(
+                        r["out"]):
+                    gut_ok = False
+                    run_error = True
+            output = "\n".join(r["out"] for r in results)
         finally:
             for abs_path, original in started["files"].items():
                 Path(abs_path).write_text(original, encoding="utf-8")
@@ -382,26 +529,35 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         invalid_reason = ("timeout" if timed_out
                           else ("run_error" if run_error else None))
         if acceptance is not None and not run_error:
-            # §SPEC-035 对账五项：任一 false → 臂 invalid。run_error（含
-            # 超时）时运行流证据不可信，对账不产生误导性记录，直接落
-            # run_error；私有目录的清理不再依赖该分支（超时同样零残留）。
-            reconciliation = reconcile(
-                root, acceptance["suite_dir"], acceptance["keys"], output,
-                replay_ok=True,
-                main_snapshot=acceptance["snapshot"])
-            if not reconciliation["ok"]:
+            # §SPEC-035 对账：分片组逐个对账，任一 false → 臂 invalid
+            recs = []
+            ok_all = True
+            for r in results:
+                rec = reconcile(
+                    root, r["plan"]["suite_dir"], r["plan"]["keys"],
+                    r["out"], replay_ok=True,
+                    main_snapshot=acceptance["snapshot"])
+                recs.append(rec)
+                ok_all = ok_all and bool(rec.get("ok"))
+            reconciliation = {"ok": ok_all, "shards": recs}
+            if not ok_all:
                 arm_valid = False
                 invalid_reason = "reconciliation_failed"
         if acceptance is not None:
-            # 超时/run_error 臂同样清理私有目录——canonical 零残留不分区
-            # 成败（§SPEC-041 同款：残留即泄漏，首轮 R1 冒烟实证泄漏）。
-            _cleanup_suite_dir(Path(acceptance["suite_dir"]))
+            for r in results:
+                if r["plan"].get("suite_dir") is not None:
+                    _cleanup_suite_dir(Path(r["plan"]["suite_dir"]))
 
         bundles: dict[str, dict] = {}
         for rel, sink in sink_by_rel.items():
             item = prepared[rel]
-            hits, probes_fired = _read_hits(str(root), sink,
-                                            manifest_by_rel[rel])
+            hits, probes_fired = _read_hits_merged(
+                root, run_uuid, rel, manifest_by_rel[rel], xdg_homes)
+            block_map = prepared[rel].get("block_map") or {}
+            if block_map:
+                # §SPEC-055：块入口命中 → 块内全部语句起始行
+                hits = {ln for start in hits
+                        for ln in block_map.get(start, [start])}
             bundle = build_bundle(
                 run_uuid=run_uuid, file_path="res://" + rel,
                 gd_source=item["src"], tests_glob=None,
@@ -425,6 +581,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
                                   status="bundle_written")
             clear_sink(None, str(root), sink)
+        for xdg in xdg_homes:
+            shutil.rmtree(xdg, ignore_errors=True)
         for rel in vacuous_rels:
             # §SPEC-042：零可执行行 → 显式 vacuous 车道（bundle 落盘、
             # union 按 §SPEC-036 严格语义仍 invalid，reason=vacuous）
@@ -455,26 +613,32 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "invalid_reason": invalid_reason,
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
+            "shards": len(plans),
         }
 
     # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
     arm_a = _arm("gut_full")
 
-    # 臂 acceptance：私有 suite 编译/重放 → 重新插桩（新 run_uuid+sink 名）
+    # 臂 acceptance：私有 suite 按分片分组编译/重放 → 并行扇出 GUT
     keys = list(acceptance_keys) if acceptance_keys else [
         f["key"] for f in recipe["acceptance_face"]["features"]]
     snapshot = _snapshot_main(root)
-    suite_dir: Path | None = None
+    groups: list[dict] = []
     try:
-        suite_dir = create_suite_dir(root)
-        compile_keys_to_suite(root, keys, suite_dir)
-        for k in keys:
-            replay_check(root, k, suite_dir=suite_dir)
+        n_groups = max(1, min(int(acceptance_shards or 1), len(keys) or 1))
+        chunk = max(1, -(-len(keys) // n_groups))
+        for i in range(0, len(keys), chunk):
+            sub = keys[i:i + chunk]
+            sd = create_suite_dir(root)
+            groups.append({"suite_dir": sd, "keys": sub})
+            compile_keys_to_suite(root, sub, sd)
+            for k in sub:
+                replay_check(root, k, suite_dir=sd)
         arm_b = _arm("acceptance", acceptance={
-            "suite_dir": suite_dir, "keys": keys, "snapshot": snapshot})
+            "groups": groups, "snapshot": snapshot})
     except (SuiteError, AcceptRunError) as e:
-        if suite_dir is not None:
-            _cleanup_suite_dir(suite_dir)
+        for g in groups:
+            _cleanup_suite_dir(Path(g["suite_dir"]))
         arm_b = {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
                  "gut_ok": False, "timed_out": False, "state": "invalid",
                  "invalid_reason": f"suite_error:{e}", "bundles": 0,
@@ -492,6 +656,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                                    wall_s=arm_b["wall_s"])
         unions.append(union_file(a, b, canonical_recipe_hash=recipe_hash))
     union_valid = bool(unions) and all(u["valid"] for u in unions)
+    comparable_reason = None
+    if not scope_complete:
+        comparable_reason = "subset_targets"
+        for u in unions:
+            u["comparable"] = False
+            u["comparable_reason"] = "subset_targets"
+    crap_records, crap_lanes, crap_version = _crap_records_for_report(
+        unions, prepared, recipe_hash)
     # §SPEC-043 measurable 子集披露：vacuous / no_probe_fired 文件归
     # unmeasurable（本就无可测数据），其余 union 无效仍属 measurable 失败
     # （超时/契约违约等），禁止静默排除——measurable + unmeasurable == 全集。
@@ -535,6 +707,28 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             },
             "unmeasurable": unmeasurable,
         },
+        "crap": {
+            "version": crap_version,
+            "evidence_level": "exploratory",
+            "coverage_semantics": "statement_start_line",
+            "path_coverage": "not_measured",
+            "assertion_effectiveness": "not_measured",
+            "method": "coverage-union/1 + func-registry",
+            "records": crap_records,
+            "summary": {
+                "functions": len(crap_records),
+                "scored": sum(1 for r in crap_records
+                              if r["score_status"] == "scored"),
+                "lanes": crap_lanes,
+            },
+            "comparable": scope_complete,
+            "comparable_reason": comparable_reason,
+        },
+        "preparation": {
+            "cache": {"hits": cache_hits, "misses": cache_misses,
+                      "algo": (prepcache.PROBE_ALGO_VERSION
+                               if block_compress else "flags/4")},
+        },
         "unmeasured": unmeasured,
         "recovered_stale_backups": recovered,
         "performance": perf,
@@ -544,6 +738,72 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "dynamic_cache": False,
         "ok": union_valid,
     }
+
+
+_FAIL_LANES = ("timeout", "run_error", "vacuous", "no_probe_fired",
+               "zero_tests", "suite_invalid")
+
+
+def _lane_from_reason(reason: str | None) -> str:
+    """union 无效原因 → 失败车道。失败样本一律 not-scored（§SPEC-053）。"""
+    for lane in _FAIL_LANES:
+        if reason and lane in reason:
+            return lane
+    return "invalid"
+
+
+def _crap_records_for_report(unions, prepared, recipe_hash):
+    """§SPEC-053：函数级 CRAP 记录——union 行集（C/I）与 registry 的
+    identity/CC 按 fid 连接；任何失败/无分母车道一律 score=None。"""
+    from ..risk.contract import build_shadow_record
+    from ..risk.formula import CRAP_LINE_VERSION
+
+    by_file = {u["file"]: u for u in unions}
+    records: list[dict] = []
+    lanes: dict[str, int] = {}
+
+    def _emit(rel: str, entry: dict, *, state: str,
+              covered: int | None = None, total: int | None = None) -> None:
+        scope = entry.get("lex_scope") or []
+        records.append(build_shadow_record(
+            function_id=entry["fid"],
+            name=entry.get("name", ""),
+            lex_path=(".".join(str(x) for x in scope)
+                      or entry.get("name", "")),
+            start_line=int(entry.get("start_line") or 0),
+            end_line=int(entry.get("end_line") or 0),
+            # registry 的 CC 字段名为 cc_oracle（§SPEC-053 连接契约）；
+            # 缺失即 cc=0 会产出伪零分，必须显式失败
+            cc=int(entry["cc_oracle"]),
+            covered=covered, total=total,
+            cov_source=("canonical_union" if state == "scored"
+                        else "not_measured"),
+            state=state,
+            recipe={"recipe_hash": recipe_hash, "method": "canonical-union/1"},
+            lambda_gap=int(entry.get("lambda_gap") or 0),
+        ))
+        lanes[state] = lanes.get(state, 0) + 1
+
+    for rel, item in prepared.items():
+        entries = item["registry"].get("entries", [])
+        u = by_file.get("res://" + rel)
+        if u is None or not u.get("valid"):
+            lane = (_lane_from_reason(u.get("invalid_reason"))
+                    if u is not None else "unknown")
+            for e in entries:
+                _emit(rel, e, state=lane)
+            continue
+        per = {row["fid"]: row for row in u["union"]["per_fid"]}
+        for e in entries:
+            row = per.get(e["fid"])
+            if row is None or int(row.get("total") or 0) <= 0:
+                # 缺分母/未入 probe 面：unknown 不出分（不冒充 100%）
+                _emit(rel, e, state="unknown")
+            else:
+                _emit(rel, e, state="scored",
+                      covered=int(row["covered"]),
+                      total=int(row["total"]))
+    return records, lanes, CRAP_LINE_VERSION
 
 
 def _safe_log_label(label: str) -> str:

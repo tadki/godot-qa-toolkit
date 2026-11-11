@@ -105,16 +105,38 @@ class FakeGodot:
                 stdout = ""
                 stderr = ""
             return R0()
-        on_gdir = any(str(x).startswith("-gdir=") for x in argv)
+        on_gdir = ".gqt-run-" in cmd  # acceptance 私有套件臂
         pg = self.root / "project.godot"
         self.pg_at_gut.append(pg.read_text(encoding="utf-8")
                               if pg.is_file() else "")
         self.flusher_at_gut.append(
             (self.root / "addons" / "gqt_cov_flusher.gd").is_file())
+        env = k.get("env") or {}
+        xdg = env.get("XDG_DATA_HOME")
+        if xdg:
+            proj = re.search(r'config/name\s*=\s*"([^"]+)"',
+                             pg.read_text(encoding="utf-8")).group(1)
+            dest = Path(xdg) / "godot" / "app_userdata" / proj
+            dest.mkdir(parents=True, exist_ok=True)
+        else:
+            dest = self.root
         for gd in self.root.glob("src_game/*.gd"):
             src = gd.read_text(encoding="utf-8")
-            names = set(re.findall(r'qa-coverage-hits-[0-9a-f-]+-[0-9a-f]{8}\.txt', src))
-            for sink in names:
+            # runtime-pid sink 形态：`qa-coverage-hits-<uuid>-` +
+            # str(OS.get_process_id()) + `-<key8>.txt`
+            pid_pairs = re.findall(
+                r'qa-coverage-hits-([0-9a-f-]{8,36})-" \+ '
+                r'str\(OS\.get_process_id\(\)\) \+ "-([0-9a-f]{8})\.txt',
+                src)
+            pairs = [(u, k, True) for u, k in pid_pairs]
+            for m2 in re.finditer(
+                    r'qa-coverage-hits-([0-9a-f-]{8,36})-([0-9a-f]{8})\.txt',
+                    src):
+                if (m2.group(1), m2.group(2)) not in pid_pairs:
+                    pairs.append((m2.group(1), m2.group(2), False))
+            for uuid, key8, _pid in pairs:
+                sink = (f"qa-coverage-hits-{uuid}-99999-{key8}.txt"
+                        if _pid else f"qa-coverage-hits-{uuid}-{key8}.txt")
                 # 三种传输形态的探针点数：direct 逐 id 函数 / R3 store_string /
                 # R4 内存 flag 标记
                 probe_ids = set(re.findall(r"__qa_cov_probe_(\d+)\(\)", src)) | set(
@@ -123,7 +145,7 @@ class FakeGodot:
                 ids = list(range(count))
                 if on_gdir and self.mode == "half_on_gdir":
                     ids = ids[: max(1, count // 2)]
-                (self.root / sink).write_text(
+                (dest / sink).write_text(
                     "".join(f"{i}\n" for i in ids), encoding="utf-8")
         class R:
             def __init__(self, rc, err):
@@ -211,13 +233,14 @@ def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
     gut_calls = [c for c in fake.calls if any(
         x == "-s" for x in c) and "gut_cmdln.gd" in " ".join(c)]
     assert len(gut_calls) == 2
-    no_gdir = [c for c in gut_calls if not any(
-        str(x).startswith("-gdir=") for x in c)]
-    with_gdir = [c for c in gut_calls if any(
-        str(x).startswith("-gdir=") for x in c)]
-    assert len(no_gdir) == 1  # gut_full 臂走 gutconfig 面（无 -gdir）
-    assert len(with_gdir) == 1  # acceptance 臂走私有目录
-    assert ".gqt-run-" in " ".join(with_gdir[0])
+    gdirs = [" ".join(x for x in c if str(x).startswith("-gdir="))
+             for c in gut_calls]
+    # 两臂均按分片扇出（-gdir 均在）：face 分片引用 gutconfig 目录，
+    # acceptance 分片引用私有 .gqt-run 套件
+    face = [g for g in gdirs if ".gqt-run-" not in g]
+    suite = [g for g in gdirs if ".gqt-run-" in g]
+    assert len(face) == 1 and len(suite) == 1
+    assert "res://tests/" in face[0]
 
 
 def test_unparseable_target_isolated_not_fatal(project: Path, tmp_path: Path):
@@ -262,7 +285,7 @@ def test_gut_timeout_records_wall_and_sentinel(project, tmp_path, monkeypatch):
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
 
-    def fake_gut(root, gut_args, timeout_s):
+    def fake_gut(root, gut_args, timeout_s, env=None):
         _t.sleep(0.01)
         raise orch.CanonicalError(f"GUT timed out after {timeout_s}s")
 
@@ -479,3 +502,221 @@ def test_flag_var_names_unique_per_file_no_inheritance_collision():
     # 命中线必须引用本文件的唯一名
     assert f"{var_p.group(1)}[" in inst_p
     assert f"{var_c.group(1)}[" in inst_c
+
+
+def test_flag_var_suffix_fallback_executes():
+    """§SPEC-053：sink 名不含 key8 时走 hashlib fallback——该路径必须可
+    执行（旧实现 hashlib 未导入，潜伏 NameError）。"""
+    from godot_qa_toolkit.coverage.runner import _flag_var_suffix
+
+    suffix = _flag_var_suffix("no-key8-sink-name.txt")
+    assert len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix)
+
+
+def test_canonical_crap_scores_shape_and_relative_fids(project, tmp_path):
+    """§SPEC-053：canonical 输出函数级 CRAP；fid 相对路径（跨 checkout
+    稳定）；分数可由 union 行集 + registry CC 重算一致。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    report = run_canonical(project, _targets(project), recipe)
+    crap = report["crap"]
+    assert crap["version"] == "crap-line/1"
+    assert crap["coverage_semantics"] == "statement_start_line"
+    recs = crap["records"]
+    assert recs, "must emit function-level records"
+    for r in recs:
+        assert r["function_id"].startswith("src_game/"), (
+            f"relative fid expected, got {r['function_id']}")
+        assert not r["function_id"].startswith("/")
+    scored = [r for r in recs if r["score_status"] == "scored"]
+    assert scored, "happy fixture must score functions"
+    for r in scored:
+        cc = r["cc"]
+        assert cc >= 1, f"cc must come from registry cc_oracle (>0), got {cc}"
+        c = r["covered"] / r["total"]
+        expect = cc * cc * (1.0 - c) ** 3 + cc
+        assert r["crap_line"]["score"] == pytest.approx(expect)
+        assert r["crap_line"]["score"] >= cc  # 公式下界
+        assert r["crap_line"]["score_status"] == "scored"
+        assert r["cov_source"] == "canonical_union"
+        assert r["evidence_level"] == "exploratory"
+    assert crap["summary"]["functions"] == len(recs)
+    assert crap["summary"]["scored"] == len(scored)
+    assert crap["comparable"] is True
+
+
+def test_canonical_failure_lanes_never_score(project, tmp_path):
+    """§SPEC-053：run_error 等失败样本一律不出分（score=None、covered/
+    total 为空、车道具名）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    fake = FakeGodot(project)
+    fake.returncode = 1
+    fake.stderr_text = "ERROR: Cannot open project"
+    sp.run = fake
+    report = run_canonical(project, _targets(project), recipe)
+    crap = report["crap"]
+    assert crap["summary"]["scored"] == 0
+    assert crap["records"], "failure lanes still disclose functions"
+    for r in crap["records"]:
+        assert r["crap_line"]["score"] is None
+        assert r["score_status"] != "scored"
+        assert r["covered"] is None and r["total"] is None
+    assert "run_error" in crap["summary"]["lanes"]
+
+
+def test_canonical_vacuous_file_never_scores(project, tmp_path):
+    (project / "src_game" / "decl.gd").write_text(
+        "extends RefCounted\n\nsignal alpha\n")
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    report = run_canonical(project, _targets(project), recipe)
+    decl = [r for r in report["crap"]["records"]
+            if "decl.gd" not in r["function_id"]
+            and r["function_id"].startswith("decl.gd")]
+    # decl.gd 零可执行行 → 无 registry 函数条目；车道披露在 union 侧
+    vac = [u for u in report["unions"] if "decl.gd" in u["file"]]
+    assert vac and "vacuous" in vac[0]["invalid_reason"]
+    for r in report["crap"]["records"]:
+        assert r["crap_line"]["score"] is None or \
+            r["score_status"] == "scored"
+
+
+def test_canonical_subset_marks_not_comparable(project, tmp_path):
+    """§SPEC-053：subset 目标集不得标 comparable。"""
+    recipe, _ = _recipe(project, tmp_path)
+    all_targets = _targets(project)
+    subset = [all_targets[0]]
+    fake = FakeGodot(project)
+    sp.run = fake
+    report = run_canonical(
+        project, subset, recipe,
+        scope_roots=[str(project / "src_game")])
+    assert report["crap"]["comparable"] is False
+    assert report["crap"]["comparable_reason"] == "subset_targets"
+    for u in report["unions"]:
+        assert u["comparable"] is False
+        assert u["comparable_reason"] == "subset_targets"
+
+
+def test_prep_cache_roundtrip_equivalence(project: Path, tmp_path: Path):
+    """§SPEC-054：第二次运行命中缓存；fresh/cache 输出核心字段逐字段
+    等价（unions/crap 语义零变化）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    first = run_canonical(project, _targets(project), recipe)
+    assert first["preparation"]["cache"]["misses"] >= 2
+    second = run_canonical(project, _targets(project), recipe)
+    assert second["preparation"]["cache"]["hits"] >= 2
+    assert second["preparation"]["cache"]["misses"] == 0
+
+    def _semantic(rep):
+        # 去除 run 级易变字段（run_uuid/wall_s）后的并集语义
+        out = []
+        for u in rep["unions"]:
+            cu = dict(u)
+            cu["arms"] = [{k: v for k, v in a.items()
+                           if k not in ("run_uuid", "wall_s")}
+                          for a in cu["arms"]]
+            out.append(cu)
+        return out
+
+    assert _semantic(first) == _semantic(second)
+    assert first["crap"]["records"] == second["crap"]["records"]
+    assert first["union"] == second["union"]
+
+
+def test_prep_cache_invalidates_on_source_and_recipe(project, tmp_path):
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    run_canonical(project, _targets(project), recipe)
+    # 源码变更 → 该文件 miss
+    (project / "src_game" / "cell.gd").write_text(
+        TARGET_SRC + "\n\nfunc extra() -> int:\n\treturn 9\n")
+    r2 = run_canonical(project, _targets(project), recipe)
+    assert r2["preparation"]["cache"]["misses"] >= 1
+    # recipe_hash 变更 → 全 miss
+    recipe2 = dict(recipe, recipe_hash="1" * 64)
+    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    try:
+        run_canonical(project, _targets(project), recipe2)
+    except CanonicalError:
+        pass  # recipe verify 可能拒绝伪造 hash —— 用缓存键层验证
+    from godot_qa_toolkit.canonical import prepcache
+    sha = __import__("hashlib").sha256(
+        (project / "src_game" / "cell.gd").read_text(
+            encoding="utf-8").encode()).hexdigest()
+    assert prepcache.load_entry(
+        project, rel="src_game/cell.gd", src_sha256=sha,
+        recipe_hash="2" * 64) is None
+
+
+def test_prep_cache_corrupt_entry_quarantined_and_rebuilt(project,
+                                                          tmp_path):
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    run_canonical(project, _targets(project), recipe)
+    from godot_qa_toolkit.canonical import prepcache
+    import glob as g
+    entries = g.glob(str(prepcache.prep_dir(project)) + "/*.json")
+    assert entries
+    open(entries[0], "w").write("{corrupt")
+    r = run_canonical(project, _targets(project), recipe)
+    assert r["preparation"]["cache"]["misses"] >= 1
+    assert g.glob(entries[0] + ".bad"), "corrupt entry must be quarantined"
+
+
+def test_prep_cache_never_stores_dynamic_data(project: Path, tmp_path: Path):
+    """§SPEC-054：动态 hits/union/bundles 永不入缓存。"""
+    import glob as g
+
+    from godot_qa_toolkit.canonical import prepcache
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    run_canonical(project, _targets(project), recipe)
+    for path in g.glob(str(prepcache.prep_dir(project)) + "/*.json"):
+        entry = json.loads(open(path, encoding="utf-8").read())
+        for k in ("hits", "hits_lines", "union", "unions", "bundles",
+                  "covered_line_ids"):
+            assert k not in entry, f"dynamic key {k} leaked into cache"
+
+
+def test_block_map_groups_straightline_runs():
+    """§SPEC-055：直线段合并、控制结构/转移/缩进变化处切块。"""
+    from godot_qa_toolkit.coverage.runner import (
+        _blocks_from_execs, _collect_executable_lines)
+
+    src = ("extends RefCounted\n\n\nfunc work(n: int) -> int:\n"
+           "\tvar acc = 0\n\tacc += 1\n\tfor i in range(n):\n"
+           "\t\tacc += i\n\tif acc > 3:\n\t\tacc = 3\n\telse:\n"
+           "\t\tacc = 4\n\treturn acc\n")
+    b = _blocks_from_execs(list(_collect_executable_lines(src)), src)
+    assert b[5] == [5, 6]           # 直线段合并
+    assert b[7] == [7]              # 控制结构自成块
+    assert b[8] == [8]              # 循环体缩进变化
+    assert b[13] == [13]            # return 自成块
+
+
+def test_block_compression_zero_drift_vs_flags(project, tmp_path):
+    """§SPEC-055 前置门：块压缩与逐语句 flags 在 fixture 上逐行零漂移。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    flags = run_canonical(project, _targets(project), recipe,
+                          block_compress=False)
+    blocks = run_canonical(project, _targets(project), recipe,
+                           block_compress=True)
+
+    def sem(rep):
+        out = []
+        for u in rep["unions"]:
+            cu = dict(u)
+            cu["arms"] = [{k: v for k, v in a.items()
+                           if k not in ("run_uuid", "wall_s")}
+                          for a in cu["arms"]]
+            out.append(cu)
+        return out
+
+    assert sem(flags) == sem(blocks)
+    assert flags["crap"]["records"] == blocks["crap"]["records"]
+    # 块形态插桩更紧凑（同文件模板更小）
+    assert (blocks["preparation"]["cache"]["algo"]
+            != flags["preparation"]["cache"]["algo"])

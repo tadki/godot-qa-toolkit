@@ -598,7 +598,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
         report = run_canonical(
             args.project_root, targets, recipe,
             probe_keys=probe_keys, timeout_s=args.timeout,
-            evidence_out=getattr(args, "evidence_dir", None))
+            evidence_out=getattr(args, "evidence_dir", None),
+            scope_roots=[str(r) for r in roots])
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},

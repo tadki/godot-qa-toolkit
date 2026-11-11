@@ -12,7 +12,13 @@ CRAP_LINE_VERSION = "crap-line/1"
 
 
 def crap_line_score(cc: int, coverage: float | None) -> float | None:
+    """§SPEC-053：非法覆盖率（越界/NaN）必须显式拒绝，不得静默 clamp——
+    clamp 会把坏的测量伪装成合法分数。"""
     if coverage is None:
         return None
-    c = min(1.0, max(0.0, coverage))
+    c = float(coverage)
+    if c != c or c < 0.0 or c > 1.0:  # NaN 或越界
+        raise ValueError(
+            f"illegal coverage ratio {coverage!r} (expected 0.0–1.0, "
+            f"cc={cc})")
     return cc * cc * (1.0 - c) ** 3 + cc

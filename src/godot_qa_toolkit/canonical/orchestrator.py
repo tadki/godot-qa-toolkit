@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -93,8 +94,12 @@ func _exit_tree() -> void:
 
 
 def _patch_autoload(text: str, entry: str) -> str:
-    """project.godot 的 [autoload] 段尾插入一行 autoload 注册；段缺失则
-    追加新段。只动文本结构，不改既有条目。"""
+    """project.godot 的 [autoload] 段首插入一行 autoload 注册；段缺失则
+    追加新段。只动文本结构，不改既有条目。
+
+    置首而非置尾：autoload 退出顺序与加载顺序相反——finalizer 必须最后
+    退出，才能排空其他 autoload 在各自 _exit_tree 里产生的关停期命中
+    （R5 实证：置尾时 _exit_tree 覆盖整段丢失）。"""
     lines = text.splitlines(keepends=True)
     start = None
     for i, ln in enumerate(lines):
@@ -105,12 +110,7 @@ def _patch_autoload(text: str, entry: str) -> str:
         if text and not text.endswith("\n"):
             text += "\n"
         return text + f"\n[autoload]\n{entry}\n"
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        if lines[j].lstrip().startswith("["):
-            end = j
-            break
-    lines.insert(end, entry + "\n")
+    lines.insert(start + 1, entry + "\n")
     return "".join(lines)
 
 
@@ -544,6 +544,214 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "dynamic_cache": False,
         "ok": union_valid,
     }
+
+
+def _safe_log_label(label: str) -> str:
+    """日志文件名消毒：组跑（"k1+k2+..."）会超文件名上限。"""
+    if len(label) <= 48:
+        return label
+    return hashlib.sha1(label.encode()).hexdigest()[:12]
+
+
+DIAGNOSTIC_VERSION = "canonical-diagnostic/1"
+
+# §SPEC-048：wait 步骤静态识别（feature 文本）——duration 等待与
+# `wait until ...` 条件等待都属于 player_session 的墙钟竞争路径。
+_WAIT_STEP_RE = re.compile(r'agent (?:执行 "wait[^"]*"|等待[^\n]*)')
+
+
+def run_canonical_diagnose(project_root: str | Path,
+                           target_files: list[str], recipe: dict,
+                           feature_keys: list[str], *,
+                           timeout_s: int = 480,
+                           progress_out: str | None = None) -> dict:
+    """§SPEC-048 diagnostic-only acceptance 计时模式。
+
+    在相同 flags 插桩（默认全 149 文件）下逐 feature 执行：同一编译套件
+    先跑未插桩基线腿、再跑 flags 插桩腿，记录绝对墙钟、GUT 测试汇总、
+    wait 步骤数与墙钟超限归因。不改 KOL、不排除 feature、不放宽门。
+    每 feature 完成即写 progress_out（长跑分段留证）。"""
+    root = Path(project_root).resolve()
+    ok, reason = verify_recipe(recipe)
+    if not ok:
+        raise CanonicalError(f"recipe invalid: {reason}")
+    feature_by_key = {f["key"]: f
+                      for f in recipe["acceptance_face"]["features"]}
+    unknown = [k for spec in feature_keys for k in spec.split("+")
+               if k and k not in feature_by_key]
+    if unknown:
+        raise CanonicalError(f"unknown acceptance features: {unknown}")
+    sources: dict[str, str] = {}
+    for path_str in target_files:
+        p = Path(path_str)
+        try:
+            sources[str(p.resolve())] = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise CanonicalError(f"target unreadable: {p}: {e}") from e
+    report = {
+        "report_version": DIAGNOSTIC_VERSION,
+        "project_root": str(root),
+        "instrumentation": {"files": len(sources), "mode": "flags",
+                            "recipe_hash": recipe.get("recipe_hash")},
+        "features": [],
+        "ok": True,
+    }
+
+    def _dump() -> None:
+        if progress_out:
+            Path(progress_out).write_text(
+                json.dumps(report, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+
+    _dump()
+    gut_re = {
+        "scripts": re.compile(r"^Scripts\s+(\d+)$", re.M),
+        "tests": re.compile(r"^Tests\s+(\d+)$", re.M),
+        "passing": re.compile(r"^Passing Tests\s+(\d+)$", re.M),
+        "failing": re.compile(r"^Failing Tests\s+(\d+)$", re.M),
+        "risky": re.compile(r"^Risky/Pending\s+(\d+)$", re.M),
+        "gut_time": re.compile(r"^Time\s+([0-9.]+)s$", re.M),
+    }
+
+    def _parse_gut(output: str) -> dict:
+        parsed = {}
+        for name, rx in gut_re.items():
+            m = rx.search(output)
+            parsed[name] = (float(m.group(1)) if name == "gut_time"
+                            else int(m.group(1))) if m else None
+        return parsed
+
+    for key_spec in feature_keys:
+        # "+" 组合 = 多个 feature 编译进同一套件、单进程计时（跨 feature
+        # 累积成本归因；单 feature 隔离跑会漏掉进程内累积效应）
+        sub_keys = [k for k in key_spec.split("+") if k]
+        if not sub_keys:
+            continue
+        feature_text = ""
+        for sk in sub_keys:
+            src = feature_by_key[sk].get("source", "")
+            if isinstance(src, str) and src.startswith("res://"):
+                fpath = root / src[len("res://"):]
+                if fpath.is_file():
+                    feature_text += fpath.read_text(encoding="utf-8")
+        key = key_spec
+        wait_commands = len(_WAIT_STEP_RE.findall(feature_text))
+        entry = {"key": key, "wait_commands": wait_commands,
+                 "baseline": {}, "instrumented": {}, "attribution": None}
+        suite_dir: Path | None = None
+        try:
+            suite_dir = create_suite_dir(root)
+            compile_keys_to_suite(root, sub_keys, suite_dir)
+            suite_rel = suite_dir.relative_to(root).as_posix()
+            gut_args = [f"-gdir=res://{suite_rel}/generated"]
+            # 腿 1：未插桩基线
+            t0 = time.monotonic()
+            r, _ = _run_one_gut(root, gut_args, timeout_s)
+            wall = time.monotonic() - t0
+            out = (r.stdout or "") + "\n" + (r.stderr or "")
+            entry["baseline"] = {"wall_s": round(wall, 3),
+                                 "rc": r.returncode, "tests": _parse_gut(out)}
+            if progress_out:
+                Path(f"{progress_out}.{_safe_log_label(key)}.baseline.log"
+                     ).write_text(out, encoding="utf-8")
+            # 腿 2：flags 插桩（同题全量文件 + finalizer 注入）
+            run_uuid = make_run_uuid()
+            backup_dir = _BACKUP_BASE / run_uuid
+            backup_dir.mkdir(parents=True)
+            started = {"run_uuid": run_uuid, "project_root": str(root),
+                       "files": {}}
+            sink_by_rel: dict[str, str] = {}
+            manifest_by_rel: dict[str, list[int]] = {}
+            instrumented: dict[str, str] = {}
+            for abs_path, src_text in sources.items():
+                rel = str(Path(abs_path).relative_to(root))
+                sink = batch_sink_name(run_uuid, rel)
+                inst, manifest = _instrument(src_text, sink, flags=True)
+                if not manifest:
+                    continue
+                started["files"][abs_path] = src_text
+                sink_by_rel[rel] = sink
+                manifest_by_rel[rel] = manifest
+                instrumented[abs_path] = inst
+            pg_path = root / "project.godot"
+            started["project_godot"] = pg_path.read_text(encoding="utf-8")
+            started["created"] = [str(root / _FLUSHER_RELPATH)]
+            (backup_dir / "started.json").write_text(
+                json.dumps(started, ensure_ascii=False), encoding="utf-8")
+            timed_out = False
+            out = ""
+            rc = None
+            wall = 0.0
+            try:
+                for abs_path, inst in instrumented.items():
+                    Path(abs_path).write_text(inst, encoding="utf-8")
+                pg_path.write_text(
+                    _patch_autoload(
+                        started["project_godot"],
+                        f'{_AUTOLOAD_NAME}="*res://{_FLUSHER_RELPATH}"'),
+                    encoding="utf-8")
+                flusher_abs = root / _FLUSHER_RELPATH
+                flusher_abs.parent.mkdir(parents=True, exist_ok=True)
+                flusher_abs.write_text(_FLUSHER_GD, encoding="utf-8")
+                t0 = time.monotonic()
+                try:
+                    r, _ = _run_one_gut(root, gut_args, timeout_s)
+                    wall = time.monotonic() - t0
+                    rc = r.returncode
+                    out = (r.stdout or "") + "\n" + (r.stderr or "")
+                except CanonicalError as e:
+                    timed_out = True
+                    wall = time.monotonic() - t0
+                    te = getattr(e, "__cause__", None)
+                    if te is not None:
+                        out = (getattr(te, "stdout", "") or "") + "\n" + (
+                            getattr(te, "stderr", "") or "")
+            finally:
+                for abs_path, original in started["files"].items():
+                    Path(abs_path).write_text(original, encoding="utf-8")
+                pg_path.write_text(started["project_godot"],
+                                   encoding="utf-8")
+                for created in started.get("created", []):
+                    Path(created).unlink(missing_ok=True)
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            probes_total = 0
+            hit_files = 0
+            for rel, sink in sink_by_rel.items():
+                hits, fired = _read_hits(str(root), sink,
+                                         manifest_by_rel[rel])
+                probes_total += fired
+                hit_files += 1 if fired else 0
+                clear_sink(None, str(root), sink)
+            if progress_out:
+                Path(f"{progress_out}.{_safe_log_label(key)}.instrumented.log"
+                     ).write_text(out, encoding="utf-8")
+            entry["instrumented"] = {
+                "wall_s": round(wall, 3), "rc": rc,
+                "timed_out": timed_out, "tests": _parse_gut(out),
+                "hit_files": hit_files, "probes_fired_total": probes_total,
+                "output_tail": out[-1500:]}
+        except (SuiteError, AcceptRunError) as e:
+            entry["attribution"] = f"suite_error:{e}"
+        finally:
+            if suite_dir is not None:
+                _cleanup_suite_dir(suite_dir)
+        if entry["attribution"] is None:
+            ins = entry["instrumented"]
+            base_wall = entry["baseline"].get("wall_s") or 0.0
+            if ins.get("timed_out"):
+                entry["attribution"] = (
+                    "wait_wall_dominant:instrumented capped at "
+                    f"{timeout_s}s (baseline {base_wall}s, waits "
+                    f"{wait_commands})")
+            elif wait_commands and ins["wall_s"] > max(60.0, 20 * base_wall):
+                entry["attribution"] = (f"slow_with_waits:{ins['wall_s']}s vs "
+                                        f"baseline {base_wall}s")
+            else:
+                entry["attribution"] = (f"other:{ins['wall_s']}s vs "
+                                        f"baseline {base_wall}s")
+        report["features"].append(entry)
+        _dump()
+    return report
 
 
 def _performance(root: Path, probe_keys: list[str] | None,

@@ -24,7 +24,10 @@ from godot_qa_toolkit.mutation.channel_router import (
     route_target,
 )
 from godot_qa_toolkit.mutation import worker_channel as wc
-from godot_qa_toolkit.mutation.worker_channel import WorkerSession
+from godot_qa_toolkit.mutation.worker_channel import (
+    WorkerLegResult,
+    WorkerSession,
+)
 
 
 # -- ① class_name 引用边（D-W2 根因修复）--------------------------------------
@@ -112,6 +115,7 @@ def _session(tmp_path):
     s = WorkerSession(slot_root=str(tmp_path / "slot"),
                       project_root=str(tmp_path), kind="linux")
     s._log_path = tmp_path / "worker-log.txt"  # 无 start()：测试面直连
+    s._target_res = "res://target.gd"  # D-DVP：位点级 43/44 豁免的判定基准
     return s
 
 
@@ -201,8 +205,9 @@ def _fake_session_cls(script_by_session):
 
 def _mk_mutant(i):
     from types import SimpleNamespace
-    return SimpleNamespace(stable_id=f"m{i}", kind="op", original="a+b",
-                           mutated="a-b")
+    return SimpleNamespace(file="t.gd", line=2, column=10, operator="+",
+                           original="+", mutated="-", kind="AOR",
+                           scope_id="f", n=i, stable_id=f"t.gd#f#{i}")
 
 
 def _slot_ns():
@@ -296,3 +301,66 @@ def test_worker_requires_real_gut_addon(monkeypatch, tmp_path):
     ok_full.unlink()
     assert not _runner.os.path.isfile(
         _runner.os.path.join(str(proj), "addons", "gut", "gut.gd"))
+
+
+# -- ④ D-DVP：位点级 compile-invalid 与 parity 锚定 ---------------------------
+
+def test_target_reload_failure_is_invalid_not_fatal(tmp_path):
+    """目标 43/44 = 变异体自身不可编译 → 位点级 invalid（不致命，会话继续）。"""
+    s = _session(tmp_path)
+    resp = _resp(0, [["a.gd", "sig", "cb"]])
+    resp["reload"] = {"res://target.gd": 44}
+    r = s._interpret(0, resp)
+    assert not r.fatal, r.fatal_reason
+    assert r.target_compile_invalid
+    assert r.reload.get("res://target.gd") == 44
+
+
+def test_target_hard_parse_failure_is_invalid_not_fatal(tmp_path):
+    s = _session(tmp_path)
+    resp = _resp(0, [["a.gd", "sig", "cb"]])
+    resp["reload"] = {"res://target.gd": 43}
+    r = s._interpret(0, resp)
+    assert not r.fatal and r.target_compile_invalid
+
+
+def test_non_target_reload_failure_stays_fatal(tmp_path):
+    """非目标闭包成员 reload 失败 = 缓存/盘分歧 → 仍会话致命（定案语义）。"""
+    s = _session(tmp_path)
+    resp = _resp(0, [["a.gd", "sig", "cb"]])
+    resp["reload"] = {"res://other.gd": 43}
+    r = s._interpret(0, resp)
+    assert r.fatal and "closure reload failed" in r.fatal_reason
+
+
+def test_parity_leg_does_not_anchor_or_fatal_on_drift(tmp_path):
+    """parity 腿（-1）不锚定漂移参考：其指纹与首真实腿不同 → 不致命，
+    参考由首真实腿锚定（D-DVP 实测的 37vs35 逐腿 0 风暴修复）。"""
+    s = _session(tmp_path)
+    r = s._interpret(-1, _resp(-1, [["a.gd", "sig", "cb"]],
+                              user_files=[f"user://f{i}.json"
+                                          for i in range(37)]))
+    assert not r.fatal
+    assert s.state.ref_connections is None, "parity 腿不得锚定参考"
+    r0 = s._interpret(0, _resp(0, [["a.gd", "sig", "cb"]],
+                               user_files=[f"user://f{i}.json"
+                                           for i in range(35)]))
+    assert not r0.fatal, "首真实腿锚定自身，不漂移"
+    r1 = s._interpret(1, _resp(1, [["a.gd", "sig", "cb"]],
+                               user_files=[f"user://f{i}.json"
+                                           for i in range(35)]))
+    assert not r1.fatal
+    r2 = s._interpret(2, _resp(2, [["a.gd", "sig", "cb"]],
+                               user_files=["user://polluted.json"]))
+    assert r2.fatal and "drift" in r2.fatal_reason
+
+
+def test_classify_target_compile_invalid_is_invalid_mutant():
+    from godot_qa_toolkit.mutation.reporting import classify_worker_leg
+    leg = WorkerLegResult(leg=0, hash_ok=True, gut_ran=False,
+                          target_compile_invalid=True,
+                          reload={"res://target.gd": 44})
+    rec = classify_worker_leg(_mk_mutant(1), leg, set(), False, None,
+                              "/tmp", "src")
+    assert rec["verdict"] == "invalid_mutant"
+    assert "fails to compile" in rec["reason"]

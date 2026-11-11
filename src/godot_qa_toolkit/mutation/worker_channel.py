@@ -114,6 +114,8 @@ class WorkerLegResult:
 
     leg: int
     ok: bool = False
+    target_compile_invalid: bool = False
+    state_drift: bool = False
     fatal: bool = False
     fatal_reason: str = ""
     hash_ok: bool = False
@@ -273,6 +275,7 @@ class WorkerSession:
             return WorkerLegResult(leg=leg, fatal=True,
                                    fatal_reason=self.dead_reason)
         work = Path(self.slot_root) / WORKER_DIRNAME
+        self._target_res = target_res  # D-DVP：目标自身 reload 失败 = 位点级 invalid
         req = {
             "leg": leg,
             "target_res": target_res,
@@ -317,6 +320,12 @@ class WorkerSession:
 
     # -- 结果解释与门消费 ------------------------------------------------
 
+    def _target_compile_invalid(self, leg: int, reload_rcs: dict) -> bool:
+        """D-DVP：目标成员自身 reload 失败（43 硬解析 / 44 软编译拒绝）= 该
+        变异体不可编译 → 位点级 invalid（parity 腿除外——其重载的是原码，
+        原件编译状态非变异体责任）。"""
+        return leg >= 0 and reload_rcs.get(self._target_res, 0) != 0
+
     def _interpret(self, leg: int, resp: dict) -> WorkerLegResult:
         r = WorkerLegResult(
             leg=leg,
@@ -333,20 +342,27 @@ class WorkerSession:
             connections=list(resp.get("connections") or []),
             timings=dict(resp.get("timings") or {}),
         )
+        r.target_compile_invalid = self._target_compile_invalid(leg, r.reload)
         r.failing_tests = self._leg_failing_names(leg)
         reason = self._fatal_reason(r)
         if not reason:
-            reason = self._state_drift(r)
+            drift = self._state_drift(r)
+            if drift:
+                reason = drift
+                r.state_drift = True
         if reason:
             r.fatal = True
             r.fatal_reason = reason
-        r.ok = (not r.fatal and r.hash_ok and r.gut_ran)
+        r.ok = (not r.fatal and not r.target_compile_invalid and r.hash_ok
+                and r.gut_ran)
         return r
 
     def _fatal_reason(self, r: WorkerLegResult) -> str:
         """会话致命判定（定案硬规则）：reload 失败 / autoload 交叠 /
-        loaded-source 哈希门失配——任一命中即 fatal。"""
-        bad_reloads = {m: rc for m, rc in r.reload.items() if rc != 0}
+        loaded-source 哈希门失配——任一命中即 fatal。目标成员自身的
+        reload 失败（43/44）是按位点 invalid，不算会话致命（D-DVP）。"""
+        bad_reloads = {m: rc for m, rc in r.reload.items()
+                       if rc != 0 and m != self._target_res}
         if bad_reloads:
             return (f"closure reload failed (rc≠0) on "
                     f"{sorted(bad_reloads)} — session fatal, batch "
@@ -366,8 +382,17 @@ class WorkerSession:
         """腿间状态漂移门（D-W2 canary 拦截面扩大）：冷通道每 mutant 一个
         全新进程，连接指纹与 user:// 树逐腿天然全等；worker 常驻进程必须
         达到同一不变量，否则判定不可信（污染 → 假 kill / 假 survived）。
-        参考基线取首腿（boot 后干净态）；此后任一腿漂移即会话致命。"""
+        参考基线锚定在**首个真实 mutant 腿**（leg>=0；parity 腿 -1 只比对
+        判定不锚定指纹——D-DVP 实测：首次 GUT 运行的一次性 user:// 生成
+        会使 parity 态与稳态腿不同，锚在 parity 会造成逐腿 0 风暴式误致命）。"""
         st = self.state
+        if r.leg < 0:
+            return ""  # parity 腿（-1）不参与漂移门：既不比对也不锚定参考
+        if not r.gut_ran:
+            # 非 GUT 执行腿（位点级 compile-invalid 等跳过 GUT 的腿）指纹无
+            # 意义（wipe 后空树）——不参与比对也不得锚定参考（D-DVP 实测：
+            # 空锚定会造成 ref=0 vs 35 的风暴式误致命）。
+            return ""
         if st.ref_connections is None:
             st.ref_connections = list(r.connections)
             st.ref_user_files = list(r.user_files)
@@ -478,13 +503,20 @@ func _run_leg(req: Dictionary) -> void:
 		if not member.ends_with(".gd"):
 			continue
 		var rc := _reload_member(member)
+		if rc == 0:
+			var scr = load(member)
+			if scr != null:
+				# D-DVP：软编译失败族——语法可解析但 Godot 编译拒绝的变异体
+				# （can_instantiate=false）。与冷通道 beacon-invalid 同语义：
+				# 目标成员 44 = 按位点 invalid（会话继续，编译失败不执行任何
+				# 代码、不污染会话态）；非目标成员 44 = 原件自身状态，仅记录。
+				if not scr.can_instantiate():
+					rc = 44
+				else:
+					resp["source_sha"][member] = scr.source_code.sha1_text()
 		resp["reload"][member] = rc
 		if rc != 0:
 			all_ok = false
-		else:
-			var scr = load(member)
-			if scr != null:
-				resp["source_sha"][member] = scr.source_code.sha1_text()
 	resp["timings"] = {"reload_ms": Time.get_ticks_msec() - t_reload}
 	var t_gut := 0
 	if bool(resp["hash_ok"]) and all_ok and resp["autoload_in_closure"].is_empty():
@@ -770,12 +802,18 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
             baseline_failures, parity_inject_fn)
         if parity_event is not None:
             fatal_events.append(parity_event)
+        prev_leg_gut_ran = True  # parity 腿按 GUT 执行腿对待（有其冷 oracle）
         for seq, m in enumerate(mutants):
             mutant_sha, inject_error = inject_fn(m)
             if inject_error is not None:
                 _record(m, inject_error)
                 continue
-            canary_cold = cold_runner(m, seq) if canary_due(seq) else None
+            # D-DVP：非 GUT 腿（位点级 compile-invalid 跳过 GUT）之后的腿，
+            # wipe+部分再生的 user:// 态与冷全新目录不等价——该腿强制双通道
+            # canary（否则产生无证据假 kill）。周期 canary 照旧叠加。
+            force_canary = not prev_leg_gut_ran
+            canary_cold = (cold_runner(m, seq)
+                           if (canary_due(seq) or force_canary) else None)
             if degrade_all or session_failures >= 2 or session.dead:
                 # parity 失配 / 会话不可用（respawn 连续失败）：剩余腿全冷降级
                 verdict, elapsed = _run_cold(m, seq)
@@ -785,12 +823,29 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
             leg = session.run_leg(seq, target_res, mutant_sha, list(closure),
                                   tests_glob)
             leg_elapsed = time.monotonic() - t_leg
+            if leg.fatal and leg.state_drift:
+                # 漂移致命 = 腿间状态污染被实证（D-DVP 扩面实测：与 canary
+                # 失配同族）→ 通道资格否证：窗口冷权威 + 剩余全部冷降级，
+                # 不再 respawn 后继续 worker（同 canary 否证语义）。
+                fatal_events.append(leg.fatal_reason)
+                print(f"mutation worker: SESSION FATAL at leg {seq} — "
+                      f"{leg.fatal_reason}; channel disqualified for this "
+                      f"file: window invalidated and ALL remaining legs "
+                      f"degraded to cold (disclosed, equivalence preserved)",
+                      file=sys.stderr)
+                _recast_cold(window_start)
+                session.close()
+                degrade_all = True
+                verdict, elapsed = _run_cold(m, seq)
+                _record(m, verdict, elapsed)
+                continue
             if leg.fatal:
                 verdict, elapsed = _recover_fatal(seq, leg, m)
                 fatal_events.append(leg.fatal_reason)
                 _record(m, verdict, elapsed)
                 continue
             session_failures = 0
+            prev_leg_gut_ran = leg.gut_ran
             verdict = classify_fn(m, leg)
             verdict, canary_event, mismatch = _apply_canary(
                 canary_cold, verdict, seq, session)

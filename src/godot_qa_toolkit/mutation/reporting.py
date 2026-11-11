@@ -296,10 +296,19 @@ def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
     """worker 腿 → verdict（与冷通道同一 kill 语义：失败名差集 + 同档分类）。
 
     worker 腿的 L1/L4 beacon 失败 → run_error（数据不可信，绝不 killed/
-    survived）；killed 走与冷通道相同的 killer 证书签发面。
+    survived）；killed 走与冷通道相同的 killer 证书签发面。D-DVP：目标
+    编译失败（reload 43/44，can_instantiate=false 族）→ invalid_mutant
+    ——与冷通道 beacon-invalid 同档同语义，杜绝证据缺失的假 killed。
     """
     from .identity import killer_certificate
 
+    if getattr(leg, "target_compile_invalid", False):
+        return _mutant_record(
+            m, "invalid_mutant",
+            "mutant fails to compile in the resident worker "
+            "(target reload non-zero, can_instantiate=false) — "
+            "cold-beacon-equivalent invalid",
+            src=original_src)
     if not leg.hash_ok:
         return _mutant_record(
             m, "run_error",

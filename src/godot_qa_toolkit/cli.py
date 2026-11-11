@@ -599,7 +599,11 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             args.project_root, targets, recipe,
             probe_keys=probe_keys, timeout_s=args.timeout,
             evidence_out=getattr(args, "evidence_dir", None),
-            scope_roots=[str(r) for r in roots])
+            scope_roots=[str(r) for r in roots],
+            stability_baseline=getattr(args, "stability_baseline", None),
+            shard_width=getattr(args, "shard_width", 6),
+            acceptance_shards=getattr(args, "acceptance_shards", 4),
+            shard_log_dir=getattr(args, "shard_log_dir", None))
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -696,6 +700,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="W4 cost probe keys (default: aidomain_integration)")
     can.add_argument("--timeout", type=int, default=180,
                      help="GUT timeout seconds per arm (default 180)")
+    can.add_argument("--stability-baseline", default=None,
+                     help="prior canonical report path: fids whose covered "
+                          "lines differ are routed to the unstable lane "
+                          "(no score, §SPEC-056)")
+    can.add_argument("--shard-width", type=int, default=6,
+                     help="gut_full parallel shard count (1 = sequential, "
+                          "§SPEC-052)")
+    can.add_argument("--acceptance-shards", type=int, default=4,
+                     help="acceptance parallel shard count")
+    can.add_argument("--shard-log-dir", default=None,
+                     help="retain per-shard full logs and raw sink copies "
+                          "(§SPEC-056)")
     can.add_argument("--evidence-dir", default=None,
                      help="optional coverage-evidence/2 output dir for "
                           "per-arm bundles")

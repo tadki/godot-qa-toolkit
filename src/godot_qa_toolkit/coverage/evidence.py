@@ -395,9 +395,26 @@ def prune_sinks(project_root: str, retention_days: int = RETENTION_DAYS) -> dict
 
 def clear_sink(sink_path: str | None, project_root: str,
                sink_name: str) -> None:
-    """Delete this run's sink after the bundle landed (evidence moved)."""
+    """Delete this run's sink after the bundle landed (evidence moved).
+
+    §SPEC-041 (D1): probes write the sink under user:// — the project-root
+    copy is only a non-user:// fallback. Clearing must cover the actual
+    write location or every Linux-channel run leaks its sink; unlink
+    failure is fail-loud, never silent."""
     if sink_path and Path(sink_path).is_file():
         Path(sink_path).unlink()
     local = Path(project_root) / sink_name
     if local.is_file():
         local.unlink()
+    from .runner import _resolve_user_sink
+
+    user_sink = _resolve_user_sink(project_root, sink_name)
+    if user_sink:
+        us = Path(user_sink)
+        if us.is_file():
+            try:
+                us.unlink()
+            except OSError as e:
+                raise RuntimeError(
+                    f"clear_sink failed to remove user:// sink {us}: {e}"
+                ) from e

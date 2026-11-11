@@ -613,6 +613,27 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                                [{"reason": "union invalid or arms invalid"}])})
 
 
+def _diagnose_gd_targets(roots: list[Path]) -> list[str]:
+    targets = sorted({str(p) for root in roots
+                      for p in root.rglob("*.gd") if p.is_file()})
+    return targets
+
+
+def _diagnose_summary(report: dict) -> dict:
+    return {
+        "report_version": report["report_version"],
+        "instrumentation": report["instrumentation"],
+        "features": [
+            {"key": f["key"],
+             "baseline_wall_s": f["baseline"].get("wall_s"),
+             "instrumented_wall_s": f["instrumented"].get("wall_s"),
+             "instrumented_timed_out": f["instrumented"].get("timed_out"),
+             "wait_commands": f["wait_commands"],
+             "attribution": f["attribution"]}
+            for f in report["features"]],
+    }
+
+
 def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
     """§SPEC-048 diagnostic-only acceptance 计时模式。"""
     import json as _json
@@ -634,9 +655,7 @@ def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
         return _emit({"tool": "canonical-diagnose", "ok": False,
                       "summary": {"error": f"recipe invalid: {reason}"},
                       "failures": [{"reason": f"recipe invalid: {reason}"}]})
-    roots = [_P(r) for r in args.roots]
-    targets = sorted({str(p) for root in roots
-                      for p in root.rglob("*.gd") if p.is_file()})
+    targets = _diagnose_gd_targets([_P(r) for r in args.roots])
     if not targets:
         return _emit({"tool": "canonical-diagnose", "ok": False,
                       "summary": {"error": "no .gd targets under roots"},
@@ -653,20 +672,8 @@ def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
     _P(args.out).write_text(
         _json.dumps(report, ensure_ascii=False, indent=1) + "\n",
         encoding="utf-8")
-    summary = {
-        "report_version": report["report_version"],
-        "instrumentation": report["instrumentation"],
-        "features": [
-            {"key": f["key"],
-             "baseline_wall_s": f["baseline"].get("wall_s"),
-             "instrumented_wall_s": f["instrumented"].get("wall_s"),
-             "instrumented_timed_out": f["instrumented"].get("timed_out"),
-             "wait_commands": f["wait_commands"],
-             "attribution": f["attribution"]}
-            for f in report["features"]],
-    }
     return _emit({"tool": "canonical-diagnose", "ok": True,
-                  "summary": summary, "failures": []})
+                  "summary": _diagnose_summary(report), "failures": []})
 
 
 def build_parser() -> argparse.ArgumentParser:

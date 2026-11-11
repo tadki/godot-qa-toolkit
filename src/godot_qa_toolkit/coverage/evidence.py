@@ -74,6 +74,14 @@ def update_run_record(evidence_dir: Path, run_uuid: str, **fields) -> None:
     write_run_record(evidence_dir, record)
 
 
+def _resolve_arm(tests_glob: str | None, arm: str | None) -> str:
+    # §SPEC-037：recipe.arm 显式参数注入（canonical 编排器传入）；
+    # 不传 arm 时保留 tests_glob 推断（既有调用方 stdout 契约零漂移）。
+    if arm is not None:
+        return arm
+    return "gut_core" if tests_glob else "gut_full"
+
+
 def build_run_record(
     *,
     run_uuid: str,
@@ -81,6 +89,7 @@ def build_run_record(
     gd_source: str,
     tests_glob: str | None,
     probe_manifest: dict,
+    arm: str | None = None,
 ) -> dict:
     return {
         "run_uuid": run_uuid,
@@ -90,7 +99,7 @@ def build_run_record(
             "sha256": sha256_text(gd_source),
         },
         "recipe": {
-            "arm": "gut_core" if tests_glob else "gut_full",
+            "arm": _resolve_arm(tests_glob, arm),
             "tests_glob": tests_glob or "res://tests/",
         },
         "status": "started",
@@ -114,6 +123,7 @@ def build_bundle(
     recovered: bool = False,
     registry: dict | None = None,
     probe_manifest: dict | None = None,
+    arm: str | None = None,
 ) -> dict:
     """Assemble the `coverage-evidence/2` bundle: probe-manifest/2 (T/I), the
     sink hits attributed to fids (C), run sentinels and per-entry states.
@@ -189,7 +199,7 @@ def build_bundle(
         "recovered": recovered,
         "target": {"file": file_path, "sha256": sha256_text(gd_source)},
         "recipe": {
-            "arm": "gut_core" if tests_glob else "gut_full",
+            "arm": _resolve_arm(tests_glob, arm),
             "tests_glob": tests_glob or "res://tests/",
         },
         "probe_manifest": {

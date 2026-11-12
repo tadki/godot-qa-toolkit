@@ -380,11 +380,15 @@ def test_accumulate_chunk_sums_stages_and_maxes_rss():
 
 def test_precompute_baselines_baseline_stage_includes_provisioning(
         tmp_path, monkeypatch):
-    """opt-in 时 baseline 阶段含 farm 槽制备成本（外层包裹语义）。
-    确定性单调钟调度：test_scan enter/exit（0.0/0.0）、outer baseline enter
-    0.0、(制备) inner enter 5.0、snapshot、inner exit 8.0（chain 接管）、
-    outer exit 9.0。嵌套同名 stage 求和 → 披露 = outer(9.0) + inner(3.0)
-    = 12.0。外层摘除 → 3.0；内层摘除 → 9.0——断言 12.0 双杀。"""
+    """opt-in 时 baseline 阶段含 farm 槽制备成本（制备段独立成段）。
+
+    §SPEC-210 MED-1 重锚：本钉子原钉「嵌套同名 stage 求和 = 12.0」（外层
+    9.0 + 内层 3.0），Final Review 裁定该嵌套即双计缺陷。现语义 = 粒度
+    单计：确定性单调钟调度 test_scan enter/exit（0.0/0.0）、baseline 制备
+    段 enter 0.0 → exit 5.0（+5.0）、逐 glob 快照段 enter 8.0 → exit 9.0
+    （+1.0）→ 披露 = 6.0（各段恰一次）。变异判别力保留：外层重新包住整段
+    循环 → 制备段 exit 吞到 9.0 → 10.0 红；制备段不自成一段（外层摘除）
+    → 快照段 0.0→5.0 → 5.0 红。"""
     ticks = itertools.chain([0.0, 0.0, 0.0, 5.0], itertools.count(8.0, 1.0))
     monkeypatch.setattr(st_mod.time, "monotonic", lambda: next(ticks))
     monkeypatch.setenv(ENV_BASELINE_IN_FARM, "1")
@@ -403,7 +407,7 @@ def test_precompute_baselines_baseline_stage_includes_provisioning(
         knob_state=knob_state)
     assert baselines and not failures
     assert knob_state["baseline_in_farm"] is True
-    assert clock.disclosure()["baseline"] == 12.0  # outer(9)+inner(3)
+    assert clock.disclosure()["baseline"] == 6.0  # 制备 5.0 + 快照 1.0
     assert not fake_slot.exists()                  # fresh 槽用完即弃
 
 

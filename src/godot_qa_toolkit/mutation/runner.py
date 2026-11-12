@@ -711,8 +711,9 @@ def _run_mutant_loop(
                         store2, prior_entries, scopes)
         finally:
             release_problems = shadowpool.release_slot(slot)
-            # §SPEC-202 slot_sync = 槽获取（含 fresh 制备/warm 同步）+ 归还
-            # 断言全程——槽位固定成本的唯一出处。
+            # §SPEC-202 slot_sync = 槽获取（含 fresh 制备/warm 同步）→ 归还
+            # 断言全程——窗口含整段 per_mutant 执行；槽位固定成本 = 其与
+            # per_mutant 之差（§SPEC-210 LOW-1 口径修正，QA 实测 ≈0.09s/chunk）。
             clock.add("slot_sync", time.monotonic() - t_slot)
             if release_problems:
                 slot_info["release_problems"] = release_problems

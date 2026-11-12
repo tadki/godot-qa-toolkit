@@ -104,6 +104,33 @@ def test_envelope_stage_timings_rss_disk_delta(tmp_path, monkeypatch):
     _assert_stage_shape(result["results"][0]["summary"]["stage_timings"])
 
 
+def test_envelope_baseline_counted_once_multi_file(tmp_path, monkeypatch):
+    """§SPEC-210 MED-1 引脚：多文件信封 baseline 单计（≈各 glob 实测耗时
+    之和）。双层同名 stage 嵌套会让每次快照记两次（Final Review 实证：
+    0.2s 快照 → 0.401）；本引脚以同 glob 双文件（单次快照）钉死单计。"""
+    import time as _time
+    _install_fakes(monkeypatch)
+    proj, target = _write_project(tmp_path)
+    target2 = str(Path(proj) / "calc2.gd")
+    Path(target2).write_text(GD_TARGET.replace("add", "mul"))
+    sleep_s = 0.15
+
+    def sleepy_snapshot(root, g, t):
+        _time.sleep(sleep_s)
+        return {"rc": 0, "tail": "pass", "elapsed": sleep_s}
+
+    monkeypatch.setattr(executor, "_run_baseline_snapshot", sleepy_snapshot)
+    result = run_mutation_files([target, target2], proj, budget=10,
+                                timeout_s=60,
+                                tests_glob="res://tests/unit/save/", jobs=2)
+    st = result["stage_timings"]
+    assert st["baseline"] >= sleep_s * 0.9, (
+        f"baseline stage must record the real snapshot cost, got {st['baseline']}")
+    assert st["baseline"] < sleep_s * 1.5, (
+        "envelope baseline must be counted once per snapshot (MED-1 double "
+        f"count: {st['baseline']}s for a {sleep_s}s snapshot)")
+
+
 def test_stage_timings_present_on_warm_full_reuse(tmp_path, monkeypatch):
     """warm 全复用（零执行）：阶段面仍在场——per_mutant=0、baseline=锚耗时。"""
     _install_fakes(monkeypatch)

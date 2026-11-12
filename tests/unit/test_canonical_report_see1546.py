@@ -969,3 +969,103 @@ def test_prep_cache_tampered_registry_quarantined(project, tmp_path,
     assert warm["crap"]["records"] == fresh["crap"]["records"]
     bad = g.glob(str(prepcache.prep_dir(project)) + "/*.bad")
     assert bad, "tampered entry must be quarantined as .bad"
+
+
+class TwoFailuresConfigFaceGodot(FakeGodot):
+    """§SPEC-061b 反例注入：gut_full 臂两个普通失败——字体族（基线内）+
+    一个「插桩不容忍」契约测试（原文匹配撞探针行）。"""
+
+    def __call__(self, *a, **k):
+        r = super().__call__(*a, **k)
+        cmd = " ".join(a[0])
+        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+            r.returncode = 1
+            r.stderr = ("- test_font_row_height\n"
+                        "  [Failed] Expected row height 12 got 13\n"
+                        "- test_intolerant_probe_shape\n"
+                        "  [Failed] byte-exact source contract sees probe "
+                        "lines\n")
+        return r
+
+
+def test_intolerant_declared_bypasses_gating_and_disclosed(project, tmp_path):
+    """§SPEC-061b：具名声明项旁路失败门控（不门控、不静默），报告逐名
+    披露理由并作为覆盖率盲点声明。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = TwoFailuresConfigFaceGodot(project)
+    report = run_canonical(
+        project, _targets(project), recipe,
+        baseline_failures={"test_font_row_height"},
+        intolerant_config={"tests": [{"name": "test_intolerant_probe_shape",
+                                      "reason": "byte-exact source contract "
+                                                "breaks under probe lines"}]})
+    assert report["ok"] is True
+    assert report["failures"]["gated"] is False
+    assert report["failures"]["arms"]["gut_full"]["new"] == []
+    assert report["failures"]["arms"]["gut_full"][
+        "instrumentation_intolerant"] == ["test_intolerant_probe_shape"]
+    blk = report["instrumentation_intolerant"]
+    assert blk["observed"] == ["test_intolerant_probe_shape"]
+    assert blk["declared"] == [{"name": "test_intolerant_probe_shape",
+                                "reason": "byte-exact source contract breaks "
+                                          "under probe lines"}]
+    assert blk["coverage_blind_spots"] == ["test_intolerant_probe_shape"]
+    assert blk["note"]
+    assert any(r["score_status"] == "scored"
+               for r in report["crap"]["records"])
+
+
+def test_undeclared_intolerant_failure_still_gates(project, tmp_path):
+    """§SPEC-061b 反向：未具名的插桩新增失败照常门控（旁路仅限具名项）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = TwoFailuresConfigFaceGodot(project)
+    report = run_canonical(project, _targets(project), recipe,
+                           baseline_failures={"test_font_row_height"})
+    assert report["ok"] is False
+    assert report["failures"]["gated"] is True
+    assert report["failures"]["arms"]["gut_full"]["new"] == \
+        ["test_intolerant_probe_shape"]
+    assert report["instrumentation_intolerant"]["declared"] == []
+    assert not any(r["score_status"] == "scored"
+                   for r in report["crap"]["records"])
+
+
+def test_coverage_limitation_reason_named_on_unstable(project, tmp_path):
+    """§SPEC-061c：声明的覆盖限制文件，其 unstable 记录必须携带具名理由
+    （provenance.stability_reason），报告披露限制清单——不伪造确定性。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    base = run_canonical(project, _targets(project), recipe)
+    doc = json.loads(json.dumps(base))
+    changed_fid = None
+    for u in doc["unions"]:
+        if u.get("union") is None:
+            continue
+        for row in u["union"]["per_fid"]:
+            if row["covered_line_ids"]:
+                row["covered_line_ids"] = row["covered_line_ids"][:-1]
+                changed_fid = row["fid"]
+                break
+        if changed_fid:
+            break
+    assert changed_fid
+    rel = changed_fid.split("::")[0]
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(doc), encoding="utf-8")
+    rerun = run_canonical(
+        project, _targets(project), recipe,
+        stability_baseline=str(baseline_path),
+        intolerant_config={"coverage_limitations": [
+            {"file": rel, "reason": "tool limitation: late-mounted UI "
+                                    "instantiation is not reproducible "
+                                    "under instrumentation slowdown"}]})
+    blk = rerun["instrumentation_intolerant"]
+    assert blk["declared"] == []
+    assert rerun["coverage_limitations"] == [
+        {"file": rel, "reason": "tool limitation: late-mounted UI "
+                                "instantiation is not reproducible under "
+                                "instrumentation slowdown"}]
+    rec = next(r for r in rerun["crap"]["records"]
+               if r["function_id"] == changed_fid)
+    assert rec["score_status"] == "unstable"
+    assert rec["provenance"]["stability_reason"].startswith("tool limitation")

@@ -624,6 +624,27 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                           "failures": [{"reason": "baseline-failures "
                                                   "malformed"}]})
         baseline_failures = set(tests)
+    intolerant_config = None
+    it_path = getattr(args, "intolerant_tests", None)
+    if it_path:
+        try:
+            it_doc = _json.loads(_P(it_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return _emit({"tool": "canonical", "ok": False,
+                          "summary": {"error":
+                                      f"intolerant-tests load failed: {e}"},
+                          "failures": [{"reason":
+                                        f"intolerant-tests load failed: "
+                                        f"{e}"}]})
+        if not isinstance(it_doc, dict):
+            return _emit({"tool": "canonical", "ok": False,
+                          "summary": {"error":
+                                      "intolerant-tests must be an object "
+                                      "with optional tests/coverage_"
+                                      "limitations arrays"},
+                          "failures": [{"reason": "intolerant-tests "
+                                                  "malformed"}]})
+        intolerant_config = it_doc
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -634,7 +655,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             shard_width=getattr(args, "shard_width", 6),
             acceptance_shards=getattr(args, "acceptance_shards", 4),
             shard_log_dir=getattr(args, "shard_log_dir", None),
-            baseline_failures=baseline_failures)
+            baseline_failures=baseline_failures,
+            intolerant_config=intolerant_config)
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -730,6 +752,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="JSON file with pre-existing (un-instrumented) "
                           "failing test names ([...] or {\"tests\": [...]}) "
                           "— new failures gate the arm (§SPEC-060a)")
+    can.add_argument("--intolerant-tests", default=None,
+                     help="JSON file declaring instrumentation-intolerant "
+                          "tests ({\"tests\": [{\"name\", \"reason\"}]}) and "
+                          "coverage_limitations ([{\"file\", \"reason\"}]) — "
+                          "declared tests bypass failure gating by name and "
+                          "are disclosed as coverage blind spots; limitation "
+                          "files name why unstable lanes cannot be "
+                          "deterministic (§SPEC-061b/c)")
     can.add_argument("--acceptance-probe-keys", nargs="?",
                      const="aidomain_integration", default=None,
                      help="W4 cost probe keys (default: aidomain_integration)")

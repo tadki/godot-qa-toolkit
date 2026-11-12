@@ -1499,3 +1499,202 @@ def test_script_null_rejected_and_absent_script_legal(project, tmp_path):
     d = report["instrumentation_intolerant"]["declared"]
     assert d == [{"name": "test_t", "reason": "contract"}]
     assert all("script" not in x for x in d)
+
+
+def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path):
+    """§SPEC-066/R20（Revy R19-L1）：合法 JSON 非 dict recipe 根与
+    exclusions 直接消费结构（list/行/reason）非法形状必须转领域错误——
+    API 侧 verify_recipe not-ok / build_recipe (None, reason) /
+    run_canonical CanonicalError；真实 CLI（canonical 与 canonical-diagnose）
+    输出 tool JSON ok=false，不得泄漏 AttributeError/TypeError traceback；
+    合法 exclusions 行为不变。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.canonical.recipe import (
+        RECIPE_VERSION,
+        build_recipe,
+        verify_recipe,
+    )
+    from godot_qa_toolkit.cli import build_parser
+
+    # API：verify_recipe 非 dict 根 → not-ok + reason（原 AttributeError）
+    for bad_root in ([1, 2], "recipe", 7, None):
+        ok, reason = verify_recipe(bad_root)
+        assert ok is False
+        assert "must be a JSON object" in reason, reason
+
+    # API：exclusions 直接消费结构逐项
+    ok, reason = verify_recipe({"recipe_version": RECIPE_VERSION,
+                                "exclusions": {"a": 1}, "recipe_hash": "x"})
+    assert ok is False and "must be a list" in reason
+    ok, reason = verify_recipe({"recipe_version": RECIPE_VERSION,
+                                "exclusions": ["x"], "recipe_hash": "x"})
+    assert ok is False and "must be an object" in reason
+    ok, reason = verify_recipe({"recipe_version": RECIPE_VERSION,
+                                "exclusions": [7], "recipe_hash": "x"})
+    assert ok is False and "must be an object" in reason
+    ok, reason = verify_recipe(
+        {"recipe_version": RECIPE_VERSION,
+         "exclusions": [{"scope": "gut_dir", "entry": "x", "reason": 123}],
+         "recipe_hash": "x"})
+    assert ok is False and "must be a non-empty string" in reason
+    # API-only 形态：非 JSON 可序列化值 → 领域错误，不泄漏 TypeError
+    ok, reason = verify_recipe({"recipe_version": RECIPE_VERSION,
+                                "exclusions": [], "recipe_hash": "x",
+                                "junk": {1, 2}})
+    assert ok is False and "serializable" in reason
+
+    # API：run_canonical 携带非法 recipe → CanonicalError（统一领域出口）
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), [1, 2])
+
+    # API：build_recipe exclusions 非法形状 → (None, reason)
+    for bad in ({"scope": "x"}, ["x"], "",
+                [{"scope": ["gut_dir"], "entry": "x", "reason": "r"}],
+                [{"scope": "gut_dir", "entry": 7, "reason": "r"}],
+                [{"scope": "gut_dir", "entry": "x", "reason": 123}]):
+        rec, err = build_recipe(project, exclusions=bad)
+        assert rec is None and err, bad
+
+    # 合法正例：exclusions 合法时行为不变
+    rec, err = build_recipe(project, exclusions=[
+        {"scope": "gut_dir", "entry": "res://tests/old/",
+         "reason": "retired face"}])
+    assert err is None
+    ok, reason = verify_recipe(rec)
+    assert ok is True, reason
+
+    # 真实 CLI：canonical 非 dict recipe 根 → exit 1 + tool JSON ok=false
+    # （stdout 整体可解析为 tool JSON 本身即证明无 traceback）
+    bad = tmp_path / "bad_recipe.json"
+    bad.write_text("[1, 2]", encoding="utf-8")
+    out_path = tmp_path / "out.json"
+    parser = build_parser()
+    args = parser.parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(bad), "--out", str(out_path)])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    assert code == 1
+    doc = json.loads(buf.getvalue())
+    assert doc["tool"] == "canonical" and doc["ok"] is False
+    assert "must be a JSON object" in doc["summary"]["error"]
+
+    # 真实 CLI：canonical-diagnose 同拒
+    args = parser.parse_args([
+        "canonical-diagnose", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(bad), "--features", "demo",
+        "--out", str(out_path)])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    assert code == 1
+    doc = json.loads(buf.getvalue())
+    assert doc["tool"] == "canonical-diagnose" and doc["ok"] is False
+    assert "must be a JSON object" in doc["summary"]["error"]
+
+
+def test_spec066_stability_baseline_illegal_shapes_domain_errors(
+        project, tmp_path):
+    """§SPEC-066/R20（Revy R19-L2）：stability baseline 合法 JSON 非 dict
+    根与 unions/per_fid/crap.records 直接消费结构非法形状必须转
+    CanonicalError；真实 CLI 输出 tool JSON ok=false canonical_error:true，
+    不得泄漏 AttributeError/TypeError/KeyError；含 union=null 行、
+    total=null、标量行集的合法基线路径不变。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.canonical.orchestrator import _load_baseline_report
+    from godot_qa_toolkit.cli import build_parser
+
+    recipe, rpath = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+
+    def _baseline_err(doc) -> str:
+        p = tmp_path / "baseline.json"
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        with pytest.raises(CanonicalError) as ei:
+            run_canonical(project, _targets(project), recipe,
+                          stability_baseline=str(p))
+        return str(ei.value)
+
+    # 根非 dict（R19-L2 原反例）
+    assert "must be a JSON object" in _baseline_err([1, 2])
+    # unions 直接消费结构逐项
+    assert "must be a list" in _baseline_err({"unions": "x"})
+    assert "must be an object" in _baseline_err({"unions": ["x"]})
+    assert "must be a non-empty string" in _baseline_err(
+        {"unions": [{"file": 7, "union": {"per_fid": []}}]})
+    assert "must be an object or null" in _baseline_err(
+        {"unions": [{"file": "f.gd", "union": 7}]})
+    assert "'per_fid' must be a list" in _baseline_err(
+        {"unions": [{"file": "f.gd", "union": {"per_fid": "x"}}]})
+    assert "must be an object" in _baseline_err(
+        {"unions": [{"file": "f.gd", "union": {"per_fid": ["x"]}}]})
+    assert "'fid' must be a non-empty string" in _baseline_err(
+        {"unions": [{"file": "f.gd",
+                     "union": {"per_fid": [{"covered_line_ids": [1]}]}}]})
+    assert "'covered_line_ids' must be a list" in _baseline_err(
+        {"unions": [{"file": "f.gd",
+                     "union": {"per_fid": [{"fid": "a"}]}}]})
+    assert "'covered_line_ids' must be a list" in _baseline_err(
+        {"unions": [{"file": "f.gd",
+                     "union": {"per_fid": [{"fid": "a",
+                                            "covered_line_ids": "01"}]}}]})
+    assert "scalars" in _baseline_err(
+        {"unions": [{"file": "f.gd",
+                     "union": {"per_fid": [{"fid": "a",
+                                            "covered_line_ids": [1,
+                                                                 {"x": 1}]}]}}]})
+    assert "'total' must be a number or null" in _baseline_err(
+        {"unions": [{"file": "f.gd",
+                     "union": {"per_fid": [{"fid": "a",
+                                            "covered_line_ids": [1],
+                                            "total": "abc"}]}}]})
+    # crap.records 直接消费结构
+    assert "'crap' must be an object" in _baseline_err({"crap": 7})
+    assert "must be a list" in _baseline_err({"crap": {"records": 7}})
+    assert "must be an object" in _baseline_err({"crap": {"records": ["x"]}})
+    assert "'function_id' must be a non-empty string" in _baseline_err(
+        {"crap": {"records": [{"score": 1}]}})
+
+    # 真实 CLI：非 dict 根 baseline → exit 1 + tool JSON ok=false
+    # canonical_error:true（CanonicalError 在 CLI 边界统一转 tool JSON）
+    bad = tmp_path / "bad_baseline.json"
+    bad.write_text("[1, 2]", encoding="utf-8")
+    out_path = tmp_path / "out.json"
+    args = build_parser().parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(rpath),
+        "--stability-baseline", str(bad), "--out", str(out_path)])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    assert code == 1
+    doc = json.loads(buf.getvalue())
+    assert doc["tool"] == "canonical" and doc["ok"] is False
+    assert doc["summary"]["canonical_error"] is True
+    assert "must be a JSON object" in doc["summary"]["error"]
+
+    # 合法正例：union=null 行跳过、total=null → 0、str/int 标量行集可读回
+    good = tmp_path / "good_baseline.json"
+    good.write_text(json.dumps({
+        "unions": [
+            {"file": "res://a.gd",
+             "union": {"per_fid": [
+                 {"fid": "f", "covered_line_ids": ["0", "1"], "total": 3},
+                 {"fid": "g", "covered_line_ids": [4], "total": None}]}},
+            {"file": "res://gone.gd", "union": None},
+        ],
+        "crap": {"records": [{"function_id": "res://a.gd::f", "score": 5}]},
+    }), encoding="utf-8")
+    lines, records = _load_baseline_report(str(good))
+    assert lines["res://a.gd"]["f"] == (frozenset({"0", "1"}), 3)
+    assert lines["res://a.gd"]["g"] == (frozenset({4}), 0)
+    assert "res://gone.gd" not in lines
+    assert records["res://a.gd::f"]["score"] == 5

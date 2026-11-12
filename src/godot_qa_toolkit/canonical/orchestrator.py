@@ -1276,24 +1276,97 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
 
 def _load_baseline_report(path: str) -> tuple[dict, dict]:
     """§SPEC-056/057 stability baseline：读取历史 canonical 报告的逐 fid
-    行集与函数级 CRAP 记录。"""
+    行集与函数级 CRAP 记录。§SPEC-066：根与直接消费结构（unions 行/
+    union/per_fid 行/file/fid/covered_line_ids/total、crap.records）在
+    读取前完成形状校验，非法形状 CanonicalError，不泄漏
+    AttributeError/TypeError/KeyError。"""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise CanonicalError(
             f"stability baseline unreadable: {path}: {e}") from e
+    if not isinstance(doc, dict):
+        raise CanonicalError(
+            f"stability baseline must be a JSON object, got "
+            f"{type(doc).__name__} (§SPEC-066)")
+    unions = doc.get("unions", [])
+    if not isinstance(unions, list):
+        raise CanonicalError(
+            f"stability baseline 'unions' must be a list, got {unions!r} "
+            f"(§SPEC-066)")
     lines: dict = {}
-    for u in doc.get("unions") or []:
+    for u in unions:
+        if not isinstance(u, dict):
+            raise CanonicalError(
+                f"stability baseline union row must be an object, got "
+                f"{u!r} (§SPEC-066)")
         if u.get("union") is None:
             continue
-        # §SPEC-060d：行集与 total 分母一并入基线（同行集但分母变化 = 车道
-        # 迁移，不允许静默保持 scored）
-        lines[u["file"]] = {
-            row["fid"]: (frozenset(row["covered_line_ids"]),
-                         int(row.get("total") or 0))
-            for row in u["union"].get("per_fid") or []}
-    records = {r["function_id"]: r for r in doc.get("crap", {}).get(
-        "records") or []}
+        union = u["union"]
+        if not isinstance(union, dict):
+            raise CanonicalError(
+                f"stability baseline union row 'union' must be an object "
+                f"or null, got {union!r} (§SPEC-066)")
+        file = u.get("file")
+        if not isinstance(file, str) or not file:
+            raise CanonicalError(
+                f"stability baseline union row 'file' must be a non-empty "
+                f"string, got {file!r} (§SPEC-066)")
+        per_fid = union.get("per_fid", [])
+        if not isinstance(per_fid, list):
+            raise CanonicalError(
+                f"stability baseline 'per_fid' must be a list, got "
+                f"{per_fid!r} (§SPEC-066)")
+        rows: dict = {}
+        for row in per_fid:
+            if not isinstance(row, dict):
+                raise CanonicalError(
+                    f"stability baseline per_fid row must be an object, "
+                    f"got {row!r} (§SPEC-066)")
+            fid = row.get("fid")
+            if not isinstance(fid, str) or not fid:
+                raise CanonicalError(
+                    f"stability baseline per_fid row 'fid' must be a "
+                    f"non-empty string, got {fid!r} (§SPEC-066)")
+            covered = row.get("covered_line_ids")
+            # frozenset 消费边界：非 list（裸字符串/缺键）或含容器/None
+            # 元素会在比较语义上 TypeError 或漂移，读取前拒绝
+            if not isinstance(covered, list) or not all(
+                    isinstance(x, (str, int, float)) for x in covered):
+                raise CanonicalError(
+                    f"stability baseline per_fid row 'covered_line_ids' "
+                    f"must be a list of scalars, got {covered!r} (§SPEC-066)")
+            total = row.get("total")
+            if total is not None and not isinstance(total, (int, float)):
+                raise CanonicalError(
+                    f"stability baseline per_fid row 'total' must be a "
+                    f"number or null, got {total!r} (§SPEC-066)")
+            # §SPEC-060d：行集与 total 分母一并入基线（同行集但分母变化 =
+            # 车道迁移，不允许静默保持 scored）
+            rows[fid] = (frozenset(covered), int(total or 0))
+        lines[file] = rows
+    crap = doc.get("crap", {})
+    if not isinstance(crap, dict):
+        raise CanonicalError(
+            f"stability baseline 'crap' must be an object, got {crap!r} "
+            f"(§SPEC-066)")
+    records_list = crap.get("records", [])
+    if not isinstance(records_list, list):
+        raise CanonicalError(
+            f"stability baseline 'crap.records' must be a list, got "
+            f"{records_list!r} (§SPEC-066)")
+    records: dict = {}
+    for r in records_list:
+        if not isinstance(r, dict):
+            raise CanonicalError(
+                f"stability baseline crap record must be an object, got "
+                f"{r!r} (§SPEC-066)")
+        fid = r.get("function_id")
+        if not isinstance(fid, str) or not fid:
+            raise CanonicalError(
+                f"stability baseline crap record 'function_id' must be a "
+                f"non-empty string, got {fid!r} (§SPEC-066)")
+        records[fid] = r
     return lines, records
 
 

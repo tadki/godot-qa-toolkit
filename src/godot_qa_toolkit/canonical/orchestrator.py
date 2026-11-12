@@ -436,6 +436,36 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
     return [g for g in groups if g]
 
 
+_BASE_SYMLINK_CACHE: dict[str, list[str]] = {}
+
+
+def _base_symlink_relpaths(base_root: Path) -> list[str]:
+    """§SPEC-071 H1：base 侧一次性 symlink 预扫（per-process 缓存）——
+    无 symlink 的项目（如 KOL）零额外成本；有 symlink 时仅对命中路径在
+    shadow 内做解引用处理，避免每分片全树 Python walk 的协议开销。"""
+    cached = _BASE_SYMLINK_CACHE.get(str(base_root))
+    if cached is not None:
+        return cached
+    links: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(base_root):
+        if Path(dirpath) == base_root:
+            # shadow 不拷贝 .godot（编排器排除项），其下 symlink 与
+            # no-write-through 契约无关；剪枝同时让预扫保持轻量
+            dirnames[:] = [d for d in dirnames if d != ".godot"]
+        for name in dirnames:
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                links.append(p.relative_to(base_root).as_posix())
+        dirnames[:] = [d for d in dirnames
+                       if not (Path(dirpath) / d).is_symlink()]
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                links.append(p.relative_to(base_root).as_posix())
+    _BASE_SYMLINK_CACHE[str(base_root)] = links
+    return links
+
+
 def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
                     ) -> tuple[Path, dict]:
     """§SPEC-056：分片独立 project shadow——源码/resource 状态与基准树
@@ -447,9 +477,9 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
     文件，非插桩文件可被永久污染；改为 reflink（FS 支持）否则实拷贝。
 
     §SPEC-071 H1：cp -a 会原样保留 symlink——绝对/相对链接可指向 base
-    inode，运行期写经链接写穿。所有复制的 symlink 一律**解引用**为常规
-    文件/实拷贝目录（shadow 自有 inode）；悬空链接移除。两种行为确定性
-    且经返回的 disclosure 计数显式披露。"""
+    inode，运行期写经链接写穿。base 侧一次性预扫发现的所有 symlink 在
+    shadow 内**解引用**为常规文件/实拷贝目录（shadow 自有 inode）；悬空
+    链接移除。两种行为确定性且经返回的 disclosure 计数显式披露。"""
     import shutil as _shutil
     import subprocess as _sp
 
@@ -467,29 +497,28 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
     if junit.is_file():
         junit.unlink()
     disclosure = {"symlinks_dereferenced": 0, "dangling_links_removed": 0}
-    for dirpath, dirnames, filenames in os.walk(shadow, topdown=False):
-        for name in list(dirnames) + list(filenames):
-            p = Path(dirpath) / name
-            if not p.is_symlink():
-                continue
-            tmp = p.with_name(p.name + ".gqt-deref")
+    for rel in _base_symlink_relpaths(base_root):
+        p = shadow / rel
+        if not p.is_symlink():
+            continue
+        tmp = p.with_name(p.name + ".gqt-deref")
+        try:
+            if p.is_dir():
+                # 目录链接 → 解引用为实拷贝目录（内层 symlink 由
+                # copytree symlinks=False 一并解引用；悬空内层即报错，
+                # 按悬空链接移除处理）
+                _shutil.copytree(p, tmp, symlinks=False)
+            else:
+                _shutil.copyfile(p, tmp)
+            os.replace(tmp, p)
+            disclosure["symlinks_dereferenced"] += 1
+        except OSError:
             try:
-                if p.is_dir():
-                    # 目录链接 → 解引用为实拷贝目录（内层 symlink 由
-                    # copytree symlinks=False 一并解引用；悬空内层即报错，
-                    # 按悬空链接移除处理）
-                    _shutil.copytree(p, tmp, symlinks=False)
-                else:
-                    _shutil.copyfile(p, tmp)
-                os.replace(tmp, p)
-                disclosure["symlinks_dereferenced"] += 1
+                _shutil.rmtree(tmp, ignore_errors=True)
             except OSError:
-                try:
-                    _shutil.rmtree(tmp, ignore_errors=True)
-                except OSError:
-                    pass
-                p.unlink(missing_ok=True)
-                disclosure["dangling_links_removed"] += 1
+                pass
+            p.unlink(missing_ok=True)
+            disclosure["dangling_links_removed"] += 1
     return shadow, disclosure
 
 

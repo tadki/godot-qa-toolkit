@@ -8,6 +8,7 @@ GUT glob。扫描零命中返回 None——由 runner 自动退回全量。
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 # res:// 引用字面量：preload("x") / load("x") 两函数形态（与 class_name
@@ -51,6 +52,38 @@ def _ref_hits_target(ref: str, target_res_path: str) -> bool:
     target_cf = target_res_path.casefold().strip()
     # 精确或后缀匹配；“路径+尾巴 .bak” 这类串改别的文件的字面量不算
     return ref_cf == target_cf or ref_cf.endswith("/" + target_cf.rsplit("res://", 1)[-1])
+
+
+# E2（§SPEC-501）：零引用短路披露面——stderr 一行 + summary 定终态记录。
+# 判据唯一出处 = derive_tests_glob 零命中（派生 glob，禁止 CLI 参数推断——
+# SEE-1568 批次二 v1 串行门误判教训）；串行/并行路径共用同一判据与记录形态。
+_ZERO_REF_NOTE = ("zero-ref short-circuit: no test references the target "
+                  "— full-GUT fallback skipped (disclosed short-circuit; "
+                  "potential kills intentionally not executed)")
+
+
+def disclose_zero_ref(file_path: str) -> None:
+    """零引用短路 stderr 披露行（与 summary.zero_ref_short_circuit 双披露）。"""
+    print(f"zero-ref short-circuit: {file_path} — no test references the "
+          f"target, full-GUT fallback skipped (disclosed)", file=sys.stderr)
+
+
+def zero_ref_short_circuit_result(file_path: str) -> dict:
+    """零引用目标定终态：有意不执行 + 双披露（形态与 no_sites 契约同构）。"""
+    return {
+        "tool": "mutation",
+        "ok": True,
+        "summary": {
+            "file": file_path, "mutants": 0, "jobs": 0,
+            "killed": 0, "survived": 0, "timeout": 0,
+            "run_errors": 0, "suspect": 0, "invalid_mutants": 0,
+            "kill_rate": 0.0,
+            "note": _ZERO_REF_NOTE,
+            "scoped": False,
+            "zero_ref_short_circuit": True,
+        },
+        "failures": [],
+    }
 
 
 def derive_tests_glob(target_res_path: str, tests_dir: Path,
@@ -100,6 +133,11 @@ def _glob_from_counts(counts: dict[str, int], tests_dir: Path) -> str | None:
     return "res://tests/" + best[0] + "/"
 
 
+# E6-4（§SPEC-503）：gdself 索引进程内复用——规划相位只读、按 project_root
+# 命中即复用、零持久化（进程级保守口径，跨 run 场景以新进程天然失效）。
+_INDEX_CACHE: dict[str, dict] = {}
+
+
 def _index_ref_counts(project_root: str, target_res_path: str,
                       tests_dir: Path) -> dict[str, int]:
     """gdself 正向索引 → 每命中测试文件计数（keys 与反查同形：绝对路径）。
@@ -107,8 +145,14 @@ def _index_ref_counts(project_root: str, target_res_path: str,
     计数 = 该测试文件的命中源种类数（path/class/autoload/stem/dynamic），
     与反查的「引用次数」同为强度代理，供同一 tie-break 消费。
     """
-    from .gdself import query_consumers
-    out = query_consumers(project_root, target_res_path, tests_dir)
+    from .gdself import build_index, query_consumers
+    cache_key = str(Path(project_root).resolve())
+    index = _INDEX_CACHE.get(cache_key)
+    if index is None:
+        index = build_index(project_root)
+        _INDEX_CACHE[cache_key] = index
+    out = query_consumers(project_root, target_res_path, tests_dir,
+                          index=index)
     tests_abs = str(tests_dir.absolute()).replace("\\", "/")
     counts: dict[str, int] = {}
     for consumer in out["consumers"]:

@@ -605,8 +605,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
-    clock = clock or StageClock()
-    baselines, baseline_failures = _precompute_baselines(
+    返回 (chunks, settled, v2ctx)。P1 差分规划在父层单点完成（D4/D6）：
     plan_diff + budget_on_retry 后按 retry 位点分片，worker 只执行注入的
     retry_ids——分片间零重叠，per-id 条目写天然无竞态。v2ctx 供合并层注入
     reused 记录/披露并单点写 manifest（D5 高风险通道：并发下 manifest 索引

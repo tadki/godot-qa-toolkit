@@ -16,6 +16,7 @@ from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .identity import certificate_valid
 from .reporting import _dry_run_result, _mutant_record
 from .resume2 import ResumeStoreV2
+from .stagetiming import StageClock
 
 __all__ = ["dry_run_estimate", "plan_execution"]
 
@@ -121,12 +122,8 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
                      prior_entries, mutate_all=mutate_all,
                      cert_validator=lambda kb: certificate_valid(kb,
                                                                  project_root))
-    if clock is not None:
-        with clock.stage("prefilter"):
-            uncovered_mutants, retry_pool = _apply_coverage_prefilter(
-                plan, path, project_root, tests_glob, binary_kind,
-                reuse_coverage, disclosures, identity=identity)
-    else:
+    clock = clock or StageClock()
+    with clock.stage("prefilter"):
         uncovered_mutants, retry_pool = _apply_coverage_prefilter(
             plan, path, project_root, tests_glob, binary_kind,
             reuse_coverage, disclosures, identity=identity)

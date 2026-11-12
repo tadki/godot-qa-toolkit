@@ -35,7 +35,7 @@ from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
 from .stagetiming import (StageClock, merge_execution_stages, qa_disk_bytes,
                           self_rss_peak_mb)
-from .runner import run_mutation
+from .runner import _res_path_of, run_mutation
 
 # 进程池工厂（可注入替身做单测）
 _worker_pool = ProcessPoolExecutor
@@ -672,6 +672,16 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     if raw_total <= 0 or budget <= 0:
         return [], None, _settled_no_sites(f, bool(glob))
     header_hash, spans, mutants, scope_hashes = build_manifest(src, f, collected)
+    # D-1（SEE-1564 §SPEC-207）：父层 manifest 必须与 worker 记录同通道同键
+    # ——identity 先经 identity_for_target 注入本文件的 exec_scheme（与
+    # run_mutation 同源解析）。identity_pack 缺省即 cold，父层恒以 cold 键
+    # 落 manifest 而 worker 记录在 worker 键下 → plan_diff 无条目可复用 →
+    # warm 全量重跑（Revy 实测第 2 轮 executed=9、diff_skipped=[]）。cold
+    # 通道注入为 no-op，既有 cold 键零迁移；worker 键本就是记录落点，修复
+    # 只是把 manifest 归位到同键。
+    from .worker_channel import identity_for_target
+    identity, _route, _scheme = identity_for_target(
+        identity, project_root, _res_path_of(f, project_root), worker_channel)
     store2 = ResumeStoreV2(project_root, f, glob, binary_kind=binary_kind,
                            identity=identity)
     store2.disclose_v1_superseded()

@@ -7,8 +7,10 @@ per-file 准备产物（func-registry、probe-manifest、插桩模板）。动�
 插桩模板中的 sink 名以 uuid 占位符保存：臂间只做占位符替换（同长度 uuid），
 per-file 变量名后缀来自文件 key8（与臂无关），模板跨臂、跨轮复用。
 
-缓存条目带模板 sha256 校验（防损坏）；fresh 生成路径的 reparse 守卫保留，
-校验和失败/版本不匹配一律回落 fresh 重建并计数缓存未命中原因。
+缓存条目带模板 sha256 与 registry/probe_manifest/block_map 语义内容
+sha256 校验（§SPEC-060c：篡改即 quarantine + fresh 重建）；fresh 生成路径
+的 reparse 守卫保留，校验和失败/版本不匹配一律回落 fresh 重建并计数缓存
+未命中原因。
 
 落点（§SPEC-052 R6 fix）：被测项目（KOL）只读零残留——持久缓存迁至
 `~/.cache/gqt-canonical-prep/<root-hash12>/`（HOME 稳定命名空间），路径与
@@ -23,7 +25,7 @@ import json
 import os
 from pathlib import Path
 
-PREP_VERSION = "canonical-prep/1"
+PREP_VERSION = "canonical-prep/2"
 # probe 算法版本：插桩形态（flags/块压缩等）变化必须 bump，旧条目全失效
 PROBE_ALGO_VERSION = "blocks/6"
 SINK_UUID_PLACEHOLDER = "GQTUUIDSENTINEL"
@@ -82,6 +84,59 @@ def _probe_lines_ok(entry: dict) -> list | None:
     return probe_lines
 
 
+def _sha256_obj(obj) -> str:
+    """语义内容完整性指纹：键统一 str + 显式排序后 canonical json——
+    JSON 往返把 int 键变 str，指纹必须对往返稳定形态计算。"""
+    def canon(o):
+        if isinstance(o, dict):
+            return {str(k): canon(v) for k, v in sorted(
+                o.items(), key=lambda kv: str(kv[0]))}
+        if isinstance(o, (list, tuple)):
+            return [canon(x) for x in o]
+        return o
+
+    return hashlib.sha256(json.dumps(
+        canon(obj), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _normalize_block_map(block_map) -> dict:
+    """块映射键统一 str（存储形态 = JSON 往返稳定形态）。非 int 键/值 →
+    ValueError（caller 按损坏处理）。"""
+    try:
+        return {str(int(k)): sorted(int(x) for x in v)
+                for k, v in dict(block_map or {}).items()}
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"block_map malformed: {e}") from e
+
+
+def _denormalize_block_map(block_map) -> dict:
+    """load 侧还原 int 键（orchestrator 以 int 起始行查块映射）。"""
+    try:
+        return {int(k): list(v) for k, v in dict(block_map or {}).items()}
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"block_map malformed: {e}") from e
+
+
+def _semantic_integrity_ok(entry: dict) -> bool:
+    """§SPEC-060c：registry/probe_manifest/block_map 语义内容 sha256 校验
+    （§SPEC-053 cc_oracle 连接与探针清单直接消费这些内容，被篡改的缓存
+    会把伪造 CC 当真）。缺失/类型错/指纹不匹配 → False（quarantine）。"""
+    registry = entry.get("registry")
+    manifest = entry.get("probe_manifest")
+    block_map = entry.get("block_map")
+    if not isinstance(registry, dict) or not isinstance(manifest, dict) \
+            or not isinstance(block_map, dict):
+        return False
+    try:
+        bm_norm = _normalize_block_map(block_map)
+    except ValueError:
+        return False
+    return (entry.get("registry_sha256") == _sha256_obj(registry)
+            and entry.get("probe_manifest_sha256") == _sha256_obj(manifest)
+            and entry.get("block_map_sha256") == _sha256_obj(bm_norm))
+
+
 def _template_ok(entry: dict, tpl: str, probe_lines: list) -> bool:
     """模板完整性：sha256 校验 + vacuous/占位符形态。"""
     if hashlib.sha256(tpl.encode("utf-8")).hexdigest() != entry.get(
@@ -123,14 +178,22 @@ def load_entry(project_root: str | os.PathLike, *, rel: str,
     if probe_lines is None:
         _quarantine(path)
         return None
+    if not _semantic_integrity_ok(entry):
+        _quarantine(path)
+        return None
     if not _template_ok(entry, tpl, probe_lines):
+        _quarantine(path)
+        return None
+    try:
+        block_map = _denormalize_block_map(entry.get("block_map") or {})
+    except ValueError:
         _quarantine(path)
         return None
     return {"registry": entry["registry"],
             "probe_manifest": entry["probe_manifest"],
             "instrumented_template": tpl,
             "probe_lines": probe_lines,
-            "block_map": entry.get("block_map") or {}}
+            "block_map": block_map}
 
 
 def store_entry(project_root: str | os.PathLike, *, rel: str,
@@ -143,6 +206,11 @@ def store_entry(project_root: str | os.PathLike, *, rel: str,
     rid = root_id(project_root)
     import tempfile
 
+    try:
+        block_map = _normalize_block_map(block_map)
+    except ValueError as e:
+        # 缓存写失败不阻断测量（orchestrator 按 OSError 隔离处理）
+        raise OSError(f"cache store rejected malformed block_map: {e}") from e
     root = prep_dir(project_root)
     os.makedirs(root, exist_ok=True)
     key = prep_key(rel, src_sha256, recipe_hash, algo)
@@ -156,12 +224,15 @@ def store_entry(project_root: str | os.PathLike, *, rel: str,
         "recipe_hash": recipe_hash,
         "template_sha256": hashlib.sha256(
             instrumented_template.encode("utf-8")).hexdigest(),
+        "registry_sha256": _sha256_obj(registry),
+        "probe_manifest_sha256": _sha256_obj(probe_manifest),
+        "block_map_sha256": _sha256_obj(block_map),
         "registry": registry,
         "probe_manifest": probe_manifest,
         "instrumented_template": instrumented_template,
         "probe_lines": list(probe_lines),
         "source_plain": source_plain,
-        "block_map": block_map or {},
+        "block_map": block_map,
     }
     fd, tmp = tempfile.mkstemp(dir=root, prefix=f".{key}.", suffix=".tmp")
     try:

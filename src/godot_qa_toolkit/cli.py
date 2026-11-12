@@ -594,6 +594,28 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     probe_keys = (args.acceptance_probe_keys or None)
     if probe_keys:
         probe_keys = [k.strip() for k in probe_keys.split(",") if k.strip()]
+    baseline_failures = None
+    bf_path = getattr(args, "baseline_failures", None)
+    if bf_path:
+        try:
+            doc = _json.loads(_P(bf_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return _emit({"tool": "canonical", "ok": False,
+                          "summary": {"error":
+                                      f"baseline-failures load failed: {e}"},
+                          "failures": [{"reason":
+                                        f"baseline-failures load failed: "
+                                        f"{e}"}]})
+        tests = doc.get("tests") if isinstance(doc, dict) else doc
+        if not isinstance(tests, list) \
+                or not all(isinstance(t, str) for t in tests):
+            return _emit({"tool": "canonical", "ok": False,
+                          "summary": {"error":
+                                      "baseline-failures must be a JSON "
+                                      "array of test names (or {tests: []})"},
+                          "failures": [{"reason": "baseline-failures "
+                                                  "malformed"}]})
+        baseline_failures = set(tests)
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -603,7 +625,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             stability_baseline=getattr(args, "stability_baseline", None),
             shard_width=getattr(args, "shard_width", 6),
             acceptance_shards=getattr(args, "acceptance_shards", 4),
-            shard_log_dir=getattr(args, "shard_log_dir", None))
+            shard_log_dir=getattr(args, "shard_log_dir", None),
+            baseline_failures=baseline_failures)
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -695,6 +718,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="canonical-recipe/1 JSON (from `gqt recipe --out`)")
     can.add_argument("--out", required=True,
                      help="canonical-report/1 output JSON path")
+    can.add_argument("--baseline-failures", default=None,
+                     help="JSON file with pre-existing (un-instrumented) "
+                          "failing test names ([...] or {\"tests\": [...]}) "
+                          "— new failures gate the arm (§SPEC-060a)")
     can.add_argument("--acceptance-probe-keys", nargs="?",
                      const="aidomain_integration", default=None,
                      help="W4 cost probe keys (default: aidomain_integration)")

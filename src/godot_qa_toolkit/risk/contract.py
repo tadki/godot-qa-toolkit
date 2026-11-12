@@ -29,6 +29,9 @@ SCORE_STATUS_VALUES = frozenset(
         "unstable",
         "no_instability_observed",
         "excluded",
+        # §SPEC-060f：canonical 实际产生、此前契约表缺失的两个状态
+        "no_probe_fired",
+        "invalid",
     }
 )
 
@@ -82,6 +85,12 @@ def build_shadow_record(
     if total is not None and total > 0 and covered is not None:
         coverage = covered / total
     score = crap_line_score(cc, coverage) if state == "scored" else None
+    # §SPEC-060f：scored 与 score=None 自相矛盾是公共契约违约（Revy M-2
+    # 反例），构造期 fail-loud，禁止矛盾 record 流出
+    if state == "scored" and score is None:
+        raise ValueError(
+            f"scored record requires computable coverage "
+            f"(covered={covered!r}, total={total!r}, cc={cc})")
     status = state
     return {
         "function_id": function_id,

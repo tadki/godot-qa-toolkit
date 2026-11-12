@@ -1425,3 +1425,45 @@ def test_parse_failing_pairs_summary_and_gqt_run_normalization():
          "test_known"),
         ("", "test_secret"),
     }
+
+
+def test_config_fields_must_be_non_empty_strings(project, tmp_path):
+    """§SPEC-065 反例（Revy R17-LOW）：tests.name/script 与
+    coverage_limitations.file/reason 须为非空 str——类型错（如 file=123，
+    会在附着层失配静默失效）或空值一律 CanonicalError fail-fast。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    cases = [
+        {"tests": [{"name": 123, "reason": "r"}]},
+        {"tests": [{"name": "t", "reason": "r", "script": 123}]},
+        {"tests": [{"name": "t", "reason": "r", "script": ""}]},
+        {"tests": ["not-a-dict"]},
+        {"coverage_limitations": [{"file": 123, "reason": "r"}]},
+        {"coverage_limitations": [{"file": "a.gd", "reason": ""}]},
+        {"coverage_limitations": ["not-a-dict"]},
+    ]
+    for cfg in cases:
+        with pytest.raises(CanonicalError):
+            run_canonical(project, _targets(project), recipe,
+                          intolerant_config=cfg)
+
+
+def test_valid_config_passes_type_validation(project, tmp_path):
+    """§SPEC-065 正向：合法声明（含 script 作用域 + coverage limitation）
+    通过类型校验，报告 declared/limitations 逐字段保持非空 str。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    report = run_canonical(
+        project, _targets(project), recipe,
+        intolerant_config={
+            "tests": [{"name": "test_t", "reason": "contract",
+                       "script": "res://tests/unit/test_game.gd"}],
+            "coverage_limitations": [
+                {"file": "src_game/cell.gd", "reason": "tool limitation"}]})
+    d = report["instrumentation_intolerant"]["declared"]
+    assert d == [{"name": "test_t", "reason": "contract",
+                  "script": "res://tests/unit/test_game.gd"}]
+    assert report["coverage_limitations"] == [
+        {"file": "src_game/cell.gd", "reason": "tool limitation"}]
+    assert report["ok"] is True

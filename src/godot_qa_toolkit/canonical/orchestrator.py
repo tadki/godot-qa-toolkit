@@ -70,6 +70,21 @@ _BACKUP_BASE = Path(tempfile.gettempdir()) / "gqt-canonical-backups"
 # finally 恢复零残留。
 _AUTOLOAD_NAME = "GqtCovFlusher"
 _FLUSHER_RELPATH = "addons/gqt_cov_flusher.gd"
+# §SPEC-062A：finalizer 经 GUT pre_run_script 通道注册（root index 0，
+# 退出序最后 = R5 drain 顺序纪律），测量期 project.godot 零改动
+_PRE_HOOK_RELPATH = "addons/gqt_cov_pre_hook.gd"
+_PRE_HOOK_GD = """extends "res://addons/gut/hook_script.gd"
+# qa-toolkit canonical coverage finalizer registration hook. Registers the
+# drain node as root's FIRST child so its _exit_tree runs LAST (reverse
+# exit order = R5 drain discipline) — without touching project.godot.
+func run():
+	var root: Node = (gut.get_tree().root if gut != null
+			else Engine.get_main_loop().root)
+	var node: Node = load("res://addons/gqt_cov_flusher.gd").new()
+	node.name = "GqtCovFlusherNode"
+	root.add_child(node)
+	root.move_child(node, 0)
+"""
 _FLUSHER_GD = """extends Node
 # qa-toolkit canonical flag-mode probe finalizer (auto-injected, never in
 # production). At tree exit, drains every registered per-file flag array to
@@ -250,10 +265,12 @@ def _shard_user_dir(xdg_home: str, project_name: str) -> Path:
 def _read_hits_merged(root: Path, run_uuid: str, rel: str,
                       manifest: list[int],
                       xdg_homes: list[str],
-                      retain_dir: Path | None = None
+                      retain_dir: Path | None = None,
+                      consume: bool = True
                       ) -> tuple[set[int], int]:
     """并行分片臂的合并读回：sink 名含进程 PID（`...-<uuid>-<pid>-<key8>`
-    .txt），按 run_uuid+key8 模式跨全部分片 user:// 目录取并集。"""
+    .txt），按 run_uuid+key8 模式跨全部分片 user:// 目录取并集。
+    consume=False 仅读不删（§SPEC-062C 收敛预读复用；正式读回仍消费）。"""
     key8 = file_key8(rel)
     name = f"qa-coverage-hits-{run_uuid}-*-{key8}.txt"
     proj = _project_name(root)
@@ -274,7 +291,8 @@ def _read_hits_merged(root: Path, run_uuid: str, rel: str,
                 if ln.isdigit():
                     ids.append(int(ln))
         finally:
-            f.unlink(missing_ok=True)
+            if consume:
+                f.unlink(missing_ok=True)
     valid = set(range(len(manifest)))
     hits = {manifest[pid] for pid in ids if pid in valid}
     return hits, sum(1 for pid in ids if pid in valid)
@@ -326,7 +344,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   shard_log_dir: str | None = None,
                   stability_baseline: str | None = None,
                   baseline_failures: "set[str] | None" = None,
-                  intolerant_config: dict | None = None) -> dict:
+                  intolerant_config: dict | None = None,
+                  acceptance_repeats: int = 3) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。
 
     baseline_failures（§SPEC-060a）：既有（未插桩）运行的失败测试名集合
@@ -339,7 +358,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     （任何源码级插桩都会改变其断言所见的源码/autoload 原始形态）：仅具名项
     从失败门控比较中旁路（不静默跳过），报告逐名披露理由并作为覆盖率盲点
     声明；coverage_limitations 声明工具无法确定性测量的文件（如插桩减速下
-    晚挂载 UI），其 unstable 记录附具名理由。"""
+    晚挂载 UI），其 unstable 记录附具名理由。
+
+    acceptance_repeats（§SPEC-062C）：验收臂 N 次重复执行取行集并集
+    （单轮 UI 时序不确定，并集测量可复现），报告收敛轮数或如实报告未收敛
+    与上界；重复成本计入臂 wall_s（§SPEC-052 时长预算内比较）。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
     baseline_failures = set(baseline_failures or ())
@@ -503,9 +526,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         pg_path = root / "project.godot"
         if not pg_path.is_file():
             raise CanonicalError(
-                "cannot inject finalizer autoload: project.godot missing")
-        started["project_godot"] = pg_path.read_text(encoding="utf-8")
-        started["created"] = [str(root / _FLUSHER_RELPATH)]
+                "cannot run measurement: project.godot missing")
+        # §SPEC-062A：project.godot 全程只读——finalizer 经 GUT
+        # pre_run_script 通道注册，不再改写 [autoload] 表
+        started["created"] = [str(root / _FLUSHER_RELPATH),
+                              str(root / _PRE_HOOK_RELPATH)]
         (backup_dir / "started.json").write_text(
             json.dumps(started, ensure_ascii=False), encoding="utf-8")
         # 分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs
@@ -529,57 +554,62 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         xdg_homes: list[str] = []
         arm_failures: set[str] = set()
         arm_new_failures: list[str] = []
+        # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
+        reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
 
         def _run_shard(ip):
             idx, plan = ip
-            xdg = tempfile.mkdtemp(
-                prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-")
-            # §SPEC-060e：mkdtemp 成功即注册进闭包共享的 xdg_homes——
-            # 后续任何异常（含 shadow 构建失败令 ex.map 抛出）都由外层
-            # finally 清理，不依赖 results 收集成功
-            xdg_homes.append(xdg)
-            env = dict(os.environ)
-            env["XDG_DATA_HOME"] = xdg
+            args = list(plan["args"]) + [
+                "-gpre_run_script=res://" + _PRE_HOOK_RELPATH]
+            rep_records: list[dict] = []
             shadow = None
             try:
-                # §SPEC-056：分片独立 project shadow（独立 .godot）
+                # §SPEC-056：分片独立 project shadow（rep 间复用）
                 shadow = _prepare_shadow(root, run_uuid, idx)
-                r, _w = _run_one_gut(shadow, plan["args"], timeout_s,
-                                     env=env, gate_root=root)
-                out = (r.stdout or "") + "\n" + (r.stderr or "")
-                rc = r.returncode
-                timed_out = False
-            except CanonicalError as e:
-                te = getattr(e, "__cause__", None)
-                tail = ""
-                if te is not None:
-                    tail = ((getattr(te, "stdout", "") or "") + "\n" +
-                            (getattr(te, "stderr", "") or ""))
-                out = str(e) + "\n" + tail
-                rc = None
-                timed_out = True
+                for rep in range(reps):
+                    xdg = tempfile.mkdtemp(
+                        prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-r{rep}-")
+                    # §SPEC-060e：mkdtemp 成功即注册进闭包共享的
+                    # xdg_homes——任何异常路径都由外层 finally 清理
+                    xdg_homes.append(xdg)
+                    env = dict(os.environ)
+                    env["XDG_DATA_HOME"] = xdg
+                    try:
+                        r, _w = _run_one_gut(shadow, args, timeout_s,
+                                             env=env, gate_root=root)
+                        out = (r.stdout or "") + "\n" + (r.stderr or "")
+                        rc = r.returncode
+                        rep_timed_out = False
+                    except CanonicalError as e:
+                        te = getattr(e, "__cause__", None)
+                        tail = ""
+                        if te is not None:
+                            tail = ((getattr(te, "stdout", "") or "") + "\n" +
+                                    (getattr(te, "stderr", "") or ""))
+                        out = str(e) + "\n" + tail
+                        rc = None
+                        rep_timed_out = True
+                    if shard_log_dir:
+                        log_dir = Path(shard_log_dir)
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        (log_dir /
+                         f"{name}-shard{idx}-rep{rep}.log").write_text(
+                            out, encoding="utf-8")
+                    rep_records.append(
+                        {"xdg": xdg, "rc": rc, "out": out,
+                         "timed_out": rep_timed_out})
             finally:
                 _cleanup_shadow(shadow)
-            if shard_log_dir:
-                log_dir = Path(shard_log_dir)
-                log_dir.mkdir(parents=True, exist_ok=True)
-                (log_dir / f"{name}-shard{idx}.log").write_text(
-                    out, encoding="utf-8")
-            return {"plan": plan, "xdg": xdg, "rc": rc,
-                    "out": out[-6000:] if timed_out else out,
-                    "timed_out": timed_out}
+            return {"plan": plan, "reps": rep_records}
 
         try:
             for abs_path, inst in instrumented_files.items():
                 Path(abs_path).write_text(inst, encoding="utf-8")
-            pg_path.write_text(
-                _patch_autoload(
-                    started["project_godot"],
-                    f'{_AUTOLOAD_NAME}="*res://{_FLUSHER_RELPATH}"'),
-                encoding="utf-8")
-            flusher_abs = root / _FLUSHER_RELPATH
-            flusher_abs.parent.mkdir(parents=True, exist_ok=True)
-            flusher_abs.write_text(_FLUSHER_GD, encoding="utf-8")
+            for relpath, text in ((_FLUSHER_RELPATH, _FLUSHER_GD),
+                                  (_PRE_HOOK_RELPATH, _PRE_HOOK_GD)):
+                abs_p = root / relpath
+                abs_p.parent.mkdir(parents=True, exist_ok=True)
+                abs_p.write_text(text, encoding="utf-8")
             t_arm = time.monotonic()
             try:
                 with ThreadPoolExecutor(
@@ -595,22 +625,25 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 raise
             wall_s = time.monotonic() - t_arm
             for r in results:
-                if r["timed_out"]:
-                    gut_ok = False
-                    run_error = True
-                    timed_out = True
-                elif r["rc"] != 0 and _looks_like_godot_launch_failure(
-                        r["out"]):
-                    gut_ok = False
-                    run_error = True
-            output = "\n".join(r["out"] for r in results)
+                for rep in r["reps"]:
+                    if rep["timed_out"]:
+                        gut_ok = False
+                        run_error = True
+                        timed_out = True
+                    elif rep["rc"] != 0 and _looks_like_godot_launch_failure(
+                            rep["out"]):
+                        gut_ok = False
+                        run_error = True
+            output = "\n".join(
+                rep["out"] for r in results for rep in r["reps"])
             # §SPEC-060a：逐名解析双臂失败集；相对基线的新增失败 = 插桩
             # 语境下测试语义被改变或产品回归 → 门控本臂（不出分）。
             # §SPEC-061b：声明为 instrumentation-intolerant 的具名项先从
             # 门控比较中旁路（逐名披露，不静默）。
             arm_failures: set[str] = set()
             for r in results:
-                arm_failures |= _parse_failing_tests(r["out"])
+                for rep in r["reps"]:
+                    arm_failures |= _parse_failing_tests(rep["out"])
             arm_intolerant = sorted(arm_failures & intolerant_names)
             arm_new_failures = sorted(
                 (arm_failures - intolerant_names) - baseline_failures)
@@ -620,8 +653,6 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         finally:
             for abs_path, original in started["files"].items():
                 Path(abs_path).write_text(original, encoding="utf-8")
-            if "project_godot" in started:
-                pg_path.write_text(started["project_godot"], encoding="utf-8")
             for created in started.get("created", []):
                 Path(created).unlink(missing_ok=True)
             shutil.rmtree(backup_dir, ignore_errors=True)
@@ -631,16 +662,18 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         invalid_reason = ("timeout" if timed_out
                           else ("run_error" if run_error else None))
         if acceptance is not None and not run_error:
-            # §SPEC-035 对账：分片组逐个对账，任一 false → 臂 invalid
+            # §SPEC-035 对账：分片组逐 rep 对账（rep 间独立进程独立输出），
+            # 任一 false → 臂 invalid
             recs = []
             ok_all = True
             for r in results:
-                rec = reconcile(
-                    root, r["plan"]["suite_dir"], r["plan"]["keys"],
-                    r["out"], replay_ok=True,
-                    main_snapshot=acceptance["snapshot"])
-                recs.append(rec)
-                ok_all = ok_all and bool(rec.get("ok"))
+                for rep in r["reps"]:
+                    rec = reconcile(
+                        root, r["plan"]["suite_dir"], r["plan"]["keys"],
+                        rep["out"], replay_ok=True,
+                        main_snapshot=acceptance["snapshot"])
+                    recs.append(rec)
+                    ok_all = ok_all and bool(rec.get("ok"))
             reconciliation = {"ok": ok_all, "shards": recs}
             if not ok_all:
                 arm_valid = False
@@ -651,7 +684,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     _cleanup_suite_dir(Path(r["plan"]["suite_dir"]))
 
         bundles: dict[str, dict] = {}
+        convergence = None
         try:
+            if acceptance is not None and reps > 1:
+                # §SPEC-062C：逐轮行集并集收敛轮数（rep 间独立进程，
+                # 并集对轮序不敏感）
+                convergence = _acceptance_convergence(
+                    root, run_uuid, sink_by_rel, manifest_by_rel,
+                    results, reps)
             for rel, sink in sink_by_rel.items():
                 item = prepared[rel]
                 retain = (Path(shard_log_dir) / f"{name}-sinks"
@@ -721,6 +761,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "test_failures": {"observed": sorted(arm_failures),
                               "new": arm_new_failures,
                               "instrumentation_intolerant": arm_intolerant},
+            # §SPEC-062C：验收臂 N 次重复与收敛披露（gut_full 恒单轮）
+            "repeats": reps,
+            "convergence": convergence,
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
             "shards": len(plans),
@@ -755,7 +798,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                  "invalid_reason": f"suite_error:{e}", "bundles": 0,
                  "bundles_data": {}, "reconciliation": None,
                  "test_failures": {"observed": [], "new": [],
-                                   "instrumentation_intolerant": []}}
+                                   "instrumentation_intolerant": []},
+                 "repeats": 0, "convergence": None}
 
     # 逐文件 union（coverage-union/1，禁平均）
     unions = []
@@ -997,6 +1041,30 @@ def _crap_replay_vanished_baseline(records: list, lanes: dict,
                                 stability="baseline_vanished_this_run")
         records.append(nr)
         lanes["unstable"] = lanes.get("unstable", 0) + 1
+
+
+def _acceptance_convergence(root: Path, run_uuid: str, sink_by_rel: dict,
+                            manifest_by_rel: dict, results: list,
+                            reps: int) -> dict:
+    """§SPEC-062C：验收臂逐轮行集并集收敛——min k s.t. ∪(1..k) ==
+    ∪(1..N)。k<N 即收敛（其后轮零新增）；k==N 如实报告未收敛与上界。"""
+    n_reps = min(reps, min(len(r["reps"]) for r in results) if results else 0)
+    worst = 0
+    for rel in sink_by_rel:
+        manifest = manifest_by_rel[rel]
+        cum: set[int] = set()
+        cum_seq: list[frozenset] = []
+        for i in range(n_reps):
+            rep_xdgs = [r["reps"][i]["xdg"] for r in results]
+            hits, _ = _read_hits_merged(root, run_uuid, rel, manifest,
+                                        rep_xdgs, consume=False)
+            cum |= set(hits)
+            cum_seq.append(frozenset(cum))
+        final = cum_seq[-1] if cum_seq else frozenset()
+        k = next((i + 1 for i, s in enumerate(cum_seq) if s == final),
+                 n_reps)
+        worst = max(worst, k)
+    return {"rounds_used": worst, "bound": reps, "converged": worst < reps}
 
 
 def _attach_limitation_reasons(records: list, limitations: list) -> None:

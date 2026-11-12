@@ -872,8 +872,10 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
     baselines: dict = {}
     failures: dict[str, str] = {}
     try:
-        # baseline 阶段含 farm 槽制备成本（opt-in 时）——占比归因口径：
-        # 这笔开销是 baseline-in-farm 路线自身的成本，必须可见。
+        # §SPEC-210 MED-1：stage 粒度单计——制备段与逐 glob 快照段各自成
+        # 一段；此前外层同名 stage 把「制备+整段循环」与内层逐 glob 段嵌套，
+        # 每次快照被累加两次（Final Review 实证 0.2s → 0.401）。制备开销
+        # （opt-in 时）仍计入 baseline 阶段总额，占比归因口径不变。
         with clock.stage("baseline"):
             if knob_state is not None and baseline_in_farm_requested():
                 try:
@@ -886,17 +888,17 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
                           f"provisioning failed ({e}) — baseline runs on the "
                           f"real repo (D5 authority unchanged)",
                           file=sys.stderr)
-            for g in set(globs.values()):
-                if g is None:
-                    continue
-                with clock.stage("baseline"):
-                    baseline = _run_baseline_snapshot(farm_root, g, timeout_s)
-                if baseline and baseline.get("rc") == 0:
-                    baselines[g] = baseline
-                else:
-                    failures[g] = _BASELINE_FAILURE_REASONS.pop(
-                        _baseline_key(farm_root, g),
-                        "no baseline snapshot returned")
+        for g in set(globs.values()):
+            if g is None:
+                continue
+            with clock.stage("baseline"):
+                baseline = _run_baseline_snapshot(farm_root, g, timeout_s)
+            if baseline and baseline.get("rc") == 0:
+                baselines[g] = baseline
+            else:
+                failures[g] = _BASELINE_FAILURE_REASONS.pop(
+                    _baseline_key(farm_root, g),
+                    "no baseline snapshot returned")
     finally:
         if farm_slot is not None:
             shutil.rmtree(farm_slot, ignore_errors=True)

@@ -79,10 +79,11 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
         scope = row.get("scope", "")
         entry_text = row.get("entry", "")
         reason = row.get("reason")
-        # scope/entry 非 str 提前拒绝：非 str scope 会在 LEGAL_SCOPES
-        # frozenset 成员测试上 TypeError，非 str entry 会静默入 recipe 面
+        # §SPEC-068：scope/entry 与 verify 同一规则（entry strip 后非空）
+        # ——工具自产 recipe 不得被自家 canonical 拒绝；非 str scope 会在
+        # LEGAL_SCOPES frozenset 成员测试上 TypeError，提前拒绝
         if not isinstance(scope, str) or not scope \
-                or not isinstance(entry_text, str) or not entry_text:
+                or not isinstance(entry_text, str) or not entry_text.strip():
             return [], (
                 f"exclusion missing scope/entry: {row!r}"
             )
@@ -138,6 +139,11 @@ def build_recipe(
         return None, error
 
     dirs = gutconfig.get("dirs", [])
+    # §SPEC-068：与 verify 同一规则——dirs 必须是非空字符串列表，否则
+    # build 会产出被自家 canonical 拒绝的 recipe
+    if not isinstance(dirs, list) or not all(
+            isinstance(d, str) and d.strip() for d in dirs):
+        return None, "gutconfig 'dirs' must be a list of non-empty strings"
     if not dirs:
         return None, "gutconfig has no dirs — empty GUT face is not canonical"
 
@@ -293,6 +299,15 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         if not isinstance(key, str) or not key.strip():
             return False, (f"recipe acceptance feature 'key' must be a "
                            f"non-empty string, got {key!r} (§SPEC-067)")
+    # §SPEC-068：空 features/dirs 拒绝（与 build 侧非空要求一致）。空性
+    # 检查排在面结构检查之后——调用方优先拿到最具体的结构错误（face
+    # 类型错不被另一面的空列表抢先）
+    if not dirs:
+        return False, (f"recipe 'gut_face.dirs' must be a non-empty list "
+                       f"of non-empty strings, got {dirs!r} (§SPEC-068)")
+    if not features:
+        return False, (f"recipe 'acceptance_face.features' must be a "
+                       f"non-empty list, got {features!r} (§SPEC-068)")
     toolchain = recipe.get("toolchain", {})
     if not isinstance(toolchain, dict):
         return False, (f"recipe 'toolchain' must be an object, "

@@ -368,7 +368,7 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 - **臂 gut_full**：.gutconfig 面（无 `-gdir`——GUT 缺省读配置，GUT 9.6 实测锚定）；
 - **臂 acceptance**：`acceptance/features` 全量 keys 编译进私有目录 `.gqt-run-<uuid>/`（§12 管线）+ 重放校验 + 重新插桩（新 run_uuid+sink 名）→ 1 次 GUT → **对账五项**（任一 false → 臂 invalid）→ 私有目录清理零残留；
 - **逐文件 sink** `qa-coverage-hits-{run_uuid}-{file_key8}.txt`（`file_key8 = sha1(relpath)[:8]`），落盘即清、沿 §10 prune 纪律；
-- **在树插桩**：备份 `/tmp/gqt-canonical-backups/<run_uuid>/`（started-record + 逐文件原文），finally 恢复；启动时回收同项目陈旧备份（崩溃恢复，恢复前不信任任何 sink）；KOL 生产树零残留；
+- **在树插桩**：备份 per-uid 私有目录 `/tmp/gqt-canonical-backups-<uid>/<run_uuid>/`（started-record + 逐文件原文；0700、ownership 校验、拒 symlink），finally 原子恢复；启动时回收同项目陈旧备份（崩溃恢复：marker schema 校验 + 恢复写入经 pinned-root 逐组件 O_NOFOLLOW dirfd 走廊限定 project root 内）；KOL 生产树零残留；
 - 两臂共用同一 registry/probe manifest（同源码、同 manifest），run UUID 每臂独立；
 - `recipe.arm` 显式注入（`gut_full|gut_core|acceptance`）；缺省不传 arm 保留 tests_glob 推断（既有 stdout 契约零漂移）；
 - **certification.status="not_certified"**、`evidence_level="exploratory"`、`diagnostic_only=true`、`dynamic_cache=false`（单轮 exploratory；WP5 拥有双轮认证）；

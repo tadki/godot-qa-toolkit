@@ -544,7 +544,8 @@ def test_canonical_crap_scores_shape_and_relative_fids(project, tmp_path):
     # §SPEC-070/R26 FR-4：record 级语义按文件测量形态区分；顶层在两种
     # 形态并存时为 mixed，单一形态时为该形态
     counts = crap["coverage_semantics_counts"]
-    if counts["block_entry_approximation"] and counts["statement_start_line"]:
+    if counts.get("block_entry_approximation") and \
+            counts.get("statement_start_line"):
         assert crap["coverage_semantics"] == "mixed"
     else:
         assert crap["coverage_semantics"] == (

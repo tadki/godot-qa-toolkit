@@ -188,7 +188,7 @@ def test_recovery_skips_foreign_writable_dir(project, tmp_path):
 # --------------------------------------------------- FR-2 shadow inode 隔离
 
 def test_shadow_does_not_share_writable_inodes(project):
-    shadow = _prepare_shadow(project, "r25shadow", 0)
+    shadow, _disc = _prepare_shadow(project, "r25shadow", 0)
     try:
         base_file = project / "src_game" / "cell.gd"
         shadow_file = shadow / "src_game" / "cell.gd"
@@ -197,6 +197,46 @@ def test_shadow_does_not_share_writable_inodes(project):
         shadow_file.write_text("RUNTIME-WRITE")
         assert base_file.read_text() == TARGET_SRC, (
             "shadow 运行期写不得写穿 base")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(shadow, ignore_errors=True)
+
+
+# ------------------------------------------------- §SPEC-071 H1 symlink 写穿
+
+def test_shadow_dereferences_symlinks_zero_write_through(
+        project, tmp_path):
+    """§SPEC-071 H1（Revy R26-H1 反例闭合）：shadow 内任意复制的 symlink
+    （绝对/相对）解引用为常规文件/实拷贝——运行期写零写穿 base；悬空
+    链接移除并经 disclosure 显式披露。"""
+    victim = tmp_path / "victim.gd"
+    victim.write_text("BASE-ORIGINAL")
+    base_file = project / "src_game" / "cell.gd"
+    # 绝对 symlink → base victim（R26-H1 原反例）
+    (project / "src_game" / "linked.gd").symlink_to(victim)
+    # 相对 symlink → project 内另一文件
+    (project / "src_game" / "rel.gd").symlink_to("cell.gd")
+    # 悬空 symlink
+    (project / "src_game" / "dangling.gd").symlink_to(
+        tmp_path / "nonexistent.gd")
+
+    shadow, disc = _prepare_shadow(project, "r27shadow", 0)
+    try:
+        assert disc["symlinks_dereferenced"] >= 2
+        assert disc["dangling_links_removed"] >= 1
+        # shadow 内零 symlink 残留
+        assert not any(p.is_symlink() for p in shadow.rglob("*"))
+        # 原反例路径：写入不再写穿 base victim
+        linked = shadow / "src_game" / "linked.gd"
+        assert linked.is_file() and not linked.is_symlink()
+        linked.write_text("PWNED")
+        assert victim.read_text() == "BASE-ORIGINAL"
+        # 相对链接同样解引用为自有 inode
+        relf = shadow / "src_game" / "rel.gd"
+        relf.write_text("REL-WRITE")
+        assert base_file.read_text() == TARGET_SRC
+        # 悬空链接已移除
+        assert not (shadow / "src_game" / "dangling.gd").exists()
     finally:
         import shutil as _sh
         _sh.rmtree(shadow, ignore_errors=True)
@@ -262,14 +302,15 @@ def test_report_discloses_block_semantics(project, tmp_path):
     # statement_start_line；statement 文件保持精确语义；顶层为 mixed
     crap = report["crap"]
     counts = crap["coverage_semantics_counts"]
-    assert counts["block_entry_approximation"] \
+    assert counts.get("block_entry_approximation", 0) \
         == sem["block_compressed_files"]
-    if counts["statement_start_line"] and counts["block_entry_approximation"]:
+    if counts.get("statement_start_line") and \
+            counts.get("block_entry_approximation"):
         assert crap["coverage_semantics"] == "mixed"
     else:
         assert crap["coverage_semantics"] == (
             "block_entry_approximation"
-            if counts["block_entry_approximation"]
+            if counts.get("block_entry_approximation")
             else "statement_start_line")
     by_fid_sem = {(r["function_id"], r["coverage_semantics"],
                   r["crap_line"]["coverage_semantics"])
@@ -367,22 +408,21 @@ def test_canonical_evidence_record_has_no_phantom_sink_path(
 # ---------------------------------------- R26：FR-1 残余加固反例
 
 def test_atomic_write_excl_0600_no_leftover(project):
-    """O_CREAT|O_EXCL|O_NOFOLLOW + 0600 + 随机后缀：临时名不可抢注、
-    不跟随 symlink、replace 后零残留、终态 0600。"""
-    from godot_qa_toolkit.canonical.orchestrator import _atomic_write_text
-    target = project / "src_game" / "cell.gd"
-    _atomic_write_text(target, "ATOMIC-CONTENT")
+    """O_CREAT|O_EXCL|O_NOFOLLOW + 0600 + 随机后缀（经 pinned dirfd）：
+    临时名不可抢注、不跟随 symlink、replace 后零残留、终态 0600。"""
+    from godot_qa_toolkit.canonical.orchestrator import \
+        _atomic_write_via_dir_fd
+    src_dir = project / "src_game"
+    target = src_dir / "cell.gd"
+    dir_fd = os.open(src_dir, os.O_RDONLY | os.O_NOFOLLOW
+                     | os.O_DIRECTORY)
+    try:
+        _atomic_write_via_dir_fd(dir_fd, "cell.gd", "ATOMIC-CONTENT")
+    finally:
+        os.close(dir_fd)
     assert target.read_text() == "ATOMIC-CONTENT"
     assert target.stat().st_mode & 0o777 == 0o600
-    assert list(project.glob("src_game/.*gqt-tmp*")) == []
-    # 目标位置为 symlink 时：替换 symlink 本身（不跟随写穿目标文件）
-    victim = tmp_path2 = project.parent / "r26-victim.txt"
-    victim.write_text("VICTIM")
-    link = project / "src_game" / "linked.gd"
-    link.symlink_to(victim)
-    _atomic_write_text(link, "NEW-CONTENT")
-    assert victim.read_text() == "VICTIM"  # 未写穿
-    assert link.read_text() == "NEW-CONTENT"  # symlink 被常规文件替换
+    assert list(src_dir.glob(".*gqt-tmp*")) == []
 
 
 def test_backup_base_rejects_symlink(monkeypatch):
@@ -425,3 +465,188 @@ def test_backup_base_rejects_tampered_mode():
             _backup_base()
     finally:
         os.chmod(base, 0o700)
+
+
+# ---------------------------------------- §SPEC-071 H2 竞态注入（确定性）
+
+def test_recovery_parent_symlink_swap_outside_zero_change(
+        project, tmp_path):
+    """§SPEC-071 H2（Revy R26-H2 注入形态，确定性）：恢复时刻 src_game
+    已被换为指向 root 外目录的 symlink——预过滤 resolve 即越界，记录整体
+    跳过，root 外文件零改动。"""
+    import shutil as _sh
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_cell = outside / "cell.gd"
+    outside_cell.write_text("OUTSIDE-ORIGINAL")
+
+    base = _backup_base()
+    d = base / "r27-race-outside"
+    d.mkdir(mode=0o700)
+    (d / "started.json").write_text(json.dumps({
+        "run_uuid": "r27-race-outside",
+        "project_root": str(project),
+        "files": {str(project / "src_game" / "cell.gd"): "REWRITTEN"},
+    }), encoding="utf-8")
+
+    real_dir = project / "src_game_real"
+    _sh.move(str(project / "src_game"), str(real_dir))
+    (project / "src_game").symlink_to(outside)
+    try:
+        restored = _recover_stale_backups(project)
+        assert restored == 0
+        assert outside_cell.read_text() == "OUTSIDE-ORIGINAL"
+    finally:
+        (project / "src_game").unlink()
+        _sh.move(str(real_dir), str(project / "src_game"))
+        _sh.rmtree(d, ignore_errors=True)
+
+
+def test_recovery_in_root_symlink_component_resolves_in_root(
+        project, tmp_path):
+    """§SPEC-071 H2：组件 symlink 解析后在 root 内——resolve 规范化把
+    恢复落点映射到 root 内 resolved 位置（写入落点在 root 内，root 外
+    零改动）；resolve 之后沿 resolved 路线插入的 symlink 会被 dirfd
+    逐组件 O_NOFOLLOW 走廊 ELOOP 拒绝（无 pathname 重解析窗口）。"""
+    import shutil as _sh
+    internal = project / "internal"
+    internal.mkdir()
+    internal_cell = internal / "cell.gd"
+    internal_cell.write_text("INTERNAL-ORIGINAL")
+
+    base = _backup_base()
+    d = base / "r27-race-inside"
+    d.mkdir(mode=0o700)
+    (d / "started.json").write_text(json.dumps({
+        "run_uuid": "r27-race-inside",
+        "project_root": str(project),
+        "files": {str(project / "src_game" / "cell.gd"): "REWRITTEN"},
+    }), encoding="utf-8")
+
+    real_dir = project / "src_game_real"
+    _sh.move(str(project / "src_game"), str(real_dir))
+    (project / "src_game").symlink_to(internal)
+    try:
+        restored = _recover_stale_backups(project)
+        # 恢复经 resolved 路线落在 root 内位置；root 外零改动
+        assert restored == 1
+        assert internal_cell.read_text() == "REWRITTEN"
+        outside_probe = tmp_path / "outside-probe.txt"
+        assert not outside_probe.exists()
+    finally:
+        (project / "src_game").unlink()
+        _sh.move(str(real_dir), str(project / "src_game"))
+        _sh.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------- §SPEC-071 L1 marker schema
+
+def test_recovery_skips_malformed_markers_and_does_not_block(
+        project, tmp_path):
+    """§SPEC-071 L1：marker 根非 object / created 非 list / project_godot
+    非 str 等非法形态 → 不可信记录跳过（不写不删、无裸异常），且不阻塞
+    后续合法恢复。"""
+    base = _backup_base()
+    cell = project / "src_game" / "cell.gd"
+    cell.write_text("CURRENT")
+
+    d_bad_list = base / "r27-l1-list"
+    d_bad_list.mkdir(mode=0o700)
+    (d_bad_list / "started.json").write_text('["not", "a", "dict"]',
+                                             encoding="utf-8")
+    d_bad_created = base / "r27-l1-created"
+    d_bad_created.mkdir(mode=0o700)
+    (d_bad_created / "started.json").write_text(json.dumps({
+        "run_uuid": "r27-l1-created", "project_root": str(project),
+        "files": {str(cell): "REWRITTEN"}, "created": 7,
+    }), encoding="utf-8")
+    d_bad_pg = base / "r27-l1-pg"
+    d_bad_pg.mkdir(mode=0o700)
+    (d_bad_pg / "started.json").write_text(json.dumps({
+        "run_uuid": "r27-l1-pg", "project_root": str(project),
+        "files": {str(cell): "REWRITTEN"}, "project_godot": 7,
+    }), encoding="utf-8")
+    d_good = base / "r27-l1-good"
+    d_good.mkdir(mode=0o700)
+    (d_good / "started.json").write_text(json.dumps({
+        "run_uuid": "r27-l1-good", "project_root": str(project),
+        "files": {str(cell): "ORIGINAL"},
+        "created": [str(project / "addons" / "gqt_cov_flusher.gd")],
+    }), encoding="utf-8")
+
+    restored = _recover_stale_backups(project)
+    assert restored == 1  # 仅合法记录恢复，坏 marker 不阻塞
+    assert cell.read_text() == "ORIGINAL"
+    assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
+    for d in (d_bad_list, d_bad_created, d_bad_pg):
+        assert d.exists()  # 不可信记录保留痕迹
+        import shutil as _sh
+        _sh.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------- §SPEC-071 L2 ghost 回放语义
+
+def test_ghost_replay_semantics_reconciled_with_current_form():
+    """§SPEC-071 L2：ghost 回放 record/crap_line 的 coverage_semantics 与
+    本轮该文件实测形态对账；rel 不在本轮测量面时保留 baseline 原值并
+    显式标注 carried。"""
+    from godot_qa_toolkit.canonical.orchestrator import (
+        _crap_replay_vanished_baseline,
+        _SEM_BLOCK,
+        _SEM_STATEMENT,
+    )
+    prepared = {
+        "src_game/blocky.gd": {"block_map": {0: [1, 2]}},
+        "src_game/plain.gd": {"block_map": {}},
+    }
+    baseline_records = {
+        "src_game/blocky.gd::f": {
+            "function_id": "src_game/blocky.gd::f",
+            "score_status": "scored",
+            "coverage_semantics": _SEM_STATEMENT,
+            "crap_line": {"score": 1.0,
+                          "coverage_semantics": _SEM_STATEMENT},
+        },
+        "src_game/gone.gd::g": {
+            "function_id": "src_game/gone.gd::g",
+            "score_status": "scored",
+            "coverage_semantics": _SEM_STATEMENT,
+            "crap_line": {"score": 2.0,
+                          "coverage_semantics": _SEM_STATEMENT},
+        },
+    }
+    records: list = []
+    lanes: dict = {}
+    _crap_replay_vanished_baseline(records, lanes, baseline_records,
+                                   emitted_fids=set(), prepared=prepared)
+    by_fid = {r["function_id"]: r for r in records}
+    blocky = by_fid["src_game/blocky.gd::f"]
+    assert blocky["coverage_semantics"] == _SEM_BLOCK
+    assert blocky["crap_line"]["coverage_semantics"] == _SEM_BLOCK
+    gone = by_fid["src_game/gone.gd::g"]
+    assert gone.get("coverage_semantics_carried_from_baseline") is True
+    assert gone["coverage_semantics"] == _SEM_STATEMENT
+    assert gone["crap_line"]["coverage_semantics"] == _SEM_STATEMENT
+    assert lanes["unstable"] == 2
+
+
+# ---------------------------------------- §SPEC-071 L3 文档/负行号
+
+def test_docs_and_negative_line_ids_aligned():
+    """§SPEC-071 L3：docs 与 orchestrator docstring 均为 per-uid 私有
+    备份根；负整数/负整值浮点行号一律 False（与 docstring 对齐）。"""
+    from godot_qa_toolkit.canonical.orchestrator import _is_baseline_line_id
+    assert _is_baseline_line_id(-1) is False
+    assert _is_baseline_line_id(-2.0) is False
+    assert _is_baseline_line_id(0) is True
+    assert _is_baseline_line_id(3) is True
+    assert _is_baseline_line_id("12") is True
+    assert _is_baseline_line_id("abc") is False
+    repo = Path(__file__).resolve().parents[2]
+    contract = (repo / "docs" / "contract.md").read_text(encoding="utf-8")
+    assert "gqt-canonical-backups-<uid>" in contract
+    assert "/tmp/gqt-canonical-backups/" not in contract
+    mod_src = (repo / "src" / "godot_qa_toolkit" / "canonical"
+               / "orchestrator.py").read_text(encoding="utf-8")
+    assert "gqt-canonical-backups-<uid>" in mod_src
+    assert "/tmp/gqt-canonical-backups/" not in mod_src

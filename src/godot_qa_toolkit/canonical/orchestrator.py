@@ -814,12 +814,91 @@ def _lane_from_reason(reason: str | None) -> str:
     return "invalid"
 
 
+def _crap_emit(records: list, lanes: dict, recipe_hash: str, rel: str,
+               entry: dict, *, state: str, covered: int | None = None,
+               total: int | None = None) -> None:
+    from ..risk.contract import build_shadow_record
+
+    scope = entry.get("lex_scope") or []
+    records.append(build_shadow_record(
+        function_id=entry["fid"],
+        name=entry.get("name", ""),
+        lex_path=(".".join(str(x) for x in scope)
+                  or entry.get("name", "")),
+        start_line=int(entry.get("start_line") or 0),
+        end_line=int(entry.get("end_line") or 0),
+        # registry 的 CC 字段名为 cc_oracle（§SPEC-053 连接契约）；
+        # 缺失即 cc=0 会产出伪零分，必须显式失败
+        cc=int(entry["cc_oracle"]),
+        covered=covered, total=total,
+        cov_source=("canonical_union" if state == "scored"
+                    else "not_measured"),
+        state=state,
+        recipe={"recipe_hash": recipe_hash, "method": "canonical-union/1"},
+        lambda_gap=int(entry.get("lambda_gap") or 0),
+    ))
+    lanes[state] = lanes.get(state, 0) + 1
+
+
+def _crap_emit_file_unmeasured(records: list, lanes: dict,
+                               recipe_hash: str, rel: str, entries: list,
+                               lane: str, unstable_file: bool) -> None:
+    """union 缺失/无效文件：整文件按失败车道落记录（§SPEC-053），基线
+    消失文件按 §SPEC-057 覆写为显式 unstable。"""
+    for e in entries:
+        _crap_emit(records, lanes, recipe_hash, rel, e,
+                   state=("unstable" if unstable_file else lane))
+
+
+def _crap_emit_file_scored(records: list, lanes: dict, recipe_hash: str,
+                           rel: str, entries: list, u: dict,
+                           unstable_keys: set) -> None:
+    """union 有效文件：per-fid 连接后按 unknown/unstable/scored 三车道
+    落记录（§SPEC-053/056）。"""
+    per = {row["fid"]: row for row in u["union"]["per_fid"]}
+    for e in entries:
+        row = per.get(e["fid"])
+        if row is None or int(row.get("total") or 0) <= 0:
+            # 缺分母/未入 probe 面：unknown 不出分（不冒充 100%）
+            _crap_emit(records, lanes, recipe_hash, rel, e, state="unknown")
+        elif ("res://" + rel, e["fid"]) in unstable_keys:
+            # §SPEC-056：跨 run 抖动函数 → 显式 unstable 车道，不出分
+            _crap_emit(records, lanes, recipe_hash, rel, e, state="unstable",
+                       covered=int(row["covered"]),
+                       total=int(row["total"]))
+        else:
+            _crap_emit(records, lanes, recipe_hash, rel, e, state="scored",
+                       covered=int(row["covered"]),
+                       total=int(row["total"]))
+
+
+def _crap_replay_vanished_baseline(records: list, lanes: dict,
+                                   baseline_records: dict,
+                                   emitted_fids: set) -> None:
+    """§SPEC-057：基线 scored 但本轮缺席的函数（目标集/union 变化）→
+    从基线记录回放为显式 unstable（不出分），杜绝静默消失。"""
+    for fid, brec in baseline_records.items():
+        if fid in emitted_fids:
+            continue
+        if brec.get("score_status") != "scored":
+            continue
+        nr = dict(brec)
+        nr["score_status"] = "unstable"
+        cl = dict(brec.get("crap_line") or {})
+        cl["score"] = None
+        cl["score_status"] = "unstable"
+        nr["crap_line"] = cl
+        nr["provenance"] = dict(brec.get("provenance") or {},
+                                stability="baseline_vanished_this_run")
+        records.append(nr)
+        lanes["unstable"] = lanes.get("unstable", 0) + 1
+
+
 def _crap_records_for_report(unions, prepared, recipe_hash,
                              unstable_keys: set | None = None,
                              baseline_records: dict | None = None):
     """§SPEC-053：函数级 CRAP 记录——union 行集（C/I）与 registry 的
     identity/CC 按 fid 连接；任何失败/无分母车道一律 score=None。"""
-    from ..risk.contract import build_shadow_record
     from ..risk.formula import CRAP_LINE_VERSION
 
     by_file = {u["file"]: u for u in unions}
@@ -827,28 +906,6 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
     lanes: dict[str, int] = {}
 
     unstable_keys = unstable_keys or set()
-
-    def _emit(rel: str, entry: dict, *, state: str,
-              covered: int | None = None, total: int | None = None) -> None:
-        scope = entry.get("lex_scope") or []
-        records.append(build_shadow_record(
-            function_id=entry["fid"],
-            name=entry.get("name", ""),
-            lex_path=(".".join(str(x) for x in scope)
-                      or entry.get("name", "")),
-            start_line=int(entry.get("start_line") or 0),
-            end_line=int(entry.get("end_line") or 0),
-            # registry 的 CC 字段名为 cc_oracle（§SPEC-053 连接契约）；
-            # 缺失即 cc=0 会产出伪零分，必须显式失败
-            cc=int(entry["cc_oracle"]),
-            covered=covered, total=total,
-            cov_source=("canonical_union" if state == "scored"
-                        else "not_measured"),
-            state=state,
-            recipe={"recipe_hash": recipe_hash, "method": "canonical-union/1"},
-            lambda_gap=int(entry.get("lambda_gap") or 0),
-        ))
-        lanes[state] = lanes.get(state, 0) + 1
 
     for rel, item in prepared.items():
         entries = item["registry"].get("entries", [])
@@ -859,45 +916,16 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
             # §SPEC-057：基线内该文件曾有覆盖、本轮 union 消失 → 整文件
             # unstable（显式车道，不出分）
             unstable_file = (f"res://{rel}", "__file_vanished__") \
-                in (unstable_keys or set())
-            for e in entries:
-                _emit(rel, e,
-                      state=("unstable" if unstable_file else lane))
+                in unstable_keys
+            _crap_emit_file_unmeasured(records, lanes, recipe_hash, rel,
+                                       entries, lane, unstable_file)
             continue
-        per = {row["fid"]: row for row in u["union"]["per_fid"]}
-        for e in entries:
-            row = per.get(e["fid"])
-            if row is None or int(row.get("total") or 0) <= 0:
-                # 缺分母/未入 probe 面：unknown 不出分（不冒充 100%）
-                _emit(rel, e, state="unknown")
-            elif ("res://" + rel, e["fid"]) in unstable_keys:
-                # §SPEC-056：跨 run 抖动函数 → 显式 unstable 车道，不出分
-                _emit(rel, e, state="unstable",
-                      covered=int(row["covered"]),
-                      total=int(row["total"]))
-            else:
-                _emit(rel, e, state="scored",
-                      covered=int(row["covered"]),
-                      total=int(row["total"]))
-    # §SPEC-057：基线 scored 但本轮缺席的函数（目标集/union 变化）→
-    # 从基线记录回放为显式 unstable（不出分），杜绝静默消失
+        _crap_emit_file_scored(records, lanes, recipe_hash, rel, entries,
+                               u, unstable_keys)
     if baseline_records:
         emitted_fids = {r["function_id"] for r in records}
-        for fid, brec in baseline_records.items():
-            if fid in emitted_fids:
-                continue
-            if brec.get("score_status") != "scored":
-                continue
-            nr = dict(brec)
-            nr["score_status"] = "unstable"
-            cl = dict(brec.get("crap_line") or {})
-            cl["score"] = None
-            cl["score_status"] = "unstable"
-            nr["crap_line"] = cl
-            nr["provenance"] = dict(brec.get("provenance") or {},
-                                    stability="baseline_vanished_this_run")
-            records.append(nr)
-            lanes["unstable"] = lanes.get("unstable", 0) + 1
+        _crap_replay_vanished_baseline(records, lanes, baseline_records,
+                                       emitted_fids)
     return records, lanes, CRAP_LINE_VERSION
 
 

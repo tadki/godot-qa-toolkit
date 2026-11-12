@@ -397,17 +397,33 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         return v
 
     cfg = intolerant_config or {}
-    # §SPEC-063e/065：声明 name/reason/script 统一非空 str 校验——
+    # §SPEC-065（R19）：提供即须合法——顶层键显式 null / 非 list 与声明
+    # 字段类型错同治（"键缺省" 与 "键值为 null" 是两种语义，null 不得
+    # 静默降级为缺省）
+    tests_decl = cfg.get("tests", [])
+    if not isinstance(tests_decl, list):
+        raise CanonicalError(
+            "intolerant 'tests' must be a list, "
+            f"got {tests_decl!r} (§SPEC-065)")
+    limits_decl = cfg.get("coverage_limitations", [])
+    if not isinstance(limits_decl, list):
+        raise CanonicalError(
+            "intolerant 'coverage_limitations' must be a list, "
+            f"got {limits_decl!r} (§SPEC-065)")
+    # §SPEC-063e/065：声明 name/reason 统一非空 str 校验——
     # 空论证旁路 = 静默排除的捷径，禁止
     intolerant_tests = []
-    for t in (cfg.get("tests") or []):
+    for t in tests_decl:
         if not isinstance(t, dict):
             raise CanonicalError(
                 "intolerant declaration must be an object, "
                 f"got {t!r} (§SPEC-065)")
         entry = {"name": _req_str(t, "name", "intolerant declaration"),
                  "reason": _req_str(t, "reason", "intolerant declaration")}
-        if t.get("script") is not None:
+        # §SPEC-065（R19）：script 键存在性语义——键缺省 = 合法 bare-name
+        # 声明；键一旦提供（含显式 null）必须通过非空 str 校验，不得静默
+        # 降级改变豁免身份范围
+        if "script" in t:
             entry["script"] = _req_str(t, "script",
                                        "intolerant declaration")
         intolerant_tests.append(entry)
@@ -420,7 +436,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     # §SPEC-064c/065：coverage_limitations file/reason 统一非空 str 校验
     # （盲点披露不得无提示消失或静默失配）
     coverage_limitations = []
-    for l in (cfg.get("coverage_limitations") or []):
+    for l in limits_decl:
         if not isinstance(l, dict):
             raise CanonicalError(
                 "coverage limitation must be an object, "

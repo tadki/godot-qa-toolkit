@@ -606,16 +606,20 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                           "failures": [{"reason":
                                         f"baseline-failures load failed: "
                                         f"{e}"}]})
-        tests = doc.get("tests") if isinstance(doc, dict) else doc
-        if not isinstance(tests, list) \
-                or not all(isinstance(t, str) for t in tests):
+        pairs = doc.get("pairs") if isinstance(doc, dict) else doc
+        if not isinstance(pairs, list) \
+                or not all(isinstance(x, list) and len(x) == 2
+                           and all(isinstance(y, str) for y in x)
+                           for x in pairs):
             return _emit({"tool": "canonical", "ok": False,
                           "summary": {"error":
                                       "baseline-failures must be a JSON "
-                                      "array of test names (or {tests: []})"},
+                                      "array of [script, test] pairs (or "
+                                      "{\"pairs\": [...]}) — bare names are "
+                                      "identity-ambiguous (§SPEC-064b)"},
                           "failures": [{"reason": "baseline-failures "
                                                   "malformed"}]})
-        baseline_failures = set(tests)
+        baseline_failures = {(x[0], x[1]) for x in pairs}
     intolerant_config = None
     it_path = getattr(args, "intolerant_tests", None)
     if it_path:
@@ -743,8 +747,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="canonical-report/1 output JSON path")
     can.add_argument("--baseline-failures", default=None,
                      help="JSON file with pre-existing (un-instrumented) "
-                          "failing test names ([...] or {\"tests\": [...]}) "
-                          "— new failures gate the arm (§SPEC-060a)")
+                          "failing (script, test) pairs ([[..],..] or "
+                          "{\"pairs\": [[..],..]}) — new failing pairs gate "
+                          "the arm; bare names are identity-ambiguous and "
+                          "rejected (§SPEC-060a/064b)")
     can.add_argument("--intolerant-tests", default=None,
                      help="JSON file declaring instrumentation-intolerant "
                           "tests ({\"tests\": [{\"name\", \"reason\"}]}) and "

@@ -66,12 +66,23 @@ LEGAL_SCOPES = frozenset({"gut_dir", "acceptance_feature"})
 
 
 def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
+    # §SPEC-066：exclusions 是外部 JSON 输入的直接消费结构——容器/行/字段
+    # 在读取前完成形状校验，非法形状一律领域错误，绝不 AttributeError
+    if not isinstance(exclusions, list):
+        return [], (f"exclusions must be a list, "
+                    f"got {type(exclusions).__name__} (§SPEC-066)")
     normalized: list[dict] = []
     for row in exclusions:
+        if not isinstance(row, dict):
+            return [], (f"exclusion row must be an object, "
+                        f"got {row!r} (§SPEC-066)")
         scope = row.get("scope", "")
         entry_text = row.get("entry", "")
-        reason = (row.get("reason") or "").strip()
-        if not scope or not entry_text:
+        reason = row.get("reason")
+        # scope/entry 非 str 提前拒绝：非 str scope 会在 LEGAL_SCOPES
+        # frozenset 成员测试上 TypeError，非 str entry 会静默入 recipe 面
+        if not isinstance(scope, str) or not scope \
+                or not isinstance(entry_text, str) or not entry_text:
             return [], (
                 f"exclusion missing scope/entry: {row!r}"
             )
@@ -82,7 +93,12 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
                 f"illegal exclusion scope {scope!r} — "
                 f"must be one of {sorted(LEGAL_SCOPES)}"
             )
-        if not reason:
+        if not isinstance(reason, str):
+            return [], (
+                f"exclusion for {entry_text!r} reason must be a "
+                f"non-empty string, got {reason!r} (§SPEC-066)"
+            )
+        if not reason.strip():
             # plan §4.6: an exclusion without a stated reason is an illegal
             # recipe — empty justification must fail loudly, never silently
             # shrink the measured face
@@ -92,7 +108,7 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
                 "without one)"
             )
         normalized.append(
-            {"scope": scope, "entry": entry_text, "reason": reason}
+            {"scope": scope, "entry": entry_text, "reason": reason.strip()}
         )
     return normalized, None
 
@@ -109,7 +125,10 @@ def build_recipe(
     """Build the canonical-recipe/1 dict; returns (recipe, None) or
     (None, reason) when the project layout or an exclusion is illegal."""
     root = Path(project_root)
-    exclusions = exclusions or []
+    # §SPEC-066：只有 None 归缺省；其余非 list 交给 _legal_exclusions
+    # 显式拒绝（falsy 值不得静默降级为空面）
+    if exclusions is None:
+        exclusions = []
     normalized_exclusions, error = _legal_exclusions(exclusions)
     if error is not None:
         return None, error
@@ -200,12 +219,36 @@ def recipe_hash(recipe: dict) -> str:
 
 
 def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
-    """Verify a loaded recipe: version tag, exclusion reasons, hash match."""
+    """Verify a loaded recipe: version tag, exclusion reasons, hash match.
+
+    §SPEC-066：recipe 是外部 JSON 输入——根与 exclusions 直接消费结构在
+    读取前完成形状校验，非法形状一律 not-ok + reason（上层编排器转
+    CanonicalError、CLI 转 tool JSON ok=false），绝不泄漏
+    AttributeError/TypeError。"""
+    if not isinstance(recipe, dict):
+        return False, (f"recipe must be a JSON object, "
+                       f"got {type(recipe).__name__} (§SPEC-066)")
     if recipe.get("recipe_version") != RECIPE_VERSION:
         return False, f"recipe_version mismatch: {recipe.get('recipe_version')}"
-    for row in recipe.get("exclusions", []):
-        if not (row.get("reason") or "").strip():
+    rows = recipe.get("exclusions", [])
+    if not isinstance(rows, list):
+        return False, (f"recipe 'exclusions' must be a list, "
+                       f"got {rows!r} (§SPEC-066)")
+    for row in rows:
+        if not isinstance(row, dict):
+            return False, (f"exclusion row must be an object, "
+                           f"got {row!r} (§SPEC-066)")
+        reason = row.get("reason")
+        if not isinstance(reason, str):
+            return False, (f"exclusion reason must be a non-empty string, "
+                           f"got {reason!r} (§SPEC-066)")
+        if not reason.strip():
             return False, f"exclusion without reason: {row!r}"
-    if recipe.get("recipe_hash") != recipe_hash(recipe):
+    try:
+        current_hash = recipe_hash(recipe)
+    except (TypeError, ValueError) as e:
+        # 非 JSON 可序列化值（API-only 形态）→ 领域错误而非 TypeError
+        return False, f"recipe is not JSON-serializable: {e} (§SPEC-066)"
+    if recipe.get("recipe_hash") != current_hash:
         return False, "recipe_hash mismatch — recipe was modified after hashing"
     return True, None

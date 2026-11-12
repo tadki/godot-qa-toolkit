@@ -590,6 +590,16 @@ def test_build_verify_roundtrip_legal_control(project):
     assert verify_recipe(recipe) == (True, None)
 
 
+def test_verify_dirs_elements_strip_aligned_with_build():
+    """§SPEC-068/R23 残余：verify 侧 gut_face.dirs 元素与 build 同一
+    strip 非空规则——纯空白元素拒绝、含空白但非空白目录合法。"""
+    reason = _verify_recipe_err(_legal_recipe(gut_face={"dirs": ["   "]}))
+    assert "dirs" in reason
+    ok, err = verify_recipe(
+        _legal_recipe(gut_face={"dirs": [" res://tests/"]}))
+    assert (ok, err) == (True, None)
+
+
 def test_verify_rejects_empty_faces_structural_errors_first():
     """§SPEC-068：空 features/dirs 拒绝（与 build 非空要求一致）；面结构
     错误优先于面空性——dirs 空列表不得抢在 acceptance_face 类型错之前。"""

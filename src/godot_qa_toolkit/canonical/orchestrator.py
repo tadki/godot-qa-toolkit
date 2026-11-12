@@ -1276,33 +1276,37 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
 
 
 def _is_baseline_line_id(value) -> bool:
-    """§SPEC-067：行集元素须为有限标量。bool 是 int 子类但语义上不是
-    行号——frozenset({True}) == frozenset({1}) 会伪造第 1 行已覆盖、
-    改变 stable/unstable 判定；NaN/±Infinity 入集会污染比较。"""
+    """§SPEC-067/068：行集元素须为有限标量且数值为整数。bool 是 int 子类
+    但语义上不是行号——frozenset({True}) == frozenset({1}) 会伪造第 1 行
+    已覆盖、改变 stable/unstable 判定；NaN/±Infinity 入集会污染比较；
+    非整数浮点（2.5）不是合法行号。"""
     if isinstance(value, bool):
         return False
     if isinstance(value, (str, int)):
         return True
-    return isinstance(value, float) and math.isfinite(value)
+    return isinstance(value, float) and math.isfinite(value) \
+        and value.is_integer()
 
 
 def _baseline_total(value) -> int:
-    """§SPEC-067：total 分母仅允许有限整数值或 null——bool 不得当数字，
-    NaN/±Infinity 拒绝，非整数不得截断（3.7 → 不能静默变 3）。"""
+    """§SPEC-067/068：total 分母仅允许非负有限整数值或 null——bool 不得
+    当数字，NaN/±Infinity 拒绝，负数与非整数拒绝（3.7 不得截断、-1 非法
+    分母）。"""
     if value is None:
         return 0
+    total = None
     if isinstance(value, bool):
-        raise CanonicalError(
-            f"stability baseline per_fid row 'total' must be a finite "
-            f"integer value or null, got {value!r} (§SPEC-067)")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and math.isfinite(value) \
+        pass
+    elif isinstance(value, int):
+        total = value
+    elif isinstance(value, float) and math.isfinite(value) \
             and value.is_integer():
-        return int(value)
-    raise CanonicalError(
-        f"stability baseline per_fid row 'total' must be a finite "
-        f"integer value or null, got {value!r} (§SPEC-067)")
+        total = int(value)
+    if total is None or total < 0:
+        raise CanonicalError(
+            f"stability baseline per_fid row 'total' must be a non-negative "
+            f"finite integer value or null, got {value!r} (§SPEC-068)")
+    return total
 
 
 def _load_baseline_report(path: str) -> tuple[dict, dict]:
@@ -1327,6 +1331,7 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
             f"stability baseline 'unions' must be a list, got {unions!r} "
             f"(§SPEC-066)")
     lines: dict = {}
+    seen_files: set = set()
     for u in unions:
         if not isinstance(u, dict):
             raise CanonicalError(
@@ -1344,6 +1349,12 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
             raise CanonicalError(
                 f"stability baseline union row 'file' must be a non-empty "
                 f"string, got {file!r} (§SPEC-067)")
+        # §SPEC-068：重复身份明确拒绝——last-wins 静默覆盖会伪造基线
+        if file in seen_files:
+            raise CanonicalError(
+                f"stability baseline duplicate union row for file "
+                f"{file!r} (§SPEC-068)")
+        seen_files.add(file)
         per_fid = union.get("per_fid", [])
         if not isinstance(per_fid, list):
             raise CanonicalError(
@@ -1360,6 +1371,10 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
                 raise CanonicalError(
                     f"stability baseline per_fid row 'fid' must be a "
                     f"non-empty string, got {fid!r} (§SPEC-067)")
+            if fid in rows:
+                raise CanonicalError(
+                    f"stability baseline duplicate fid {fid!r} in file "
+                    f"{file!r} (§SPEC-068)")
             covered = row.get("covered_line_ids")
             # frozenset 消费边界：非 list（裸字符串/缺键）或含容器/None/
             # bool/非有限数值元素会在比较语义上 TypeError、伪造或漂移，
@@ -1396,6 +1411,10 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
             raise CanonicalError(
                 f"stability baseline crap record 'function_id' must be a "
                 f"non-empty string, got {fid!r} (§SPEC-067)")
+        if fid in records:
+            raise CanonicalError(
+                f"stability baseline duplicate function_id {fid!r} "
+                f"(§SPEC-068)")
         # §SPEC-067：回放字段——`_crap_replay_vanished_baseline` 对
         # crap_line / provenance 直接 dict(...)，非对象即 TypeError/ValueError
         for field in ("crap_line", "provenance"):

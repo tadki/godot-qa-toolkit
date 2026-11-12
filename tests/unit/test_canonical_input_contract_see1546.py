@@ -70,10 +70,11 @@ def _verify_recipe_err(doc) -> str:
 
 
 def _legal_recipe(**overrides) -> dict:
+    # §SPEC-068：空 features/dirs 被拒绝——合法基底用非空面
     recipe = {
         "recipe_version": RECIPE_VERSION,
-        "gut_face": {"dirs": []},
-        "acceptance_face": {"features": []},
+        "gut_face": {"dirs": ["res://tests/"]},
+        "acceptance_face": {"features": [{"key": "demo"}]},
         "toolchain": {},
         "exclusions": [],
     }
@@ -559,3 +560,121 @@ def test_real_cli_rejects_bool_total_baseline(project, tmp_path):
             "union": {"per_fid": [{"fid": "f", "covered_line_ids": [1],
                                    "total": True}]}}]))
     assert "'total' must be a" in payload["summary"]["error"]
+
+
+# ---------------------------------------------- §SPEC-068 build↔verify 自洽
+
+def test_build_rejects_blank_entry_like_verify(project):
+    """§SPEC-068 跨命令反例①：空白 entry 不得再由 build 产出后被 verify
+    拒绝——build 与 verify 对 entry 采用同一 strip 非空规则。"""
+    recipe, error = build_recipe(project, exclusions=[
+        {"scope": "gut_dir", "entry": "   ", "reason": "r"}])
+    assert recipe is None and error and "scope/entry" in error
+
+
+@pytest.mark.parametrize("dirs", [
+    [1], ["res://a/", ""], ["   "], "res://tests/", {"a": 1},
+])
+def test_build_rejects_illegal_gutconfig_dirs(project, dirs):
+    """§SPEC-068 跨命令反例②：gutconfig dirs 含非 str / 空白项或非列表
+    时 build 直接拒绝——不再产出会被自家 verify 拒绝的 recipe。"""
+    (project / ".gutconfig.json").write_text(json.dumps({"dirs": dirs}))
+    recipe, error = build_recipe(project)
+    assert recipe is None and error and "dirs" in error, dirs
+
+
+def test_build_verify_roundtrip_legal_control(project):
+    """合法路径不变：build 产物（非空 dirs/features）必过 verify。"""
+    recipe, error = build_recipe(project)
+    assert error is None
+    assert verify_recipe(recipe) == (True, None)
+
+
+def test_verify_rejects_empty_faces_structural_errors_first():
+    """§SPEC-068：空 features/dirs 拒绝（与 build 非空要求一致）；面结构
+    错误优先于面空性——dirs 空列表不得抢在 acceptance_face 类型错之前。"""
+    recipe = {
+        "recipe_version": RECIPE_VERSION,
+        "gut_face": {"dirs": []},
+        "acceptance_face": {"features": []},
+        "toolchain": {},
+        "exclusions": [],
+    }
+    recipe["recipe_hash"] = recipe_hash(recipe)
+    reason = _verify_recipe_err(recipe)
+    assert "dirs" in reason or "features" in reason
+    # 结构错误优先：acceptance_face 类型错不被 dirs 空列表抢先
+    recipe2 = {
+        "recipe_version": RECIPE_VERSION,
+        "gut_face": {"dirs": []},
+        "acceptance_face": 7,
+        "toolchain": {},
+        "exclusions": [],
+    }
+    recipe2["recipe_hash"] = recipe_hash(recipe2)
+    assert "acceptance_face" in _verify_recipe_err(recipe2)
+
+
+# ------------------------------------------------ §SPEC-068 接受侧边界
+
+@pytest.mark.parametrize("covered", [[2.5], [-0.5], [1.5, 2]])
+def test_baseline_non_integer_float_line_ids_rejected(tmp_path, covered):
+    """§SPEC-068：数值行号须为有限整数——2.0 合法、2.5 拒绝。"""
+    row = {"fid": "f", "covered_line_ids": covered, "total": 1}
+    doc = _baseline_doc(unions=[{
+        "file": "res://a.gd", "union": {"per_fid": [row]}}])
+    assert "'covered_line_ids'" in _baseline_err(tmp_path, doc)
+
+
+@pytest.mark.parametrize("total", [-1, -5, -2.0])
+def test_baseline_negative_total_rejected(tmp_path, total):
+    row = {"fid": "f", "covered_line_ids": [1], "total": total}
+    doc = _baseline_doc(unions=[{
+        "file": "res://a.gd", "union": {"per_fid": [row]}}])
+    assert "'total' must be a" in _baseline_err(tmp_path, doc)
+
+
+def test_baseline_integer_valued_float_and_compat_legal(tmp_path):
+    """兼容行为不变：整值浮点行号/total、str/int 行集、union:null、
+    total:null 全部保持合法。"""
+    doc = {
+        "unions": [
+            {"file": "res://a.gd", "union": {"per_fid": [
+                {"fid": "f", "covered_line_ids": ["0", 1, 2.0],
+                 "total": 2.0},
+                {"fid": "g", "covered_line_ids": [3.0], "total": None}]}},
+            {"file": "res://gone.gd", "union": None},
+        ],
+        "crap": {"records": []},
+    }
+    path = _write_json(tmp_path / "b.json", doc)
+    lines, _ = _load_baseline_report(path)
+    assert lines["res://a.gd"]["f"] == (frozenset({"0", 1, 2.0}), 2)
+    assert lines["res://a.gd"]["g"] == (frozenset({3.0}), 0)
+    assert "res://gone.gd" not in lines
+
+
+def test_baseline_duplicate_file_rejected(tmp_path):
+    doc = _baseline_doc(unions=[
+        {"file": "res://a.gd", "union": {"per_fid": []}},
+        {"file": "res://a.gd", "union": {"per_fid": []}},
+    ])
+    assert "duplicate" in _baseline_err(tmp_path, doc)
+
+
+def test_baseline_duplicate_fid_rejected(tmp_path):
+    doc = _baseline_doc(unions=[{
+        "file": "res://a.gd",
+        "union": {"per_fid": [
+            {"fid": "f", "covered_line_ids": [1], "total": 1},
+            {"fid": "f", "covered_line_ids": [2], "total": 1},
+        ]}}])
+    assert "duplicate" in _baseline_err(tmp_path, doc)
+
+
+def test_baseline_duplicate_function_id_rejected(tmp_path):
+    doc = _baseline_doc(crap={"records": [
+        {"function_id": "res://a.gd::f"},
+        {"function_id": "res://a.gd::f"},
+    ]})
+    assert "duplicate" in _baseline_err(tmp_path, doc)

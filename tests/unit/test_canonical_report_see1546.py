@@ -804,3 +804,45 @@ def test_crap_records_mark_vanished_file_unstable(project, tmp_path):
         assert r["score_status"] == "unstable", (
             f"vanishing scored file must be unstable, got {r['score_status']}")
         assert r["crap_line"]["score"] is None
+
+
+def test_prep_algo_report_matches_cache_key(project: Path, tmp_path: Path):
+    """§SPEC-059a：报告 preparation.cache.algo 与实际缓存键算法一致——
+    非块压缩路径 = flags/4-pid，块压缩 = blocks/6，不得错报。"""
+    import glob as g
+
+    from godot_qa_toolkit.canonical import prepcache
+    expected = {"flags/4-pid": False, "blocks/6": True}
+    for algo, bc in expected.items():
+        # 清理 fixture 项目缓存目录，隔离两轮
+        import shutil as sh
+        prep = Path(project) / ".qa-cache" / "gqt-canonical-prep"
+        if prep.is_dir():
+            sh.rmtree(prep)
+        recipe, _ = _recipe(project, tmp_path)
+        sp.run = FakeGodot(project)
+        rep = run_canonical(project, _targets(project), recipe,
+                            block_compress=bc)
+        assert rep["preparation"]["cache"]["algo"] == algo
+        assert rep["preparation"]["cache"]["misses"] >= 1
+
+
+def test_xdg_tmp_dirs_cleaned_on_sink_read_exception(project: Path,
+                                                     tmp_path: Path,
+                                                     monkeypatch):
+    """§SPEC-059b：sink 读回抛异常时，分片 XDG 临时目录仍被清理（不残留）。"""
+    import glob as g
+
+    import godot_qa_toolkit.canonical.orchestrator as orch
+
+    def boom(*a, **k):
+        raise OSError("sink read exploded")
+
+    monkeypatch.setattr(orch, "_read_hits_merged", boom)
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    before = set(g.glob("/tmp/gqt-shard-*"))
+    with pytest.raises(OSError):
+        run_canonical(project, _targets(project), recipe)
+    after = set(g.glob("/tmp/gqt-shard-*"))
+    assert after <= before, "xdg tmp dirs must be cleaned on exception"

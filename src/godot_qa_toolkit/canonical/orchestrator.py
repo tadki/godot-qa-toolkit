@@ -325,16 +325,31 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   acceptance_shards: int = 4,
                   shard_log_dir: str | None = None,
                   stability_baseline: str | None = None,
-                  baseline_failures: "set[str] | None" = None) -> dict:
+                  baseline_failures: "set[str] | None" = None,
+                  intolerant_config: dict | None = None) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。
 
     baseline_failures（§SPEC-060a）：既有（未插桩）运行的失败测试名集合
     ——双臂 GUT 失败集逐名解析披露后，相对该基线的**新增失败**即门控：
     臂 run_error → union invalid → ok=false/comparable=false，臂不出分。
-    缺省（None）按空基线处理：任何失败都是新增（fail-closed）。"""
+    缺省（None）按空基线处理：任何失败都是新增（fail-closed）。
+
+    intolerant_config（§SPEC-061b/c）：{"tests": [{name, reason}],
+    "coverage_limitations": [{file, reason}]}——声明「插桩不容忍」测试
+    （任何源码级插桩都会改变其断言所见的源码/autoload 原始形态）：仅具名项
+    从失败门控比较中旁路（不静默跳过），报告逐名披露理由并作为覆盖率盲点
+    声明；coverage_limitations 声明工具无法确定性测量的文件（如插桩减速下
+    晚挂载 UI），其 unstable 记录附具名理由。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
     baseline_failures = set(baseline_failures or ())
+    cfg = intolerant_config or {}
+    intolerant_tests = [t for t in (cfg.get("tests") or [])
+                        if isinstance(t, dict) and t.get("name")]
+    intolerant_names = {t["name"] for t in intolerant_tests}
+    coverage_limitations = [l for l in (cfg.get("coverage_limitations") or [])
+                            if isinstance(l, dict) and l.get("file")
+                            and l.get("reason")]
     ok, reason = verify_recipe(recipe)
     if not ok:
         raise CanonicalError(f"recipe invalid: {reason}")
@@ -591,10 +606,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             output = "\n".join(r["out"] for r in results)
             # §SPEC-060a：逐名解析双臂失败集；相对基线的新增失败 = 插桩
             # 语境下测试语义被改变或产品回归 → 门控本臂（不出分）。
+            # §SPEC-061b：声明为 instrumentation-intolerant 的具名项先从
+            # 门控比较中旁路（逐名披露，不静默）。
             arm_failures: set[str] = set()
             for r in results:
                 arm_failures |= _parse_failing_tests(r["out"])
-            arm_new_failures = sorted(arm_failures - baseline_failures)
+            arm_intolerant = sorted(arm_failures & intolerant_names)
+            arm_new_failures = sorted(
+                (arm_failures - intolerant_names) - baseline_failures)
             if arm_new_failures:
                 gut_ok = False
                 run_error = True
@@ -700,7 +719,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "state": ("valid" if arm_valid else "invalid"),
             "invalid_reason": invalid_reason,
             "test_failures": {"observed": sorted(arm_failures),
-                              "new": arm_new_failures},
+                              "new": arm_new_failures,
+                              "instrumentation_intolerant": arm_intolerant},
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
             "shards": len(plans),
@@ -734,7 +754,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                  "gut_ok": False, "timed_out": False, "state": "invalid",
                  "invalid_reason": f"suite_error:{e}", "bundles": 0,
                  "bundles_data": {}, "reconciliation": None,
-                 "test_failures": {"observed": [], "new": []}}
+                 "test_failures": {"observed": [], "new": [],
+                                   "instrumentation_intolerant": []}}
 
     # 逐文件 union（coverage-union/1，禁平均）
     unions = []
@@ -770,6 +791,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                      if baseline_lines else set())
     crap_records, crap_lanes, crap_version = _crap_records_for_report(
         unions, prepared, recipe_hash, unstable_keys, baseline_records)
+    # §SPEC-061c：声明的覆盖限制具名入 unstable 记录 provenance（不伪造
+    # 确定性、不静默——工具限制如实呈现）
+    _attach_limitation_reasons(crap_records, coverage_limitations)
     # §SPEC-043 measurable 子集披露：vacuous / no_probe_fired 文件归
     # unmeasurable（本就无可测数据），其余 union 无效仍属 measurable 失败
     # （超时/契约违约等），禁止静默排除——measurable + unmeasurable == 全集。
@@ -806,6 +830,28 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "gated": any(v["new"] for v in gated_arms.values()),
             "arms": gated_arms,
         },
+        # §SPEC-061b：instrumentation-intolerant 具名排除披露——仅具名项
+        # 旁路门控，逐名给理由，并作为覆盖率盲点声明（非静默跳过）
+        "instrumentation_intolerant": {
+            "declared": [{"name": t["name"], "reason": str(t.get("reason")
+                                                           or "")}
+                         for t in intolerant_tests],
+            "observed": sorted(
+                set((arm_a.get("test_failures") or {})
+                    .get("instrumentation_intolerant") or [])
+                | set((arm_b.get("test_failures") or {})
+                      .get("instrumentation_intolerant") or [])),
+            "coverage_blind_spots": [t["name"] for t in intolerant_tests],
+            "note": ("declared tests bypass the failure-gating comparison "
+                     "only by name; they cannot attest behavior under "
+                     "instrumentation, so they are disclosed here and as "
+                     "coverage blind spots — not silently skipped"),
+        },
+        # §SPEC-061c：工具无法确定性测量的文件（如插桩减速下晚挂载 UI）
+        # 声明披露；对应 unstable 记录附具名理由
+        "coverage_limitations": [
+            {"file": l["file"], "reason": str(l["reason"])}
+            for l in coverage_limitations],
         "union": {
             "valid": union_valid,
             "files": len(unions),
@@ -951,6 +997,22 @@ def _crap_replay_vanished_baseline(records: list, lanes: dict,
                                 stability="baseline_vanished_this_run")
         records.append(nr)
         lanes["unstable"] = lanes.get("unstable", 0) + 1
+
+
+def _attach_limitation_reasons(records: list, limitations: list) -> None:
+    """§SPEC-061c：unstable 记录命中声明的覆盖限制文件 → 具名理由写入
+    provenance.stability_reason（不得静默、不得伪造确定性）。"""
+    if not limitations:
+        return
+    for r in records:
+        if r.get("score_status") != "unstable":
+            continue
+        for lim in limitations:
+            if r.get("function_id", "").startswith(
+                    str(lim["file"]) + "::"):
+                prov = dict(r.get("provenance") or {})
+                prov["stability_reason"] = str(lim["reason"])
+                r["provenance"] = prov
 
 
 def _crap_records_for_report(unions, prepared, recipe_hash,

@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -437,33 +438,37 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
 
 
 _BASE_SYMLINK_CACHE: dict[str, list[str]] = {}
+_BASE_SYMLINK_LOCK = threading.Lock()
 
 
 def _base_symlink_relpaths(base_root: Path) -> list[str]:
-    """§SPEC-071 H1：base 侧一次性 symlink 预扫（per-process 缓存）——
-    无 symlink 的项目（如 KOL）零额外成本；有 symlink 时仅对命中路径在
-    shadow 内做解引用处理，避免每分片全树 Python walk 的协议开销。"""
-    cached = _BASE_SYMLINK_CACHE.get(str(base_root))
-    if cached is not None:
-        return cached
-    links: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(base_root):
-        if Path(dirpath) == base_root:
-            # shadow 不拷贝 .godot（编排器排除项），其下 symlink 与
-            # no-write-through 契约无关；剪枝同时让预扫保持轻量
-            dirnames[:] = [d for d in dirnames if d != ".godot"]
-        for name in dirnames:
-            p = Path(dirpath) / name
-            if p.is_symlink():
-                links.append(p.relative_to(base_root).as_posix())
-        dirnames[:] = [d for d in dirnames
-                       if not (Path(dirpath) / d).is_symlink()]
-        for name in filenames:
-            p = Path(dirpath) / name
-            if p.is_symlink():
-                links.append(p.relative_to(base_root).as_posix())
-    _BASE_SYMLINK_CACHE[str(base_root)] = links
-    return links
+    """§SPEC-071 H1：base 侧一次性 symlink 预扫（per-process 缓存 +
+    模块级锁防分片并发首调的缓存踩踏——踩踏会让每个分片各走一遍
+    node_modules 量级的目录树，GIL 串行放大为每分片 ~11s 的协议回退）。
+    无 symlink 的项目（如 KOL）命中缓存后零额外成本。"""
+    key = str(base_root)
+    with _BASE_SYMLINK_LOCK:
+        cached = _BASE_SYMLINK_CACHE.get(key)
+        if cached is not None:
+            return cached
+        links: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(base_root):
+            if Path(dirpath) == base_root:
+                # shadow 不拷贝 .godot（编排器排除项），其下 symlink 与
+                # no-write-through 契约无关；剪枝同时让预扫保持轻量
+                dirnames[:] = [d for d in dirnames if d != ".godot"]
+            for name in dirnames:
+                p = Path(dirpath) / name
+                if p.is_symlink():
+                    links.append(p.relative_to(base_root).as_posix())
+            dirnames[:] = [d for d in dirnames
+                           if not (Path(dirpath) / d).is_symlink()]
+            for name in filenames:
+                p = Path(dirpath) / name
+                if p.is_symlink():
+                    links.append(p.relative_to(base_root).as_posix())
+        _BASE_SYMLINK_CACHE[key] = links
+        return links
 
 
 def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
@@ -818,6 +823,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                        for x in Path(sr).rglob("*.gd") if x.is_file()}
         scope_complete = scope_files <= {str(Path(tf)) for tf in target_files}
     recovered = _recover_stale_backups(root)
+    # §SPEC-071 H1：主线程预热 base symlink 预扫缓存——避免分片线程并发
+    # 首调的缓存踩踏（每分片各走一遍目录树，GIL 串行放大为协议回退）
+    _base_symlink_relpaths(root)
 
 
     def _arm(name: str, acceptance: dict | None = None) -> dict:

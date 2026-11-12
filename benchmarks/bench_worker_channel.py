@@ -125,11 +125,21 @@ def _instrumented_leg(project_root: str, target_fs: str,
         rel.write_bytes(original)
 
 
-def bench_track(fixture: Path, gut_dir: Path | None, workdir: Path,
+def bench_track(fixture: Path | None, gut_dir: Path | None, workdir: Path,
                 rounds: int, target_res: str, tests_glob: str | None,
-                timeout_s: int) -> tuple[dict, Path]:
-    """A/A ×rounds 定噪声带 → A/B 交错 ×rounds + per-mutant 分解。"""
-    proj = _prep_project(fixture, gut_dir, workdir, "bench")
+                timeout_s: int,
+                prepared_proj: str | Path | None = None
+                ) -> tuple[dict, Path]:
+    """A/A ×rounds 定噪声带 → A/B 交错 ×rounds + per-mutant 分解。
+
+    prepared_proj（§SPEC-201）：已就绪的项目根（如 KOL /tmp 真副本）——
+    直接在其上跑轮次，跳过 fixture 制备（kol 模式此前误走 fixture 分支，
+    引用未定义变量 `fixture` 崩溃）。
+    """
+    if prepared_proj is not None:
+        proj = Path(prepared_proj)
+    else:
+        proj = _prep_project(fixture, gut_dir, workdir, "bench")
     target_fs = str(Path(proj) / target_res.removeprefix("res://"))
     tests_glob = tests_glob or "res://tests/"
     aa: list[float] = []
@@ -245,25 +255,24 @@ def main() -> int:
             print("--mode j7 requires --project-root", file=sys.stderr)
             return 2
         report = j7_mode(args.project_root, args.rounds, gut_dir, outdir)
+    elif args.mode == "kol":
+        # §SPEC-201：kol 模式在调用方自备的 /tmp 真副本上直跑——target 取
+        # --kol-target 的 res 路径，不触碰 fixture 分支（此前该分支引用未
+        # 定义的 `fixture` 直接 NameError）。
+        if not args.kol_copy:
+            print("--mode kol requires --kol-copy", file=sys.stderr)
+            return 2
+        report, _proj = bench_track(
+            None, gut_dir, outdir, rounds=args.rounds,
+            target_res="res://" + args.kol_target,
+            tests_glob=args.tests_glob, timeout_s=300,
+            prepared_proj=args.kol_copy)
     else:
-        if args.mode == "kol":
-            if not args.kol_copy:
-                print("--mode kol requires --kol-copy", file=sys.stderr)
-                return 2
-            proj_root = args.kol_copy
-            target_fs = str(Path(proj_root) / args.kol_target)
-            tests_glob = None
-        else:
-            fixture = Path(args.fixture)
-            if not fixture.is_absolute():
-                fixture = REPO / fixture
-            proj_root = str(_prep_project(
-                fixture.resolve(), gut_dir, outdir, "fixture"))
-            target_fs = str(Path(proj_root) / args.target.removeprefix("res://"))
-            tests_glob = args.tests_glob
-        line = args.point_line if args.mode == "kol" else None
+        fixture = Path(args.fixture)
+        if not fixture.is_absolute():
+            fixture = REPO / fixture
         report, proj = bench_track(
-            fixture, gut_dir, outdir, rounds=args.rounds,
+            fixture.resolve(), gut_dir, outdir, rounds=args.rounds,
             target_res=args.target, tests_glob=args.tests_glob,
             timeout_s=300)
 

@@ -409,7 +409,7 @@ def _prune_pool_locked(project_root: str, pool: dict, now: float) -> None:
     体积用记录值（建槽/release 时核算）——acquire 热路径零 du 扫描。
     """
     slots = pool["slots"]
-    max_slots = shadow.DEFAULT_POOL_MAX_SLOTS
+    max_slots = shadow.pool_max_slots()
     budget = shadow.pool_budget_bytes()
 
     def _oldest_unlocked() -> str | None:

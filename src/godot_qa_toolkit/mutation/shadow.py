@@ -35,6 +35,7 @@ POOL_DIRNAME = "mutation-pool"
 FARM_DIRNAME = "gqt-mutation-farm"
 
 ENV_POOL_BUDGET_MB = "GQT_MUTATION_POOL_BUDGET_MB"
+ENV_POOL_MAX_SLOTS = "GQT_MUTATION_POOL_MAX_SLOTS"
 ENV_FULL_CENSUS = "GQT_MUTATION_FULL_CENSUS"
 
 DEFAULT_POOL_BUDGET_MB = 512
@@ -363,6 +364,24 @@ def pool_budget_bytes() -> int:
     except (TypeError, ValueError):
         return DEFAULT_POOL_BUDGET_MB * 1024 * 1024
     return max(1, v) * 1024 * 1024
+
+
+def pool_max_slots() -> int:
+    """warm 池槽上限（§SPEC-203 测量旋钮：env 覆写，缺省 = DEFAULT 常量）。
+
+    缺省路径读模块常量（保持既有 monkeypatch seam）；无效值 stderr 告警后
+    回退默认（不静默）；钳制下限 1（与 pool_budget_bytes 的 max(1, v) 先例
+    同语义）。"""
+    raw = os.environ.get(ENV_POOL_MAX_SLOTS, "")
+    if raw.strip() == "":
+        return DEFAULT_POOL_MAX_SLOTS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        print(f"shadowpool: invalid {ENV_POOL_MAX_SLOTS}={raw!r} — "
+              f"falling back to default {DEFAULT_POOL_MAX_SLOTS}",
+              file=sys.stderr)
+        return DEFAULT_POOL_MAX_SLOTS
 
 
 def full_census_requested() -> bool:

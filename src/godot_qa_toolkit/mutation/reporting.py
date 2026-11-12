@@ -200,7 +200,8 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      pinned_count: int = 0,
                      slot_info: dict | None = None,
                      original_src: str | None = None,
-                     adaptive_timeout_s: int = 0) -> dict:
+                     adaptive_timeout_s: int = 0,
+                     stage_timings: dict | None = None) -> dict:
     total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
     kill_rate = killed / total if total else 0.0
     failures = [r for r in results if r["verdict"] != "killed"]
@@ -224,6 +225,11 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
         "baseline_reused": baseline_reused,
     }
     _apply_mechanism_disclosures(summary, results, slot_info, original_src)
+    # §SPEC-202 只加不改：完整报告路径恒携带 8 阶段全键（缺省阶段 0.0）；
+    # dry-run / 零位点 / setup 错误契约不经本函数，形态零变化。rss_peak_mb
+    # 由 run_mutation 包装层补记（VmHWM 是进程级高水位，报告收尾时刻读取）。
+    if stage_timings is not None:
+        summary["stage_timings"] = stage_timings
     # SEE-1400 §SPEC-002：仅在 resume 跳过语义在场的 run 报 skipped 数——
     # 常规 run 的 summary 与升级前逐字节同构（既有消费方零感知）。
     if resumed is not None:

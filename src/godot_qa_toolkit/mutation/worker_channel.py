@@ -162,6 +162,8 @@ class WorkerSession:
         self.state = _SessionState()
         self.dead = False
         self.dead_reason = ""
+        # §SPEC-202：累计 boot 耗时（秒）——respawn 会话由调用方收割后清零
+        self.boot_ms = 0.0
 
     # -- 生命周期 -------------------------------------------------------
 
@@ -175,6 +177,7 @@ class WorkerSession:
     def start(self) -> None:
         if self.state.proc is not None and self.state.proc.poll() is None:
             return
+        t_boot = time.monotonic()
         work = Path(self.slot_root) / WORKER_DIRNAME
         work.mkdir(parents=True, exist_ok=True)
         # 上一会话的会合文件（尤其 stop）必须清掉，否则宿主秒退/误读陈旧
@@ -209,6 +212,7 @@ class WorkerSession:
             stdout=log_fh, stderr=subprocess.STDOUT, text=True)
         self.state.log_fh = log_fh
         self._await_boot()
+        self.boot_ms += time.monotonic() - t_boot
 
     def _godot_command(self) -> str:
         from .inject import godot_command
@@ -733,7 +737,8 @@ def _apply_canary(canary_cold, verdict, seq, session):
 def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                     tests_glob, inject_fn, cold_runner, record_fn,
                     classify_fn, leg_timeout_s,
-                    baseline_failures=None, parity_inject_fn=None):
+                    baseline_failures=None, parity_inject_fn=None,
+                    timings_out: dict | None = None):
     """§SPEC-020 W 通道逐腿执行（R-C 硬序 + 门消费 + 会话致命处置）。
 
     会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门 fire / autoload
@@ -756,6 +761,15 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
     window_start = 0
     session_failures = 0  # 防抖：respwan 连续失败 → 剩余腿全冷降级
     degrade_all = False  # parity 门失配：本文件剩余全部冷跑（非会话级）
+
+    def _harvest_boot(s: "WorkerSession") -> None:
+        """§SPEC-202：会话 boot 耗时收割（含 respawn 的旧会话——收后清零
+        防最终重复计数）。"""
+        if timings_out is None:
+            return
+        timings_out["worker_boot_s"] = round(
+            timings_out.get("worker_boot_s", 0.0) + s.boot_ms, 3)
+        s.boot_ms = 0.0
 
     def _record(m, verdict, elapsed_s=0.0):
         raw_pairs.append((m, verdict))
@@ -785,6 +799,7 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
               f"{leg.fatal_reason}; window {window_start}.."
               f"{len(raw_pairs)} invalidated, cold rerun", file=sys.stderr)
         _recast_cold(window_start)
+        _harvest_boot(session)
         session.close()
         session = _new_session()
         window_start = len(raw_pairs)
@@ -834,6 +849,7 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                       f"degraded to cold (disclosed, equivalence preserved)",
                       file=sys.stderr)
                 _recast_cold(window_start)
+                _harvest_boot(session)
                 session.close()
                 degrade_all = True
                 verdict, elapsed = _run_cold(m, seq)
@@ -856,6 +872,7 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                 degrade_all = True
             _record(m, verdict, leg_elapsed)
     finally:
+        _harvest_boot(session)
         session.close()
     return raw_pairs, fatal_events
 
@@ -864,7 +881,7 @@ def execute_worker_branch(path, project_root, original_src, mutants,
                           tests_glob, baseline_failures, baseline_dirty,
                           slot, auto_name, target_rel, target_res, kind,
                           reporter, store2, prior_entries, scopes,
-                          ownership_fn):
+                          ownership_fn, timings_out: dict | None = None):
     """§SPEC-020 W 通道接线（薄层）：注入/冷跑/记录/分类回调注入编排层。
 
     runner 域符号在函数体内延迟 import（baseline.py 先例）——避免
@@ -918,5 +935,5 @@ def execute_worker_branch(path, project_root, original_src, mutants,
             project_root, original_src),
         max(60, int(_runner._adaptive_timeout or 60)),
         baseline_failures=set(baseline_failures or ()),
-        parity_inject_fn=_parity_inject)
+        parity_inject_fn=_parity_inject, timings_out=timings_out)
 

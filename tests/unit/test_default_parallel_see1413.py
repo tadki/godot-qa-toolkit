@@ -114,6 +114,8 @@ class TestDefaultParallelRouting:
         summary = out["summary"]
         # SEE-1550 只加不改：机制标签/槽位披露键并入既有键集（inject_scheme
         # 恒在场；slot_mode/freshness 在影子槽执行轮在场）。
+        # SEE-1564 §SPEC-202 只加不改：分段计时/RSS/磁盘增量三字段并入
+        # 单文件 flat 契约（旋钮键仅 env 置位时在场，缺省形态不含 knobs）。
         assert set(summary) == {
             "file", "mutants", "killed", "survived", "suspect", "timeout",
             "run_errors", "invalid_mutants", "kill_rate", "budget",
@@ -121,6 +123,7 @@ class TestDefaultParallelRouting:
             "timing_source", "samples_n", "baseline_p90", "jobs",
             "inject_scheme", "slot_mode", "freshness",
             "exec_scheme",
+            "stage_timings", "rss_peak_mb", "disk_delta_bytes",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")

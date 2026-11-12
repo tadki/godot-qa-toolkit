@@ -229,14 +229,14 @@ def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
     run_canonical(project, _targets(project), recipe)
     gut_calls = [c for c in fake.calls if any(
         x == "-s" for x in c) and "gut_cmdln.gd" in " ".join(c)]
-    assert len(gut_calls) == 2
+    assert len(gut_calls) == 4  # face 1 轮 + acceptance 3 重复（§SPEC-062C）
     gdirs = [" ".join(x for x in c if str(x).startswith("-gdir="))
              for c in gut_calls]
     # 两臂均按分片扇出（-gdir 均在）：face 分片引用 gutconfig 目录，
     # acceptance 分片引用私有 .gqt-run 套件
     face = [g for g in gdirs if ".gqt-run-" not in g]
     suite = [g for g in gdirs if ".gqt-run-" in g]
-    assert len(face) == 1 and len(suite) == 1
+    assert len(face) == 1 and len(suite) == 3
     assert "res://tests/" in face[0]
 
 
@@ -382,23 +382,28 @@ def test_measurable_subset_and_unmeasurable_disclosure(
     assert all(r for r in reasons.values())  # 原因非空——禁止静默排除
 
 
-def test_flag_mode_injects_finalizer_and_restores(project: Path,
-                                                  tmp_path: Path):
-    """§SPEC-046：flag 形态的统一落盘由注入的 finalizer autoload 在树退出
-    时完成——GUT 调用窗口内 project.godot 含注册行且 finalizer 在场；run
-    结束后两者恢复零残留。"""
+def test_flag_mode_registers_finalizer_via_hook_and_project_godot_untouched(
+        project: Path, tmp_path: Path):
+    """§SPEC-062A：finalizer 经 GUT pre_run_script 通道注册——GUT 调用
+    窗口内 project.godot 与原文逐字节一致（autoload 表零变化）、flusher
+    与 pre-hook 文件在场、argv 带 -gpre_run_script；run 结束后零残留。"""
     recipe, _ = _recipe(project, tmp_path)
     before_pg = (project / "project.godot").read_text(encoding="utf-8")
     fake = FakeGodot(project)
     sp.run = fake
     run_canonical(project, _targets(project), recipe)
-    assert len(fake.pg_at_gut) == 2
+    assert len(fake.pg_at_gut) == 4  # face 1 + acceptance 3 重复
     for pg_text, flusher in zip(fake.pg_at_gut, fake.flusher_at_gut):
-        assert "GqtCovFlusher" in pg_text
+        # 测量窗口内 project.godot 零 diff（不再注入 autoload 注册行）
+        assert pg_text == before_pg
         assert flusher is True
+    for argv in fake.calls:
+        if "gut_cmdln.gd" in " ".join(argv):
+            assert "-gpre_run_script=res://addons/gqt_cov_pre_hook.gd" in argv
     assert (project / "project.godot").read_text(
         encoding="utf-8") == before_pg
     assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
+    assert not (project / "addons" / "gqt_cov_pre_hook.gd").exists()
 
 
 def test_flag_instrument_zero_io_hit_lines_and_substitution():
@@ -1069,3 +1074,58 @@ def test_coverage_limitation_reason_named_on_unstable(project, tmp_path):
                if r["function_id"] == changed_fid)
     assert rec["score_status"] == "unstable"
     assert rec["provenance"]["stability_reason"].startswith("tool limitation")
+
+
+def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path):
+    """§SPEC-062C：验收臂 N 次重复取行集并集，报告披露收敛轮数；
+    确定性 fixture 每轮并集相同 → 第 1 轮即收敛（rounds_used=1 < N）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    report = run_canonical(project, _targets(project), recipe,
+                           acceptance_repeats=3)
+    arm_b = next(a for a in report["arms"] if a["arm"] == "acceptance")
+    assert arm_b["repeats"] == 3
+    conv = arm_b["convergence"]
+    assert conv["bound"] == 3
+    assert conv["converged"] is True
+    assert conv["rounds_used"] < 3
+    arm_a = next(a for a in report["arms"] if a["arm"] == "gut_full")
+    assert arm_a["repeats"] == 1
+    assert arm_a["convergence"] is None
+    # 并集语义：重复不虚增覆盖（确定性 rep 并集 == 单轮全量）
+    assert all(u["valid"] for u in report["unions"])
+
+
+def test_acceptance_repeats_nonconvergence_reported_with_bound(
+        project, tmp_path, monkeypatch):
+    """§SPEC-062C 反例：逐轮新增命中 → rounds_used == bound 且
+    converged=false（未收敛如实披露，不伪造确定性）。"""
+    import godot_qa_toolkit.canonical.orchestrator as orch
+
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+
+    real_merged = orch._read_hits_merged
+
+    def growing_merged(root, run_uuid, rel, manifest, xdg_homes,
+                       retain_dir=None, consume=True):
+        hits, probes = real_merged(root, run_uuid, rel, manifest, xdg_homes,
+                                   retain_dir=retain_dir, consume=consume)
+        # 模拟晚挂载：以每个 xdg 目录名中的 rep 序号决定该轮新增一个 id
+        if xdg_homes:
+            rep = int(re.search(r"-r(\d+)-",
+                                sorted(xdg_homes)[-1]).group(1))
+            if rep > 0 and manifest:
+                extra = min(manifest[-1], max(hits) + rep) if hits else \
+                    manifest[0]
+                hits = set(hits) | {int(extra)}
+        return hits, probes
+
+    monkeypatch.setattr(orch, "_read_hits_merged", growing_merged)
+    report = run_canonical(project, _targets(project), recipe,
+                           acceptance_repeats=3)
+    arm_b = next(a for a in report["arms"] if a["arm"] == "acceptance")
+    conv = arm_b["convergence"]
+    assert conv["bound"] == 3
+    assert conv["rounds_used"] == 3
+    assert conv["converged"] is False

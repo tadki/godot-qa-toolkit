@@ -648,7 +648,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             acceptance_shards=getattr(args, "acceptance_shards", 4),
             shard_log_dir=getattr(args, "shard_log_dir", None),
             baseline_failures=baseline_failures,
-            intolerant_config=intolerant_config)
+            intolerant_config=intolerant_config,
+            acceptance_repeats=getattr(args, "acceptance_repeats", 3))
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -764,6 +765,10 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--shard-width", type=int, default=6,
                      help="gut_full parallel shard count (1 = sequential, "
                           "§SPEC-052)")
+    can.add_argument("--acceptance-repeats", type=int, default=3,
+                     help="acceptance arm runs each shard group N times and "
+                          "takes the line-set union; convergence round is "
+                          "disclosed in the report (§SPEC-062C)")
     can.add_argument("--acceptance-shards", type=int, default=4,
                      help="acceptance parallel shard count")
     can.add_argument("--shard-log-dir", default=None,

@@ -52,74 +52,95 @@ def prep_key(rel: str, src_sha256: str, recipe_hash: str,
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _entry_path(project_root, key: str) -> str:
+def _entry_path(project_root: str | os.PathLike, key: str) -> str:
     return os.path.join(str(prep_dir(project_root)), f"{key}.json")
 
 
-def load_entry(project_root, *, rel: str, src_sha256: str,
-               recipe_hash: str,
+def _entry_meta_ok(entry: dict, rid: str, rel: str, src_sha256: str,
+                   recipe_hash: str, algo: str) -> bool:
+    """版本/算法/身份绑定校验；任一不匹配 → False（caller 静默回落
+    fresh，不 quarantine——版本演化是正常路径）。"""
+    return (entry.get("version") == PREP_VERSION
+            and entry.get("algo") == algo
+            and entry.get("root_id") == rid
+            and entry.get("rel") == rel
+            and entry.get("src_sha256") == src_sha256
+            and entry.get("recipe_hash") == recipe_hash)
+
+
+def _has_forbidden_keys(entry: dict) -> bool:
+    """动态数据键黑名单：命中即视为损坏（绝不复用动态结果）。"""
+    return any(k in entry for k in _FORBIDDEN_KEYS)
+
+
+def _probe_lines_ok(entry: dict) -> list | None:
+    """probe_lines 形状校验：非 int 列表 → None（损坏）。"""
+    probe_lines = entry.get("probe_lines")
+    if not isinstance(probe_lines, list) or not all(
+            isinstance(x, int) for x in probe_lines):
+        return None
+    return probe_lines
+
+
+def _template_ok(entry: dict, tpl: str, probe_lines: list) -> bool:
+    """模板完整性：sha256 校验 + vacuous/占位符形态。"""
+    if hashlib.sha256(tpl.encode("utf-8")).hexdigest() != entry.get(
+            "template_sha256"):
+        return False
+    if not probe_lines:
+        # 零可执行行：模板 = 原文，无占位符（vacuous 车道，合法形态）
+        return tpl == entry.get("source_plain")
+    return SINK_UUID_PLACEHOLDER in tpl
+
+
+def load_entry(project_root: str | os.PathLike, *, rel: str,
+               src_sha256: str, recipe_hash: str,
                algo: str = PROBE_ALGO_VERSION) -> dict | None:
-    rid = root_id(project_root)
     """命中返回 {registry, probe_manifest, instrumented_template}；任何不
     匹配/损坏/含动态键 → None（caller 重建）。保证不抛异常吞错：损坏文件
     显式落盘 .bad 后缀供排查。"""
+    rid = root_id(project_root)
     path = _entry_path(project_root, prep_key(rel, src_sha256, recipe_hash,
                                               algo))
     if not os.path.isfile(path):
         return None
     try:
-        entry = json.loads(open(path, encoding="utf-8").read())
+        with open(path, encoding="utf-8") as f:
+            entry = json.loads(f.read())
     except (OSError, ValueError):
         _quarantine(path)
         return None
-    if (entry.get("version") != PREP_VERSION
-            or entry.get("algo") != algo
-            or entry.get("root_id") != rid
-            or entry.get("rel") != rel
-            or entry.get("src_sha256") != src_sha256
-            or entry.get("recipe_hash") != recipe_hash):
+    if not _entry_meta_ok(entry, rid, rel, src_sha256, recipe_hash, algo):
         return None
-    for k in _FORBIDDEN_KEYS:
-        if k in entry:
-            _quarantine(path)
-            return None
+    if _has_forbidden_keys(entry):
+        _quarantine(path)
+        return None
     tpl = entry.get("instrumented_template")
     if not isinstance(tpl, str):
         _quarantine(path)
         return None
-    if hashlib.sha256(tpl.encode("utf-8")).hexdigest() != entry.get(
-            "template_sha256"):
+    probe_lines = _probe_lines_ok(entry)
+    if probe_lines is None:
         _quarantine(path)
         return None
-    # vacuous（无探针）条目模板=原文、无占位符：仅要求模板与原文一致
-    probe_lines = entry.get("probe_lines")
-    if (not isinstance(probe_lines, list)
-            or not all(isinstance(x, int) for x in probe_lines)):
-        _quarantine(path)
-        return None
-    block_map = entry.get("block_map") or {}
-    if not probe_lines:
-        # 零可执行行：模板 = 原文，无占位符（vacuous 车道，合法形态）
-        if tpl != entry.get("source_plain"):
-            _quarantine(path)
-            return None
-    elif SINK_UUID_PLACEHOLDER not in tpl:
+    if not _template_ok(entry, tpl, probe_lines):
         _quarantine(path)
         return None
     return {"registry": entry["registry"],
             "probe_manifest": entry["probe_manifest"],
             "instrumented_template": tpl,
             "probe_lines": probe_lines,
-            "block_map": block_map}
+            "block_map": entry.get("block_map") or {}}
 
 
-def store_entry(project_root, *, rel: str, src_sha256: str,
-                recipe_hash: str, registry: dict, probe_manifest: dict,
-                instrumented_template: str, probe_lines: list[int],
-                source_plain: str = "", block_map: dict | None = None,
+def store_entry(project_root: str | os.PathLike, *, rel: str,
+                src_sha256: str, recipe_hash: str, registry: dict,
+                probe_manifest: dict, instrumented_template: str,
+                probe_lines: list[int], source_plain: str = "",
+                block_map: dict | None = None,
                 algo: str = PROBE_ALGO_VERSION) -> str:
-    rid = root_id(project_root)
     """原子写入（tmp+rename）。仅静态产物——动态数据禁止入内。"""
+    rid = root_id(project_root)
     import tempfile
 
     root = prep_dir(project_root)

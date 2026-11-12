@@ -167,6 +167,11 @@ def then_summary_keys(bdd_state: dict) -> None:
         "exec_scheme",
         "slot_mode",
         "freshness",
+        # SEE-1564 §SPEC-202 只加不改（单文件 flat：分段计时/RSS/磁盘增量；
+        # knobs 仅 env 置位时在场，缺省形态不含）
+        "stage_timings",
+        "rss_peak_mb",
+        "disk_delta_bytes",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

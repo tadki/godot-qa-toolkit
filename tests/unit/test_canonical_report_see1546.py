@@ -442,7 +442,7 @@ def test_flag_drain_io_bounded_by_files_not_events():
     from godot_qa_toolkit.canonical.orchestrator import _FLUSHER_GD
     assert _FLUSHER_GD.count("FileAccess.open") == 2  # 主 + 回退
     assert _FLUSHER_GD.count("store_line") == 1
-    assert _FLUSHER_GD.count("func _exit_tree") == 1
+    assert _FLUSHER_GD.count("func _notification") == 1  # §SPEC-062A PREDELETE
     # 除 open（主+回退）与模式枚举外无任何其他 FileAccess 用法
     fa_uses = re.findall(r"FileAccess\.\w+", _FLUSHER_GD)
     assert sorted(fa_uses) == ["FileAccess.READ_WRITE", "FileAccess.WRITE",
@@ -1129,3 +1129,27 @@ def test_acceptance_repeats_nonconvergence_reported_with_bound(
     assert conv["bound"] == 3
     assert conv["rounds_used"] == 3
     assert conv["converged"] is False
+
+
+def test_flusher_drains_in_predelete_not_exit_tree():
+    """§SPEC-062A（R5 drain 顺序重验证结论）：GUT 收尾把注入节点移出树，
+    _exit_tree 早于引擎关停相位会丢 autoload shutdown 命中；drain 必须挂
+    NOTIFICATION_PREDELETE（孤儿节点析构晚于 autoload 退出相位，隔离实验
+    实证双标记全捕获）。"""
+    import godot_qa_toolkit.canonical.orchestrator as orch
+
+    assert "NOTIFICATION_PREDELETE" in orch._FLUSHER_GD
+    assert "func _exit_tree" not in orch._FLUSHER_GD
+
+
+def test_timeout_cause_tail_decodes_bytes():
+    """TimeoutExpired.stdout 恒为 bytes（即便 subprocess text=True）——
+    超时路径 tail 拼接必须安全解码，不得 TypeError。"""
+    from godot_qa_toolkit.canonical.orchestrator import _cause_tail
+
+    class FakeTE:
+        stdout = b"partial stdout"
+        stderr = b"partial stderr"
+
+    assert _cause_tail(FakeTE()) == "partial stdout\npartial stderr"
+    assert _cause_tail(None) == ""

@@ -99,7 +99,7 @@ class FakeGodot:
         argv = a[0]
         self.calls.append(list(argv))
         cmd = " ".join(argv)
-        # 非测试执行类子进程（compile 探针/cp -al 建 shadow 等）真实执行
+        # 非测试执行类子进程（compile 探针/cp 建 shadow 等）真实执行
         if "gut_cmdln.gd" not in cmd:
             return self.real_run(*a, **k)
         on_gdir = ".gqt-run-" in cmd  # acceptance 私有套件臂
@@ -234,7 +234,8 @@ def test_tree_restored_and_no_residue(project: Path, tmp_path: Path):
         assert p.read_bytes() == data  # 在树插桩恢复零残留
     assert not list(project.glob("qa-coverage-hits-*.txt"))  # sink 落盘即清
     import glob as g
-    assert g.glob("/tmp/gqt-canonical-backups/*") == []  # 备份目录已清
+    from godot_qa_toolkit.canonical.orchestrator import _backup_base
+    assert g.glob(str(_backup_base() / "*")) == []  # 备份目录已清
 
 
 def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
@@ -495,7 +496,8 @@ def test_canonical_diagnose_shape_and_restore(project: Path,
         assert path.read_bytes() == data  # 零残留
     assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
     import glob as g
-    assert g.glob("/tmp/gqt-canonical-backups/*") == []
+    from godot_qa_toolkit.canonical.orchestrator import _backup_base
+    assert g.glob(str(_backup_base() / "*")) == []
 
 
 def test_flag_var_names_unique_per_file_no_inheritance_collision():

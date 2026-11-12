@@ -358,9 +358,11 @@ def _probe_func(sink_name: str, count: int) -> str:
     return code
 
 
-# §SPEC-055：基本块压缩——控制转移/控制结构/缩进变化处切块。同一直线段
-# 内语句总是一起执行，块入口探针命中即代表块内全部语句起始行被执行
-# （line-coverage 语义精确等价；运行期报错继续执行时亦然）。
+# §SPEC-055/070 FR-4：基本块压缩——控制转移/控制结构/缩进变化处切块。
+# 块入口探针命中会展开为块内全部语句起始行计入覆盖——这是行覆盖**近似**
+# 而非逐语句精确测量：运行期错误中止块内执行时，后继语句仍会被计为已
+# 覆盖（canonical 报告 coverage_semantics 显式披露该近似，不冒充精确
+# statement_start_line）。
 _BLOCK_BREAKER_NODES = frozenset(
     {"return_stmt", "break_stmt", "continue_stmt"})
 _BLOCK_COMPOUND_NODES = frozenset(

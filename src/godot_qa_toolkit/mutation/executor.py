@@ -13,11 +13,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from . import shadow
 from .inject import godot_command
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
@@ -30,6 +33,8 @@ from .progress import new_run_id
 from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
+from .stagetiming import (StageClock, merge_execution_stages, qa_disk_bytes,
+                          self_rss_peak_mb)
 from .runner import run_mutation
 
 # 进程池工厂（可注入替身做单测）
@@ -37,6 +42,11 @@ _worker_pool = ProcessPoolExecutor
 
 # 预热 godot import 缓存；幂等（--import 不产生写副作用差异）
 _PREWARM_TIMEOUT_S = 300
+
+# §SPEC-203 测量专用 gated 旋钮：缺省 = master 现行为（等价钉子钉死），
+# set 时生效并在 stdout 披露（knobs_disclosure）。
+ENV_JOBS_CAP = "GQT_MUTATION_JOBS_CAP"
+ENV_BASELINE_IN_FARM = "GQT_MUTATION_BASELINE_IN_FARM"
 
 
 def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
@@ -88,12 +98,50 @@ def _disclose_superseded_stores(project_root: str) -> None:
                         root / "gqt-coverage")
 
 
+def jobs_cap() -> int:
+    """jobs 并发上限（§SPEC-203：GQT_MUTATION_JOBS_CAP 覆写，钳制保留）。
+
+    缺省 = max(2, cpu//2)（master 公式逐位不变）；env 覆写值同样钳下限 2
+    （cap>=2 不变式）；无效值 stderr 告警后回退默认（不静默）。"""
+    raw = os.environ.get(ENV_JOBS_CAP, "")
+    if raw.strip() == "":
+        return max(2, (os.cpu_count() or 2) // 2)
+    try:
+        return max(2, int(raw))
+    except ValueError:
+        print(f"mutation: invalid {ENV_JOBS_CAP}={raw!r} — falling back to "
+              f"the default cap", file=sys.stderr)
+        return max(2, (os.cpu_count() or 2) // 2)
+
+
 def default_jobs(jobs: int | None) -> int:
     """jobs 钳制：缺省给上限；显式值取 min(jobs, 上限) 且不低于 2。"""
-    cap = max(2, (os.cpu_count() or 2) // 2)
+    cap = jobs_cap()
     if jobs is None:
         return cap
     return max(2, min(jobs, cap))
+
+
+def baseline_in_farm_requested() -> bool:
+    """§SPEC-203：baseline 移入 ext4 影子槽（opt-in，缺省 OFF——D5「真实仓
+    baseline 权威」默认路径不动）。真值解析与 full_census_requested 同款。"""
+    return os.environ.get(ENV_BASELINE_IN_FARM, "").strip() \
+        not in ("", "0", "false")
+
+
+def knobs_disclosure(baseline_in_farm_effective: bool | None = None) -> dict:
+    """旋钮 set 时才披露（缺省全 unset = {}，stdout 逐位不变）。
+
+    baseline_in_farm 披露【实际生效值】：制备失败降级回真实仓时为 False
+    （降级本身已 stderr 告警，此处数据面如实登记）。"""
+    disc: dict = {}
+    if os.environ.get(ENV_JOBS_CAP, "").strip() != "":
+        disc["jobs_cap"] = jobs_cap()
+    if os.environ.get(shadow.ENV_POOL_MAX_SLOTS, "").strip() != "":
+        disc["pool_max_slots"] = shadow.pool_max_slots()
+    if baseline_in_farm_requested():
+        disc["baseline_in_farm"] = bool(baseline_in_farm_effective)
+    return disc
 
 
 def _group_by_file(files: list[str]) -> list[str]:
@@ -148,6 +196,72 @@ def run_mutation_files(
     reuse_coverage: bool = True,
     worker_channel: bool | None = None,
 ) -> dict:
+    """多文件 / 多 mutant 编排入口（§SPEC-202 运行级测量面挂载点）。
+
+    dry-run（SPEC-009 零 GUT 契约）信封不加测量字段；常规路径在信封挂
+    stage_timings / rss_peak_mb / disk_delta_bytes（只加不改），旋钮 set
+    时挂 knobs——单文件 flat CLI 契约的信封键随 unwrap 丢失，单文件时
+    投影进 summary（多文件语义归 run，逐文件不投影）。
+    """
+    if dry_run:
+        return _run_mutation_files_impl(
+            files, project_root, budget=budget, timeout_s=timeout_s,
+            dry_run=dry_run, tests_glob=tests_glob, jobs=jobs, resume=resume,
+            binary_kind=binary_kind, timing_store=timing_store,
+            mutation_warning=mutation_warning,
+            timeout_factor=timeout_factor, mutate_all=mutate_all,
+            reuse_coverage=reuse_coverage, worker_channel=worker_channel)
+    clock = StageClock()
+    knob_state: dict = {}
+    disk_before = qa_disk_bytes(project_root)
+    t0 = time.monotonic()
+    envelope = _run_mutation_files_impl(
+        files, project_root, budget=budget, timeout_s=timeout_s,
+        dry_run=dry_run, tests_glob=tests_glob, jobs=jobs, resume=resume,
+        binary_kind=binary_kind, timing_store=timing_store,
+        mutation_warning=mutation_warning, timeout_factor=timeout_factor,
+        mutate_all=mutate_all, reuse_coverage=reuse_coverage,
+        worker_channel=worker_channel, clock=clock, knob_state=knob_state)
+    clock.add("total", time.monotonic() - t0)
+    for r in envelope.get("results", []):
+        merge_execution_stages(
+            clock, (r.get("summary") or {}).get("stage_timings"))
+    envelope["stage_timings"] = clock.disclosure()
+    envelope["rss_peak_mb"] = self_rss_peak_mb()
+    envelope["disk_delta_bytes"] = qa_disk_bytes(project_root) - disk_before
+    # 单文件 flat CLI 契约：信封键随 unwrap 丢失——运行级测量字段（磁盘
+    # 增量、旋钮披露）语义上就是该文件的 run，投影进唯一文件的 summary。
+    results = envelope.get("results") or []
+    if len(files) == 1 and results:
+        results[0]["summary"]["disk_delta_bytes"] = \
+            envelope["disk_delta_bytes"]
+    disc = knobs_disclosure(knob_state.get("baseline_in_farm"))
+    if disc:
+        envelope["knobs"] = disc
+        if len(files) == 1 and results:
+            results[0]["summary"]["knobs"] = disc
+    return envelope
+
+
+def _run_mutation_files_impl(
+    files: list[str],
+    project_root: str,
+    budget: int = 50,
+    timeout_s: int = 60,
+    dry_run: bool = False,
+    tests_glob: str | None = None,
+    jobs: int | None = None,
+    resume: bool = False,
+    binary_kind: str | None = None,
+    timing_store=None,
+    mutation_warning: int | None = None,
+    timeout_factor: float | None = None,
+    mutate_all: bool = False,
+    reuse_coverage: bool = True,
+    worker_channel: bool | None = None,
+    clock: StageClock | None = None,
+    knob_state: dict | None = None,
+) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
     dry_run（SPEC-009）：只清点不跑 GUT——预热、baseline、worker mutant 轮
@@ -166,6 +280,8 @@ def run_mutation_files(
     files = _group_by_file(files)
     kind = binary_kind or _detect_binary_kind()
     identity = identity_pack(project_root, kind)
+    clock = clock or StageClock()
+    knob_state = knob_state if knob_state is not None else {}
     _disclose_superseded_stores(project_root)
     # SEE-1413：--jobs 1（显式串行）走单文件串行快路径；缺省时默认并行
     # 上限几乎必然 >1，不需要在这里走快路径。
@@ -210,7 +326,8 @@ def run_mutation_files(
             return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                     "results": [r]}
 
-    prewarm_import(project_root)
+    with clock.stage("prewarm"):
+        prewarm_import(project_root)
     chunks, settled, v2ctx = _build_chunks(files, project_root, budget,
                                            timeout_s, tests_glob, jobs,
                                            resume, binary_kind=binary_kind,
@@ -219,7 +336,9 @@ def run_mutation_files(
                                            mutate_all=mutate_all,
                                            reuse_coverage=reuse_coverage,
                                            identity=identity,
-                                           worker_channel=worker_channel)
+                                           worker_channel=worker_channel,
+                                           clock=clock,
+                                           knob_state=knob_state)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -346,6 +465,14 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
     agg["freshness"] += list(s.get("freshness") or [])
     agg["killed_by_certificates"] += list(s.get("killed_by_certificates") or [])
     agg["suspected_orphans"] += list(s.get("suspected_orphans") or [])
+    # §SPEC-202（只加不改）：跨分片阶段耗时求和 + RSS 峰值取最大（分片级
+    # VmHWM 是各 worker 进程自己的高水位——文件级取 max 为其诚实上界）。
+    for k, v in (s.get("stage_timings") or {}).items():
+        if isinstance(v, (int, float)):
+            agg["stage_timings"][k] = agg["stage_timings"].get(k, 0.0) + v
+    rss = s.get("rss_peak_mb")
+    if isinstance(rss, (int, float)):
+        agg["rss_peak_mb"] = max(agg["rss_peak_mb"], float(rss))
     agg["failures"].extend(cr.get("failures", []))
     agg["scoped"] = bool(s.get("scoped"))
     agg["budget"] = s.get("budget")
@@ -381,6 +508,7 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
             "total_sites": None, "attention": None,
             "freshness": [], "killed_by_certificates": [],
             "suspected_orphans": [],
+            "stage_timings": {}, "rss_peak_mb": 0.0,
         })
         _accumulate_chunk(agg, cr, passthrough_keys)
         # §SPEC-1420-01：截断面 N/M 披露的父层聚合锚（截断前全量位点数）
@@ -450,6 +578,9 @@ def _file_summary(agg: dict, passthrough_keys: tuple[str, ...],
         **{k: agg[k] for k in passthrough_keys if k in agg},
         **_see1550_disclosures(agg),
         **({"resumed": agg["resumed"]} if resumed_present else {}),
+        "stage_timings": {k: round(v, 3)
+                          for k, v in sorted(agg["stage_timings"].items())},
+        "rss_peak_mb": round(agg["rss_peak_mb"], 1),
     }
     return {
         "tool": "mutation",
@@ -469,10 +600,13 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   reuse_coverage: bool = True,
                   identity: dict | None = None,
                   worker_channel: bool | None = None,
+                  clock: StageClock | None = None,
+                  knob_state: dict | None = None,
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
-    返回 (chunks, settled, v2ctx)。P1 差分规划在父层单点完成（D4/D6）：
+    clock = clock or StageClock()
+    baselines, baseline_failures = _precompute_baselines(
     plan_diff + budget_on_retry 后按 retry 位点分片，worker 只执行注入的
     retry_ids——分片间零重叠，per-id 条目写天然无竞态。v2ctx 供合并层注入
     reused 记录/披露并单点写 manifest（D5 高风险通道：并发下 manifest 索引
@@ -483,7 +617,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     run 的 per-worker 分片聚合在同一个目录下）。
     """
     baselines, baseline_failures = _precompute_baselines(
-        files, project_root, timeout_s, tests_glob)
+        files, project_root, timeout_s, tests_glob, clock=clock,
+        knob_state=knob_state)
     run_id = new_run_id()
     chunks: list[dict] = []
     settled: list[dict] = []
@@ -493,7 +628,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             f, project_root, budget, timeout_s, tests_glob, jobs, resume,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
             reuse_coverage, baselines, baseline_failures, run_id,
-            identity=identity, worker_channel=worker_channel)
+            identity=identity, worker_channel=worker_channel, clock=clock)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
@@ -507,12 +642,14 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       mutate_all, reuse_coverage, baselines,
                       baseline_failures=None, run_id=None,
                       identity: dict | None = None,
-                      worker_channel: bool | None = None):
+                      worker_channel: bool | None = None,
+                      clock: StageClock | None = None):
     """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
     budget → 分片。
 
     返回 (chunks_for_file, v2ctx_entry_or_None, settled_or_None)。
     """
+    clock = clock or StageClock()
     try:
         src = open(f, encoding="utf-8").read()
         collected = _collect_mutations(src, f)
@@ -529,7 +666,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         print(f"mutation-warning: {raw_total} mutation sites exceed "
               f"--mutation-warning {mutation_warning} in {f} — consider "
               f"splitting this file", file=sys.stderr)
-    glob = tests_glob or _auto_scan_tests_glob(f, project_root)
+    with clock.stage("test_scan"):
+        glob = tests_glob or _auto_scan_tests_glob(f, project_root)
     # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
@@ -545,9 +683,10 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                      entries, mutate_all=mutate_all,
                      cert_validator=lambda kb: certificate_valid(kb,
                                                                  project_root))
-    uncovered_mutants, retry_pool = _apply_coverage_prefilter(
-        plan, f, project_root, glob, binary_kind, reuse_coverage,
-        identity=identity)
+    with clock.stage("prefilter"):
+        uncovered_mutants, retry_pool = _apply_coverage_prefilter(
+            plan, f, project_root, glob, binary_kind, reuse_coverage,
+            identity=identity)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     baseline = baselines.get(glob)
     if not executed_list:
@@ -693,33 +832,65 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
 # dict 对象身份零变化。
 
 
-def _precompute_baselines(files, project_root, timeout_s, tests_glob):
+def _precompute_baselines(files, project_root, timeout_s, tests_glob,
+                          clock: StageClock | None = None,
+                          knob_state: dict | None = None):
     """并发分派【之前】单进程冷启动 baseline（SPEC-005 锚点）。
 
     复用条件（SPEC-008）：同一 tests_glob（显式相同 / 全部退回全量 /
     自动扫描推导出同一目录）跨文件共享一份；代码状态 = 目标文件此刻都
     是仓库原始态，快照不落盘，禁止跨 mtime 复用。
 
+    §SPEC-203（opt-in）：GQT_MUTATION_BASELINE_IN_FARM 置位时 baseline 在
+    ext4 影子槽副本内实测（measurement-only；fresh 槽用完即弃、不进 warm
+    池）——缺省与制备失败都落在真实仓（D5 权威不动，降级 stderr 告警）。
+    生效与否经 knob_state["baseline_in_farm"] 回传 stdout 披露。
+
     返回 (baselines, failures)：failures 只含**尝试过且失败**的 glob →
     原因摘要（SEE-1525 降级告警用）；glob=None（全量面未预跑）不在其中。
     """
     from .runner import _auto_scan_tests_glob
+    from .shadow import SlotProvisionError, create_slot
 
+    clock = clock or StageClock()
     globs = {}
     for f in files:
-        g = tests_glob if tests_glob else _auto_scan_tests_glob(f, project_root)
+        with clock.stage("test_scan"):
+            g = tests_glob if tests_glob \
+                else _auto_scan_tests_glob(f, project_root)
         globs[f] = g
+    farm_root, farm_slot = project_root, None
     baselines: dict = {}
     failures: dict[str, str] = {}
-    for g in set(globs.values()):
-        if g is None:
-            continue
-        baseline = _run_baseline_snapshot(project_root, g, timeout_s)
-        if baseline and baseline.get("rc") == 0:
-            baselines[g] = baseline
-        else:
-            failures[g] = _BASELINE_FAILURE_REASONS.pop(
-                _baseline_key(project_root, g), "no baseline snapshot returned")
+    try:
+        # baseline 阶段含 farm 槽制备成本（opt-in 时）——占比归因口径：
+        # 这笔开销是 baseline-in-farm 路线自身的成本，必须可见。
+        with clock.stage("baseline"):
+            if knob_state is not None and baseline_in_farm_requested():
+                try:
+                    root, _prov = create_slot(project_root, "linux")
+                    farm_root, farm_slot = str(root), root
+                    knob_state["baseline_in_farm"] = True
+                except SlotProvisionError as e:
+                    knob_state["baseline_in_farm"] = False
+                    print(f"mutation: baseline-in-farm requested but slot "
+                          f"provisioning failed ({e}) — baseline runs on the "
+                          f"real repo (D5 authority unchanged)",
+                          file=sys.stderr)
+            for g in set(globs.values()):
+                if g is None:
+                    continue
+                with clock.stage("baseline"):
+                    baseline = _run_baseline_snapshot(farm_root, g, timeout_s)
+                if baseline and baseline.get("rc") == 0:
+                    baselines[g] = baseline
+                else:
+                    failures[g] = _BASELINE_FAILURE_REASONS.pop(
+                        _baseline_key(farm_root, g),
+                        "no baseline snapshot returned")
+    finally:
+        if farm_slot is not None:
+            shutil.rmtree(farm_slot, ignore_errors=True)
     return baselines, failures
 
 

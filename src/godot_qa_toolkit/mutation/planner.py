@@ -49,7 +49,7 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                     budget, tests_glob, binary_kind, resume2_store,
                     mutate_all, retry_ids, select_ids, select_lines,
                     reuse_coverage, attention, mutant_slice, original_src,
-                    identity: dict | None = None):
+                    identity: dict | None = None, clock=None):
     """执行面规划（P1 差分 / P3 寻址 / P2 覆盖过滤三模式互斥落定）。
 
     返回 (prior_entries, reused, untouched, disclosures, executed_list,
@@ -70,7 +70,8 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
     return _plan_serial(store2, path, project_root, mutants, header_hash,
                         scope_hashes, budget, tests_glob, binary_kind,
                         mutate_all, reuse_coverage, mutant_slice,
-                        original_src, disclosures, identity=identity)
+                        original_src, disclosures, identity=identity,
+                        clock=clock)
 
 
 def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
@@ -108,7 +109,7 @@ def _plan_worker(mutants, retry_ids, disclosures):
 def _plan_serial(store2, path, project_root, mutants, header_hash,
                  scope_hashes, budget, tests_glob, binary_kind, mutate_all,
                  reuse_coverage, mutant_slice, original_src, disclosures,
-                 identity: dict | None = None):
+                 identity: dict | None = None, clock=None):
     """串行自规划：D4 差分矩阵（killed 证书门）→ P2 覆盖前置过滤 →
     D6 budget-on-retry。"""
     store2.disclose_v1_superseded()
@@ -120,9 +121,15 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
                      prior_entries, mutate_all=mutate_all,
                      cert_validator=lambda kb: certificate_valid(kb,
                                                                  project_root))
-    uncovered_mutants, retry_pool = _apply_coverage_prefilter(
-        plan, path, project_root, tests_glob, binary_kind, reuse_coverage,
-        disclosures, identity=identity)
+    if clock is not None:
+        with clock.stage("prefilter"):
+            uncovered_mutants, retry_pool = _apply_coverage_prefilter(
+                plan, path, project_root, tests_glob, binary_kind,
+                reuse_coverage, disclosures, identity=identity)
+    else:
+        uncovered_mutants, retry_pool = _apply_coverage_prefilter(
+            plan, path, project_root, tests_glob, binary_kind,
+            reuse_coverage, disclosures, identity=identity)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     reused = plan.reused
     if disclosures.get("coverage_prefilter") not in ("store_miss", "instrumentable_face_missing") \

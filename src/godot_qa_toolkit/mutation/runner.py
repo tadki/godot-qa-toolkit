@@ -54,6 +54,7 @@ from .identity import (COLD_SCHEME, INJECT_SCHEME, TestOwnershipIndex,
                        WORKER_SCHEME, identity_pack, killer_certificate,
                        suspected_orphan)
 from .channel_router import CHANNEL_WORKER, route_target
+from .stagetiming import StageClock, self_rss_peak_mb
 from .worker_channel import (identity_for_target, resolve_exec_scheme,
                              run_worker_legs, worker_enabled)
 # 统一 mutant 明细记录形态（SEE-1416 扩列）、结果塑形契约与统一报告构建
@@ -205,6 +206,54 @@ def run_mutation(    file_path: str,
     identity: dict | None = None,
     worker_channel: bool | None = None,
 ) -> dict:
+    """单文件 mutation 入口（§SPEC-202 单位级测量面挂载点）。
+
+    dry-run / 零位点 / setup 错误契约保持既有 summary 形态（零键增量）；
+    完整报告路径在 summary 挂 stage_timings（8 阶段全键）+ rss_peak_mb
+    （self VmHWM）——total 在包装层补记（覆盖核心体全程墙钟）。
+    """
+    t0 = time.monotonic()
+    result = _run_mutation_core(
+        file_path, project_root, budget=budget, timeout_s=timeout_s,
+        dry_run=dry_run, tests_glob=tests_glob,
+        precomputed_baseline=precomputed_baseline,
+        mutant_slice=mutant_slice, timing_store=timing_store,
+        resume=resume, binary_kind=binary_kind,
+        mutation_warning=mutation_warning, timeout_factor=timeout_factor,
+        mutate_all=mutate_all, retry_ids=retry_ids,
+        resume2_store=resume2_store, select_ids=select_ids,
+        select_lines=select_lines, reuse_coverage=reuse_coverage,
+        progress=progress, identity=identity, worker_channel=worker_channel)
+    s = result.get("summary") if isinstance(result, dict) else None
+    if isinstance(s, dict) and "stage_timings" in s:
+        s["stage_timings"]["total"] = round(time.monotonic() - t0, 3)
+        s["rss_peak_mb"] = self_rss_peak_mb()
+    return result
+
+
+def _run_mutation_core(    file_path: str,
+    project_root: str,
+    budget: int = 50,
+    timeout_s: int = 60,
+    dry_run: bool = False,
+    tests_glob: str | None = None,
+    precomputed_baseline: dict | None = None,
+    mutant_slice: tuple[int, int] | None = None,
+    timing_store=None,
+    resume: bool = False,
+    binary_kind: str | None = None,
+    mutation_warning: int | None = None,
+    timeout_factor: float | None = None,
+    mutate_all: bool = False,
+    retry_ids: list[str] | None = None,
+    resume2_store=None,
+    select_ids: list[str] | None = None,
+    select_lines: list[int] | None = None,
+    reuse_coverage: bool = True,
+    progress: dict | None = None,
+    identity: dict | None = None,
+    worker_channel: bool | None = None,
+) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
     budget 控制 mutant 上限（mutation 风暴防御——100 变异 × GUT 全套 = 时间爆炸）。
@@ -248,8 +297,10 @@ def run_mutation(    file_path: str,
 
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
 
+    clock = StageClock()
     if tests_glob is None:
-        tests_glob = _auto_scan_tests_glob(str(path), project_root)
+        with clock.stage("test_scan"):
+            tests_glob = _auto_scan_tests_glob(str(path), project_root)
     scoped = tests_glob is not None
 
     original_src = path.read_text(encoding="utf-8")
@@ -297,7 +348,7 @@ def run_mutation(    file_path: str,
             path, project_root, mutants, header_hash, scope_hashes, budget,
             tests_glob, binary_kind, resume2_store, mutate_all, retry_ids,
             select_ids, select_lines, reuse_coverage, attention,
-            mutant_slice, original_src, identity=identity)
+            mutant_slice, original_src, identity=identity, clock=clock)
 
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
@@ -316,7 +367,7 @@ def run_mutation(    file_path: str,
         store2, timeout_factor, header_hash, retry_ids, resume, scoped,
         total_sites, progress=progress, identity=identity,
         targeted_only=bool(select_ids or select_lines),
-        worker_channel=worker_channel)
+        worker_channel=worker_channel, clock=clock)
 
 
 def _execute_planned(path, project_root, original_src, backup, mutants,
@@ -325,8 +376,10 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      timing_store, timeout_s, precomputed_baseline, store2,
                      timeout_factor, header_hash, retry_ids, resume, scoped,
                      total_sites, progress=None, identity=None,
-                     targeted_only=False, worker_channel=None):
+                     targeted_only=False, worker_channel=None,
+                     clock: StageClock | None = None):
     """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
+    clock = clock or StageClock()
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
     if total_sites > budget:
@@ -384,11 +437,14 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
         tests_glob, effective_timeout, precomputed_baseline,
         store2, prior_entries, scope_hashes, timeout_factor,
         reporter=reporter, identity=identity, targeted_only=targeted_only,
-        worker_channel=worker_channel)
+        worker_channel=worker_channel, clock=clock)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
 
     raw_pairs, baseline_reused, baseline_elapsed, slot_info = outcome
+    # §SPEC-202：本 run 消费的 baseline GUT 耗时入账（复用父层快照时
+    # elapsed 同样入账——占比归因口径：成本付过就该可见）。
+    clock.add("baseline", baseline_elapsed)
     resumed_count = len(reused)
 
     # D5 落定（权威口径）：streak/pinned 转化 + 毒 run 修正——循环内乐观
@@ -412,7 +468,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                             disclosures=disclosures or None,
                             pinned_count=len(streaks.pinned_ids),
                             slot_info=slot_info, original_src=original_src,
-                            adaptive_timeout_s=_adaptive_timeout)
+                            adaptive_timeout_s=_adaptive_timeout,
+                            stage_timings=clock.disclosure())
 
 
 def _negotiate_budget(timing_store, timeout_s: int,
@@ -490,7 +547,8 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  timeout_factor: float | None = None,
                                  reporter=None, identity=None,
                                  targeted_only: bool = False,
-                                 worker_channel=None):
+                                 worker_channel=None,
+                                 clock: StageClock | None = None):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
@@ -499,6 +557,7 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             precomputed_baseline, store2, prior_entries, scopes,
             timeout_factor, reporter=reporter, identity=identity,
             targeted_only=targeted_only, worker_channel=worker_channel,
+            clock=clock,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -545,7 +604,7 @@ def _run_mutant_loop(
     store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
     timeout_factor: float | None = None, reporter=None,
     identity: dict | None = None, targeted_only: bool = False,
-    worker_channel=None,
+    worker_channel=None, clock: StageClock | None = None,
 ) -> tuple[list, bool, float, dict]:
     """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
     baseline_elapsed, slot_info)。
@@ -600,6 +659,8 @@ def _run_mutant_loop(
         target_rel = project_relative(project_root, str(path))
         target_res = _res_path_of(str(path), str(Path(project_root)))
         auto_name = beacon.autoload_name_for(project_root, target_res)
+        clock = clock or StageClock()
+        t_slot = time.monotonic()
         slot = shadowpool.acquire_slot(project_root, kind, [target_rel],
                                        idpack.get("boot_wiring_hash", ""),
                                        targeted_only=targeted_only)
@@ -620,23 +681,32 @@ def _run_mutant_loop(
         slot_info["exec_scheme"] = exec_scheme_resolved
         try:
             beacon.seed_beacon_script(slot.root)
+            timings_out: dict = {}
             if use_worker:
                 from .worker_channel import execute_worker_branch
-                raw_pairs, fatal_events = execute_worker_branch(
-                    path, project_root, original_src, mutants, tests_glob,
-                    baseline_failures, baseline_dirty, slot, auto_name,
-                    target_rel, target_res, kind, reporter, store2,
-                    prior_entries, scopes, _ownership)
+                with clock.stage("per_mutant"):
+                    raw_pairs, fatal_events = execute_worker_branch(
+                        path, project_root, original_src, mutants, tests_glob,
+                        baseline_failures, baseline_dirty, slot, auto_name,
+                        target_rel, target_res, kind, reporter, store2,
+                        prior_entries, scopes, _ownership,
+                        timings_out=timings_out)
+                clock.add("worker_boot",
+                          timings_out.get("worker_boot_s", 0.0))
                 if fatal_events:
                     slot_info["worker_fatal_events"] = fatal_events
             else:
-                raw_pairs = _run_cold_legs(
-                    path, project_root, original_src, backup, mutants,
-                    tests_glob, baseline_failures, baseline_dirty, slot,
-                    auto_name, target_rel, target_res, _ownership, reporter,
-                    store2, prior_entries, scopes)
+                with clock.stage("per_mutant"):
+                    raw_pairs = _run_cold_legs(
+                        path, project_root, original_src, backup, mutants,
+                        tests_glob, baseline_failures, baseline_dirty, slot,
+                        auto_name, target_rel, target_res, _ownership, reporter,
+                        store2, prior_entries, scopes)
         finally:
             release_problems = shadowpool.release_slot(slot)
+            # §SPEC-202 slot_sync = 槽获取（含 fresh 制备/warm 同步）+ 归还
+            # 断言全程——槽位固定成本的唯一出处。
+            clock.add("slot_sync", time.monotonic() - t_slot)
             if release_problems:
                 slot_info["release_problems"] = release_problems
 

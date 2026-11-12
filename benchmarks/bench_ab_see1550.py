@@ -115,7 +115,10 @@ def _run_scenario(src_root: Path, proj: Path, target_rel: str, scenario: str,
         if not keep_cache:
             _wipe_cache(proj)
     elif scenario == "warm":
-        args += ["--mutate-all"]  # 二轮全复用（warm 全复用仅一次 baseline）
+        # §SPEC-201：warm = 真零执行复用——差分默认开启（不传 --mutate-all），
+        # killed 条目全复用仅剩 baseline 锚；此前误传 --mutate-all 使 warm
+        # 轮全量重跑，测的不是复用面。
+        pass
     elif scenario == "scope":
         args += ["--mutate-all", "--tests", "res://tests/"]
     elif scenario == "point":

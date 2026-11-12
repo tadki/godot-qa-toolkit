@@ -208,13 +208,16 @@ class TestTestIsolation:
     即视为泄漏（编排环境挂起的第一疑因）。"""
 
     def test_no_real_process_pool_in_concurrent_tests(self):
-        """规格化对抗：run_mutation_files 的池工厂必须经模块变量 `_worker_pool`
-        间接（可被替身注入）；直连 concurrent.futures 的常量引用一旦回退就红。"""
+        """规格化对抗：并发编排体的池工厂必须经模块变量 `_worker_pool`
+        间接（可被替身注入）；直连 concurrent.futures 的常量引用一旦回退就红。
+        SEE-1564 §SPEC-202 起 run_mutation_files 拆为测量包装层 + 编排体
+        `_run_mutation_files_impl`——池 seam 不变式钉在编排体上。"""
         import inspect
         from godot_qa_toolkit.mutation import executor as ex
-        src = inspect.getsource(ex.run_mutation_files)
+        src = inspect.getsource(ex._run_mutation_files_impl)
         assert "ProcessPoolExecutor(" not in src, \
-            "run_mutation_files must not instantiate ProcessPoolExecutor directly"
+            "mutation orchestration must not instantiate ProcessPoolExecutor " \
+            "directly"
         assert "_worker_pool(" in src
 
 

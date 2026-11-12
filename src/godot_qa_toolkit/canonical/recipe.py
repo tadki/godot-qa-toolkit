@@ -219,12 +219,15 @@ def recipe_hash(recipe: dict) -> str:
 
 
 def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
-    """Verify a loaded recipe: version tag, exclusion reasons, hash match.
+    """Verify a loaded recipe: version tag, exclusion legality, consumed
+    face shapes, hash match.
 
-    §SPEC-066：recipe 是外部 JSON 输入——根与 exclusions 直接消费结构在
-    读取前完成形状校验，非法形状一律 not-ok + reason（上层编排器转
+    §SPEC-066/067：recipe 是外部 JSON 输入——根、exclusions、
+    gut_face / acceptance_face / features / key / toolchain 等**全部下游
+    直接消费字段**必须在启动编排/注入前完成系统校验（而非在下游异常点
+    逐个兜底）；非法形状一律 not-ok + reason（上层编排器转
     CanonicalError、CLI 转 tool JSON ok=false），绝不泄漏
-    AttributeError/TypeError。"""
+    AttributeError/TypeError/KeyError。"""
     if not isinstance(recipe, dict):
         return False, (f"recipe must be a JSON object, "
                        f"got {type(recipe).__name__} (§SPEC-066)")
@@ -238,6 +241,19 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         if not isinstance(row, dict):
             return False, (f"exclusion row must be an object, "
                            f"got {row!r} (§SPEC-066)")
+        # §SPEC-067：scope/entry 与 build 侧同规则——缺失、空白、非 str、
+        # 非法 scope 一律拒绝（原 verify 只查 reason，hash 合法即可静默放行）
+        scope = row.get("scope")
+        if not isinstance(scope, str) or not scope:
+            return False, (f"exclusion scope must be a non-empty string, "
+                           f"got {scope!r} (§SPEC-067)")
+        if scope not in LEGAL_SCOPES:
+            return False, (f"illegal exclusion scope {scope!r} — "
+                           f"must be one of {sorted(LEGAL_SCOPES)}")
+        entry = row.get("entry")
+        if not isinstance(entry, str) or not entry.strip():
+            return False, (f"exclusion entry must be a non-empty string, "
+                           f"got {entry!r} (§SPEC-067)")
         reason = row.get("reason")
         if not isinstance(reason, str):
             return False, (f"exclusion reason must be a non-empty string, "
@@ -251,4 +267,34 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         return False, f"recipe is not JSON-serializable: {e} (§SPEC-066)"
     if recipe.get("recipe_hash") != current_hash:
         return False, "recipe_hash mismatch — recipe was modified after hashing"
+    # §SPEC-067：编排/分片/feature key 展开的下游直接消费面
+    gut_face = recipe.get("gut_face")
+    if not isinstance(gut_face, dict):
+        return False, (f"recipe 'gut_face' must be an object, "
+                       f"got {gut_face!r} (§SPEC-067)")
+    dirs = gut_face.get("dirs")
+    if not isinstance(dirs, list) or not all(
+            isinstance(d, str) and d for d in dirs):
+        return False, (f"recipe 'gut_face.dirs' must be a list of "
+                       f"non-empty strings, got {dirs!r} (§SPEC-067)")
+    acceptance_face = recipe.get("acceptance_face")
+    if not isinstance(acceptance_face, dict):
+        return False, (f"recipe 'acceptance_face' must be an object, "
+                       f"got {acceptance_face!r} (§SPEC-067)")
+    features = acceptance_face.get("features")
+    if not isinstance(features, list):
+        return False, (f"recipe 'acceptance_face.features' must be a list, "
+                       f"got {features!r} (§SPEC-067)")
+    for feature in features:
+        if not isinstance(feature, dict):
+            return False, (f"recipe acceptance feature must be an object, "
+                           f"got {feature!r} (§SPEC-067)")
+        key = feature.get("key")
+        if not isinstance(key, str) or not key.strip():
+            return False, (f"recipe acceptance feature 'key' must be a "
+                           f"non-empty string, got {key!r} (§SPEC-067)")
+    toolchain = recipe.get("toolchain", {})
+    if not isinstance(toolchain, dict):
+        return False, (f"recipe 'toolchain' must be an object, "
+                       f"got {toolchain!r} (§SPEC-067)")
     return True, None

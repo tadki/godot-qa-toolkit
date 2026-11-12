@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1274,12 +1275,43 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
     return records, lanes, CRAP_LINE_VERSION
 
 
+def _is_baseline_line_id(value) -> bool:
+    """§SPEC-067：行集元素须为有限标量。bool 是 int 子类但语义上不是
+    行号——frozenset({True}) == frozenset({1}) 会伪造第 1 行已覆盖、
+    改变 stable/unstable 判定；NaN/±Infinity 入集会污染比较。"""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (str, int)):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _baseline_total(value) -> int:
+    """§SPEC-067：total 分母仅允许有限整数值或 null——bool 不得当数字，
+    NaN/±Infinity 拒绝，非整数不得截断（3.7 → 不能静默变 3）。"""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        raise CanonicalError(
+            f"stability baseline per_fid row 'total' must be a finite "
+            f"integer value or null, got {value!r} (§SPEC-067)")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) \
+            and value.is_integer():
+        return int(value)
+    raise CanonicalError(
+        f"stability baseline per_fid row 'total' must be a finite "
+        f"integer value or null, got {value!r} (§SPEC-067)")
+
+
 def _load_baseline_report(path: str) -> tuple[dict, dict]:
     """§SPEC-056/057 stability baseline：读取历史 canonical 报告的逐 fid
-    行集与函数级 CRAP 记录。§SPEC-066：根与直接消费结构（unions 行/
-    union/per_fid 行/file/fid/covered_line_ids/total、crap.records）在
-    读取前完成形状校验，非法形状 CanonicalError，不泄漏
-    AttributeError/TypeError/KeyError。"""
+    行集与函数级 CRAP 记录。§SPEC-066/067：根与**全部直接消费字段**
+    （unions 行/union/per_fid 行/file/fid/covered_line_ids/total、
+    crap.records 的 function_id/score_status/crap_line/provenance）在
+    读取前完成系统校验；身份串 strip 后非空、数值面 bool/NaN/Inf 拒绝，
+    非法形状 CanonicalError，不泄漏 AttributeError/TypeError/KeyError。"""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -1308,10 +1340,10 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
                 f"stability baseline union row 'union' must be an object "
                 f"or null, got {union!r} (§SPEC-066)")
         file = u.get("file")
-        if not isinstance(file, str) or not file:
+        if not isinstance(file, str) or not file.strip():
             raise CanonicalError(
                 f"stability baseline union row 'file' must be a non-empty "
-                f"string, got {file!r} (§SPEC-066)")
+                f"string, got {file!r} (§SPEC-067)")
         per_fid = union.get("per_fid", [])
         if not isinstance(per_fid, list):
             raise CanonicalError(
@@ -1324,26 +1356,24 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
                     f"stability baseline per_fid row must be an object, "
                     f"got {row!r} (§SPEC-066)")
             fid = row.get("fid")
-            if not isinstance(fid, str) or not fid:
+            if not isinstance(fid, str) or not fid.strip():
                 raise CanonicalError(
                     f"stability baseline per_fid row 'fid' must be a "
-                    f"non-empty string, got {fid!r} (§SPEC-066)")
+                    f"non-empty string, got {fid!r} (§SPEC-067)")
             covered = row.get("covered_line_ids")
-            # frozenset 消费边界：非 list（裸字符串/缺键）或含容器/None
-            # 元素会在比较语义上 TypeError 或漂移，读取前拒绝
+            # frozenset 消费边界：非 list（裸字符串/缺键）或含容器/None/
+            # bool/非有限数值元素会在比较语义上 TypeError、伪造或漂移，
+            # 读取前拒绝
             if not isinstance(covered, list) or not all(
-                    isinstance(x, (str, int, float)) for x in covered):
+                    _is_baseline_line_id(x) for x in covered):
                 raise CanonicalError(
                     f"stability baseline per_fid row 'covered_line_ids' "
-                    f"must be a list of scalars, got {covered!r} (§SPEC-066)")
-            total = row.get("total")
-            if total is not None and not isinstance(total, (int, float)):
-                raise CanonicalError(
-                    f"stability baseline per_fid row 'total' must be a "
-                    f"number or null, got {total!r} (§SPEC-066)")
+                    f"must be a list of finite scalars, got {covered!r} "
+                    f"(§SPEC-067)")
             # §SPEC-060d：行集与 total 分母一并入基线（同行集但分母变化 =
             # 车道迁移，不允许静默保持 scored）
-            rows[fid] = (frozenset(covered), int(total or 0))
+            rows[fid] = (frozenset(covered),
+                         _baseline_total(row.get("total")))
         lines[file] = rows
     crap = doc.get("crap", {})
     if not isinstance(crap, dict):
@@ -1362,10 +1392,25 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
                 f"stability baseline crap record must be an object, got "
                 f"{r!r} (§SPEC-066)")
         fid = r.get("function_id")
-        if not isinstance(fid, str) or not fid:
+        if not isinstance(fid, str) or not fid.strip():
             raise CanonicalError(
                 f"stability baseline crap record 'function_id' must be a "
-                f"non-empty string, got {fid!r} (§SPEC-066)")
+                f"non-empty string, got {fid!r} (§SPEC-067)")
+        # §SPEC-067：回放字段——`_crap_replay_vanished_baseline` 对
+        # crap_line / provenance 直接 dict(...)，非对象即 TypeError/ValueError
+        for field in ("crap_line", "provenance"):
+            v = r.get(field)
+            if v is not None and not isinstance(v, dict):
+                raise CanonicalError(
+                    f"stability baseline crap record {field!r} must be an "
+                    f"object or null, got {v!r} (§SPEC-067)")
+        # score_status 只经等值比较消费；非 str / 空白会静默失配 replay
+        if "score_status" in r:
+            status = r["score_status"]
+            if not isinstance(status, str) or not status.strip():
+                raise CanonicalError(
+                    f"stability baseline crap record 'score_status' must "
+                    f"be a non-empty string, got {status!r} (§SPEC-067)")
         records[fid] = r
     return lines, records
 

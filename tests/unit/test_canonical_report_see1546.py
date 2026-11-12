@@ -1650,7 +1650,7 @@ def test_spec066_stability_baseline_illegal_shapes_domain_errors(
                      "union": {"per_fid": [{"fid": "a",
                                             "covered_line_ids": [1,
                                                                  {"x": 1}]}]}}]})
-    assert "'total' must be a number or null" in _baseline_err(
+    assert "'total' must be a finite integer value or null" in _baseline_err(
         {"unions": [{"file": "f.gd",
                      "union": {"per_fid": [{"fid": "a",
                                             "covered_line_ids": [1],

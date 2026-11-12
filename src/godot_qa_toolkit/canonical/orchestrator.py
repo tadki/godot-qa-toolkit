@@ -65,26 +65,40 @@ CERTIFICATION = {
 
 
 def _backup_base() -> Path:
-    """§SPEC-070 FR-1：备份根必须进程/用户私有——/tmp 上的共享备份根可被
-    任意本地用户预置/篡改 started.json（恢复信任边界）。改为 per-uid 私有
-    目录（POSIX 校验 ownership + 0700 + 拒绝 symlink），被篡改即 fail-loud。"""
-    uid = os.getuid() if hasattr(os, "getuid") else None
-    name = (f"gqt-canonical-backups-{uid}" if uid is not None
-            else "gqt-canonical-backups")
-    base = Path(tempfile.gettempdir()) / name
-    if base.is_symlink() or (base.exists() and not base.is_dir()):
+    """§SPEC-070 FR-1/R26：备份根必须进程/用户私有——/tmp 上的共享备份根
+    可被任意本地用户预置/篡改 started.json（恢复信任边界）。per-uid 私有
+    目录 + lstat（不跟随 symlink）+ O_NOFOLLOW dirfd 验证消除
+    mkdir/lstat 竞争窗口；无 uid 的非 POSIX 平台显式 fail-loud，不做
+    不安全回退。任一校验失败即 CanonicalError。"""
+    import stat as _stat
+
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
         raise CanonicalError(
-            f"backup root is not a private directory: {base}")
+            "private backup root requires a POSIX uid; non-POSIX "
+            "platforms are unsupported (fail-loud, no unsafe fallback)")
+    uid = getuid()
+    base = Path(tempfile.gettempdir()) / f"gqt-canonical-backups-{uid}"
     if not base.exists():
         try:
             base.mkdir(mode=0o700)
         except FileExistsError:
             pass
-    st = base.stat()
-    if (uid is not None and st.st_uid != uid) or (st.st_mode & 0o077):
+    st = base.lstat()  # symlink 呈现 S_ISLNK，不跟随
+    if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISDIR(st.st_mode):
+        raise CanonicalError(
+            f"backup root is not a private directory: {base}")
+    if st.st_uid != uid or st.st_mode & 0o077:
         raise CanonicalError(
             f"backup root is not private: {base} "
             f"(uid={st.st_uid}, mode={oct(st.st_mode & 0o777)})")
+    try:
+        dir_fd = os.open(base, os.O_RDONLY | os.O_NOFOLLOW
+                         | os.O_DIRECTORY)
+    except OSError as e:
+        raise CanonicalError(
+            f"backup root failed O_NOFOLLOW directory check: {base}: {e}")
+    os.close(dir_fd)
     return base
 
 # §SPEC-046：flag 形态的统一落盘由注入的 finalizer autoload 承担——GUT
@@ -202,11 +216,25 @@ def _contained_restore_target(path_str, root: Path) -> Path | None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """§SPEC-070 FR-1：恢复写入原子化——同目录临时文件 + os.replace，
-    避免崩溃/并发下留下半写状态。"""
-    tmp = path.with_name(f".{path.name}.gqt-tmp-{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    """§SPEC-070 FR-1/R26：恢复写入原子化——同目录 O_CREAT|O_EXCL|O_NOFOLLOW
+    （0600、不可预测随机后缀）临时文件 + os.replace：临时名不可抢注、
+    不跟随 symlink、崩溃/并发下半写状态不可见。"""
+    import secrets
+
+    tmp = path.with_name(
+        f".{path.name}.gqt-tmp-{os.getpid()}-{secrets.token_hex(8)}")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _recover_stale_backups(project_root: Path) -> int:
@@ -1120,7 +1148,22 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "crap": {
             "version": crap_version,
             "evidence_level": "exploratory",
-            "coverage_semantics": "statement_start_line",
+            # §SPEC-070 FR-4/R26：块压缩与逐语句文件并存 → 顶层为 mixed，
+            # 逐文件语义在每条 record/crap_line 上区分（不冒充精确测量）
+            "coverage_semantics": (
+                "mixed" if any(prepared[rel].get("block_map")
+                               for rel in prepared)
+                and any(not prepared[rel].get("block_map")
+                        for rel in prepared)
+                else (_SEM_BLOCK if all(prepared[rel].get("block_map")
+                                        for rel in prepared)
+                      else _SEM_STATEMENT)),
+            "coverage_semantics_counts": {
+                _SEM_BLOCK: sum(1 for rel in prepared
+                                if prepared[rel].get("block_map")),
+                _SEM_STATEMENT: sum(1 for rel in prepared
+                                    if not prepared[rel].get("block_map")),
+            },
             "path_coverage": "not_measured",
             "assertion_effectiveness": "not_measured",
             "method": "coverage-union/1 + func-registry",
@@ -1183,9 +1226,14 @@ def _lane_from_reason(reason: str | None) -> str:
     return "invalid"
 
 
+_SEM_STATEMENT = "statement_start_line"
+_SEM_BLOCK = "block_entry_approximation"
+
+
 def _crap_emit(records: list, lanes: dict, recipe_hash: str, rel: str,
                entry: dict, *, state: str, covered: int | None = None,
-               total: int | None = None) -> None:
+               total: int | None = None,
+               coverage_semantics: str = _SEM_STATEMENT) -> None:
     from ..risk.contract import build_shadow_record
 
     scope = entry.get("lex_scope") or []
@@ -1205,23 +1253,30 @@ def _crap_emit(records: list, lanes: dict, recipe_hash: str, rel: str,
         state=state,
         recipe={"recipe_hash": recipe_hash, "method": "canonical-union/1"},
         lambda_gap=int(entry.get("lambda_gap") or 0),
+        # §SPEC-070 FR-4/R26：record 级语义按文件测量形态区分（块压缩文件
+        # 不得冒充精确 statement_start_line）
+        coverage_semantics=coverage_semantics,
     ))
     lanes[state] = lanes.get(state, 0) + 1
 
 
 def _crap_emit_file_unmeasured(records: list, lanes: dict,
                                recipe_hash: str, rel: str, entries: list,
-                               lane: str, unstable_file: bool) -> None:
+                               lane: str, unstable_file: bool,
+                               coverage_semantics: str = _SEM_STATEMENT
+                               ) -> None:
     """union 缺失/无效文件：整文件按失败车道落记录（§SPEC-053），基线
     消失文件按 §SPEC-057 覆写为显式 unstable。"""
     for e in entries:
         _crap_emit(records, lanes, recipe_hash, rel, e,
-                   state=("unstable" if unstable_file else lane))
+                   state=("unstable" if unstable_file else lane),
+                   coverage_semantics=coverage_semantics)
 
 
 def _crap_emit_file_scored(records: list, lanes: dict, recipe_hash: str,
                            rel: str, entries: list, u: dict,
-                           unstable_keys: set) -> None:
+                           unstable_keys: set,
+                           coverage_semantics: str = _SEM_STATEMENT) -> None:
     """union 有效文件：per-fid 连接后按 unknown/unstable/scored 三车道
     落记录（§SPEC-053/056）。"""
     per = {row["fid"]: row for row in u["union"]["per_fid"]}
@@ -1233,14 +1288,17 @@ def _crap_emit_file_scored(records: list, lanes: dict, recipe_hash: str,
         if ("res://" + rel, e["fid"]) in unstable_keys:
             _crap_emit(records, lanes, recipe_hash, rel, e, state="unstable",
                        covered=(int(row["covered"]) if row else None),
-                       total=(int(row["total"]) if row else None))
+                       total=(int(row["total"]) if row else None),
+                       coverage_semantics=coverage_semantics)
         elif row is None or int(row.get("total") or 0) <= 0:
             # 缺分母/未入 probe 面：unknown 不出分（不冒充 100%）
-            _crap_emit(records, lanes, recipe_hash, rel, e, state="unknown")
+            _crap_emit(records, lanes, recipe_hash, rel, e, state="unknown",
+                       coverage_semantics=coverage_semantics)
         else:
             _crap_emit(records, lanes, recipe_hash, rel, e, state="scored",
                        covered=int(row["covered"]),
-                       total=int(row["total"]))
+                       total=int(row["total"]),
+                       coverage_semantics=coverage_semantics)
 
 
 def _crap_replay_vanished_baseline(records: list, lanes: dict,
@@ -1378,10 +1436,18 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
             unstable_file = (f"res://{rel}", "__file_vanished__") \
                 in unstable_keys
             _crap_emit_file_unmeasured(records, lanes, recipe_hash, rel,
-                                       entries, lane, unstable_file)
+                                       entries, lane, unstable_file,
+                                       coverage_semantics=(
+                                           _SEM_BLOCK if
+                                           prepared[rel].get("block_map")
+                                           else _SEM_STATEMENT))
             continue
         _crap_emit_file_scored(records, lanes, recipe_hash, rel, entries,
-                               u, unstable_keys)
+                               u, unstable_keys,
+                               coverage_semantics=(
+                                   _SEM_BLOCK if
+                                   prepared[rel].get("block_map")
+                                   else _SEM_STATEMENT))
     if baseline_records:
         emitted_fids = {r["function_id"] for r in records}
         _crap_replay_vanished_baseline(records, lanes, baseline_records,

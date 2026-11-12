@@ -80,6 +80,7 @@ def build_shadow_record(
     provenance: dict | None = None,
     blind_spots: list[str] | None = None,
     lambda_gap: int = 0,
+    coverage_semantics: str = "statement_start_line",
 ) -> dict:
     coverage = None
     if total is not None and total > 0 and covered is not None:
@@ -108,7 +109,10 @@ def build_shadow_record(
         "blind_spots": list(blind_spots or []),
         "lambda_gap": lambda_gap,
         "evidence_level": "exploratory",
-        "coverage_semantics": "statement_start_line",
+        # §SPEC-070 FR-4/R26：按文件测量形态区分——逐语句插桩为精确
+        # statement_start_line，块压缩文件为 block_entry_approximation
+        # （不冒充精确测量）
+        "coverage_semantics": coverage_semantics,
         "path_coverage": "not_measured",
         "assertion_effectiveness": "not_measured",
         "crap_line": {
@@ -119,7 +123,7 @@ def build_shadow_record(
             "coverage": coverage,
             "score": score,
             "score_status": status,
-            "coverage_semantics": "statement_start_line",
+            "coverage_semantics": coverage_semantics,
             "path_coverage": "not_measured",
             "assertion_effectiveness": "not_measured",
             "blind_spots": list(blind_spots or []),

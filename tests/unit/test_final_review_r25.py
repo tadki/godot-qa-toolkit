@@ -13,6 +13,7 @@ import io
 import json
 import os
 import subprocess as sp
+import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -248,12 +249,35 @@ def test_cli_root_external_target_emits_tool_json(project, tmp_path):
 # ------------------------------------------------------------- FR-4
 
 def test_report_discloses_block_semantics(project, tmp_path):
+    # CI 无 godot PATH：GUT 腿必须由 FakeGodot 驱动（不得依赖本机二进制）
+    sp.run = FakeGodot(project)
     report = run_canonical(project, _targets(project), _recipe(project))
     sem = report["coverage_semantics"]
     assert sem["block_compressed_files"] >= 1
     assert sem["statement_files"] >= 0
     assert "approximation" in sem["semantics"]
     assert "not per-statement exact" in sem["semantics"]
+    # §SPEC-070/R26 FR-4 record 级闭合：块压缩文件的每条 record 与
+    # crap_line 均为 block_entry_approximation，不再冒充精确
+    # statement_start_line；statement 文件保持精确语义；顶层为 mixed
+    crap = report["crap"]
+    counts = crap["coverage_semantics_counts"]
+    assert counts["block_entry_approximation"] \
+        == sem["block_compressed_files"]
+    if counts["statement_start_line"] and counts["block_entry_approximation"]:
+        assert crap["coverage_semantics"] == "mixed"
+    else:
+        assert crap["coverage_semantics"] == (
+            "block_entry_approximation"
+            if counts["block_entry_approximation"]
+            else "statement_start_line")
+    by_fid_sem = {(r["function_id"], r["coverage_semantics"],
+                  r["crap_line"]["coverage_semantics"])
+                  for r in crap["records"]}
+    sems = {s for (_f, s, _cl) in by_fid_sem}
+    assert sems <= {"block_entry_approximation", "statement_start_line"}
+    assert "block_entry_approximation" in sems
+    assert all(cl == s for (_f, s, cl) in by_fid_sem)
 
 
 # ------------------------------------------------------------- FR-5
@@ -325,6 +349,8 @@ def test_cli_diagnose_forwards_godot_bin(project, tmp_path):
 
 def test_canonical_evidence_record_has_no_phantom_sink_path(
         project, tmp_path):
+    # CI 无 godot PATH：GUT 腿必须由 FakeGodot 驱动
+    sp.run = FakeGodot(project)
     evidence = tmp_path / "evidence"
     run_canonical(project, _targets(project), _recipe(project),
                   evidence_out=str(evidence))
@@ -336,3 +362,66 @@ def test_canonical_evidence_record_has_no_phantom_sink_path(
         if isinstance(doc, dict) and "run_uuid" in doc:
             assert "sink_path" not in doc, (
                 "canonical evidence record 不得携带指向不存在位置的 sink_path")
+
+
+# ---------------------------------------- R26：FR-1 残余加固反例
+
+def test_atomic_write_excl_0600_no_leftover(project):
+    """O_CREAT|O_EXCL|O_NOFOLLOW + 0600 + 随机后缀：临时名不可抢注、
+    不跟随 symlink、replace 后零残留、终态 0600。"""
+    from godot_qa_toolkit.canonical.orchestrator import _atomic_write_text
+    target = project / "src_game" / "cell.gd"
+    _atomic_write_text(target, "ATOMIC-CONTENT")
+    assert target.read_text() == "ATOMIC-CONTENT"
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert list(project.glob("src_game/.*gqt-tmp*")) == []
+    # 目标位置为 symlink 时：替换 symlink 本身（不跟随写穿目标文件）
+    victim = tmp_path2 = project.parent / "r26-victim.txt"
+    victim.write_text("VICTIM")
+    link = project / "src_game" / "linked.gd"
+    link.symlink_to(victim)
+    _atomic_write_text(link, "NEW-CONTENT")
+    assert victim.read_text() == "VICTIM"  # 未写穿
+    assert link.read_text() == "NEW-CONTENT"  # symlink 被常规文件替换
+
+
+def test_backup_base_rejects_symlink(monkeypatch):
+    base_parent = Path(tempfile.gettempdir())
+    uid = os.getuid()
+    base = base_parent / f"gqt-canonical-backups-{uid}"
+    import shutil as _sh
+    real_dir = base.parent / f"gqt-r26-real-{os.getpid()}"
+    real_dir.mkdir(mode=0o700, exist_ok=True)
+    if base.is_symlink() or base.exists():
+        # 保护性清理既有 base（测试专用沙箱语义；lstat 校验会拒绝 symlink）
+        if base.is_symlink():
+            base.unlink()
+        elif base.is_dir():
+            _sh.rmtree(base)
+        else:
+            base.unlink()
+    base.symlink_to(real_dir)
+    try:
+        with pytest.raises(CanonicalError, match="private directory|not a"):
+            _backup_base()
+    finally:
+        base.unlink()
+        _sh.rmtree(real_dir, ignore_errors=True)
+
+
+def test_backup_base_no_uid_fails_loud(monkeypatch):
+    """无 uid 的非 POSIX 平台：显式 CanonicalError，不做不安全回退。"""
+    monkeypatch.delattr(os, "getuid", raising=False)
+    with pytest.raises(CanonicalError, match="POSIX uid"):
+        _backup_base()
+
+
+def test_backup_base_rejects_tampered_mode():
+    base = _backup_base()
+    import shutil as _sh
+    os.chmod(base, 0o755)
+    try:
+        with pytest.raises(CanonicalError, match="not private"):
+            _backup_base()
+    finally:
+        os.chmod(base, 0o700)

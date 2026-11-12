@@ -721,3 +721,100 @@ def test_shadow_removes_late_dangling_link_and_discloses(project, tmp_path):
         assert not any(p.is_symlink() for p in sh2.rglob("*"))
     finally:
         _sh.rmtree(sh2, ignore_errors=True)
+
+
+# ------------------------- §SPEC-073 目录链接解引用语义（R28 反例闭合）
+
+def test_shadow_dereferences_dir_link_with_content_alive(project):
+    """§SPEC-073（Revy R28-HIGH 反例闭合）：有效目录 symlink 解引用为
+    保留全部内容的实拷贝目录，计入 symlinks_dereferenced——不得静默
+    删除或虚报 dangling。"""
+    base_dir = project / "other"
+    base_dir.mkdir()
+    (base_dir / "f.txt").write_text("TARGET")
+    (project / "src_game" / "dirlink").symlink_to(base_dir)
+
+    shadow, disc = _prepare_shadow(project, "r29dir", 0)
+    try:
+        link = shadow / "src_game" / "dirlink"
+        assert link.is_dir() and not link.is_symlink(), (
+            "有效目录链接必须解引用为实拷贝目录（不得删除）")
+        assert (link / "f.txt").read_text() == "TARGET", (
+            "目录链接内容必须存活")
+        assert disc["symlinks_dereferenced"] == 1
+        assert disc["dangling_links_removed"] == 0
+    finally:
+        import shutil as _sh
+        _sh.rmtree(shadow, ignore_errors=True)
+
+
+def test_shadow_dir_link_inner_links_resolved_and_disclosed(
+        project, tmp_path):
+    """§SPEC-073 内层边界：目录链接内含文件链接 → 内层解引用计数；
+    内含悬空链接 → 内层移除并计入 dangling（确定性披露）；外层目录
+    内容存活。"""
+    base_dir = project / "outer"
+    base_dir.mkdir()
+    (base_dir / "keep.txt").write_text("KEEP")
+    inner_target = tmp_path / "inner-target.gd"
+    inner_target.write_text("INNER-TARGET")
+    (base_dir / "inner_file.gd").symlink_to(inner_target)
+    (base_dir / "inner_dangling.gd").symlink_to(
+        tmp_path / "nonexistent.gd")
+    (project / "src_game" / "dirlink").symlink_to(base_dir)
+
+    shadow, disc = _prepare_shadow(project, "r29inner", 0)
+    try:
+        link = shadow / "src_game" / "dirlink"
+        assert link.is_dir() and not link.is_symlink()
+        assert (link / "keep.txt").read_text() == "KEEP"
+        inner_file = link / "inner_file.gd"
+        assert inner_file.is_file() and not inner_file.is_symlink(), (
+            "内层文件链接必须解引用为自有 inode")
+        assert inner_file.read_text() == "INNER-TARGET"
+        assert not (link / "inner_dangling.gd").exists(), (
+            "内层悬空链接必须移除")
+        # 计数 = 实际处理的 shadow symlink 实例数：同一 base 文件经
+        # outer/inner_file.gd 与 dirlink/inner_file.gd 两条 shadow 路径
+        # 各出现一次 → 各解引用一次；outer/inner_dangling.gd 与
+        # dirlink 内层悬空各移除一次
+        assert disc["symlinks_dereferenced"] == 3
+        assert disc["dangling_links_removed"] == 2
+        assert all(not p.is_symlink() for p in link.rglob("*"))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(shadow, ignore_errors=True)
+
+
+def test_shadow_symlink_loop_goes_to_dangling_bucket(project):
+    """§SPEC-073：循环链接属于「真正不可解析」→ 移除并计入 dangling。"""
+    (project / "src_game" / "loop.gd").symlink_to(
+        project / "src_game" / "loop.gd")
+    shadow, disc = _prepare_shadow(project, "r29loop", 0)
+    try:
+        assert disc["dangling_links_removed"] == 1
+        assert disc["symlinks_dereferenced"] == 0
+        assert not (shadow / "src_game" / "loop.gd").is_symlink()
+    finally:
+        import shutil as _sh
+        _sh.rmtree(shadow, ignore_errors=True)
+
+
+def test_shadow_deref_copy_failure_is_fail_loud(project, tmp_path):
+    """§SPEC-073：解引用阶段的内容拷贝失败必须 fail-loud
+    （CanonicalError）——不得静默删除有效链接或虚报计数。cp 阶段只复制
+    链接本身（无需访问目标），deref copyfile 跟随读取不可读目标时才失败。"""
+    import shutil as _sh
+    if hasattr(os, "getuid") and os.getuid() == 0:
+        return  # root 环境无法构造读取障碍
+    # 目标放 project 外：cp 只复制链接本身（无需访问目标），deref
+    # copyfile 跟随读取不可读目标时才失败（精确命中 CanonicalError 路径）
+    locked_file = tmp_path / "locked-target.gd"
+    locked_file.write_text("SECRET")
+    (project / "src_game" / "locked.gd").symlink_to(locked_file)
+    os.chmod(locked_file, 0o000)
+    try:
+        with pytest.raises(CanonicalError, match="dereference failed"):
+            _prepare_shadow(project, "r29lock", 0)
+    finally:
+        os.chmod(locked_file, 0o644)

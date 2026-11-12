@@ -24,6 +24,7 @@ import math
 import os
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import tempfile
 import time
@@ -475,25 +476,64 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
         if not raw:
             continue
         p = Path(os.fsdecode(raw))
-        tmp = p.with_name(p.name + ".gqt-deref")
-        try:
-            if p.is_dir():
-                # 目录链接 → 解引用为实拷贝目录（内层 symlink 由
-                # copytree symlinks=False 一并解引用；悬空内层即报错，
-                # 按悬空链接移除处理）
-                _shutil.copytree(p, tmp, symlinks=False)
-            else:
-                _shutil.copyfile(p, tmp)
-            os.replace(tmp, p)
-            disclosure["symlinks_dereferenced"] += 1
-        except OSError:
-            try:
-                _shutil.rmtree(tmp, ignore_errors=True)
-            except OSError:
-                pass
-            p.unlink(missing_ok=True)
-            disclosure["dangling_links_removed"] += 1
+        _deref_shadow_symlink(p, disclosure)
     return shadow, disclosure
+
+
+def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
+    """§SPEC-073：解引用 shadow 内单个 symlink——读 base 目标内容落到
+    shadow 自有 inode（只读 base，零写穿）。
+
+    - 真正不可解析/不可读（悬空/循环）→ 移除链接并计入
+      dangling_links_removed（确定性：移除即计数、计数即移除）。
+    - 文件链接 → 解引用为常规文件；目录链接 → copytree(symlinks=True)
+      实拷贝目录后对内层链接**递归**解引用（深度有界，超限 fail-loud；
+      内层悬空/循环移除并计入 dangling——确定性披露）。
+    - 内容拷贝开始后的任何失败 → fail-loud（CanonicalError），不得静默
+      删除有效链接或虚报计数（R28 反例根因：Linux rename 拒绝
+      目录替换 symlink → NotADirectoryError 被宽 except 吞掉）。
+    """
+    if depth > 8:
+        raise CanonicalError(
+            f"shadow symlink dereference depth exceeded: {p}")
+    try:
+        target_stat = os.stat(p)  # 跟随链接；悬空/循环 → OSError
+    except OSError:
+        p.unlink(missing_ok=True)
+        disclosure["dangling_links_removed"] += 1
+        return
+    tmp = p.with_name(p.name + ".gqt-deref")
+    try:
+        if stat_module.S_ISDIR(target_stat.st_mode):
+            # symlinks=True：保留内层链接形态（随后的逐链接解引用负责
+            # 消解——symlinks=False 会在内层悬空时整体报错并丢失已拷贝
+            # 内容，不符合「内层边界确定性披露」）
+            shutil.copytree(p, tmp, symlinks=True)
+        else:
+            shutil.copyfile(p, tmp)
+    except OSError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise CanonicalError(
+            f"shadow symlink dereference failed (link kept): {p}: {e}"
+        ) from e
+    if stat_module.S_ISDIR(target_stat.st_mode):
+        for dirpath, dirnames, filenames in os.walk(tmp, topdown=True):
+            # 目录链接不入 walk 递归（防环）——由下方递归解引用处理
+            for name in list(dirnames):
+                inner = Path(dirpath) / name
+                if inner.is_symlink():
+                    _deref_shadow_symlink(inner, disclosure, depth + 1)
+            dirnames[:] = [d for d in dirnames
+                           if not (Path(dirpath) / d).is_symlink()]
+            for name in list(filenames):
+                inner = Path(dirpath) / name
+                if inner.is_symlink():
+                    _deref_shadow_symlink(inner, disclosure, depth + 1)
+    # 用 tmp 换掉链接位置：Linux rename 拒绝 dir→非 dir（NotADirectory），
+    # 必须先摘除链接再 rename（shadow 为进程私有，无并发竞争）
+    p.unlink(missing_ok=True)
+    os.rename(tmp, p)
+    disclosure["symlinks_dereferenced"] += 1
 
 
 def _cleanup_shadow(shadow: Path | None) -> None:

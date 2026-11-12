@@ -650,3 +650,74 @@ def test_docs_and_negative_line_ids_aligned():
                / "orchestrator.py").read_text(encoding="utf-8")
     assert "gqt-canonical-backups-<uid>" in mod_src
     assert "/tmp/gqt-canonical-backups/" not in mod_src
+
+
+# ------------------------- §SPEC-072 快照无关 no-write-through（真实序列）
+
+def test_shadow_symlink_decoupled_from_any_snapshot(project, tmp_path):
+    """§SPEC-072（Revy R27 残余真实序列闭合）：首次 shadow 建立后才向
+    base 新增 symlink——第二次 shadow 仍解引用（无跨 run 缓存可陈旧），
+    disclosure 非零且准确，写入零写穿 base。"""
+    victim = tmp_path / "victim.gd"
+    victim.write_text("BASE-ORIGINAL")
+    base_cell = project / "src_game" / "cell.gd"
+
+    sh1, disc1 = _prepare_shadow(project, "r28seq", 0)
+    assert disc1 == {"symlinks_dereferenced": 0,
+                     "dangling_links_removed": 0}
+    import shutil as _sh
+    _sh.rmtree(sh1, ignore_errors=True)
+
+    # 真实代码序列：预扫时点之后新增 symlink（同进程二次 run 情景）
+    (project / "src_game" / "linked.gd").symlink_to(victim)
+
+    sh2, disc2 = _prepare_shadow(project, "r28seq", 1)
+    try:
+        assert disc2["symlinks_dereferenced"] >= 1
+        assert disc2["dangling_links_removed"] == 0
+        assert not any(p.is_symlink() for p in sh2.rglob("*"))
+        linked = sh2 / "src_game" / "linked.gd"
+        assert linked.is_file() and not linked.is_symlink()
+        linked.write_text("PWNED")
+        assert victim.read_text() == "BASE-ORIGINAL"
+        assert base_cell.read_text() == TARGET_SRC
+    finally:
+        _sh.rmtree(sh2, ignore_errors=True)
+
+
+def test_shadow_dereferences_links_inside_godot_cache(project, tmp_path):
+    """§SPEC-072：`.godot` 内的 symlink 同样被 post-copy 检测覆盖
+    （旧实现按预扫剪枝 .godot，属与契约相关的缺口——现关闭）。"""
+    victim = tmp_path / "cache-victim.txt"
+    victim.write_text("CACHE-ORIGINAL")
+    cache = project / ".godot" / "imported"
+    cache.mkdir(parents=True)
+    (cache / "linked.dat").symlink_to(victim)
+
+    shadow, disc = _prepare_shadow(project, "r28godot", 0)
+    try:
+        assert disc["symlinks_dereferenced"] >= 1
+        assert not any(p.is_symlink() for p in (shadow / ".godot").rglob("*"))
+        written = shadow / ".godot" / "imported" / "linked.dat"
+        written.write_text("PWNED")
+        assert victim.read_text() == "CACHE-ORIGINAL"
+    finally:
+        import shutil as _sh
+        _sh.rmtree(shadow, ignore_errors=True)
+
+
+def test_shadow_removes_late_dangling_link_and_discloses(project, tmp_path):
+    """§SPEC-072：首次 shadow 后新增的悬空链接在下次 shadow 中被移除并
+    计入 disclosure（行为确定、计数真实）。"""
+    sh1, _ = _prepare_shadow(project, "r28dang", 0)
+    import shutil as _sh
+    _sh.rmtree(sh1, ignore_errors=True)
+    (project / "src_game" / "dangling.gd").symlink_to(
+        tmp_path / "nonexistent.gd")
+    sh2, disc = _prepare_shadow(project, "r28dang", 1)
+    try:
+        assert disc["dangling_links_removed"] >= 1
+        assert not (sh2 / "src_game" / "dangling.gd").exists()
+        assert not any(p.is_symlink() for p in sh2.rglob("*"))
+    finally:
+        _sh.rmtree(sh2, ignore_errors=True)

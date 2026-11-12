@@ -26,7 +26,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -437,40 +436,6 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
     return [g for g in groups if g]
 
 
-_BASE_SYMLINK_CACHE: dict[str, list[str]] = {}
-_BASE_SYMLINK_LOCK = threading.Lock()
-
-
-def _base_symlink_relpaths(base_root: Path) -> list[str]:
-    """§SPEC-071 H1：base 侧一次性 symlink 预扫（per-process 缓存 +
-    模块级锁防分片并发首调的缓存踩踏——踩踏会让每个分片各走一遍
-    node_modules 量级的目录树，GIL 串行放大为每分片 ~11s 的协议回退）。
-    无 symlink 的项目（如 KOL）命中缓存后零额外成本。"""
-    key = str(base_root)
-    with _BASE_SYMLINK_LOCK:
-        cached = _BASE_SYMLINK_CACHE.get(key)
-        if cached is not None:
-            return cached
-        links: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(base_root):
-            if Path(dirpath) == base_root:
-                # shadow 不拷贝 .godot（编排器排除项），其下 symlink 与
-                # no-write-through 契约无关；剪枝同时让预扫保持轻量
-                dirnames[:] = [d for d in dirnames if d != ".godot"]
-            for name in dirnames:
-                p = Path(dirpath) / name
-                if p.is_symlink():
-                    links.append(p.relative_to(base_root).as_posix())
-            dirnames[:] = [d for d in dirnames
-                           if not (Path(dirpath) / d).is_symlink()]
-            for name in filenames:
-                p = Path(dirpath) / name
-                if p.is_symlink():
-                    links.append(p.relative_to(base_root).as_posix())
-        _BASE_SYMLINK_CACHE[key] = links
-        return links
-
-
 def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
                     ) -> tuple[Path, dict]:
     """§SPEC-056：分片独立 project shadow——源码/resource 状态与基准树
@@ -481,10 +446,12 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
     （cp -al）下运行期任何 res:// 写都会写穿 base，最终恢复只覆盖被插桩
     文件，非插桩文件可被永久污染；改为 reflink（FS 支持）否则实拷贝。
 
-    §SPEC-071 H1：cp -a 会原样保留 symlink——绝对/相对链接可指向 base
-    inode，运行期写经链接写穿。base 侧一次性预扫发现的所有 symlink 在
-    shadow 内**解引用**为常规文件/实拷贝目录（shadow 自有 inode）；悬空
-    链接移除。两种行为确定性且经返回的 disclosure 计数显式披露。"""
+    §SPEC-071/072 H1：cp -a 会原样保留 symlink——绝对/相对链接可指向
+    base inode，运行期写经链接写穿。消解**不依赖复制前的预扫快照**：
+    复制完成后对 shadow 本身做 `find -type l` 检测（原生速度；覆盖
+    `.godot` 与复制窗口内新增的任何链接；无跨 run 缓存可陈旧），命中
+    链接一律解引用为常规文件/实拷贝目录（shadow 自有 inode），悬空
+    链接移除；disclosure 计数即实际处理数。"""
     import shutil as _shutil
     import subprocess as _sp
 
@@ -502,10 +469,12 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
     if junit.is_file():
         junit.unlink()
     disclosure = {"symlinks_dereferenced": 0, "dangling_links_removed": 0}
-    for rel in _base_symlink_relpaths(base_root):
-        p = shadow / rel
-        if not p.is_symlink():
+    found = _sp.run(["find", str(shadow), "-type", "l", "-print0"],
+                    check=True, capture_output=True)
+    for raw in found.stdout.split(b"\0"):
+        if not raw:
             continue
+        p = Path(os.fsdecode(raw))
         tmp = p.with_name(p.name + ".gqt-deref")
         try:
             if p.is_dir():
@@ -823,9 +792,6 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                        for x in Path(sr).rglob("*.gd") if x.is_file()}
         scope_complete = scope_files <= {str(Path(tf)) for tf in target_files}
     recovered = _recover_stale_backups(root)
-    # §SPEC-071 H1：主线程预热 base symlink 预扫缓存——避免分片线程并发
-    # 首调的缓存踩踏（每分片各走一遍目录树，GIL 串行放大为协议回退）
-    _base_symlink_relpaths(root)
 
 
     def _arm(name: str, acceptance: dict | None = None) -> dict:

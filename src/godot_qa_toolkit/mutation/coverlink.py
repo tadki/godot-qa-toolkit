@@ -20,10 +20,26 @@ import time
 from pathlib import Path
 
 from ..timing import binary_kind_tag, project_relative, store_key
+from .identity import COLD_SCHEME
 
 SCHEMA_COVERAGE = "see1420-coverage/1"
 
 COVERAGE_CACHE_DIRNAME = "gqt-coverage"
+
+
+def coverage_identity(identity: dict | None) -> dict | None:
+    """coverage 通道身份（§SPEC-208 D-2）：exec_scheme 恒 canonical cold。
+
+    coverage 是通道无关事实（行覆盖不依赖执行通道，verdict 等价已证）——
+    写侧唯一调用点恒 cold（coverage CLI 无 worker 旗标），读侧（prefilter）
+    若按调用方通道身份比对，worker 路由目标对 cold 条目恒 drift → 过滤
+    永久失效。本归一让「合法 coverage」以正确身份命中；其余身份成分
+    （ops/godot 版本/wiring/gut 哈希）仍全匹配校验——身份不符仍禁用并
+    披露（宁 miss 不假绿）。manifest/store2 键不经此函数（维持通道身份，
+    D-1 语义不动）。"""
+    if identity is None:
+        return None
+    return {**identity, "exec_scheme": COLD_SCHEME}
 
 
 def coverage_cache_path(project_root: str, file_path: str,
@@ -69,7 +85,10 @@ def save_coverage(covered_lines: set[int], total_lines: int,
         "recorded_at": time.time(),
     }
     if identity is not None:
-        doc["identity"] = dict(identity)
+        # §SPEC-208：落档身份归一为 coverage 通道身份（cold/canonical）——
+        # 现有写侧（coverage/runner 恒 cold）为 no-op，未来任何通道调用都
+        # 产出通道无关条目（读侧校验同源）。
+        doc["identity"] = coverage_identity(identity)
     if instrumentable_lines is not None:
         doc["instrumentable_lines"] = sorted(int(l) for l in instrumentable_lines)
     path = coverage_cache_path(project_root, file_path, tests_glob,
@@ -149,7 +168,8 @@ def _load_coverage_doc(project_root: str, file_path: str,
         return None, "coverage cache tests_glob mismatch (exact-match rule)"
     if raw.get("binary_kind") != kind:
         return None, "coverage cache binary kind mismatch"
-    if identity is not None and raw.get("identity") != identity:
+    if identity is not None and raw.get("identity") != coverage_identity(
+            identity):
         return None, ("coverage cache identity drift (fresh + identity-pack "
                       "match required — store invalidated)")
     try:

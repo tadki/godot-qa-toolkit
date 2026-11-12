@@ -20,7 +20,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from . import shadow
+from . import cost_priors, shadow
 from .inject import godot_command
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
@@ -240,6 +240,16 @@ def run_mutation_files(
         envelope["knobs"] = disc
         if len(files) == 1 and results:
             results[0]["summary"]["knobs"] = disc
+    # E6-5（§SPEC-502）：run 收尾方写成本先验（单写者，对齐 manifest 收尾
+    # 单点写惯例；0 值保留旧先验合并——串行轮测不到 prewarm/baseline 阶段，
+    # 写 0 不得覆盖既有测量，消除逐轮翻转）。仅单文件常规路径；短路/零执行
+    # 轮无新信息，record 内跳过。
+    if len(files) == 1 and results:
+        summary = results[0].get("summary") or {}
+        cost_priors.record(project_root, envelope.get("stage_timings") or {},
+                           envelope.get("jobs") or 0,
+                           int(summary.get("executed")
+                               or summary.get("mutants") or 0))
     return envelope
 
 
@@ -329,7 +339,13 @@ def _run_mutation_files_impl(
                                 files[0])]}
             else:
                 tests_glob = derived
-        if total == 0 or 0 < total <= jobs:
+        # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
+        # （退串行判定前置纪律不回退）。total > jobs 才需仲裁（≤ jobs 本就
+        # 退串行）；无先验/先验不可用 = 并行缺省（KOL 量级不误降级）。
+        cost_serial = (total > jobs
+                       and cost_priors.prefers_serial(project_root, total,
+                                                      jobs))
+        if total == 0 or 0 < total <= jobs or cost_serial:
             r = run_mutation(files[0], project_root, budget=budget,
                              timeout_s=timeout_s, dry_run=False,
                              tests_glob=tests_glob, resume=resume,

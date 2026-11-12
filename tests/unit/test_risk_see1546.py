@@ -132,8 +132,35 @@ def test_run_error_states_never_score():
 def test_score_status_values_cover_contract_states():
     for required in ("scored", "unknown", "vacuous", "cc_unmeasured",
                      "partial_instrumentation", "identity_mismatch",
-                     "run_error", "timeout", "suite_invalid", "zero_tests"):
+                     "run_error", "timeout", "suite_invalid", "zero_tests",
+                     "no_probe_fired", "invalid"):
         assert required in SCORE_STATUS_VALUES
+
+
+def test_scored_state_with_missing_coverage_is_contract_violation():
+    """§SPEC-060f 反例（Revy M-2）：scored + score=None 自相矛盾 record
+    必须构造期拒绝（fail-loud），不得流出。"""
+    with pytest.raises(ValueError):
+        build_shadow_record(
+            function_id="x.gd::f", name="f", lex_path="f", start_line=1,
+            end_line=2, cc=2, covered=None, total=4, cov_source="gut_core",
+            state="scored",
+        )
+    with pytest.raises(ValueError):
+        build_shadow_record(
+            function_id="x.gd::f", name="f", lex_path="f", start_line=1,
+            end_line=2, cc=2, covered=1, total=0, cov_source="gut_core",
+            state="scored",
+        )
+    # 合法 scored 路径不受影响：scored 必有分
+    ok_record = build_shadow_record(
+        function_id="x.gd::f", name="f", lex_path="f", start_line=1,
+        end_line=2, cc=2, covered=1, total=4, cov_source="canonical_union",
+        state="scored",
+    )
+    assert ok_record["crap_line"]["score"] == pytest.approx(
+        crap_line_score(2, 0.25))
+    assert ok_record["score_status"] == "scored"
 
 
 # --------------------------------------------------------------------------

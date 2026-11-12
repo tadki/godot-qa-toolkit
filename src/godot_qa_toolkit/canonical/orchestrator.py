@@ -54,6 +54,7 @@ from ..coverage.runner import (
 from ..coverage.union import arm_record_from_bundle, union_file
 from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.inject import godot_command
+from ..mutation.gutrun import _parse_failing_tests
 from .recipe import verify_recipe
 
 REPORT_VERSION = "canonical-report/1"
@@ -323,10 +324,17 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   shard_width: int = 6,
                   acceptance_shards: int = 4,
                   shard_log_dir: str | None = None,
-                  stability_baseline: str | None = None) -> dict:
-    """canonical 双源批式编排，产出 canonical-report/1。"""
+                  stability_baseline: str | None = None,
+                  baseline_failures: "set[str] | None" = None) -> dict:
+    """canonical 双源批式编排，产出 canonical-report/1。
+
+    baseline_failures（§SPEC-060a）：既有（未插桩）运行的失败测试名集合
+    ——双臂 GUT 失败集逐名解析披露后，相对该基线的**新增失败**即门控：
+    臂 run_error → union invalid → ok=false/comparable=false，臂不出分。
+    缺省（None）按空基线处理：任何失败都是新增（fail-closed）。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
+    baseline_failures = set(baseline_failures or ())
     ok, reason = verify_recipe(recipe)
     if not ok:
         raise CanonicalError(f"recipe invalid: {reason}")
@@ -504,11 +512,17 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         output = ""
         results: list[dict] = []
         xdg_homes: list[str] = []
+        arm_failures: set[str] = set()
+        arm_new_failures: list[str] = []
 
         def _run_shard(ip):
             idx, plan = ip
             xdg = tempfile.mkdtemp(
                 prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-")
+            # §SPEC-060e：mkdtemp 成功即注册进闭包共享的 xdg_homes——
+            # 后续任何异常（含 shadow 构建失败令 ex.map 抛出）都由外层
+            # finally 清理，不依赖 results 收集成功
+            xdg_homes.append(xdg)
             env = dict(os.environ)
             env["XDG_DATA_HOME"] = xdg
             shadow = None
@@ -552,10 +566,19 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             flusher_abs.parent.mkdir(parents=True, exist_ok=True)
             flusher_abs.write_text(_FLUSHER_GD, encoding="utf-8")
             t_arm = time.monotonic()
-            with ThreadPoolExecutor(max_workers=max(1, len(plans))) as ex:
-                results = list(ex.map(_run_shard, enumerate(plans)))
+            try:
+                with ThreadPoolExecutor(
+                        max_workers=max(1, len(plans))) as ex:
+                    results = list(ex.map(_run_shard, enumerate(plans)))
+            except BaseException:
+                # §SPEC-060e：worker 生命周期异常终止（如 shadow 构建失败）
+                # → 已创建的 XDG 立即清理；with-block 退出已等待全部在飞
+                # 分片，闭包注册表在此刻已完整
+                for xdg in xdg_homes:
+                    shutil.rmtree(xdg, ignore_errors=True)
+                xdg_homes.clear()
+                raise
             wall_s = time.monotonic() - t_arm
-            xdg_homes = [r["xdg"] for r in results]
             for r in results:
                 if r["timed_out"]:
                     gut_ok = False
@@ -566,6 +589,15 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     gut_ok = False
                     run_error = True
             output = "\n".join(r["out"] for r in results)
+            # §SPEC-060a：逐名解析双臂失败集；相对基线的新增失败 = 插桩
+            # 语境下测试语义被改变或产品回归 → 门控本臂（不出分）。
+            arm_failures: set[str] = set()
+            for r in results:
+                arm_failures |= _parse_failing_tests(r["out"])
+            arm_new_failures = sorted(arm_failures - baseline_failures)
+            if arm_new_failures:
+                gut_ok = False
+                run_error = True
         finally:
             for abs_path, original in started["files"].items():
                 Path(abs_path).write_text(original, encoding="utf-8")
@@ -667,6 +699,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "gut_ok": gut_ok, "timed_out": timed_out,
             "state": ("valid" if arm_valid else "invalid"),
             "invalid_reason": invalid_reason,
+            "test_failures": {"observed": sorted(arm_failures),
+                              "new": arm_new_failures},
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
             "shards": len(plans),
@@ -699,7 +733,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         arm_b = {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
                  "gut_ok": False, "timed_out": False, "state": "invalid",
                  "invalid_reason": f"suite_error:{e}", "bundles": 0,
-                 "bundles_data": {}, "reconciliation": None}
+                 "bundles_data": {}, "reconciliation": None,
+                 "test_failures": {"observed": [], "new": []}}
 
     # 逐文件 union（coverage-union/1，禁平均）
     unions = []
@@ -714,7 +749,16 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         unions.append(union_file(a, b, canonical_recipe_hash=recipe_hash))
     union_valid = bool(unions) and all(u["valid"] for u in unions)
     comparable_reason = None
-    if not scope_complete:
+    # §SPEC-060a：任一臂出现相对基线的新增失败 → 全局 comparable=false
+    gated_arms = {
+        arm["arm"]: arm.get("test_failures") or {"observed": [], "new": []}
+        for arm in (arm_a, arm_b)}
+    if any(v["new"] for v in gated_arms.values()):
+        comparable_reason = "new_test_failures"
+        for u in unions:
+            u["comparable"] = False
+            u["comparable_reason"] = "new_test_failures"
+    if not scope_complete and comparable_reason is None:
         comparable_reason = "subset_targets"
         for u in unions:
             u["comparable"] = False
@@ -756,6 +800,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             for arm in (arm_a, arm_b)
         ],
         "unions": unions,
+        # §SPEC-060a：双臂失败集逐名披露（observed 全集 + new 相对基线）
+        "failures": {
+            "baseline_count": len(baseline_failures),
+            "gated": any(v["new"] for v in gated_arms.values()),
+            "arms": gated_arms,
+        },
         "union": {
             "valid": union_valid,
             "files": len(unions),
@@ -783,11 +833,15 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                               if r["score_status"] == "scored"),
                 "lanes": crap_lanes,
             },
-            "comparable": scope_complete,
+            "comparable": scope_complete and comparable_reason is None,
             "comparable_reason": comparable_reason,
             "stability": {
                 "baseline": stability_baseline,
-                "unstable_functions": len(unstable_keys),
+                # §SPEC-060g：按函数实数计数（键集含 __file_vanished__
+                # 哨兵，直接 len 会把整文件消失算成 1 个函数）
+                "unstable_functions": sum(
+                    1 for r in crap_records
+                    if r.get("score_status") == "unstable"),
             },
         },
         "preparation": {
@@ -861,14 +915,16 @@ def _crap_emit_file_scored(records: list, lanes: dict, recipe_hash: str,
     per = {row["fid"]: row for row in u["union"]["per_fid"]}
     for e in entries:
         row = per.get(e["fid"])
-        if row is None or int(row.get("total") or 0) <= 0:
+        # §SPEC-060d：车道判定先 unstable 后 unknown——文件内 fid 消失
+        # （基线有、本轮 per_fid 无）会同时命中 unstable 键与 row None，
+        # 必须落 unstable 显式车道，不得落 unknown 掩盖稳定性缺陷
+        if ("res://" + rel, e["fid"]) in unstable_keys:
+            _crap_emit(records, lanes, recipe_hash, rel, e, state="unstable",
+                       covered=(int(row["covered"]) if row else None),
+                       total=(int(row["total"]) if row else None))
+        elif row is None or int(row.get("total") or 0) <= 0:
             # 缺分母/未入 probe 面：unknown 不出分（不冒充 100%）
             _crap_emit(records, lanes, recipe_hash, rel, e, state="unknown")
-        elif ("res://" + rel, e["fid"]) in unstable_keys:
-            # §SPEC-056：跨 run 抖动函数 → 显式 unstable 车道，不出分
-            _crap_emit(records, lanes, recipe_hash, rel, e, state="unstable",
-                       covered=int(row["covered"]),
-                       total=int(row["total"]))
         else:
             _crap_emit(records, lanes, recipe_hash, rel, e, state="scored",
                        covered=int(row["covered"]),
@@ -944,28 +1000,34 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
     for u in doc.get("unions") or []:
         if u.get("union") is None:
             continue
-        lines[u["file"]] = {row["fid"]: frozenset(row["covered_line_ids"])
-                            for row in u["union"].get("per_fid") or []}
+        # §SPEC-060d：行集与 total 分母一并入基线（同行集但分母变化 = 车道
+        # 迁移，不允许静默保持 scored）
+        lines[u["file"]] = {
+            row["fid"]: (frozenset(row["covered_line_ids"]),
+                         int(row.get("total") or 0))
+            for row in u["union"].get("per_fid") or []}
     records = {r["function_id"]: r for r in doc.get("crap", {}).get(
         "records") or []}
     return lines, records
 
 
 def _unstable_keys(unions, baseline_lines: dict) -> set:
-    """§SPEC-057：比较 fid 集合本身与状态迁移——基线消失/新增/行集变化
-    全部捕获，杜绝「只比较当前仍存在 fid」的漏报。"""
+    """§SPEC-057/060d：比较 fid 集合本身与状态迁移——基线消失/新增/行集
+    变化/total 分母变化全部捕获，杜绝「只比较当前仍存在 fid」与「只比
+    行集不比分母」的漏报。"""
     keys: set = set()
     cur_files = {}
     for u in unions:
         if u.get("union") is None:
             continue
-        cur = {row["fid"]: frozenset(row["covered_line_ids"])
+        cur = {row["fid"]: (frozenset(row["covered_line_ids"]),
+                            int(row.get("total") or 0))
                for row in u["union"].get("per_fid") or []}
         cur_files[u["file"]] = cur
         base = baseline_lines.get(u["file"], {})
         for fid in set(base) | set(cur):
-            b = base.get(fid, frozenset())
-            c = cur.get(fid, frozenset())
+            b = base.get(fid, (frozenset(), 0))
+            c = cur.get(fid, (frozenset(), 0))
             if b != c:
                 keys.add((u["file"], fid))
     # 基线中存在但本轮 union 完全消失的文件（整文件不可复现）

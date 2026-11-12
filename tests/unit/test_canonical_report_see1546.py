@@ -761,16 +761,20 @@ def test_stability_baseline_routes_jitter_to_unstable_lane(project,
 
 
 def test_unstable_keys_captures_fid_set_changes():
-    """§SPEC-057 反例：基线消失/新增/行集变化必须全部捕获（漏报缺陷回归）。"""
+    """§SPEC-057/060d 反例：基线消失/新增/行集变化/total 分母变化必须
+    全部捕获（漏报缺陷回归）。"""
     from godot_qa_toolkit.canonical.orchestrator import _unstable_keys
 
-    base = {"f.gd": {"a": frozenset({1, 2}), "b": frozenset({3}),
-                     "gone": frozenset({4})}}
+    base = {"f.gd": {"a": (frozenset({1, 2}), 3), "b": (frozenset({3}), 2),
+                     "gone": (frozenset({4}), 2),
+                     "shrink": (frozenset({5}), 2)}}
     cur_unions = [
         {"file": "f.gd", "union": {"per_fid": [
-            {"fid": "a", "covered_line_ids": [1]},
-            {"fid": "b", "covered_line_ids": [3]},
-            {"fid": "new", "covered_line_ids": [9]},
+            {"fid": "a", "covered_line_ids": [1], "total": 3},
+            {"fid": "b", "covered_line_ids": [3], "total": 2},
+            {"fid": "new", "covered_line_ids": [9], "total": 1},
+            # §SPEC-060d：行集相同、分母 2→1 = 车道迁移，必须捕获
+            {"fid": "shrink", "covered_line_ids": [5], "total": 1},
         ]}},
         {"file": "vanished.gd", "union": None},  # 基线有、本轮消失的文件
     ]
@@ -778,6 +782,8 @@ def test_unstable_keys_captures_fid_set_changes():
     assert ("f.gd", "a") in keys          # 行集变化
     assert ("f.gd", "gone") in keys       # 基线消失
     assert ("f.gd", "new") in keys        # 新增
+    assert ("f.gd", "shrink") in keys     # 分母变化（Revy H-4 反例）
+    assert ("f.gd", "b") not in keys      # 行集与分母均不变 → 稳定
     # union=None 的文件由调用方按 file-vanished 处理（哨兵键另测）
 
 
@@ -804,6 +810,9 @@ def test_crap_records_mark_vanished_file_unstable(project, tmp_path):
         assert r["score_status"] == "unstable", (
             f"vanishing scored file must be unstable, got {r['score_status']}")
         assert r["crap_line"]["score"] is None
+    # §SPEC-060g（Revy L-1）：整文件消失按函数实数计数，__file_vanished__
+    # 哨兵不得顶替函数计数（cell.gd 基线 2 个 scored 函数 → 计 2）
+    assert rerun["crap"]["stability"]["unstable_functions"] == len(lost)
 
 
 def test_prep_algo_report_matches_cache_key(project: Path, tmp_path: Path):
@@ -832,17 +841,131 @@ def test_xdg_tmp_dirs_cleaned_on_sink_read_exception(project: Path,
                                                      monkeypatch):
     """§SPEC-059b：sink 读回抛异常时，分片 XDG 临时目录仍被清理（不残留）。"""
     import glob as g
+    import tempfile as tf
 
     import godot_qa_toolkit.canonical.orchestrator as orch
 
     def boom(*a, **k):
         raise OSError("sink read exploded")
 
+    # §SPEC-060h：实现走 tempfile.gettempdir()，断言必须同源，防自定义
+    # TMPDIR 下断言空转
+    pattern = str(Path(tf.gettempdir()) / "gqt-shard-*")
+
     monkeypatch.setattr(orch, "_read_hits_merged", boom)
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    before = set(g.glob("/tmp/gqt-shard-*"))
+    before = set(g.glob(pattern))
     with pytest.raises(OSError):
         run_canonical(project, _targets(project), recipe)
-    after = set(g.glob("/tmp/gqt-shard-*"))
+    after = set(g.glob(pattern))
     assert after <= before, "xdg tmp dirs must be cleaned on exception"
+
+
+class FailingConfigFaceGodot(FakeGodot):
+    """H-1 反例注入：gut_full 臂（无 .gqt-run-）的 GUT 输出带一个普通
+    测试失败（rc=1 + Run Summary 段 [Failed] 形态，非启动失败）。"""
+
+    def __call__(self, *a, **k):
+        r = super().__call__(*a, **k)
+        cmd = " ".join(a[0])
+        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+            r.returncode = 1
+            r.stderr = ("- test_font_row_height\n"
+                        "  [Failed] Expected row height 12 got 13\n")
+        return r
+
+
+def test_new_test_failures_gate_arm_and_disclosure(project, tmp_path):
+    """§SPEC-060a 反例（Revy H-1）：普通 GUT 失败相对空基线即新增失败，
+    必须门控本臂：ok=false、union invalid、无 scored、逐名披露。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FailingConfigFaceGodot(project)
+    report = run_canonical(project, _targets(project), recipe)
+    assert report["ok"] is False
+    assert report["failures"]["gated"] is True
+    assert report["failures"]["arms"]["gut_full"]["observed"] == \
+        ["test_font_row_height"]
+    assert report["failures"]["arms"]["gut_full"]["new"] == \
+        ["test_font_row_height"]
+    assert all(not u["valid"] for u in report["unions"])
+    assert not any(r["score_status"] == "scored"
+                   for r in report["crap"]["records"])
+    assert report["crap"]["comparable"] is False
+    assert report["crap"]["comparable_reason"] == "new_test_failures"
+
+
+def test_baseline_failures_absorb_preexisting_failures(project, tmp_path):
+    """§SPEC-060a：既有失败（基线同名）不门控——canonical 失败集 == 基线
+    失败集时臂有效、评分照常（配 §SPEC-060b 插桩透明化）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FailingConfigFaceGodot(project)
+    report = run_canonical(project, _targets(project), recipe,
+                           baseline_failures={"test_font_row_height"})
+    assert report["ok"] is True
+    assert report["failures"]["gated"] is False
+    assert report["failures"]["arms"]["gut_full"]["new"] == []
+    assert report["failures"]["arms"]["gut_full"]["observed"] == \
+        ["test_font_row_height"]
+    assert all(u["valid"] for u in report["unions"])
+    assert any(r["score_status"] == "scored"
+               for r in report["crap"]["records"])
+
+
+def test_xdg_tmp_dirs_cleaned_on_worker_build_exception(project, tmp_path,
+                                                        monkeypatch):
+    """§SPEC-060e 反例（Revy M-1）：worker 构建异常（shadow 失败令
+    executor 抛出）时已创建的分片 XDG 临时目录仍被清理。"""
+    import glob as g
+    import tempfile as tf
+
+    import godot_qa_toolkit.canonical.orchestrator as orch
+    pattern = str(Path(tf.gettempdir()) / "gqt-shard-*")
+
+    def boom(*a, **k):
+        raise OSError("shadow prepare exploded")
+
+    monkeypatch.setattr(orch, "_prepare_shadow", boom)
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    before = set(g.glob(pattern))
+    with pytest.raises(OSError):
+        run_canonical(project, _targets(project), recipe)
+    after = set(g.glob(pattern))
+    assert after <= before, "xdg tmp dirs must be cleaned on worker build " \
+                            "exception too"
+
+
+def test_prep_cache_tampered_registry_quarantined(project, tmp_path,
+                                                  monkeypatch):
+    """§SPEC-060c 反例（Revy H-3）：篡改缓存内 registry 的 cc_oracle 必须
+    quarantine + 回落 fresh 重建——伪造 CC 不得进入评分。"""
+    import glob as g
+    import json as j
+
+    from godot_qa_toolkit.canonical import prepcache
+    monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    fresh = run_canonical(project, _targets(project), recipe)
+    fid = next(r["function_id"] for r in fresh["crap"]["records"])
+    fresh_cc = next(r["cc"] for r in fresh["crap"]["records"]
+                    if r["function_id"] == fid)
+    assert fresh_cc >= 1
+
+    # 直接篡改缓存条目内的 registry 语义内容（绕过 store 接口）
+    entries = g.glob(str(prepcache.prep_dir(project)) + "/*.json")
+    assert entries
+    for path in entries:
+        doc = j.loads(Path(path).read_text(encoding="utf-8"))
+        for e in doc.get("registry", {}).get("entries", []):
+            e["cc_oracle"] = 99
+        Path(path).write_text(j.dumps(doc), encoding="utf-8")
+
+    warm = run_canonical(project, _targets(project), recipe)
+    warm_cc = next(r["cc"] for r in warm["crap"]["records"]
+                   if r["function_id"] == fid)
+    assert warm_cc == fresh_cc, "tampered cached CC must never reach scoring"
+    assert warm["crap"]["records"] == fresh["crap"]["records"]
+    bad = g.glob(str(prepcache.prep_dir(project)) + "/*.bad")
+    assert bad, "tampered entry must be quarantined as .bad"

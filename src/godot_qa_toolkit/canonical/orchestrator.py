@@ -691,8 +691,21 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     return True
                 return p[0] == "" and p[1] in declared_bare
 
-            new_pairs = {p for p in arm_fail_pairs
-                         if not _exempt(p) and p not in baseline_pairs}
+            # §SPEC-064a：Summary 段 ("", t) 是同 run 内已归因失败 (s, t)
+            # 的回显（同一失败的第二种披露形态）——其归因实例已被基线吸收
+            # 或声明豁免时随同覆盖；无已覆盖归因实例的未归因失败仍为新增
+            # （N-M-3 防护不弱化）
+            covered_attributed_names = {
+                t for (s, t) in arm_fail_pairs
+                if s and ((s, t) in baseline_pairs
+                          or (s, t) in declared_scoped)}
+
+            def _covered(p: tuple[str, str]) -> bool:
+                if _exempt(p) or p in baseline_pairs:
+                    return True
+                return p[0] == "" and p[1] in covered_attributed_names
+
+            new_pairs = {p for p in arm_fail_pairs if not _covered(p)}
             exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
             arm_new_failures = sorted({t for (_s, t) in new_pairs})
             if new_pairs:

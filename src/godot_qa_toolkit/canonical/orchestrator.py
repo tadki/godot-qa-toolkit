@@ -354,6 +354,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     unmeasured: list[dict] = []
     cache_hits = 0
     cache_misses = 0
+    # §SPEC-059a：报告 algo 与实际缓存键同源（flags/4-pid / blocks/6）
+    algo_used = (prepcache.PROBE_ALGO_VERSION if block_compress
+                 else "flags/4-pid")
     for path_str in target_files:
         p = Path(path_str)
         if not p.is_file():
@@ -367,8 +370,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             continue
         rel = str(p.resolve().relative_to(root))
         src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
-        prep_algo = (prepcache.PROBE_ALGO_VERSION if block_compress
-                     else "flags/4-pid")
+        prep_algo = algo_used
         entry = prepcache.load_entry(
             root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
             algo=prep_algo)
@@ -598,43 +600,45 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     _cleanup_suite_dir(Path(r["plan"]["suite_dir"]))
 
         bundles: dict[str, dict] = {}
-        for rel, sink in sink_by_rel.items():
-            item = prepared[rel]
-            retain = (Path(shard_log_dir) / f"{name}-sinks"
-                      if shard_log_dir else None)
-            hits, probes_fired = _read_hits_merged(
-                root, run_uuid, rel, manifest_by_rel[rel], xdg_homes,
-                retain_dir=retain)
-            block_map = prepared[rel].get("block_map") or {}
-            if block_map:
-                # §SPEC-055：块入口命中 → 块内全部语句起始行
-                hits = {ln for start in hits
-                        for ln in block_map.get(start, [start])}
-            bundle = build_bundle(
-                run_uuid=run_uuid, file_path="res://" + rel,
-                gd_source=item["src"], tests_glob=None,
-                registry=item["registry"],
-                probe_manifest=item["probe_manifest"],
-                hits_lines=sorted(hits), probes_fired=probes_fired,
-                gut_ok=gut_ok, run_error=run_error, timeout=timed_out,
-                zero_tests=False, vacuous=False, arm=name)
-            bundles[rel] = bundle
-            if evidence_dir is not None:
-                # 批式同臂共享 run_uuid——evidence 文件名必须带 per-file
-                # 后缀防互相覆盖（R3 实证缺陷）
-                suffix = f"-{file_key8(rel)}"
-                record = build_run_record(
+        try:
+            for rel, sink in sink_by_rel.items():
+                item = prepared[rel]
+                retain = (Path(shard_log_dir) / f"{name}-sinks"
+                          if shard_log_dir else None)
+                hits, probes_fired = _read_hits_merged(
+                    root, run_uuid, rel, manifest_by_rel[rel], xdg_homes,
+                    retain_dir=retain)
+                block_map = prepared[rel].get("block_map") or {}
+                if block_map:
+                    # §SPEC-055：块入口命中 → 块内全部语句起始行
+                    hits = {ln for start in hits
+                            for ln in block_map.get(start, [start])}
+                bundle = build_bundle(
                     run_uuid=run_uuid, file_path="res://" + rel,
                     gd_source=item["src"], tests_glob=None,
-                    probe_manifest=item["probe_manifest"], arm=name)
-                record["sink_path"] = str(evidence_dir / sink)
-                write_run_record(evidence_dir, record, name_suffix=suffix)
-                write_bundle(evidence_dir, bundle, name_suffix=suffix)
-                update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
-                                  status="bundle_written")
-            clear_sink(None, str(root), sink)
-        for xdg in xdg_homes:
-            shutil.rmtree(xdg, ignore_errors=True)
+                    registry=item["registry"],
+                    probe_manifest=item["probe_manifest"],
+                    hits_lines=sorted(hits), probes_fired=probes_fired,
+                    gut_ok=gut_ok, run_error=run_error, timeout=timed_out,
+                    zero_tests=False, vacuous=False, arm=name)
+                bundles[rel] = bundle
+                if evidence_dir is not None:
+                    # 批式同臂共享 run_uuid——evidence 文件名必须带 per-file
+                    # 后缀防互相覆盖（R3 实证缺陷）
+                    suffix = f"-{file_key8(rel)}"
+                    record = build_run_record(
+                        run_uuid=run_uuid, file_path="res://" + rel,
+                        gd_source=item["src"], tests_glob=None,
+                        probe_manifest=item["probe_manifest"], arm=name)
+                    record["sink_path"] = str(evidence_dir / sink)
+                    write_run_record(evidence_dir, record, name_suffix=suffix)
+                    write_bundle(evidence_dir, bundle, name_suffix=suffix)
+                    update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
+                                      status="bundle_written")
+                clear_sink(None, str(root), sink)
+        finally:
+            for xdg in xdg_homes:
+                shutil.rmtree(xdg, ignore_errors=True)
         for rel in vacuous_rels:
             # §SPEC-042：零可执行行 → 显式 vacuous 车道（bundle 落盘、
             # union 按 §SPEC-036 严格语义仍 invalid，reason=vacuous）
@@ -788,8 +792,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         },
         "preparation": {
             "cache": {"hits": cache_hits, "misses": cache_misses,
-                      "algo": (prepcache.PROBE_ALGO_VERSION
-                               if block_compress else "flags/4")},
+                      "algo": algo_used},
         },
         "unmeasured": unmeasured,
         "recovered_stale_backups": recovered,

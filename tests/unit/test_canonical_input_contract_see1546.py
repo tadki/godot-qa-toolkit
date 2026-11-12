@@ -625,6 +625,31 @@ def test_verify_rejects_empty_faces_structural_errors_first():
     assert "acceptance_face" in _verify_recipe_err(recipe2)
 
 
+@pytest.mark.parametrize("scope", [[], {}, ["gut_dir"], {"a": 1}])
+def test_verify_rejects_unhashable_scope_gracefully(scope):
+    """§SPEC-069 hardener: a non-str / unhashable exclusion scope must be a
+    graceful domain rejection — never a TypeError escaping from the
+    `scope not in LEGAL_SCOPES` frozenset membership test."""
+    reason = _verify_recipe_err(_legal_recipe(exclusions=[
+        {"scope": scope, "entry": "x", "reason": "r"}]))
+    assert "scope" in reason
+
+
+def test_verify_rejects_empty_dirs_with_valid_features():
+    """§SPEC-069 hardener: empty `gut_face.dirs` is rejected on its own even
+    when the acceptance face is structurally valid and non-empty (the face
+    emptiness gate must not rely on another face being empty to fire)."""
+    reason = _verify_recipe_err(_legal_recipe(gut_face={"dirs": []}))
+    assert "dirs" in reason
+
+
+def test_verify_rejects_empty_features_with_valid_dirs():
+    """§SPEC-069 hardener: empty `acceptance_face.features` is rejected on its
+    own even when the gut face is structurally valid and non-empty."""
+    reason = _verify_recipe_err(_legal_recipe(acceptance_face={"features": []}))
+    assert "features" in reason
+
+
 # ------------------------------------------------ §SPEC-068 接受侧边界
 
 @pytest.mark.parametrize("covered", [[2.5], [-0.5], [1.5, 2]])

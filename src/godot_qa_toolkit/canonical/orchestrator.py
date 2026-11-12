@@ -54,7 +54,6 @@ from ..coverage.runner import (
 from ..coverage.union import arm_record_from_bundle, union_file
 from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.inject import godot_command
-from ..mutation.gutrun import _parse_failing_tests
 from .recipe import verify_recipe
 
 REPORT_VERSION = "canonical-report/1"
@@ -351,14 +350,16 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   acceptance_shards: int = 4,
                   shard_log_dir: str | None = None,
                   stability_baseline: str | None = None,
-                  baseline_failures: "set[str] | None" = None,
+                  baseline_failures: "set[tuple[str, str]] | None" = None,
                   intolerant_config: dict | None = None,
                   acceptance_repeats: int = 3) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。
 
-    baseline_failures（§SPEC-060a）：既有（未插桩）运行的失败测试名集合
-    ——双臂 GUT 失败集逐名解析披露后，相对该基线的**新增失败**即门控：
-    臂 run_error → union invalid → ok=false/comparable=false，臂不出分。
+    baseline_failures（§SPEC-060a/064b）：既有（未插桩）运行的失败
+    (script, test) 身份对集合——双臂失败对逐对披露后，相对该基线的
+    **新增失败对**即门控：臂 run_error → union invalid → ok=false/
+    comparable=false，臂不出分。同名跨脚本不互相吸收、未归因仅匹配
+    未归因；裸名字符串身份歧义 → CanonicalError（fail-closed）。
     缺省（None）按空基线处理：任何失败都是新增（fail-closed）。
 
     intolerant_config（§SPEC-061b/c）：{"tests": [{name, reason}],
@@ -373,7 +374,18 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     与上界；重复成本计入臂 wall_s（§SPEC-052 时长预算内比较）。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
-    baseline_failures = set(baseline_failures or ())
+    # §SPEC-064b：基线失败集升级为 (script, test) 身份对——同名跨脚本不
+    # 互相吸收、未归因仅匹配未归因；裸名字符串身份歧义 → fail-closed 拒绝
+    baseline_pairs: set[tuple[str, str]] = set()
+    for entry in (baseline_failures or ()):
+        if (isinstance(entry, tuple) and len(entry) == 2
+                and all(isinstance(x, str) for x in entry)):
+            baseline_pairs.add((entry[0], entry[1]))
+        else:
+            raise CanonicalError(
+                f"baseline failure entry must be a (script, test) pair, "
+                f"got {entry!r} — bare names are identity-ambiguous and "
+                f"rejected (§SPEC-064b)")
     cfg = intolerant_config or {}
     # §SPEC-063e：声明必须含非空 reason（缺省即配置错误 fail-fast），
     # 空论证旁路 = 静默排除的捷径，禁止
@@ -392,9 +404,16 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     declared_scoped = {(str(t["script"]), t["name"]) for t in intolerant_tests
                        if t.get("script")}
     declared_bare = {t["name"] for t in intolerant_tests if not t.get("script")}
-    coverage_limitations = [l for l in (cfg.get("coverage_limitations") or [])
-                            if isinstance(l, dict) and l.get("file")
-                            and l.get("reason")]
+    # §SPEC-064c：coverage_limitations 缺 file 或非空 reason → fail-fast
+    # （盲点披露不得无提示消失）
+    coverage_limitations = []
+    for l in (cfg.get("coverage_limitations") or []):
+        if not isinstance(l, dict) or not l.get("file") \
+                or not str(l.get("reason") or "").strip():
+            raise CanonicalError(
+                "coverage limitation must carry non-empty file and reason, "
+                f"got {l!r} (§SPEC-064c)")
+        coverage_limitations.append(l)
     ok, reason = verify_recipe(recipe)
     if not ok:
         raise CanonicalError(f"recipe invalid: {reason}")
@@ -673,7 +692,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 return p[0] == "" and p[1] in declared_bare
 
             new_pairs = {p for p in arm_fail_pairs
-                         if not _exempt(p) and p[1] not in baseline_failures}
+                         if not _exempt(p) and p not in baseline_pairs}
             exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
             arm_new_failures = sorted({t for (_s, t) in new_pairs})
             if new_pairs:
@@ -909,7 +928,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "unions": unions,
         # §SPEC-060a：双臂失败集逐名披露（observed 全集 + new 相对基线）
         "failures": {
-            "baseline_count": len(baseline_failures),
+            "baseline_count": len(baseline_pairs),
             "gated": any(v["new"] for v in gated_arms.values()),
             "arms": gated_arms,
         },
@@ -1107,20 +1126,25 @@ _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")
 
 
 def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
-    """§SPEC-063c：失败身份解析为 (script, test) 对——运行流按脚本分段
-    （res://…gd 独占一行），段内 `* / - test_x` 行后跟 [Failed] 归属该对；
-    Run Summary 段无脚本身份，不解析（截断输出只剩 Summary 时失败集为空
-    → 由 §SPEC-063a 不可归因门控兜底）。"""
+    """§SPEC-063c/064a：失败身份解析为 (script, test) 对。运行流按脚本
+    分段（res://…gd 独占一行）；Run Summary 段起脚本身份不可知，失败以
+    ("", test) 未归因对纳入解析（不得静默丢弃——混合形态必须门控，
+    §SPEC-064a）。acceptance 私有目录的 per-run uuid 归一为 `.gqt-run-*`
+    （目录名无测试身份语义，跨 run 基线可比）。"""
     pairs: set[tuple[str, str]] = set()
     current_script = ""
     current_test = None
+    in_summary = False
     for raw in gut_output.splitlines():
         line = _ANSI_RE.sub("", raw).replace("\r", "")
         s = line.strip()
-        if "Run Summary" in s:
-            break
-        if _SCRIPT_HEADER_RE.match(s):
-            current_script = s
+        if not in_summary and "Run Summary" in s:
+            in_summary = True
+            current_script = ""
+            current_test = None
+            continue
+        if not in_summary and _SCRIPT_HEADER_RE.match(s):
+            current_script = re.sub(r"\.gqt-run-[0-9a-f]+", ".gqt-run-*", s)
             current_test = None
             continue
         m = re.match(r"^[*-]\s+(test_\S+)", s)

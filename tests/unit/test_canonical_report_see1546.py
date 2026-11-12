@@ -922,7 +922,7 @@ def test_baseline_failures_absorb_preexisting_failures(project, tmp_path):
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FailingConfigFaceGodot(project)
     report = run_canonical(project, _targets(project), recipe,
-                           baseline_failures={"test_font_row_height"})
+                           baseline_failures={("", "test_font_row_height")})
     assert report["ok"] is True
     assert report["failures"]["gated"] is False
     assert report["failures"]["arms"]["gut_full"]["new"] == []
@@ -1021,7 +1021,7 @@ def test_intolerant_declared_bypasses_gating_and_disclosed(project, tmp_path):
     sp.run = TwoFailuresConfigFaceGodot(project)
     report = run_canonical(
         project, _targets(project), recipe,
-        baseline_failures={"test_font_row_height"},
+        baseline_failures={("", "test_font_row_height")},
         intolerant_config={"tests": [{"name": "test_intolerant_probe_shape",
                                       "reason": "byte-exact source contract "
                                                 "breaks under probe lines"}]})
@@ -1046,7 +1046,7 @@ def test_undeclared_intolerant_failure_still_gates(project, tmp_path):
     recipe, _ = _recipe(project, tmp_path)
     sp.run = TwoFailuresConfigFaceGodot(project)
     report = run_canonical(project, _targets(project), recipe,
-                           baseline_failures={"test_font_row_height"})
+                           baseline_failures={("", "test_font_row_height")})
     assert report["ok"] is False
     assert report["failures"]["gated"] is True
     assert report["failures"]["arms"]["gut_full"]["new"] == \
@@ -1199,7 +1199,7 @@ def test_unparseable_nonzero_failure_gates_arm(project, tmp_path):
     sp.run = UnparseableFaceGodot(project)
     report = run_canonical(
         project, _targets(project), recipe,
-        baseline_failures={"test_font_row_height"})
+        baseline_failures={("", "test_font_row_height")})
     assert report["ok"] is False
     assert report["failures"]["gated"] is False  # 非新增失败路径
     gut = next(a for a in report["arms"] if a["arm"] == "gut_full")
@@ -1324,3 +1324,104 @@ def test_prep_cache_non_dict_root_quarantined(project, tmp_path,
         "non-dict root entries must be quarantined, not loaded"
     assert g.glob(str(prepcache.prep_dir(project)) + "/*.bad"), \
         "non-dict root must be quarantined as .bad"
+
+
+class MixedSummaryGodot(FakeGodot):
+    """§SPEC-064a 反例注入（Revy 新 N-H-1）：gut_full 臂 rc=1，输出含
+    已归因基线失败（运行流）+ Run Summary 段新失败（未归因）——混合形态
+    必须门控，Summary 失败不得静默丢弃。"""
+
+    def __call__(self, *a, **k):
+        r = super().__call__(*a, **k)
+        cmd = " ".join(a[0])
+        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+            r.returncode = 1
+            r.stderr = (
+                "res://tests/unit/test_game.gd\n"
+                "* test_known_baseline\n"
+                "  [Failed] known pre-existing\n"
+                "Run Summary\n"
+                "- test_summary_secret\n"
+                "  [Failed] hidden new failure\n")
+        return r
+
+
+def test_summary_section_failures_gate_mixed_form(project, tmp_path):
+    """§SPEC-064a 反例（Revy N-H-1）：已归因基线失败 + Summary-only 新
+    失败的混合形态必须门控——Summary 失败以 ("", test) 未归因对纳入。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = MixedSummaryGodot(project)
+    report = run_canonical(
+        project, _targets(project), recipe,
+        baseline_failures={("res://tests/unit/test_game.gd",
+                            "test_known_baseline")})
+    gut = next(a for a in report["arms"] if a["arm"] == "gut_full")
+    tf = gut["test_failures"]
+    assert "::test_summary_secret" in tf["new_pairs"], tf
+    assert report["failures"]["gated"] is True
+    assert report["ok"] is False
+    assert not any(r["score_status"] == "scored"
+                   for r in report["crap"]["records"])
+
+
+def test_baseline_absorption_is_pair_scoped_and_rejects_bare_names(
+        project, tmp_path):
+    """§SPEC-064b 反例（Revy N-M-3）：基线按 (script, test) 身份对吸收——
+    脚本 A 的既有同名失败不吸收脚本 B 的新同名失败；裸名基线身份歧义
+    fail-closed 拒绝。"""
+    import os as _os
+    (project / "tests" / "unit" / "test_other.gd").write_text(
+        "extends GutTest\nfunc test_duplicate() -> void:\n"
+        "\tassert_true(false)\n")
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = CrossScriptDuplicateGodot(project)
+    report = run_canonical(
+        project, _targets(project), recipe,
+        baseline_failures={("res://tests/unit/test_game.gd",
+                            "test_duplicate")})
+    gut = next(a for a in report["arms"] if a["arm"] == "gut_full")
+    tf = gut["test_failures"]
+    assert sorted(tf["new_pairs"]) == \
+        ["res://tests/unit/test_other.gd::test_duplicate"], tf
+    assert report["failures"]["gated"] is True
+    assert report["ok"] is False
+
+    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      baseline_failures={"test_duplicate"})
+
+
+def test_coverage_limitation_requires_file_and_reason(project, tmp_path):
+    """§SPEC-064c 反例（Revy N-M-1）：coverage_limitations 缺 file 或非空
+    reason → CanonicalError fail-fast（盲点披露不得静默消失）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"coverage_limitations": [
+                          {"file": "scenes/ui/infi/infi_post_visual.gd"}]})
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"coverage_limitations": [
+                          {"file": "a.gd", "reason": "  "}]})
+
+
+def test_parse_failing_pairs_summary_and_gqt_run_normalization():
+    """§SPEC-064a/b 解析钉定：Summary 段 ("", test) 未归因对纳入；.gqt-run
+    per-run uuid 归一为 `.gqt-run-*`（跨 run 基线可比）。"""
+    from godot_qa_toolkit.canonical.orchestrator import _parse_failing_pairs
+    out = (
+        "res://acceptance/generated/.gqt-run-ab12cd34/generated/test_x.gd\n"
+        "* test_known\n"
+        "  [Failed] a\n"
+        "Run Summary\n"
+        "- test_secret\n"
+        "  [Failed] b\n")
+    pairs = _parse_failing_pairs(out)
+    assert pairs == {
+        ("res://acceptance/generated/.gqt-run-*/generated/test_x.gd",
+         "test_known"),
+        ("", "test_secret"),
+    }

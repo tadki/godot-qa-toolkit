@@ -375,9 +375,23 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     root = Path(project_root).resolve()
     baseline_failures = set(baseline_failures or ())
     cfg = intolerant_config or {}
-    intolerant_tests = [t for t in (cfg.get("tests") or [])
-                        if isinstance(t, dict) and t.get("name")]
+    # §SPEC-063e：声明必须含非空 reason（缺省即配置错误 fail-fast），
+    # 空论证旁路 = 静默排除的捷径，禁止
+    intolerant_tests = []
+    for t in (cfg.get("tests") or []):
+        if not isinstance(t, dict) or not t.get("name"):
+            continue
+        if not str(t.get("reason") or "").strip():
+            raise CanonicalError(
+                "intolerant declaration missing non-empty reason: "
+                f"{t.get('name')} (§SPEC-063e)")
+        intolerant_tests.append(t)
     intolerant_names = {t["name"] for t in intolerant_tests}
+    # §SPEC-063c：排除声明按 (script, test) 身份匹配——无 script 声明仅
+    # 豁免未归因失败（Run Summary 截断形态），同名跨脚本不合并豁免
+    declared_scoped = {(str(t["script"]), t["name"]) for t in intolerant_tests
+                       if t.get("script")}
+    declared_bare = {t["name"] for t in intolerant_tests if not t.get("script")}
     coverage_limitations = [l for l in (cfg.get("coverage_limitations") or [])
                             if isinstance(l, dict) and l.get("file")
                             and l.get("reason")]
@@ -628,30 +642,41 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 xdg_homes.clear()
                 raise
             wall_s = time.monotonic() - t_arm
+            # §SPEC-063a/c：失败身份解析为 (script, test) 对；任一 rep
+            # rc!=0 且无可解析失败名（含启动失败）→ 不可归因失败
+            # fail-closed 门控，不得出分
+            arm_failures: set[str] = set()
+            arm_fail_pairs: set[tuple[str, str]] = set()
             for r in results:
                 for rep in r["reps"]:
                     if rep["timed_out"]:
                         gut_ok = False
                         run_error = True
                         timed_out = True
-                    elif rep["rc"] != 0 and _looks_like_godot_launch_failure(
-                            rep["out"]):
-                        gut_ok = False
-                        run_error = True
+                        continue
+                    pairs = _parse_failing_pairs(rep["out"])
+                    arm_fail_pairs |= pairs
+                    arm_failures |= {t for (_s, t) in pairs}
+                    if rep["rc"] != 0:
+                        if _looks_like_godot_launch_failure(rep["out"]) \
+                                or not pairs:
+                            gut_ok = False
+                            run_error = True
             output = "\n".join(
                 rep["out"] for r in results for rep in r["reps"])
-            # §SPEC-060a：逐名解析双臂失败集；相对基线的新增失败 = 插桩
-            # 语境下测试语义被改变或产品回归 → 门控本臂（不出分）。
-            # §SPEC-061b：声明为 instrumentation-intolerant 的具名项先从
-            # 门控比较中旁路（逐名披露，不静默）。
-            arm_failures: set[str] = set()
-            for r in results:
-                for rep in r["reps"]:
-                    arm_failures |= _parse_failing_tests(rep["out"])
-            arm_intolerant = sorted(arm_failures & intolerant_names)
-            arm_new_failures = sorted(
-                (arm_failures - intolerant_names) - baseline_failures)
-            if arm_new_failures:
+            # §SPEC-060a/061b/063c：新增失败门控；具名排除按 (script, test)
+            # 身份匹配（无 script 声明仅豁免未归因失败；同名跨脚本不得合并
+            # 豁免），基线按既有失败名吸收
+            def _exempt(p: tuple[str, str]) -> bool:
+                if p in declared_scoped:
+                    return True
+                return p[0] == "" and p[1] in declared_bare
+
+            new_pairs = {p for p in arm_fail_pairs
+                         if not _exempt(p) and p[1] not in baseline_failures}
+            exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
+            arm_new_failures = sorted({t for (_s, t) in new_pairs})
+            if new_pairs:
                 gut_ok = False
                 run_error = True
         finally:
@@ -680,8 +705,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     ok_all = ok_all and bool(rec.get("ok"))
             reconciliation = {"ok": ok_all, "shards": recs}
             if not ok_all:
+                # §SPEC-063b：结构对账失败 = 臂无效且必须传入 union 失败
+                # 哨兵（run_error）——对账失败不得静默出分
                 arm_valid = False
                 invalid_reason = "reconciliation_failed"
+                gut_ok = False
+                run_error = True
         if acceptance is not None:
             for r in results:
                 if r["plan"].get("suite_dir") is not None:
@@ -763,8 +792,13 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "state": ("valid" if arm_valid else "invalid"),
             "invalid_reason": invalid_reason,
             "test_failures": {"observed": sorted(arm_failures),
+                              "observed_pairs": sorted(
+                                  f"{s}::{t}" for (s, t) in arm_fail_pairs),
                               "new": arm_new_failures,
-                              "instrumentation_intolerant": arm_intolerant},
+                              "new_pairs": sorted(
+                                  f"{s}::{t}" for (s, t) in new_pairs),
+                              "instrumentation_intolerant": sorted(
+                                  f"{s}::{t}" for (s, t) in exempt_pairs)},
             # §SPEC-062C：验收臂 N 次重复与收敛披露（gut_full 恒单轮）
             "repeats": reps,
             "convergence": convergence,
@@ -801,7 +835,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                  "gut_ok": False, "timed_out": False, "state": "invalid",
                  "invalid_reason": f"suite_error:{e}", "bundles": 0,
                  "bundles_data": {}, "reconciliation": None,
-                 "test_failures": {"observed": [], "new": [],
+                 "test_failures": {"observed": [], "observed_pairs": [],
+                                   "new": [], "new_pairs": [],
                                    "instrumentation_intolerant": []},
                  "repeats": 0, "convergence": None}
 
@@ -878,11 +913,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "gated": any(v["new"] for v in gated_arms.values()),
             "arms": gated_arms,
         },
-        # §SPEC-061b：instrumentation-intolerant 具名排除披露——仅具名项
-        # 旁路门控，逐名给理由，并作为覆盖率盲点声明（非静默跳过）
+        # §SPEC-061b/063c：instrumentation-intolerant 具名排除披露——按
+        # (script, test) 身份匹配旁路门控，逐名给理由，并作为覆盖率盲点
+        # 声明（非静默跳过；同名跨脚本不合并豁免）
         "instrumentation_intolerant": {
-            "declared": [{"name": t["name"], "reason": str(t.get("reason")
-                                                           or "")}
+            "declared": [{"name": t["name"],
+                          "reason": str(t.get("reason") or ""),
+                          **({"script": str(t["script"])}
+                             if t.get("script") else {})}
                          for t in intolerant_tests],
             "observed": sorted(
                 set((arm_a.get("test_failures") or {})
@@ -891,7 +929,10 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                       .get("instrumentation_intolerant") or [])),
             "coverage_blind_spots": [t["name"] for t in intolerant_tests],
             "note": ("declared tests bypass the failure-gating comparison "
-                     "only by name; they cannot attest behavior under "
+                     "only by (script, test) identity — a declaration "
+                     "without script matches only unattributed failures, "
+                     "and same-named tests in undeclared scripts are NOT "
+                     "exempted; they cannot attest behavior under "
                      "instrumentation, so they are disclosed here and as "
                      "coverage blind spots — not silently skipped"),
         },
@@ -1059,6 +1100,36 @@ def _cause_tail(te) -> str:
     if isinstance(se, bytes):
         se = se.decode("utf-8", "replace")
     return so + "\n" + se
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")
+
+
+def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
+    """§SPEC-063c：失败身份解析为 (script, test) 对——运行流按脚本分段
+    （res://…gd 独占一行），段内 `* / - test_x` 行后跟 [Failed] 归属该对；
+    Run Summary 段无脚本身份，不解析（截断输出只剩 Summary 时失败集为空
+    → 由 §SPEC-063a 不可归因门控兜底）。"""
+    pairs: set[tuple[str, str]] = set()
+    current_script = ""
+    current_test = None
+    for raw in gut_output.splitlines():
+        line = _ANSI_RE.sub("", raw).replace("\r", "")
+        s = line.strip()
+        if "Run Summary" in s:
+            break
+        if _SCRIPT_HEADER_RE.match(s):
+            current_script = s
+            current_test = None
+            continue
+        m = re.match(r"^[*-]\s+(test_\S+)", s)
+        if m:
+            current_test = m.group(1)
+            continue
+        if "[Failed]" in line and current_test:
+            pairs.add((current_script, current_test))
+    return pairs
 
 
 def _acceptance_convergence(root: Path, run_uuid: str, sink_by_rel: dict,

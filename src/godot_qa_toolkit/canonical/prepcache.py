@@ -165,6 +165,11 @@ def load_entry(project_root: str | os.PathLike, *, rel: str,
     except (OSError, ValueError):
         _quarantine(path)
         return None
+    if not isinstance(entry, dict):
+        # §SPEC-063d：合法 JSON 但根类型非 dict（如 []）= 语义损坏，
+        # quarantine + fresh 重建，不得 AttributeError
+        _quarantine(path)
+        return None
     if not _entry_meta_ok(entry, rid, rel, src_sha256, recipe_hash, algo):
         return None
     if _has_forbidden_keys(entry):

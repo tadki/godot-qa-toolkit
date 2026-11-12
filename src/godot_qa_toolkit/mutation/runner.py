@@ -231,7 +231,7 @@ def run_mutation(    file_path: str,
     return result
 
 
-def _run_mutation_core(    file_path: str,
+def _run_mutation_core(file_path: str,
     project_root: str,
     budget: int = 50,
     timeout_s: int = 60,

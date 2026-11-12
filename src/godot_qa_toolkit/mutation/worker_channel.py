@@ -20,8 +20,9 @@ rc≠0）/ loaded-source 哈希失配 / autoload 交叠 / 腿挂死 → 不再�
 mutant → respawn + 自上次 canary 窗口整批作废 + 冷重跑 + stderr 披露；
 禁止静默改道或 IGNORE 后继续。
 
-A9 opt-in：默认冷通道，worker 通道须显式启用（`--worker-channel` /
-`GQT_MUTATION_WORKER=1`）；定案红线：baseline 永远实测走冷通道。
+A9 默认启用（SEE-1550 default-on 翻转，护栏全保留）：eligible 目标自动走
+worker，显式 flag 最高优先，env `GQT_MUTATION_WORKER=0|false|no` 为关断
+逃生门（冷通道回退）；定案红线：baseline 永远实测走冷通道。
 """
 
 from __future__ import annotations
@@ -163,7 +164,7 @@ class WorkerSession:
         self.dead = False
         self.dead_reason = ""
         # §SPEC-202：累计 boot 耗时（秒）——respawn 会话由调用方收割后清零
-        self.boot_ms = 0.0
+        self.boot_s = 0.0
 
     # -- 生命周期 -------------------------------------------------------
 
@@ -212,7 +213,7 @@ class WorkerSession:
             stdout=log_fh, stderr=subprocess.STDOUT, text=True)
         self.state.log_fh = log_fh
         self._await_boot()
-        self.boot_ms += time.monotonic() - t_boot
+        self.boot_s += time.monotonic() - t_boot
 
     def _godot_command(self) -> str:
         from .inject import godot_command
@@ -768,8 +769,8 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
         if timings_out is None:
             return
         timings_out["worker_boot_s"] = round(
-            timings_out.get("worker_boot_s", 0.0) + s.boot_ms, 3)
-        s.boot_ms = 0.0
+            timings_out.get("worker_boot_s", 0.0) + s.boot_s, 3)
+        s.boot_s = 0.0
 
     def _record(m, verdict, elapsed_s=0.0):
         raw_pairs.append((m, verdict))

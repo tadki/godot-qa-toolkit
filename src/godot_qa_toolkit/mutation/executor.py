@@ -312,6 +312,23 @@ def _run_mutation_files_impl(
             total = min(len(_collect_mutations(src, files[0])), budget)
         except Exception:
             total = -1  # 收集异常交给 _build_chunks 定终态（error 契约）
+        # E2（§SPEC-501）：零引用短路——派生 glob 零命中（非显式 --tests）
+        # 且有可执行位点时，以披露记录替代全量 GUT 退路；门在 prewarm 之前
+        # （零引用轮零 prewarm/零 GUT）。串行（本块与 run_mutation 内）与
+        # 并行（_plan_file_chunks）共用 testscan 判据与记录形态——判据唯一
+        # 出处 = 派生 glob，禁止 CLI 参数推断（批次二 v1 串行门误判教训）。
+        if tests_glob is None and not dry_run:
+            derived = _auto_scan_tests_glob(files[0], project_root)
+            if derived is None:
+                if total > 0:
+                    from .testscan import (disclose_zero_ref,
+                                           zero_ref_short_circuit_result)
+                    disclose_zero_ref(files[0])
+                    return {"tool": "mutation", "ok": True, "jobs": 1,
+                            "results": [zero_ref_short_circuit_result(
+                                files[0])]}
+            else:
+                tests_glob = derived
         if total == 0 or 0 < total <= jobs:
             r = run_mutation(files[0], project_root, budget=budget,
                              timeout_s=timeout_s, dry_run=False,
@@ -671,6 +688,14 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
         return [], None, _settled_no_sites(f, bool(glob))
+    # E2（§SPEC-501）：并行规划路径同判据收口——显式 --tests 时 glob 必非
+    # None（门不可达）；glob=None ⟺ 派生 glob 零命中 → settled 披露记录，
+    # 不落 baseline-None 串行 fallback chunk（该 chunk 会在 worker 内跑全量
+    # GUT，正是 >361s 不可信中止的并发面形态）。
+    if glob is None:
+        from .testscan import disclose_zero_ref, zero_ref_short_circuit_result
+        disclose_zero_ref(f)
+        return [], None, zero_ref_short_circuit_result(f)
     header_hash, spans, mutants, scope_hashes = build_manifest(src, f, collected)
     # D-1（SEE-1564 §SPEC-207）：父层 manifest 必须与 worker 记录同通道同键
     # ——identity 先经 identity_for_target 注入本文件的 exec_scheme（与

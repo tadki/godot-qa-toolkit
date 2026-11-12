@@ -1467,3 +1467,35 @@ def test_valid_config_passes_type_validation(project, tmp_path):
     assert report["coverage_limitations"] == [
         {"file": "src_game/cell.gd", "reason": "tool limitation"}]
     assert report["ok"] is True
+
+
+def test_script_null_rejected_and_absent_script_legal(project, tmp_path):
+    """§SPEC-065/R19 反例（Revy LOW）：显式 `script:null` 不得静默降级为
+    bare-name 声明——键提供即须通过非空 str 校验（CanonicalError）；
+    键缺省保留既有 bare-name 合法行为（declared 无 script 键）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"tests": [
+                          {"name": "test_x", "script": None,
+                           "reason": "reason"}]})
+    # 同类可选顶层键：显式 null / 非 list 拒绝（不得静默当空）
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"tests": None})
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"coverage_limitations": None})
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"coverage_limitations": "x"})
+    # 键缺省（bare-name）合法路径不变：declared 无 script 键
+    report = run_canonical(
+        project, _targets(project), recipe,
+        intolerant_config={"tests": [{"name": "test_t",
+                                      "reason": "contract"}]})
+    d = report["instrumentation_intolerant"]["declared"]
+    assert d == [{"name": "test_t", "reason": "contract"}]
+    assert all("script" not in x for x in d)

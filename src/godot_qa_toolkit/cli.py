@@ -689,6 +689,16 @@ def _diagnose_summary(report: dict) -> dict:
     }
 
 
+def _diagnose_gate(report: dict) -> tuple[bool, list[dict]]:
+    """§SPEC-070 FR-5：diagnose 不再恒 ok=true——任一 feature 插桩腿
+    超时即为失败并具名披露。"""
+    timed_out = [f["key"] for f in report.get("features", [])
+                 if (f.get("instrumented") or {}).get("timed_out")]
+    failures = [{"reason": f"feature instrumented leg timed out: {k}"}
+                for k in timed_out]
+    return (not timed_out), failures
+
+
 def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
     """§SPEC-048 diagnostic-only acceptance 计时模式。"""
     import json as _json
@@ -697,6 +707,10 @@ def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
 
     from .canonical.orchestrator import CanonicalError, run_canonical_diagnose
     from .canonical.recipe import verify_recipe
+
+    rc = _apply_godot_bin_or_contract("canonical-diagnose", args)
+    if rc is not None:
+        return rc
 
     recipe_path = _P(args.recipe)
     try:
@@ -727,8 +741,9 @@ def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
     _P(args.out).write_text(
         _json.dumps(report, ensure_ascii=False, indent=1) + "\n",
         encoding="utf-8")
-    return _emit({"tool": "canonical-diagnose", "ok": True,
-                  "summary": _diagnose_summary(report), "failures": []})
+    ok, failures = _diagnose_gate(report)
+    return _emit({"tool": "canonical-diagnose", "ok": ok,
+                  "summary": _diagnose_summary(report), "failures": failures})
 
 
 def build_parser() -> argparse.ArgumentParser:

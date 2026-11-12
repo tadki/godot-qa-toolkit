@@ -358,7 +358,7 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 
 ### 13.3 性能门（§SPEC-039）
 
-端到端墙钟（插桩 + 两臂 GUT + union，recipe 构建与 W4 探针不计）对「现有 GUT + acceptance 序贯基线」3+3 交错中位数 ≤1.5×；**不达标=停下汇报、不得合并**；loadavg+CPU 双记录（§SPEC-022 协议）随交付。
+端到端墙钟（插桩 + 两臂 GUT + union，recipe 构建与 W4 探针不计）对「现有 GUT + acceptance 序贯基线」3+3 交错中位数 ≤1.0×（§SPEC-052 现行最终性能门；旧 §SPEC-039 时代的 1.5× 中间门已作废）；**不达标=停下汇报、不得合并**；loadavg+CPU 双记录（§SPEC-022 协议）随交付。
 
 ### 13.4 契约增量分类
 

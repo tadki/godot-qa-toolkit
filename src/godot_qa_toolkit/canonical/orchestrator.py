@@ -62,7 +62,30 @@ CERTIFICATION = {
     "status": "not_certified",
     "reason": "single round; WP5 owns two-round certification",
 }
-_BACKUP_BASE = Path(tempfile.gettempdir()) / "gqt-canonical-backups"
+
+
+def _backup_base() -> Path:
+    """§SPEC-070 FR-1：备份根必须进程/用户私有——/tmp 上的共享备份根可被
+    任意本地用户预置/篡改 started.json（恢复信任边界）。改为 per-uid 私有
+    目录（POSIX 校验 ownership + 0700 + 拒绝 symlink），被篡改即 fail-loud。"""
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    name = (f"gqt-canonical-backups-{uid}" if uid is not None
+            else "gqt-canonical-backups")
+    base = Path(tempfile.gettempdir()) / name
+    if base.is_symlink() or (base.exists() and not base.is_dir()):
+        raise CanonicalError(
+            f"backup root is not a private directory: {base}")
+    if not base.exists():
+        try:
+            base.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+    st = base.stat()
+    if (uid is not None and st.st_uid != uid) or (st.st_mode & 0o077):
+        raise CanonicalError(
+            f"backup root is not private: {base} "
+            f"(uid={st.st_uid}, mode={oct(st.st_mode & 0o777)})")
+    return base
 
 # §SPEC-046：flag 形态的统一落盘由注入的 finalizer autoload 承担——GUT
 # 退出（SceneTree 拆卸 _exit_tree）时逐 sink 排空标记数组（每 sink 一次
@@ -150,21 +173,64 @@ def file_key8(relpath: str) -> str:
     return hashlib.sha1(relpath.encode("utf-8")).hexdigest()[:8]
 
 
+def _rel_within_root(abs_path: str, root: Path) -> str:
+    """§SPEC-070 FR-3：目标不在 project root 内 → CanonicalError
+    fail-loud（裸 ValueError 会在 CLI 泄漏 traceback）。"""
+    try:
+        return str(Path(abs_path).relative_to(root))
+    except ValueError as e:
+        raise CanonicalError(
+            f"target outside project root: {abs_path} (root={root})") from e
+
+
 def batch_sink_name(run_uuid: str, relpath: str) -> str:
     return f"qa-coverage-hits-{run_uuid}-{file_key8(relpath)}.txt"
+
+
+def _contained_restore_target(path_str, root: Path) -> Path | None:
+    """§SPEC-070 FR-1：恢复目标须解析后位于 project root 内且叶子非
+    symlink——否则返回 None（该记录整体跳过，不写不删）。"""
+    p = Path(path_str)
+    if p.is_symlink():
+        return None
+    try:
+        resolved = p.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """§SPEC-070 FR-1：恢复写入原子化——同目录临时文件 + os.replace，
+    避免崩溃/并发下留下半写状态。"""
+    tmp = path.with_name(f".{path.name}.gqt-tmp-{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _recover_stale_backups(project_root: Path) -> int:
     """崩溃恢复：回收本项目的陈旧备份目录（恢复原文、删除备份）。
 
-    恢复前不信任任何 sink——调用方在回收之后才开始新 run。
-    """
+    §SPEC-070 FR-1：恢复不信任共享目录内容——备份根/目录/marker 须当前
+    用户私有（POSIX ownership + 目录无组/他者写位 + 拒绝 symlink）；恢复
+    目标限定 project root 内且叶子非 symlink；写入原子化。不可信记录整体
+    跳过（不写不删），只报可信恢复数。"""
     restored = 0
-    if not _BACKUP_BASE.is_dir():
-        return 0
-    for d in sorted(_BACKUP_BASE.iterdir()):
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    base = _backup_base()
+    for d in sorted(base.iterdir()):
         marker = d / "started.json"
-        if not marker.is_file():
+        if not marker.is_file() or d.is_symlink():
+            continue
+        try:
+            d_st = d.stat()
+            m_st = marker.stat()
+        except OSError:
+            continue
+        if uid is not None and (d_st.st_uid != uid or m_st.st_uid != uid):
+            continue
+        if d_st.st_mode & 0o022:  # 目录开放组/他者写位 → 不可信
             continue
         try:
             record = json.loads(marker.read_text(encoding="utf-8"))
@@ -172,13 +238,37 @@ def _recover_stale_backups(project_root: Path) -> int:
             continue
         if record.get("project_root") != str(project_root):
             continue
-        for src, original in record.get("files", {}).items():
-            Path(src).write_text(original, encoding="utf-8")
+        files = record.get("files", {})
+        if not isinstance(files, dict):
+            continue
+        restore_plan: dict[Path, str] | None = {}
+        for src, original in files.items():
+            target = _contained_restore_target(src, project_root)
+            if target is None:
+                restore_plan = None
+                break
+            restore_plan[target] = original
+        if restore_plan is None:
+            continue
+        created_targets: list[Path] = []
+        for created in record.get("created", []):
+            target = _contained_restore_target(created, project_root)
+            if target is None:
+                restore_plan = None
+                break
+            created_targets.append(target)
+        if restore_plan is None:
+            continue
         pg = record.get("project_godot")
         if pg is not None:
-            (project_root / "project.godot").write_text(pg, encoding="utf-8")
-        for created in record.get("created", []):
-            Path(created).unlink(missing_ok=True)
+            _atomic_write_text(project_root / "project.godot", pg)
+        for target, original in restore_plan.items():
+            _atomic_write_text(target, original)
+        for target in created_targets:
+            if target.is_symlink():
+                target.unlink()  # 只移除链接本身，不跟随
+            else:
+                target.unlink(missing_ok=True)
         shutil.rmtree(d, ignore_errors=True)
         restored += 1
     return restored
@@ -242,15 +332,20 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
 
 def _prepare_shadow(base_root: Path, run_uuid: str, idx: int) -> Path:
     """§SPEC-056：分片独立 project shadow——源码/resource 状态与基准树
-    完全一致（hardlink farm，零拷贝成本），`.godot` 引擎缓存实拷贝隔离，
-    杜绝多 Godot 进程争用同一项目目录缓存。junit 硬链断开放分片自写。"""
+    完全一致，`.godot` 引擎缓存实拷贝隔离，杜绝多 Godot 进程争用同一
+    项目目录缓存。junit 断开放分片自写。
+
+    §SPEC-070 FR-2：shadow 与 base 不得共享可写 inode——hardlink farm
+    （cp -al）下运行期任何 res:// 写都会写穿 base，最终恢复只覆盖被插桩
+    文件，非插桩文件可被永久污染；改为 reflink（FS 支持）否则实拷贝。"""
     import subprocess as _sp
 
     shadow = Path(tempfile.mkdtemp(
         prefix=f"gqt-shadow-{run_uuid[:8]}-{idx}-"))
     entries = [e for e in base_root.iterdir() if e.name != ".godot"]
     for e in entries:
-        _sp.run(["cp", "-al", str(e), str(shadow / e.name)], check=True)
+        _sp.run(["cp", "-a", "--reflink=auto", str(e), str(shadow / e.name)],
+                check=True)
     godot_cache = base_root / ".godot"
     if godot_cache.is_dir():
         _sp.run(["cp", "-a", str(godot_cache),
@@ -486,7 +581,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             unmeasured.append({"file": path_str,
                                "reason": f"read_error:{e}"})
             continue
-        rel = str(p.resolve().relative_to(root))
+        rel = _rel_within_root(str(p.resolve()), root)
         src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
         prep_algo = algo_used
         entry = prepcache.load_entry(
@@ -567,8 +662,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         from concurrent.futures import ThreadPoolExecutor
 
         run_uuid = make_run_uuid()
-        backup_dir = _BACKUP_BASE / run_uuid
-        backup_dir.mkdir(parents=True)
+        backup_dir = _backup_base() / run_uuid
+        backup_dir.mkdir(mode=0o700)
         started = {"run_uuid": run_uuid, "project_root": str(root),
                    "files": {}}
         sink_by_rel: dict[str, str] = {}
@@ -624,7 +719,6 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         output = ""
         results: list[dict] = []
         xdg_homes: list[str] = []
-        arm_failures: set[str] = set()
         arm_new_failures: list[str] = []
         # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
         reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
@@ -797,7 +891,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     retain_dir=retain)
                 block_map = prepared[rel].get("block_map") or {}
                 if block_map:
-                    # §SPEC-055：块入口命中 → 块内全部语句起始行
+                    # §SPEC-055/070 FR-4：块入口命中展开为块内全部语句起始行
+                    # ——这是行覆盖近似而非逐语句精确测量：块内后继语句被
+                    # 运行期错误中止时仍会被计为已覆盖。该近似在报告
+                    # coverage_semantics 显式披露，不冒充精确
+                    # statement_start_line。
                     hits = {ln for start in hits
                             for ln in block_map.get(start, [start])}
                 bundle = build_bundle(
@@ -817,7 +915,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                         run_uuid=run_uuid, file_path="res://" + rel,
                         gd_source=item["src"], tests_glob=None,
                         probe_manifest=item["probe_manifest"], arm=name)
-                    record["sink_path"] = str(evidence_dir / sink)
+                    # §SPEC-070 FR-5：不再写入 sink_path——批式 sink 在分片
+                    # XDG 下且读回即消费，指向 evidence_dir/<sink> 是不存在
+                    # 位置的虚假路径
                     write_run_record(evidence_dir, record, name_suffix=suffix)
                     write_bundle(evidence_dir, bundle, name_suffix=suffix)
                     update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
@@ -1045,6 +1145,20 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "preparation": {
             "cache": {"hits": cache_hits, "misses": cache_misses,
                       "algo": algo_used},
+        },
+        # §SPEC-070 FR-4：块压缩近似语义显式披露——不得冒充逐语句精确
+        # statement_start_line（块内后继语句被运行期错误中止时仍计入覆盖）
+        "coverage_semantics": {
+            "algo": algo_used,
+            "block_compressed_files": sum(
+                1 for item in prepared.values() if item.get("block_map")),
+            "statement_files": sum(
+                1 for item in prepared.values() if not item.get("block_map")),
+            "semantics": (
+                "block-entry hit expands to all statement start lines in "
+                "the block (line-coverage approximation, not per-statement "
+                "exact measurement); a runtime error aborting mid-block can "
+                "mark later statements covered"),
         },
         "unmeasured": unmeasured,
         "recovered_stale_backups": recovered,
@@ -1276,14 +1390,17 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
 
 
 def _is_baseline_line_id(value) -> bool:
-    """§SPEC-067/068：行集元素须为有限标量且数值为整数。bool 是 int 子类
-    但语义上不是行号——frozenset({True}) == frozenset({1}) 会伪造第 1 行
-    已覆盖、改变 stable/unstable 判定；NaN/±Infinity 入集会污染比较；
-    非整数浮点（2.5）不是合法行号。"""
+    """§SPEC-067/068/070：行集元素须为数值行号——非负整数或全数字字符串
+    （sink 落盘形态 str(i)）。bool 是 int 子类但语义上不是行号——
+    frozenset({True}) == frozenset({1}) 会伪造第 1 行已覆盖、改变
+    stable/unstable 判定；NaN/±Infinity 入集会污染比较；非整数浮点
+    （2.5）与非数字字符串都不是行号。"""
     if isinstance(value, bool):
         return False
-    if isinstance(value, (str, int)):
+    if isinstance(value, int):
         return True
+    if isinstance(value, str):
+        return value.isdigit()
     return isinstance(value, float) and math.isfinite(value) \
         and value.is_integer()
 
@@ -1338,6 +1455,15 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
                 f"stability baseline union row must be an object, got "
                 f"{u!r} (§SPEC-066)")
         if u.get("union") is None:
+            # §SPEC-070 FR-5：null 行同样参与 file 身份去重——否则 null 行
+            # + 有效行可绕过重复检测
+            file_raw = u.get("file")
+            if isinstance(file_raw, str) and file_raw.strip():
+                if file_raw in seen_files:
+                    raise CanonicalError(
+                        f"stability baseline duplicate union row for file "
+                        f"{file_raw!r} (§SPEC-068)")
+                seen_files.add(file_raw)
             continue
         union = u["union"]
         if not isinstance(union, dict):
@@ -1558,15 +1684,15 @@ def _diagnose_stage_flags(root: Path, sources: dict[str, str],
     """腿 2 备份与插桩：备份目录落 started.json，返回 (backup_dir,
     started, sink_by_rel, manifest_by_rel, instrumented)。零可执行行文件
     不入插桩面（vacuous 不写不还原）。"""
-    backup_dir = _BACKUP_BASE / run_uuid
-    backup_dir.mkdir(parents=True)
+    backup_dir = _backup_base() / run_uuid
+    backup_dir.mkdir(mode=0o700)
     started = {"run_uuid": run_uuid, "project_root": str(root),
                "files": {}}
     sink_by_rel: dict[str, str] = {}
     manifest_by_rel: dict[str, list[int]] = {}
     instrumented: dict[str, str] = {}
     for abs_path, src_text in sources.items():
-        rel = str(Path(abs_path).relative_to(root))
+        rel = _rel_within_root(abs_path, root)
         sink = batch_sink_name(run_uuid, rel)
         inst, manifest = _instrument(src_text, sink, flags=True)
         if not manifest:

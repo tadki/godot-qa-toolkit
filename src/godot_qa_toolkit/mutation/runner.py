@@ -370,6 +370,20 @@ def _run_mutation_core(    file_path: str,
         worker_channel=worker_channel, clock=clock)
 
 
+def _rebuild_reused_records(reused: dict, mutants: list,
+                            original_src: str) -> list[dict]:
+    """复用条目 → 报告记录重建（全签名已在 plan 阶段验证）。"""
+    by_id_all = {m.stable_id: m for m in mutants}
+    results: list[dict] = []
+    for sid, entry in reused.items():
+        m = by_id_all.get(sid)
+        if m is not None:
+            results.append(_mutant_record(m, entry["verdict"],
+                                          entry.get("reason", ""),
+                                          src=original_src))
+    return results
+
+
 def _execute_planned(path, project_root, original_src, backup, mutants,
                      executed_list, reused, results_uncovered, prior_entries,
                      scope_hashes, disclosures, budget, tests_glob,
@@ -388,14 +402,7 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
 
     # 复用记录重建（全签名已验）——串行路径在此落报告面；worker 路径的
     # reused 为空（父层合并后单点注入，避免分片重复计数）。
-    results: list[dict] = []
-    by_id_all = {m.stable_id: m for m in mutants}
-    for sid, entry in reused.items():
-        m = by_id_all.get(sid)
-        if m is not None:
-            results.append(_mutant_record(m, entry["verdict"],
-                                          entry.get("reason", ""),
-                                          src=original_src))
+    results = _rebuild_reused_records(reused, mutants, original_src)
     # _record_invalid_mutants 返回新列表——与 reused/uncovered 记录拼接而非覆盖。
     # O2：invalid_mutant（语法预检剔除）从未进入 GUT 执行——执行面以
     # _valid_mutants 过滤后的可执行集合为准，summary.executed 报实际执行数

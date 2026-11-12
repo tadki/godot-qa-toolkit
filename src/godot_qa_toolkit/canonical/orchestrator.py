@@ -87,10 +87,18 @@ func run():
 """
 _FLUSHER_GD = """extends Node
 # qa-toolkit canonical flag-mode probe finalizer (auto-injected, never in
-# production). At tree exit, drains every registered per-file flag array to
-# its sink: one open + one write loop per file — sink I/O is bounded by file
-# count and never grows with hit event count (§SPEC-046).
-func _exit_tree() -> void:
+# production). Drains every registered per-file flag array to its sink:
+# one open + one write loop per file — sink I/O is bounded by file count
+# and never grows with hit event count (§SPEC-046).
+#
+# §SPEC-062A：drain 挂在 NOTIFICATION_PREDELETE 而非 _exit_tree——GUT 收尾
+# 会把本节点移出树（_exit_tree 早于引擎关停），但对象作为孤儿节点在进程
+# 末段（autoload _exit_tree 相位之后）才被析构；PREDELETE 时 marks 已含
+# 关停期命中（隔离实验实证：sink 双标记全捕获），不重演 R5 drain 顺序
+# 丢 hits 缺陷。
+func _notification(what: int) -> void:
+\tif what != NOTIFICATION_PREDELETE:
+\t\treturn
 \tif not Engine.has_meta("gqt_cov_marks"):
 \t\treturn
 \tvar d: Dictionary = Engine.get_meta("gqt_cov_marks")
@@ -582,11 +590,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                         rep_timed_out = False
                     except CanonicalError as e:
                         te = getattr(e, "__cause__", None)
-                        tail = ""
-                        if te is not None:
-                            tail = ((getattr(te, "stdout", "") or "") + "\n" +
-                                    (getattr(te, "stderr", "") or ""))
-                        out = str(e) + "\n" + tail
+                        out = str(e) + "\n" + _cause_tail(te)
                         rc = None
                         rep_timed_out = True
                     if shard_log_dir:
@@ -1043,6 +1047,20 @@ def _crap_replay_vanished_baseline(records: list, lanes: dict,
         lanes["unstable"] = lanes.get("unstable", 0) + 1
 
 
+def _cause_tail(te) -> str:
+    """CanonicalError __cause__（TimeoutExpired）的 stdout/stderr 安全解码
+    ——TimeoutExpired 恒携带 bytes（即便 subprocess text=True）。"""
+    if te is None:
+        return ""
+    so = getattr(te, "stdout", "") or ""
+    se = getattr(te, "stderr", "") or ""
+    if isinstance(so, bytes):
+        so = so.decode("utf-8", "replace")
+    if isinstance(se, bytes):
+        se = se.decode("utf-8", "replace")
+    return so + "\n" + se
+
+
 def _acceptance_convergence(root: Path, run_uuid: str, sink_by_rel: dict,
                             manifest_by_rel: dict, results: list,
                             reps: int) -> dict:
@@ -1323,10 +1341,7 @@ def _diagnose_run_flags_leg(root: Path, gut_args: list[str],
         except CanonicalError as e:
             timed_out = True
             wall = time.monotonic() - t0
-            te = getattr(e, "__cause__", None)
-            if te is not None:
-                out = (getattr(te, "stdout", "") or "") + "\n" + (
-                    getattr(te, "stderr", "") or "")
+            out = str(e) + "\n" + _cause_tail(getattr(e, "__cause__", None))
     finally:
         for abs_path, original in started["files"].items():
             Path(abs_path).write_text(original, encoding="utf-8")

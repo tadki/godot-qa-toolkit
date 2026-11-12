@@ -541,7 +541,16 @@ def test_canonical_crap_scores_shape_and_relative_fids(project, tmp_path):
     report = run_canonical(project, _targets(project), recipe)
     crap = report["crap"]
     assert crap["version"] == "crap-line/1"
-    assert crap["coverage_semantics"] == "statement_start_line"
+    # §SPEC-070/R26 FR-4：record 级语义按文件测量形态区分；顶层在两种
+    # 形态并存时为 mixed，单一形态时为该形态
+    counts = crap["coverage_semantics_counts"]
+    if counts["block_entry_approximation"] and counts["statement_start_line"]:
+        assert crap["coverage_semantics"] == "mixed"
+    else:
+        assert crap["coverage_semantics"] == (
+            "block_entry_approximation"
+            if counts["block_entry_approximation"]
+            else "statement_start_line")
     recs = crap["records"]
     assert recs, "must emit function-level records"
     for r in recs:
@@ -744,7 +753,27 @@ def test_block_compression_zero_drift_vs_flags(project, tmp_path):
         return out
 
     assert sem(flags) == sem(blocks)
-    assert flags["crap"]["records"] == blocks["crap"]["records"]
+    # §SPEC-070/R26 FR-4：覆盖数据零漂移；唯一允许差异是 record 级
+    # coverage_semantics 语义披露（blocks=近似 / flags=精确）
+    def _strip_sem(records):
+        out = []
+        for r in records:
+            r = dict(r)
+            cl = dict(r["crap_line"])
+            cl.pop("coverage_semantics")
+            r.pop("coverage_semantics")
+            r["crap_line"] = cl
+            out.append(r)
+        return out
+
+    assert _strip_sem(flags["crap"]["records"]) == \
+        _strip_sem(blocks["crap"]["records"])
+    assert {r["coverage_semantics"]
+            for r in blocks["crap"]["records"]} == \
+        {"block_entry_approximation"}
+    assert {r["coverage_semantics"]
+            for r in flags["crap"]["records"]} == \
+        {"statement_start_line"}
     # 块形态插桩更紧凑（同文件模板更小）
     assert (blocks["preparation"]["cache"]["algo"]
             != flags["preparation"]["cache"]["algo"])

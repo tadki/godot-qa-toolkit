@@ -300,6 +300,78 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   of a KOL census is ~50% after scene-holder cold routing. win64 keeps the
   worker channel forced cold with disclosure (verdict equivalence holds,
   leg availability does not).
+- **Warm reuse needs one channel identity (SEE-1564 D-1)**: the resume
+  manifest and the per-mutant records must be written under the *same*
+  channel key. The parent planner now resolves each target's scheme through
+  the same `identity_for_target` route the runner uses, so a worker-routed
+  file's manifest lands on the worker key its records use. Cold keys are
+  unchanged (the injection is a no-op there) and A/B channel isolation is
+  preserved. Without this, the default worker channel never saw a prior
+  manifest and re-ran every mutant on the next run (`no_prior_manifest`).
+- **Coverage identity is channel-neutral (SEE-1564 D-2)**: coverage rows are
+  a channel-independent fact — line coverage does not depend on the execution
+  channel — so the prefilter reads and writes them under the canonical cold
+  identity. Comparing them against the caller's channel identity would make
+  every worker-routed target look drifted and permanently disable the
+  prefilter. Manifest and resume-store keys keep the channel identity, so
+  D-1's per-channel isolation is untouched; any *other* identity drift (ops
+  version, Godot version, wiring hash, GUT hash) still invalidates the
+  prefilter with a stderr disclosure.
+
+### Performance instrumentation & measurement knobs (SEE-1564)
+
+Every non-dry-run report is additively instrumented; no existing field
+changes meaning. With every knob unset the only additions are the
+measurement fields below — knob disclosure is itself opt-in. The
+instrumentation exists to make cost decomposition measurable — it does not
+speed anything up by itself.
+
+- **`stage_timings`** — eight cumulative wall-clock buckets, in seconds
+  (rounded to 3 decimals): `test_scan`, `prewarm`, `baseline`, `per_mutant`,
+  `worker_boot`, `slot_sync`, `prefilter`, `total`. A stage that happens more
+  than once (multiple shards/files) is summed. Two disclosure levels:
+  - **Unit level** (`summary.stage_timings` of a per-file result): only the
+    stages that unit executed itself. `prewarm` is parent-only, so it is
+    always `0.0` here; `baseline` is the baseline GUT time this run consumed
+    — including a reused parent snapshot's elapsed time (share-attribution
+    semantics).
+  - **Run level** (the multi-file envelope `stage_timings`): parent
+    orchestration stages (`test_scan` / `prewarm` / `baseline` / `prefilter` /
+    `total`) plus the summed shard execution stages (`per_mutant` /
+    `worker_boot` / `slot_sync`). Same-named stages are deliberately *not*
+    merged across layers: a unit's `baseline` is a snapshot time, the
+    parent's is the pre-run wall clock.
+- **`slot_sync` semantics**: the full window from slot acquisition (including
+  fresh provisioning / warm delta sync) through the release assertion. It
+  therefore **contains** the whole `per_mutant` span; the slot's fixed cost
+  is `slot_sync − per_mutant` (≈0.09 s/chunk measured on the QA fixture).
+- **`rss_peak_mb`** — this gqt process's `VmHWM` high-water mark (Linux
+  `/proc`; `0.0` when unavailable is an honest default). Godot subprocess
+  memory is *not* included — sample it externally in a benchmark.
+- **`disk_delta_bytes`** — byte delta of `.qa-cache` plus the ext4 shadow
+  farm tree (before vs after). Provided at run level (envelope) and projected
+  into the single-file `summary`; never per-shard (tree walks would duplicate
+  and the semantics are per-run).
+- **Measurement-only knobs** (opt-in; unset = current behaviour exactly).
+  They are disclosed only when set — under `knobs` on the envelope, and
+  projected into `summary.knobs` for a single file:
+  - `GQT_MUTATION_JOBS_CAP` — override the jobs cap. Default
+    `max(2, cpu//2)`; the value is still clamped to ≥2. An invalid value
+    warns on stderr and falls back to the default.
+  - `GQT_MUTATION_POOL_MAX_SLOTS` — override the win64 warm pool's slot cap.
+    Default `8`; clamped to ≥1; an invalid value warns and falls back.
+  - `GQT_MUTATION_BASELINE_IN_FARM` — run the baseline inside a throwaway
+    ext4 shadow slot (fresh slot, never entering the warm pool) instead of
+    the real repo, for FS-axis measurement. Default **OFF**: the "real repo
+    is the baseline authority" (D5) path is unchanged. If provisioning
+    fails, the run degrades back to the real repo with a stderr disclosure
+    and discloses `baseline_in_farm: false`.
+- **Benchmarks (SEE-1564 §SPEC-201)**: `benchmarks/bench_ab_see1550.py`'s
+  `warm` scenario is true zero-execution reuse (no `--mutate-all`, so all
+  kills are reused and only the baseline remains);
+  `benchmarks/bench_worker_channel.py`'s `kol` mode takes an
+  already-prepared project root (`prepared_proj`) and skips fixture
+  preparation instead of touching an undefined `fixture`.
 
 ### Survivor location in the report
 

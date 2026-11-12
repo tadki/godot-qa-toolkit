@@ -87,3 +87,10 @@
 ### 演进留白（重启条件，定案 §五）
 
 P5 常驻热 worker：scoped 单轮 GUT 均值 < 7s 成主流 / mutant 数 ≥200 成典型 / 启动税占比 ≥30% / GUT 提供同进程状态复位 API 且通过状态污染探针——触发其一再评估。风险主因是 Godot 引擎级状态泄漏（autoload/static var/ResourceLoader/scene tree）→ 假 verdict，代价不对称。header hash 逐条细化与嵌套粒度扩展同为纯增量演进位。
+
+## 5. SEE-1564 增量：测量面与通道身份归位
+
+- **可测量才可优化**：非 dry-run 输出新增 `stage_timings` 八阶段累计墙钟 + `rss_peak_mb`（本进程 VmHWM 高水位）+ `disk_delta_bytes`（`.qa-cache` 与 ext4 影子农场树增量）。单位级只披露本单元亲自执行的阶段，运行级在信封上合并父层编排与分片执行阶段；**同名阶段跨层语义不同，必须分层披露而非盲目相加**——`slot_sync` 即例：它是槽获取→归还全程，天然包含 `per_mutant`，槽位固定成本取其差。测量面只加不改、不参与 ok 门禁。
+- **测量旋钮与默认零漂移**：`GQT_MUTATION_JOBS_CAP` / `GQT_MUTATION_POOL_MAX_SLOTS` / `GQT_MUTATION_BASELINE_IN_FARM` 均为 opt-in 测量通道；全 unset 时与既有默认路径逐位同构，且仅在 set 时披露。baseline-in-farm 不改变「真实仓 baseline 权威」（D5）的默认语义，只提供 FS 轴实验位；制备失败即降级回真实仓并如实披露生效值。
+- **身份键必须与执行通道同源（D-1）**：manifest 与记录分属不同写入方时，键的解析必须走同一通道解析入口；否则差分复用静默失效——加速机制失效却不报警，是差分体系独有的风险形态。cold 注入为 no-op，修复不迁移任何旧键，A/B 跨侧隔离不变。
+- **通道无关事实归一到 canonical 身份（D-2）**：coverage 行事实与执行通道无关，读/写两侧统一按 cold 身份落盘与查找；manifest/记录仍按通道隔离。原则：身份的每一维只在它真实影响该事实时才进入键——否则维度越多，误失配面越大、优化越容易被静默关停。

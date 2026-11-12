@@ -103,6 +103,22 @@ class FakeGodot:
         if "gut_cmdln.gd" not in cmd:
             return self.real_run(*a, **k)
         on_gdir = ".gqt-run-" in cmd  # acceptance 私有套件臂
+        # §SPEC-063b：合成 GUT 运行流输出（脚本头 + `* test_name` 行），
+        # 使 acceptance 对账五项可按 manifest 判定（R2/R3 流程对账非空转）
+        flow = ""
+        if on_gdir:
+            m = re.search(r"-gdir=res://(\S+)/generated", cmd)
+            if m:
+                gen = self.root / m.group(1) / "generated"
+                parts = []
+                for man_path in sorted(gen.glob("*.manifest.json")):
+                    man = json.loads(man_path.read_text(encoding="utf-8"))
+                    parts.append("res://" + m.group(1) + "/generated/test_"
+                                 + man_path.name.replace(
+                                     ".manifest.json", ".gd"))
+                    for att in man.get("attribution", []):
+                        parts.append("* " + att["test_name"])
+                flow = "\n".join(parts)
         pg = self.root / "project.godot"
         self.pg_at_gut.append(pg.read_text(encoding="utf-8")
                               if pg.is_file() else "")
@@ -145,11 +161,11 @@ class FakeGodot:
                 (dest / sink).write_text(
                     "".join(f"{i}\n" for i in ids), encoding="utf-8")
         class R:
-            def __init__(self, rc, err):
+            def __init__(self, rc, err, out=""):
                 self.returncode = rc
-                self.stdout = ""
+                self.stdout = out
                 self.stderr = err
-        return R(self.returncode, self.stderr_text)
+        return R(self.returncode, self.stderr_text, flow)
 
 
 def _recipe(project: Path, tmp_path: Path) -> tuple[dict, Path]:
@@ -919,24 +935,29 @@ def test_baseline_failures_absorb_preexisting_failures(project, tmp_path):
 
 def test_xdg_tmp_dirs_cleaned_on_worker_build_exception(project, tmp_path,
                                                         monkeypatch):
-    """§SPEC-060e 反例（Revy M-1）：worker 构建异常（shadow 失败令
-    executor 抛出）时已创建的分片 XDG 临时目录仍被清理。"""
+    """§SPEC-060e/063f 反例（Revy M-1/L-3）：worker 异常注入点在 XDG 创建
+    **之后**（_run_one_gut 抛出），断言非空转——已创建的分片 XDG 临时目录
+    仍被清理。"""
     import glob as g
     import tempfile as tf
 
     import godot_qa_toolkit.canonical.orchestrator as orch
     pattern = str(Path(tf.gettempdir()) / "gqt-shard-*")
 
-    def boom(*a, **k):
-        raise OSError("shadow prepare exploded")
+    calls = {"n": 0}
 
-    monkeypatch.setattr(orch, "_prepare_shadow", boom)
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise OSError("gut worker exploded")
+
+    monkeypatch.setattr(orch, "_run_one_gut", boom)
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     before = set(g.glob(pattern))
     with pytest.raises(OSError):
         run_canonical(project, _targets(project), recipe)
     after = set(g.glob(pattern))
+    assert calls["n"] >= 1, "worker must have been invoked after XDG creation"
     assert after <= before, "xdg tmp dirs must be cleaned on worker build " \
                             "exception too"
 
@@ -1008,9 +1029,9 @@ def test_intolerant_declared_bypasses_gating_and_disclosed(project, tmp_path):
     assert report["failures"]["gated"] is False
     assert report["failures"]["arms"]["gut_full"]["new"] == []
     assert report["failures"]["arms"]["gut_full"][
-        "instrumentation_intolerant"] == ["test_intolerant_probe_shape"]
+        "instrumentation_intolerant"] == ["::test_intolerant_probe_shape"]
     blk = report["instrumentation_intolerant"]
-    assert blk["observed"] == ["test_intolerant_probe_shape"]
+    assert blk["observed"] == ["::test_intolerant_probe_shape"]
     assert blk["declared"] == [{"name": "test_intolerant_probe_shape",
                                 "reason": "byte-exact source contract breaks "
                                           "under probe lines"}]
@@ -1111,10 +1132,12 @@ def test_acceptance_repeats_nonconvergence_reported_with_bound(
                        retain_dir=None, consume=True):
         hits, probes = real_merged(root, run_uuid, rel, manifest, xdg_homes,
                                    retain_dir=retain_dir, consume=consume)
-        # 模拟晚挂载：以每个 xdg 目录名中的 rep 序号决定该轮新增一个 id
+        # §SPEC-063f：rep 序号只解析 XDG basename（合法 TMPDIR 含 -r15-
+        # 时不得把父目录误判为 rep 轮次）
         if xdg_homes:
-            rep = int(re.search(r"-r(\d+)-",
-                                sorted(xdg_homes)[-1]).group(1))
+            base = Path(sorted(xdg_homes)[-1]).name
+            m = re.search(r"(?:^|-)r(\d+)-", base)
+            rep = int(m.group(1)) if m else 0
             if rep > 0 and manifest:
                 extra = min(manifest[-1], max(hits) + rep) if hits else \
                     manifest[0]
@@ -1153,3 +1176,151 @@ def test_timeout_cause_tail_decodes_bytes():
 
     assert _cause_tail(FakeTE()) == "partial stdout\npartial stderr"
     assert _cause_tail(None) == ""
+
+
+class UnparseableFaceGodot(FakeGodot):
+    """§SPEC-063a 反例注入：gut_full 臂 rc=1 但输出只有通过行（无可解析
+    失败名、非启动失败形态）——不可归因失败必须 fail-closed 门控。"""
+
+    def __call__(self, *a, **k):
+        r = super().__call__(*a, **k)
+        cmd = " ".join(a[0])
+        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+            r.returncode = 1
+            r.stderr = "* test_seen\n  [Passed] all fine\n" \
+                       "POST-RUN ENGINE ANOMALY: something odd happened\n"
+        return r
+
+
+def test_unparseable_nonzero_failure_gates_arm(project, tmp_path):
+    """§SPEC-063a 反例（Revy 新 H-1）：rc=1 且无可解析失败名 = 不可归因
+    失败 → run_error 门控（ok=false、union invalid、零 scored）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = UnparseableFaceGodot(project)
+    report = run_canonical(
+        project, _targets(project), recipe,
+        baseline_failures={"test_font_row_height"})
+    assert report["ok"] is False
+    assert report["failures"]["gated"] is False  # 非新增失败路径
+    gut = next(a for a in report["arms"] if a["arm"] == "gut_full")
+    assert gut["state"] == "invalid"
+    assert gut["invalid_reason"] == "run_error"
+    assert not any(r["score_status"] == "scored"
+                   for r in report["crap"]["records"])
+
+
+class ReconcileBreakerGodot(FakeGodot):
+    """§SPEC-063b 反例注入：acceptance 臂输出多执行一个未声明脚本
+    （全部 [Passed]）→ 对账 R2 失败。"""
+
+    def __call__(self, *a, **k):
+        r = super().__call__(*a, **k)
+        cmd = " ".join(a[0])
+        if "gut_cmdln.gd" in cmd and ".gqt-run-" in cmd:
+            r.stdout = r.stdout + "\nres://somewhere/undeclared_extra.gd" \
+                                  "\n* test_undeclared_extra"
+        return r
+
+
+def test_reconciliation_failure_invalidates_union_and_scores(
+        project, tmp_path):
+    """§SPEC-063b 反例（Revy 新 H-2）：acceptance 对账失败必须臂无效 +
+    union 无效 + 零出分（不得静默 scored）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = ReconcileBreakerGodot(project)
+    report = run_canonical(project, _targets(project), recipe)
+    acc = next(a for a in report["arms"] if a["arm"] == "acceptance")
+    assert acc["state"] == "invalid"
+    assert acc["invalid_reason"] == "reconciliation_failed"
+    assert acc["reconciliation"]["ok"] is False
+    assert report["ok"] is False
+    assert all(not u["valid"] for u in report["unions"])
+    assert not any(r["score_status"] == "scored"
+                   for r in report["crap"]["records"])
+
+
+class CrossScriptDuplicateGodot(FakeGodot):
+    """§SPEC-063c 反例注入：gut_full 臂两个脚本同名失败 test_duplicate
+    （脚本头 + `* test_duplicate` + [Failed] 双段）。"""
+
+    def __call__(self, *a, **k):
+        r = super().__call__(*a, **k)
+        cmd = " ".join(a[0])
+        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+            r.returncode = 1
+            r.stderr = (
+                "res://tests/unit/test_game.gd\n"
+                "* test_duplicate\n"
+                "  [Failed] script one instance\n"
+                "res://tests/unit/test_other.gd\n"
+                "* test_duplicate\n"
+                "  [Failed] script two instance\n")
+        return r
+
+
+def test_same_name_cross_script_exclusion_is_identity_scoped(
+        project, tmp_path):
+    """§SPEC-063c 反例（Revy 新 H-3）：排除声明带 script 时仅豁免该脚本
+    的失败对，另一脚本的同名失败必须照常门控（不得合并豁免）。"""
+    import os as _os
+    (project / "tests" / "unit" / "test_other.gd").write_text(
+        "extends GutTest\nfunc test_duplicate() -> void:\n"
+        "\tassert_true(false)\n")
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = CrossScriptDuplicateGodot(project)
+    report = run_canonical(
+        project, _targets(project), recipe,
+        intolerant_config={"tests": [
+            {"name": "test_duplicate",
+             "script": "res://tests/unit/test_game.gd",
+             "reason": "byte-exact contract scoped to script one"}]})
+    gut = next(a for a in report["arms"] if a["arm"] == "gut_full")
+    tf = gut["test_failures"]
+    assert tf["instrumentation_intolerant"] == \
+        ["res://tests/unit/test_game.gd::test_duplicate"]
+    assert sorted(tf["new_pairs"]) == \
+        ["res://tests/unit/test_other.gd::test_duplicate"]
+    assert report["failures"]["gated"] is True
+    assert report["ok"] is False
+    assert not any(r["score_status"] == "scored"
+                   for r in report["crap"]["records"])
+
+
+def test_intolerant_declaration_requires_reason(project, tmp_path):
+    """§SPEC-063e 反例（Revy M-2）：缺非空 reason 的声明 = 配置错误，
+    fail-fast 拒绝（不得空论证旁路）。"""
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"tests": [
+                          {"name": "test_inf_bookmark_and_share_signals_"
+                                   "are_noops"}]})
+    with pytest.raises(CanonicalError):
+        run_canonical(project, _targets(project), recipe,
+                      intolerant_config={"tests": [
+                          {"name": "test_x", "reason": "   "}]})
+
+
+def test_prep_cache_non_dict_root_quarantined(project, tmp_path,
+                                              monkeypatch):
+    """§SPEC-063d 反例（Revy M-1）：缓存文件为合法 JSON 但根类型非 dict
+    （[]）→ quarantine + miss（fresh 重建），不得 AttributeError。"""
+    import glob as g
+    import json as j
+
+    from godot_qa_toolkit.canonical import prepcache
+    monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
+    recipe, _ = _recipe(project, tmp_path)
+    sp.run = FakeGodot(project)
+    run_canonical(project, _targets(project), recipe)
+    entries = g.glob(str(prepcache.prep_dir(project)) + "/*.json")
+    assert entries
+    for path in entries:
+        Path(path).write_text("[]", encoding="utf-8")
+    warm = run_canonical(project, _targets(project), recipe)
+    assert warm["preparation"]["cache"]["hits"] == 0, \
+        "non-dict root entries must be quarantined, not loaded"
+    assert g.glob(str(prepcache.prep_dir(project)) + "/*.bad"), \
+        "non-dict root must be quarantined as .bad"

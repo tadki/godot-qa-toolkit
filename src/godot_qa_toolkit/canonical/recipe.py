@@ -279,8 +279,10 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         return False, (f"recipe 'gut_face' must be an object, "
                        f"got {gut_face!r} (§SPEC-067)")
     dirs = gut_face.get("dirs")
+    # §SPEC-068/R23：与 build 侧同一 strip 非空规则——纯空白元素
+    # （如 "   "）不得因 truthy 而被放行
     if not isinstance(dirs, list) or not all(
-            isinstance(d, str) and d for d in dirs):
+            isinstance(d, str) and d.strip() for d in dirs):
         return False, (f"recipe 'gut_face.dirs' must be a list of "
                        f"non-empty strings, got {dirs!r} (§SPEC-067)")
     acceptance_face = recipe.get("acceptance_face")

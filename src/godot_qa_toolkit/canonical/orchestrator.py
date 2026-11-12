@@ -6,9 +6,11 @@ sink（`qa-coverage-hits-{run_uuid}-{file_key8}`）读回 → bundle →
 coverage-union/1 逐文件行集并集。两臂共用同一 registry/probe manifest
 （同源码、同 manifest），run UUID 每臂独立。
 
-在树插桩：备份目录 /tmp/gqt-canonical-backups/<run_uuid>/（started-record
-+ 逐文件原文），finally 恢复 + 清理；启动时回收同项目陈旧备份（崩溃恢复，
-恢复前不信任任何 sink）。KOL 生产树零残留由「备份+恢复+对账后清理」保证。
+在树插桩：备份目录 per-uid 私有 /tmp/gqt-canonical-backups-<uid>/<run_uuid>/
+（started-record + 逐文件原文；0700、ownership 校验、拒 symlink），finally
+恢复 + 清理；启动时回收同项目陈旧备份（崩溃恢复，恢复前不信任任何 sink；
+恢复写入经 pinned-root 逐组件 O_NOFOLLOW dirfd 走廊限定 project root 内）。
+KOL 生产树零残留由「备份+恢复+对账后清理」保证。
 
 certified 边界（§2.4）：一律 evidence_level="exploratory"、
 certification.status="not_certified"——单轮 exploratory，WP5 拥有双轮认证。
@@ -203,7 +205,8 @@ def batch_sink_name(run_uuid: str, relpath: str) -> str:
 
 def _contained_restore_target(path_str, root: Path) -> Path | None:
     """§SPEC-070 FR-1：恢复目标须解析后位于 project root 内且叶子非
-    symlink——否则返回 None（该记录整体跳过，不写不删）。"""
+    symlink——否则返回 None（该记录整体跳过，不写不删）。本检查是快速
+    预过滤；实际写入经 §SPEC-071 H2 的 pinned-dirfd 逐组件走廊重新验证。"""
     p = Path(path_str)
     if p.is_symlink():
         return None
@@ -215,23 +218,45 @@ def _contained_restore_target(path_str, root: Path) -> Path | None:
     return resolved
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """§SPEC-070 FR-1/R26：恢复写入原子化——同目录 O_CREAT|O_EXCL|O_NOFOLLOW
-    （0600、不可预测随机后缀）临时文件 + os.replace：临时名不可抢注、
-    不跟随 symlink、崩溃/并发下半写状态不可见。"""
+def _open_pinned_parent(root_fd: int, root: Path,
+                        resolved: Path) -> int:
+    """§SPEC-071 H2：从已 pin 的 project root dirfd 出发，对
+    resolved.parent 的每个组件以 O_NOFOLLOW|O_DIRECTORY 逐级打开——
+    containment 检查与写入之间不存在按 pathname 重新解析的窗口：
+    containment 后任一组件被换成 root 外 symlink，open 即 ELOOP 失败
+    （记录跳过、root 外零改动）；打开完成后 dirfd 钉住原 inode，后续
+    竞争换名不影响写入落点。"""
+    rel = resolved.relative_to(root)
+    cur = os.dup(root_fd)
+    try:
+        for comp in rel.parts[:-1]:
+            nxt = os.open(comp, os.O_RDONLY | os.O_NOFOLLOW
+                          | os.O_DIRECTORY, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        return cur
+    except BaseException:
+        os.close(cur)
+        raise
+
+
+def _atomic_write_via_dir_fd(parent_fd: int, name: str, text: str) -> None:
+    """§SPEC-070/071：恢复写入原子化——经 pinned parent dirfd 以
+    O_CREAT|O_EXCL|O_NOFOLLOW（0600、不可预测随机后缀）创建临时文件并
+    os.replace（同 dirfd）：临时名不可抢注、不跟随 symlink、无 pathname
+    重解析窗口、崩溃/并发下半写状态不可见。"""
     import secrets
 
-    tmp = path.with_name(
-        f".{path.name}.gqt-tmp-{os.getpid()}-{secrets.token_hex(8)}")
+    tmp = f".{name}.gqt-tmp-{os.getpid()}-{secrets.token_hex(8)}"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                     | os.O_NOFOLLOW, 0o600)
+                     | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(tmp, path)
+        os.replace(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
     except BaseException:
         try:
-            os.unlink(tmp)
+            os.unlink(tmp, dir_fd=parent_fd)
         except OSError:
             pass
         raise
@@ -241,64 +266,117 @@ def _recover_stale_backups(project_root: Path) -> int:
     """崩溃恢复：回收本项目的陈旧备份目录（恢复原文、删除备份）。
 
     §SPEC-070 FR-1：恢复不信任共享目录内容——备份根/目录/marker 须当前
-    用户私有（POSIX ownership + 目录无组/他者写位 + 拒绝 symlink）；恢复
-    目标限定 project root 内且叶子非 symlink；写入原子化。不可信记录整体
-    跳过（不写不删），只报可信恢复数。"""
+    用户私有（POSIX ownership + 目录无组/他者写位 + 拒绝 symlink）。
+    §SPEC-071 H2：写入经 pinned-root 逐组件 O_NOFOLLOW dirfd 走廊，
+    containment 检查与写入之间无按 pathname 重新解析窗口，确定性竞态
+    注入下 root 外零改动。
+    §SPEC-071 L1：marker schema 全字段类型校验——根非 object、
+    project_root 非 str、files 非 dict[str,str]、created 非 list[str]、
+    project_godot 非 str|null 的记录按不可信跳过（不写不删、不抛裸
+    异常），坏 marker 不阻塞后续恢复。"""
+    import stat as _stat
+
     restored = 0
     uid = os.getuid() if hasattr(os, "getuid") else None
     base = _backup_base()
-    for d in sorted(base.iterdir()):
-        marker = d / "started.json"
-        if not marker.is_file() or d.is_symlink():
-            continue
-        try:
-            d_st = d.stat()
-            m_st = marker.stat()
-        except OSError:
-            continue
-        if uid is not None and (d_st.st_uid != uid or m_st.st_uid != uid):
-            continue
-        if d_st.st_mode & 0o022:  # 目录开放组/他者写位 → 不可信
-            continue
-        try:
-            record = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if record.get("project_root") != str(project_root):
-            continue
-        files = record.get("files", {})
-        if not isinstance(files, dict):
-            continue
-        restore_plan: dict[Path, str] | None = {}
-        for src, original in files.items():
-            target = _contained_restore_target(src, project_root)
-            if target is None:
-                restore_plan = None
-                break
-            restore_plan[target] = original
-        if restore_plan is None:
-            continue
-        created_targets: list[Path] = []
-        for created in record.get("created", []):
-            target = _contained_restore_target(created, project_root)
-            if target is None:
-                restore_plan = None
-                break
-            created_targets.append(target)
-        if restore_plan is None:
-            continue
-        pg = record.get("project_godot")
-        if pg is not None:
-            _atomic_write_text(project_root / "project.godot", pg)
-        for target, original in restore_plan.items():
-            _atomic_write_text(target, original)
-        for target in created_targets:
-            if target.is_symlink():
-                target.unlink()  # 只移除链接本身，不跟随
-            else:
-                target.unlink(missing_ok=True)
-        shutil.rmtree(d, ignore_errors=True)
-        restored += 1
+    root_resolved = project_root.resolve()
+    try:
+        root_fd = os.open(root_resolved, os.O_RDONLY | os.O_NOFOLLOW
+                          | os.O_DIRECTORY)
+    except OSError:
+        return 0
+    try:
+        for d in sorted(base.iterdir()):
+            marker = d / "started.json"
+            if not marker.is_file() or d.is_symlink():
+                continue
+            try:
+                d_st = d.stat()
+                m_st = marker.stat()
+            except OSError:
+                continue
+            if uid is not None and (d_st.st_uid != uid
+                                    or m_st.st_uid != uid):
+                continue
+            if d_st.st_mode & 0o022:  # 目录开放组/他者写位 → 不可信
+                continue
+            try:
+                record = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            # §SPEC-071 L1：marker schema 全字段类型校验
+            if not isinstance(record, dict):
+                continue
+            if record.get("project_root") != str(project_root):
+                continue
+            files = record.get("files")
+            if not isinstance(files, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str)
+                    for k, v in files.items()):
+                continue
+            created = record.get("created", [])
+            if not isinstance(created, list) or not all(
+                    isinstance(x, str) for x in created):
+                continue
+            pg = record.get("project_godot")
+            if pg is not None and not isinstance(pg, str):
+                continue
+            # 预过滤（快速拒绝越界/symlink 叶子）+ 全量 parent fd 预开
+            # （任一组件 walk 失败 → 整记录跳过，零写入）
+            plan: list[tuple[int, str, str]] = []
+            opened: list[int] = []
+            trusted = True
+            try:
+                for src, original in files.items():
+                    target = _contained_restore_target(src, root_resolved)
+                    if target is None:
+                        trusted = False
+                        break
+                    pfd = _open_pinned_parent(root_fd, root_resolved,
+                                              target)
+                    opened.append(pfd)
+                    plan.append((pfd, target.name, original))
+                if trusted:
+                    pg_fd = None
+                    if pg is not None:
+                        pg_fd = os.dup(root_fd)
+                        opened.append(pg_fd)
+                    created_fds: list[tuple[int, str]] = []
+                    for c in created:
+                        target = _contained_restore_target(c, root_resolved)
+                        if target is None:
+                            trusted = False
+                            break
+                        cfd = _open_pinned_parent(root_fd, root_resolved,
+                                                  target)
+                        opened.append(cfd)
+                        created_fds.append((cfd, target.name))
+                    if not trusted:
+                        raise OSError("untrusted created target")
+                    # 全部 parent fd 就位后才开始写（all-or-nothing）
+                    if pg is not None:
+                        _atomic_write_via_dir_fd(pg_fd, "project.godot", pg)
+                    for pfd, name, original in plan:
+                        _atomic_write_via_dir_fd(pfd, name, original)
+                    for cfd, name in created_fds:
+                        try:
+                            os.unlink(name, dir_fd=cfd)
+                        except FileNotFoundError:
+                            pass
+            except OSError:
+                trusted = False
+            finally:
+                for fd in opened:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            if not trusted:
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            restored += 1
+    finally:
+        os.close(root_fd)
     return restored
 
 
@@ -358,14 +436,21 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
     return [g for g in groups if g]
 
 
-def _prepare_shadow(base_root: Path, run_uuid: str, idx: int) -> Path:
+def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
+                    ) -> tuple[Path, dict]:
     """§SPEC-056：分片独立 project shadow——源码/resource 状态与基准树
     完全一致，`.godot` 引擎缓存实拷贝隔离，杜绝多 Godot 进程争用同一
     项目目录缓存。junit 断开放分片自写。
 
     §SPEC-070 FR-2：shadow 与 base 不得共享可写 inode——hardlink farm
     （cp -al）下运行期任何 res:// 写都会写穿 base，最终恢复只覆盖被插桩
-    文件，非插桩文件可被永久污染；改为 reflink（FS 支持）否则实拷贝。"""
+    文件，非插桩文件可被永久污染；改为 reflink（FS 支持）否则实拷贝。
+
+    §SPEC-071 H1：cp -a 会原样保留 symlink——绝对/相对链接可指向 base
+    inode，运行期写经链接写穿。所有复制的 symlink 一律**解引用**为常规
+    文件/实拷贝目录（shadow 自有 inode）；悬空链接移除。两种行为确定性
+    且经返回的 disclosure 计数显式披露。"""
+    import shutil as _shutil
     import subprocess as _sp
 
     shadow = Path(tempfile.mkdtemp(
@@ -381,7 +466,31 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int) -> Path:
     junit = shadow / "tests" / "reports" / "junit_report.xml"
     if junit.is_file():
         junit.unlink()
-    return shadow
+    disclosure = {"symlinks_dereferenced": 0, "dangling_links_removed": 0}
+    for dirpath, dirnames, filenames in os.walk(shadow, topdown=False):
+        for name in list(dirnames) + list(filenames):
+            p = Path(dirpath) / name
+            if not p.is_symlink():
+                continue
+            tmp = p.with_name(p.name + ".gqt-deref")
+            try:
+                if p.is_dir():
+                    # 目录链接 → 解引用为实拷贝目录（内层 symlink 由
+                    # copytree symlinks=False 一并解引用；悬空内层即报错，
+                    # 按悬空链接移除处理）
+                    _shutil.copytree(p, tmp, symlinks=False)
+                else:
+                    _shutil.copyfile(p, tmp)
+                os.replace(tmp, p)
+                disclosure["symlinks_dereferenced"] += 1
+            except OSError:
+                try:
+                    _shutil.rmtree(tmp, ignore_errors=True)
+                except OSError:
+                    pass
+                p.unlink(missing_ok=True)
+                disclosure["dangling_links_removed"] += 1
+    return shadow, disclosure
 
 
 def _cleanup_shadow(shadow: Path | None) -> None:
@@ -757,9 +866,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 "-gpre_run_script=res://" + _PRE_HOOK_RELPATH]
             rep_records: list[dict] = []
             shadow = None
+            shadow_disclosure: dict = {}
             try:
                 # §SPEC-056：分片独立 project shadow（rep 间复用）
-                shadow = _prepare_shadow(root, run_uuid, idx)
+                shadow, shadow_disclosure = _prepare_shadow(
+                    root, run_uuid, idx)
                 for rep in range(reps):
                     xdg = tempfile.mkdtemp(
                         prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-r{rep}-")
@@ -790,7 +901,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                          "timed_out": rep_timed_out})
             finally:
                 _cleanup_shadow(shadow)
-            return {"plan": plan, "reps": rep_records}
+            # §SPEC-071 H1：shadow symlink 消解行为显式披露（解引用/悬空移除）
+            return {"plan": plan, "reps": rep_records,
+                    "shadow_disclosure": shadow_disclosure}
 
         try:
             for abs_path, inst in instrumented_files.items():
@@ -997,6 +1110,15 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             "reconciliation": reconciliation,
             "shards": len(plans),
             "shadowed": True,
+            # §SPEC-071 H1：shadow symlink 消解计数显式披露
+            "shadow_disclosure": {
+                "symlinks_dereferenced": sum(
+                    r.get("shadow_disclosure", {}).get(
+                        "symlinks_dereferenced", 0) for r in results),
+                "dangling_links_removed": sum(
+                    r.get("shadow_disclosure", {}).get(
+                        "dangling_links_removed", 0) for r in results),
+            },
         }
 
     # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
@@ -1148,22 +1270,19 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "crap": {
             "version": crap_version,
             "evidence_level": "exploratory",
-            # §SPEC-070 FR-4/R26：块压缩与逐语句文件并存 → 顶层为 mixed，
-            # 逐文件语义在每条 record/crap_line 上区分（不冒充精确测量）
-            "coverage_semantics": (
-                "mixed" if any(prepared[rel].get("block_map")
-                               for rel in prepared)
-                and any(not prepared[rel].get("block_map")
-                        for rel in prepared)
-                else (_SEM_BLOCK if all(prepared[rel].get("block_map")
-                                        for rel in prepared)
-                      else _SEM_STATEMENT)),
+            # §SPEC-070 FR-4/R26 + §SPEC-071 L2：顶层语义从**最终 records**
+            # 实测统计（含 ghost 回放对账后的形态），record/crap_line/
+            # counts 三处一致；两形态并存 → mixed
             "coverage_semantics_counts": {
-                _SEM_BLOCK: sum(1 for rel in prepared
-                                if prepared[rel].get("block_map")),
-                _SEM_STATEMENT: sum(1 for rel in prepared
-                                    if not prepared[rel].get("block_map")),
-            },
+                s: sum(1 for r in crap_records
+                       if r["coverage_semantics"] == s)
+                for s in {r["coverage_semantics"]
+                          for r in crap_records}},
+            "coverage_semantics": (
+                "mixed" if len({r["coverage_semantics"]
+                                for r in crap_records}) > 1
+                else (crap_records[0]["coverage_semantics"]
+                      if crap_records else _SEM_STATEMENT)),
             "path_coverage": "not_measured",
             "assertion_effectiveness": "not_measured",
             "method": "coverage-union/1 + func-registry",
@@ -1303,9 +1422,15 @@ def _crap_emit_file_scored(records: list, lanes: dict, recipe_hash: str,
 
 def _crap_replay_vanished_baseline(records: list, lanes: dict,
                                    baseline_records: dict,
-                                   emitted_fids: set) -> None:
+                                   emitted_fids: set,
+                                   prepared: dict) -> None:
     """§SPEC-057：基线 scored 但本轮缺席的函数（目标集/union 变化）→
-    从基线记录回放为显式 unstable（不出分），杜绝静默消失。"""
+    从基线记录回放为显式 unstable（不出分），杜绝静默消失。
+
+    §SPEC-071 L2：回放 record 的 coverage_semantics 与本轮该文件实测形态
+    对账——rel 在本轮 prepared 内则改写为当前形态（record/crap_line 两处
+    一致）；rel 不在本轮测量面时保留 baseline 原值并显式标注 carried
+    （provenance 已含 baseline_vanished_this_run），不得无对账混标。"""
     for fid, brec in baseline_records.items():
         if fid in emitted_fids:
             continue
@@ -1316,6 +1441,18 @@ def _crap_replay_vanished_baseline(records: list, lanes: dict,
         cl = dict(brec.get("crap_line") or {})
         cl["score"] = None
         cl["score_status"] = "unstable"
+        rel = fid.split("::", 1)[0]
+        item = prepared.get(rel)
+        if item is not None:
+            sem = (_SEM_BLOCK if item.get("block_map")
+                   else _SEM_STATEMENT)
+            nr["coverage_semantics"] = sem
+            cl["coverage_semantics"] = sem
+        else:
+            cl.setdefault("coverage_semantics",
+                          nr.get("coverage_semantics",
+                                 _SEM_STATEMENT))
+            nr["coverage_semantics_carried_from_baseline"] = True
         nr["crap_line"] = cl
         nr["provenance"] = dict(brec.get("provenance") or {},
                                 stability="baseline_vanished_this_run")
@@ -1451,24 +1588,24 @@ def _crap_records_for_report(unions, prepared, recipe_hash,
     if baseline_records:
         emitted_fids = {r["function_id"] for r in records}
         _crap_replay_vanished_baseline(records, lanes, baseline_records,
-                                       emitted_fids)
+                                       emitted_fids, prepared)
     return records, lanes, CRAP_LINE_VERSION
 
 
 def _is_baseline_line_id(value) -> bool:
-    """§SPEC-067/068/070：行集元素须为数值行号——非负整数或全数字字符串
-    （sink 落盘形态 str(i)）。bool 是 int 子类但语义上不是行号——
-    frozenset({True}) == frozenset({1}) 会伪造第 1 行已覆盖、改变
-    stable/unstable 判定；NaN/±Infinity 入集会污染比较；非整数浮点
-    （2.5）与非数字字符串都不是行号。"""
+    """§SPEC-067/068/071 L3：行集元素须为**非负**数值行号——非负整数、
+    非负整值浮点或全数字字符串（sink 落盘形态 str(i)）。bool 是 int
+    子类但语义上不是行号——frozenset({True}) == frozenset({1}) 会伪造
+    第 1 行已覆盖；NaN/±Infinity 入集会污染比较；负数、非整数浮点
+    （2.5/-2.0）与非数字字符串都不是行号。"""
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
-        return True
+        return value >= 0
     if isinstance(value, str):
         return value.isdigit()
     return isinstance(value, float) and math.isfinite(value) \
-        and value.is_integer()
+        and value.is_integer() and value >= 0
 
 
 def _baseline_total(value) -> int:

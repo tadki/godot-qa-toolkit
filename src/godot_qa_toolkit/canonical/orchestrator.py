@@ -386,34 +386,48 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 f"baseline failure entry must be a (script, test) pair, "
                 f"got {entry!r} — bare names are identity-ambiguous and "
                 f"rejected (§SPEC-064b)")
+    def _req_str(obj: dict, key: str, kind: str) -> str:
+        """§SPEC-065：配置字段统一类型校验——非 str 或空白即 CanonicalError
+        fail-fast（非 str 会在匹配/附着层失配静默失效，如 file=123）。"""
+        v = obj.get(key)
+        if not isinstance(v, str) or not v.strip():
+            raise CanonicalError(
+                f"{kind} field {key!r} must be a non-empty string, "
+                f"got {v!r} (§SPEC-065)")
+        return v
+
     cfg = intolerant_config or {}
-    # §SPEC-063e：声明必须含非空 reason（缺省即配置错误 fail-fast），
+    # §SPEC-063e/065：声明 name/reason/script 统一非空 str 校验——
     # 空论证旁路 = 静默排除的捷径，禁止
     intolerant_tests = []
     for t in (cfg.get("tests") or []):
-        if not isinstance(t, dict) or not t.get("name"):
-            continue
-        if not str(t.get("reason") or "").strip():
+        if not isinstance(t, dict):
             raise CanonicalError(
-                "intolerant declaration missing non-empty reason: "
-                f"{t.get('name')} (§SPEC-063e)")
-        intolerant_tests.append(t)
+                "intolerant declaration must be an object, "
+                f"got {t!r} (§SPEC-065)")
+        entry = {"name": _req_str(t, "name", "intolerant declaration"),
+                 "reason": _req_str(t, "reason", "intolerant declaration")}
+        if t.get("script") is not None:
+            entry["script"] = _req_str(t, "script",
+                                       "intolerant declaration")
+        intolerant_tests.append(entry)
     intolerant_names = {t["name"] for t in intolerant_tests}
     # §SPEC-063c：排除声明按 (script, test) 身份匹配——无 script 声明仅
     # 豁免未归因失败（Run Summary 截断形态），同名跨脚本不合并豁免
-    declared_scoped = {(str(t["script"]), t["name"]) for t in intolerant_tests
+    declared_scoped = {(t["script"], t["name"]) for t in intolerant_tests
                        if t.get("script")}
     declared_bare = {t["name"] for t in intolerant_tests if not t.get("script")}
-    # §SPEC-064c：coverage_limitations 缺 file 或非空 reason → fail-fast
-    # （盲点披露不得无提示消失）
+    # §SPEC-064c/065：coverage_limitations file/reason 统一非空 str 校验
+    # （盲点披露不得无提示消失或静默失配）
     coverage_limitations = []
     for l in (cfg.get("coverage_limitations") or []):
-        if not isinstance(l, dict) or not l.get("file") \
-                or not str(l.get("reason") or "").strip():
+        if not isinstance(l, dict):
             raise CanonicalError(
-                "coverage limitation must carry non-empty file and reason, "
-                f"got {l!r} (§SPEC-064c)")
-        coverage_limitations.append(l)
+                "coverage limitation must be an object, "
+                f"got {l!r} (§SPEC-065)")
+        coverage_limitations.append(
+            {"file": _req_str(l, "file", "coverage limitation"),
+             "reason": _req_str(l, "reason", "coverage limitation")})
     ok, reason = verify_recipe(recipe)
     if not ok:
         raise CanonicalError(f"recipe invalid: {reason}")

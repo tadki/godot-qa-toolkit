@@ -283,6 +283,17 @@ class TestSmallScaleDomainGate:
             proj, total=cost_priors.SMALL_SCALE_SITES + 1, jobs=2) is False
         assert "out-of-domain" in capsys.readouterr().err
 
+    def test_domain_literal_boundary_is_eight_sites(self, tmp_path, capsys):
+        """§SPEC-502 锚定值 = 8（自引用常量比较钉不住字面值——A5 变异
+        `SMALL_SCALE_SITES 8→7` 曾存活，本条按字面值双向钉死）。"""
+        assert cost_priors.SMALL_SCALE_SITES == 8
+        proj, _ = _write_project(tmp_path, GD_WIDE)
+        _write_priors(proj, KOL_R2_PRIORS)
+        cost_priors.prefers_serial(proj, total=8, jobs=2)
+        assert "out-of-domain" not in capsys.readouterr().err
+        assert cost_priors.prefers_serial(proj, total=9, jobs=2) is False
+        assert "out-of-domain" in capsys.readouterr().err
+
     def test_archived_batch2_decisions_preserved_under_gate(
             self, tmp_path, capsys):
         """批次二留档决策在域门下保持：fixture 5 位点 consult→串行，

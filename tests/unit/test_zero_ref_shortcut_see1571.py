@@ -254,3 +254,23 @@ class TestReportCompleteness:
         assert "zero-ref short-circuit" in capsys.readouterr().err
         calc = by_file[str(scoped)]["summary"]
         assert "zero_ref_short_circuit" not in calc
+
+
+class TestSerialGateDryRunContract:
+    """门自身的 dry-run 参数契约（A5 变异硬化发现的口径缺口）。
+
+    生产路径上 `_run_mutation_files_impl` 先以 `_dry_run_list` 拦截 dry-run，
+    门内 `not dry_run` 在当前调用图上恒真；但「dry-run 不短路」是门签名
+    声明的语义，本钉子直接钉住门内违约（避免未来把 dry-run 路由进门的
+    重构静默破坏零 GUT 契约）。
+    """
+
+    def test_dry_run_param_does_not_short_circuit(self, tmp_path):
+        proj, target = _write_zero_ref_project(tmp_path, GD_WIDE_TARGET)
+        ret, tests_glob = executor._single_file_serial_gate(
+            [target], proj, budget=50, timeout_s=60, tests_glob=None,
+            jobs=1, dry_run=True, resume=False, binary_kind=None,
+            timing_store=None, mutation_warning=None, timeout_factor=None,
+            mutate_all=False, worker_channel=None)
+        assert ret is None, "dry-run 面不得产出零引用短路终态"
+        assert tests_glob is None

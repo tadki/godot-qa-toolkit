@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import subprocess as stdlib_subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ import pytest
 from godot_qa_toolkit.coverage import runner as cov_runner
 from godot_qa_toolkit.mutation import executor as mexec
 from godot_qa_toolkit.mutation import inject
+from godot_qa_toolkit.mutation import prewarm_proof as mproof
 from godot_qa_toolkit.mutation import runner as mrunner
 
 ELF_MAGIC = b"\x7fELF" + b"\x00" * 8
@@ -216,9 +218,25 @@ class TestPrewarmWiring:
         root.mkdir()
         (root / "project.godot").write_text("config/name=\"t\"\n")
         seen: dict = {}
-        monkeypatch.setattr(mexec.subprocess, "run", _fake_gut_run(seen))
+        # SEE-1571 A5 §SPEC-506 seam 重锚：patch 面落在 prewarm_proof 自身
+        # 命名空间。A2 后预热已委托 prewarm_proof，旧 seam（mexec.subprocess）
+        # 只是「executor 恰好还 import 着同一 stdlib 模块对象」的巧合依赖；
+        # 本钉子不得因 executor 侧该 import 的去留而失效。
+        monkeypatch.setattr(mproof, "subprocess", SimpleNamespace(
+            run=_fake_gut_run(seen),
+            TimeoutExpired=stdlib_subprocess.TimeoutExpired))
         mexec.prewarm_import(str(root))
         return seen
+
+    def test_seam_does_not_depend_on_executor_subprocess_import(
+            self, tmp_path, monkeypatch):
+        """重锚实证：假替身只存在于 prewarm_proof 命名空间。"""
+        seen = self._prewarm(tmp_path, monkeypatch)
+        assert seen["argv"][1:] == ["--headless", "--import", "--path",
+                                    str(tmp_path / "proj")]
+        assert mproof.subprocess.run.__name__ == "fake_run"
+        assert mexec.subprocess is stdlib_subprocess, (
+            "测试不得经 executor 命名空间间接 patch stdlib 模块")
 
     def test_env_set_uses_resolved_binary(self, tmp_path, monkeypatch):
         elf = _mk_binary(tmp_path / "bin", "godot_lin")

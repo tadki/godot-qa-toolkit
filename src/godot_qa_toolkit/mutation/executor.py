@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess  # noqa: F401 — SEE-1525 TestPrewarmWiring 的 patch seam（mexec.subprocess）
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor

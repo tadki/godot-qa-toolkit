@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
+import subprocess  # noqa: F401 — SEE-1525 TestPrewarmWiring 的 patch seam（mexec.subprocess）
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from . import cost_priors, shadow
-from .inject import godot_command
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
@@ -39,9 +38,6 @@ from .runner import _res_path_of, run_mutation
 
 # 进程池工厂（可注入替身做单测）
 _worker_pool = ProcessPoolExecutor
-
-# 预热 godot import 缓存；幂等（--import 不产生写副作用差异）
-_PREWARM_TIMEOUT_S = 300
 
 # §SPEC-203 测量专用 gated 旋钮：缺省 = master 现行为（等价钉子钉死），
 # set 时生效并在 stdout 披露（knobs_disclosure）。
@@ -225,6 +221,16 @@ def run_mutation_files(
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, reuse_coverage=reuse_coverage,
         worker_channel=worker_channel, clock=clock, knob_state=knob_state)
+    return _finalize_run_envelope(envelope, files, project_root, clock,
+                                  knob_state, t0, disk_before)
+
+
+def _finalize_run_envelope(envelope: dict, files: list[str],
+                           project_root: str, clock: StageClock,
+                           knob_state: dict, t0: float,
+                           disk_before: int) -> dict:
+    """常规路径信封装饰（§SPEC-202 只加不改）：总耗时与执行阶段合并、
+    系统测量字段挂载、单文件投影、旋钮披露、E6-5 成本先验收尾写。"""
     clock.add("total", time.monotonic() - t0)
     for r in envelope.get("results", []):
         merge_execution_stages(
@@ -232,28 +238,99 @@ def run_mutation_files(
     envelope["stage_timings"] = clock.disclosure()
     envelope["rss_peak_mb"] = self_rss_peak_mb()
     envelope["disk_delta_bytes"] = qa_disk_bytes(project_root) - disk_before
-    # 单文件 flat CLI 契约：信封键随 unwrap 丢失——运行级测量字段（磁盘
-    # 增量、旋钮披露）语义上就是该文件的 run，投影进唯一文件的 summary。
-    results = envelope.get("results") or []
-    if len(files) == 1 and results:
-        results[0]["summary"]["disk_delta_bytes"] = \
-            envelope["disk_delta_bytes"]
     disc = knobs_disclosure(knob_state.get("baseline_in_farm"))
     if disc:
         envelope["knobs"] = disc
-        if len(files) == 1 and results:
-            results[0]["summary"]["knobs"] = disc
-    # E6-5（§SPEC-502）：run 收尾方写成本先验（单写者，对齐 manifest 收尾
-    # 单点写惯例；0 值保留旧先验合并——串行轮测不到 prewarm/baseline 阶段，
-    # 写 0 不得覆盖既有测量，消除逐轮翻转）。仅单文件常规路径；短路/零执行
-    # 轮无新信息，record 内跳过。
-    if len(files) == 1 and results:
-        summary = results[0].get("summary") or {}
-        cost_priors.record(project_root, envelope.get("stage_timings") or {},
-                           envelope.get("jobs") or 0,
-                           int(summary.get("executed")
-                               or summary.get("mutants") or 0))
+    _project_single_file(envelope, files, project_root)
     return envelope
+
+
+def _project_single_file(envelope: dict, files: list[str],
+                         project_root: str) -> None:
+    """单文件 flat CLI 契约投影：信封键随 unwrap 丢失——运行级测量字段
+    （磁盘增量、旋钮披露）语义上就是该文件的 run，投影进唯一文件的
+    summary；并执行 E6-5 成本先验收尾写（§SPEC-502，单写者，对齐
+    manifest 收尾单点写惯例；0 值保留旧先验合并——串行轮测不到
+    prewarm/baseline 阶段，写 0 不得覆盖既有测量，消除逐轮翻转；
+    短路/零执行轮无新信息，record 内跳过）。"""
+    if not (len(files) == 1 and envelope.get("results")):
+        return
+    results = envelope["results"]
+    results[0]["summary"]["disk_delta_bytes"] = \
+        envelope["disk_delta_bytes"]
+    if envelope.get("knobs"):
+        results[0]["summary"]["knobs"] = envelope["knobs"]
+    summary = results[0].get("summary") or {}
+    cost_priors.record(project_root, envelope.get("stage_timings") or {},
+                       envelope.get("jobs") or 0,
+                       int(summary.get("executed")
+                           or summary.get("mutants") or 0))
+
+
+def _single_file_serial_gate(files: list[str], project_root: str, *,
+                             budget: int, timeout_s: int,
+                             tests_glob: str | None, jobs: int,
+                             dry_run: bool, resume: bool,
+                             binary_kind: str | None, timing_store,
+                             mutation_warning: int | None,
+                             timeout_factor: float | None,
+                             mutate_all: bool,
+                             worker_channel: bool | None) -> tuple[
+        dict | None, str | None]:
+    """单文件门（判定先于任何 GUT 调用的前置纪律在调用方保持）。
+
+    流程：目标缺失检查 → 位点收集 → E2 零引用短路（§SPEC-501）→
+    E6-5 成本仲裁（§SPEC-502）→ 小规模/零位点串行分派。
+    返回 (result, tests_glob)：result 非 None 即终态（短路或串行分派），
+    None = 并行路径继续；tests_glob 原样回传（E2 派生 glob 回填后由并行
+    路径 _build_chunks 同源消费）。
+    """
+    # 目标缺失：与串行路径同款 FileNotFoundError（CLI 层
+    # failures[0].reason 含 "not found" 的既定 caller 契约）。
+    if not Path(files[0]).is_file():
+        raise FileNotFoundError(f"mutation target not found: {files[0]}")
+    try:
+        src = open(files[0], encoding="utf-8").read()
+        total = min(len(_collect_mutations(src, files[0])), budget)
+    except Exception:
+        total = -1  # 收集异常交给 _build_chunks 定终态（error 契约）
+    # E2（§SPEC-501）：零引用短路——派生 glob 零命中（非显式 --tests）
+    # 且有可执行位点时，以披露记录替代全量 GUT 退路；门在 prewarm 之前
+    # （零引用轮零 prewarm/零 GUT）。串行（本块与 run_mutation 内）与
+    # 并行（_plan_file_chunks）共用 testscan 判据与记录形态——判据唯一
+    # 出处 = 派生 glob，禁止 CLI 参数推断（批次二 v1 串行门误判教训）。
+    if tests_glob is None and not dry_run:
+        derived = _auto_scan_tests_glob(files[0], project_root)
+        if derived is None:
+            if total > 0:
+                from .testscan import (disclose_zero_ref,
+                                       zero_ref_short_circuit_result)
+                disclose_zero_ref(files[0])
+                return {"tool": "mutation", "ok": True, "jobs": 1,
+                        "results": [zero_ref_short_circuit_result(
+                            files[0])]}, tests_glob
+        else:
+            tests_glob = derived
+    # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
+    # （退串行判定前置纪律不回退）。total > jobs 才需仲裁（≤ jobs 本就
+    # 退串行）；无先验/先验不可用 = 并行缺省（KOL 量级不误降级）。
+    cost_serial = (total > jobs
+                   and cost_priors.prefers_serial(project_root, total,
+                                                  jobs))
+    if total == 0 or 0 < total <= jobs or cost_serial:
+        r = run_mutation(files[0], project_root, budget=budget,
+                         timeout_s=timeout_s, dry_run=False,
+                         tests_glob=tests_glob, resume=resume,
+                         binary_kind=binary_kind,
+                         timing_store=timing_store,
+                         mutation_warning=mutation_warning,
+                         timeout_factor=timeout_factor,
+                         mutate_all=mutate_all,
+                         worker_channel=worker_channel)
+        r["summary"].setdefault("jobs", 1)
+        return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
+                "results": [r]}, tests_glob
+    return None, tests_glob
 
 
 def _run_mutation_files_impl(
@@ -316,51 +393,14 @@ def _run_mutation_files_impl(
     # 显式 jobs 一体生效（§SPEC-002：总数 ≤ jobs 即退）；--jobs 1 在上方
     # 串行快路径已拦截。
     if len(files) == 1:
-        # 目标缺失：与串行路径同款 FileNotFoundError（CLI 层
-        # failures[0].reason 含 "not found" 的既定 caller 契约）。
-        if not Path(files[0]).is_file():
-            raise FileNotFoundError(f"mutation target not found: {files[0]}")
-        try:
-            src = open(files[0], encoding="utf-8").read()
-            total = min(len(_collect_mutations(src, files[0])), budget)
-        except Exception:
-            total = -1  # 收集异常交给 _build_chunks 定终态（error 契约）
-        # E2（§SPEC-501）：零引用短路——派生 glob 零命中（非显式 --tests）
-        # 且有可执行位点时，以披露记录替代全量 GUT 退路；门在 prewarm 之前
-        # （零引用轮零 prewarm/零 GUT）。串行（本块与 run_mutation 内）与
-        # 并行（_plan_file_chunks）共用 testscan 判据与记录形态——判据唯一
-        # 出处 = 派生 glob，禁止 CLI 参数推断（批次二 v1 串行门误判教训）。
-        if tests_glob is None and not dry_run:
-            derived = _auto_scan_tests_glob(files[0], project_root)
-            if derived is None:
-                if total > 0:
-                    from .testscan import (disclose_zero_ref,
-                                           zero_ref_short_circuit_result)
-                    disclose_zero_ref(files[0])
-                    return {"tool": "mutation", "ok": True, "jobs": 1,
-                            "results": [zero_ref_short_circuit_result(
-                                files[0])]}
-            else:
-                tests_glob = derived
-        # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
-        # （退串行判定前置纪律不回退）。total > jobs 才需仲裁（≤ jobs 本就
-        # 退串行）；无先验/先验不可用 = 并行缺省（KOL 量级不误降级）。
-        cost_serial = (total > jobs
-                       and cost_priors.prefers_serial(project_root, total,
-                                                      jobs))
-        if total == 0 or 0 < total <= jobs or cost_serial:
-            r = run_mutation(files[0], project_root, budget=budget,
-                             timeout_s=timeout_s, dry_run=False,
-                             tests_glob=tests_glob, resume=resume,
-                             binary_kind=binary_kind,
-                             timing_store=timing_store,
-                             mutation_warning=mutation_warning,
-                             timeout_factor=timeout_factor,
-                             mutate_all=mutate_all,
-                             worker_channel=worker_channel)
-            r["summary"].setdefault("jobs", 1)
-            return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
-                    "results": [r]}
+        ret, tests_glob = _single_file_serial_gate(
+            files, project_root, budget=budget, timeout_s=timeout_s,
+            tests_glob=tests_glob, jobs=jobs, dry_run=dry_run, resume=resume,
+            binary_kind=binary_kind, timing_store=timing_store,
+            mutation_warning=mutation_warning, timeout_factor=timeout_factor,
+            mutate_all=mutate_all, worker_channel=worker_channel)
+        if ret is not None:
+            return ret
 
     with clock.stage("prewarm"):
         prewarm_import(project_root)
@@ -912,7 +952,6 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
             g = tests_glob if tests_glob \
                 else _auto_scan_tests_glob(f, project_root)
         globs[f] = g
-    farm_root, farm_slot = project_root, None
     baselines: dict = {}
     failures: dict[str, str] = {}
     try:
@@ -920,55 +959,10 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
         # 一段；此前外层同名 stage 把「制备+整段循环」与内层逐 glob 段嵌套，
         # 每次快照被累加两次（Final Review 实证 0.2s → 0.401）。制备开销
         # （opt-in 时）仍计入 baseline 阶段总额，占比归因口径不变。
-        with clock.stage("baseline"):
-            if knob_state is not None and baseline_in_farm_requested():
-                try:
-                    root, _prov = create_slot(project_root, "linux")
-                    farm_root, farm_slot = str(root), root
-                    # §SPEC-507 §4：baseline-in-farm 执行根双绑定——复制后、
-                    # 任何 baseline 启动前重算 input+output 双摘要；失配废弃
-                    # 重建一次（MUST_REBUILD），仍失配退回真实仓。
-                    ok, reason = _guard_baseline(farm_root, project_root)
-                    if not ok:
-                        print(f"mutation: baseline-in-farm root drift "
-                              f"({reason}) — rebuilding slot once",
-                              file=sys.stderr)
-                        shutil.rmtree(farm_slot, ignore_errors=True)
-                        root, _prov = create_slot(project_root, "linux")
-                        farm_root, farm_slot = str(root), root
-                        ok, reason = _guard_baseline(farm_root, project_root)
-                    if not ok:
-                        print(f"mutation: baseline-in-farm root still "
-                              f"drifted ({reason}) — baseline falls back to "
-                              f"the real repo", file=sys.stderr)
-                        farm_root, farm_slot = project_root, None
-                    else:
-                        knob_state["baseline_in_farm"] = True
-                except SlotProvisionError as e:
-                    knob_state["baseline_in_farm"] = False
-                    print(f"mutation: baseline-in-farm requested but slot "
-                          f"provisioning failed ({e}) — baseline runs on the "
-                          f"real repo (D5 authority unchanged)",
-                          file=sys.stderr)
-            else:
-                # §SPEC-507 §4：真实仓 baseline 前双绑定（缺证 = 守卫不激活，
-                # 如实披露；失配 → MUST_REBUILD 重签证一次）。
-                ok, reason = _guard_baseline(farm_root, project_root)
-                if not ok:
-                    print(f"mutation: real-repo baseline drift ({reason}) — "
-                          f"reissuing prewarm proof before baseline",
-                          file=sys.stderr)
-                    from . import prewarm_proof
-                    prewarm_proof.reissue_after_drift(project_root)
-                    ok, reason = _guard_baseline(farm_root, project_root)
-                    if not ok:
-                        print(f"mutation: real-repo proof still drifted "
-                              f"({reason}) — baselines withheld (count=0)",
-                              file=sys.stderr)
-                        return baselines, {g: f"prewarm proof drift "
-                                            f"persists: {reason}"
-                                            for g in set(globs.values())
-                                            if g is not None}
+        farm_root, farm_slot, veto = _prepare_baseline_root(
+            project_root, knob_state, clock, globs)
+        if veto is not None:
+            return veto
         for g in set(globs.values()):
             if g is None:
                 continue
@@ -984,6 +978,81 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
         if farm_slot is not None:
             shutil.rmtree(farm_slot, ignore_errors=True)
     return baselines, failures
+
+
+def _prepare_baseline_root(project_root: str, knob_state: dict | None,
+                           clock: StageClock,
+                           globs: dict) -> tuple[str, object, tuple | None]:
+    """baseline 执行根制备（§SPEC-210 farm 槽 opt-in / §SPEC-507 §4 双绑定）。
+
+    制备段整体计入 clock 的 "baseline" stage。返回 (farm_root, farm_slot,
+    veto)：veto 非 None 时为 (baselines, failures) 终态——真实仓重签证后
+    仍漂移，baselines 收缴为 0（MUST_REBUILD 纪律），调用方直接返回。
+    """
+    farm_root, farm_slot = project_root, None
+    with clock.stage("baseline"):
+        if knob_state is not None and baseline_in_farm_requested():
+            farm_root, farm_slot = _provision_farm_slot(
+                project_root, knob_state)
+        else:
+            # §SPEC-507 §4：真实仓 baseline 前双绑定（缺证 = 守卫不激活，
+            # 如实披露；失配 → MUST_REBUILD 重签证一次）。
+            ok, reason = _guard_baseline(farm_root, project_root)
+            if not ok:
+                print(f"mutation: real-repo baseline drift ({reason}) — "
+                      f"reissuing prewarm proof before baseline",
+                      file=sys.stderr)
+                from . import prewarm_proof
+                prewarm_proof.reissue_after_drift(project_root)
+                ok, reason = _guard_baseline(farm_root, project_root)
+                if not ok:
+                    print(f"mutation: real-repo proof still drifted "
+                          f"({reason}) — baselines withheld (count=0)",
+                          file=sys.stderr)
+                    return farm_root, farm_slot, ({},
+                                                  {g: f"prewarm proof drift "
+                                                      f"persists: {reason}"
+                                                   for g in set(globs.values())
+                                                   if g is not None})
+    return farm_root, farm_slot, None
+
+
+def _provision_farm_slot(project_root: str,
+                         knob_state: dict) -> tuple[str, object]:
+    """§SPEC-210 opt-in farm 槽制备 + §SPEC-507 §4 执行根双绑定。
+
+    复制后、任何 baseline 启动前重算 input+output 双摘要；失配废弃重建
+    一次（MUST_REBUILD），仍失配退回真实仓；制备失败同样退回真实仓
+    （D5 权威不动，降级 stderr 告警）。返回 (farm_root, farm_slot)。
+    """
+    from .shadow import SlotProvisionError, create_slot
+
+    try:
+        root, _prov = create_slot(project_root, "linux")
+        farm_root, farm_slot = str(root), root
+        ok, reason = _guard_baseline(farm_root, project_root)
+        if not ok:
+            print(f"mutation: baseline-in-farm root drift "
+                  f"({reason}) — rebuilding slot once",
+                  file=sys.stderr)
+            shutil.rmtree(farm_slot, ignore_errors=True)
+            root, _prov = create_slot(project_root, "linux")
+            farm_root, farm_slot = str(root), root
+            ok, reason = _guard_baseline(farm_root, project_root)
+        if not ok:
+            print(f"mutation: baseline-in-farm root still "
+                  f"drifted ({reason}) — baseline falls back to "
+                  f"the real repo", file=sys.stderr)
+            return project_root, None
+        knob_state["baseline_in_farm"] = True
+        return farm_root, farm_slot
+    except SlotProvisionError as e:
+        knob_state["baseline_in_farm"] = False
+        print(f"mutation: baseline-in-farm requested but slot "
+              f"provisioning failed ({e}) — baseline runs on the "
+              f"real repo (D5 authority unchanged)",
+              file=sys.stderr)
+        return project_root, None
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:

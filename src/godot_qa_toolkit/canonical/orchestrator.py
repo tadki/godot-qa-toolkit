@@ -437,6 +437,17 @@ def _shard_groups(root: Path, dirs: list[str], width: int) -> list[list[str]]:
     return [g for g in groups if g]
 
 
+def _force_rmtree(path: Path) -> None:
+    """§SPEC-074：失败路径强制清理——shadow 可能含 copystat 保留的只读
+    模式副本（如 0555 只读目录），需先自底向上恢复写位再删除。"""
+    for dirpath, _dirnames, _filenames in os.walk(path, topdown=False):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError:
+            pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
                     ) -> tuple[Path, dict]:
     """§SPEC-056：分片独立 project shadow——源码/resource 状态与基准树
@@ -452,32 +463,58 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
     复制完成后对 shadow 本身做 `find -type l` 检测（原生速度；覆盖
     `.godot` 与复制窗口内新增的任何链接；无跨 run 缓存可陈旧），命中
     链接一律解引用为常规文件/实拷贝目录（shadow 自有 inode），悬空
-    链接移除；disclosure 计数即实际处理数。"""
+    链接移除；disclosure 计数即实际处理数。
+
+    §SPEC-074：任何失败路径不泄漏已 mkdtemp 的 shadow 目录（整体
+    try/except 后 _force_rmtree——shadow 可能含 copystat 保留的只读
+    模式副本，需先自底向上恢复写位），OS 级失败（含只读目录内悬空
+    链接的 unlink 拒绝）与 cp/find 失败统一转 CanonicalError——真实
+    CLI 恒输出可解析 tool JSON，无裸 traceback。"""
     import shutil as _shutil
     import subprocess as _sp
 
     shadow = Path(tempfile.mkdtemp(
         prefix=f"gqt-shadow-{run_uuid[:8]}-{idx}-"))
-    entries = [e for e in base_root.iterdir() if e.name != ".godot"]
-    for e in entries:
-        _sp.run(["cp", "-a", "--reflink=auto", str(e), str(shadow / e.name)],
-                check=True)
-    godot_cache = base_root / ".godot"
-    if godot_cache.is_dir():
-        _sp.run(["cp", "-a", str(godot_cache),
-                 str(shadow / ".godot")], check=True)
-    junit = shadow / "tests" / "reports" / "junit_report.xml"
-    if junit.is_file():
-        junit.unlink()
-    disclosure = {"symlinks_dereferenced": 0, "dangling_links_removed": 0}
-    found = _sp.run(["find", str(shadow), "-type", "l", "-print0"],
-                    check=True, capture_output=True)
-    for raw in found.stdout.split(b"\0"):
-        if not raw:
-            continue
-        p = Path(os.fsdecode(raw))
-        _deref_shadow_symlink(p, disclosure)
-    return shadow, disclosure
+    try:
+        entries = [e for e in base_root.iterdir() if e.name != ".godot"]
+        for e in entries:
+            _sp.run(["cp", "-a", "--reflink=auto", str(e),
+                     str(shadow / e.name)], check=True)
+        godot_cache = base_root / ".godot"
+        if godot_cache.is_dir():
+            _sp.run(["cp", "-a", str(godot_cache),
+                     str(shadow / ".godot")], check=True)
+        junit = shadow / "tests" / "reports" / "junit_report.xml"
+        if junit.is_file():
+            junit.unlink()
+        disclosure = {"symlinks_dereferenced": 0, "dangling_links_removed": 0}
+        found = _sp.run(["find", str(shadow), "-type", "l", "-print0"],
+                        check=True, capture_output=True)
+        for raw in found.stdout.split(b"\0"):
+            if not raw:
+                continue
+            p = Path(os.fsdecode(raw))
+            try:
+                _deref_shadow_symlink(p, disclosure)
+            except CanonicalError:
+                raise
+            except OSError as e:
+                # §SPEC-074：解引用阶段全部 OS 级失败（含只读目录内悬空
+                # 链接的 unlink 拒绝）转领域错误——顶层命中与递归内层两侧
+                # 统一由本包裹覆盖
+                raise CanonicalError(
+                    f"shadow symlink handling failed (OS): {p}: {e}"
+                ) from e
+        return shadow, disclosure
+    except CanonicalError:
+        _force_rmtree(shadow)
+        raise
+    except (OSError, subprocess.CalledProcessError) as e:
+        _force_rmtree(shadow)
+        raise CanonicalError(f"shadow preparation failed: {e}") from e
+    except BaseException:
+        _force_rmtree(shadow)
+        raise
 
 
 def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
@@ -499,7 +536,14 @@ def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
     try:
         target_stat = os.stat(p)  # 跟随链接；悬空/循环 → OSError
     except OSError:
-        p.unlink(missing_ok=True)
+        try:
+            p.unlink(missing_ok=True)
+        except OSError as e:
+            # §SPEC-074：只读父目录内悬空链接无法移除 → 领域错误
+            # fail-loud（顶层 find 命中与递归内层两侧统一由调用方包裹）
+            raise CanonicalError(
+                f"shadow dangling symlink cannot be removed: {p}: {e}"
+            ) from e
         disclosure["dangling_links_removed"] += 1
         return
     tmp = p.with_name(p.name + ".gqt-deref")
@@ -531,8 +575,13 @@ def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
                     _deref_shadow_symlink(inner, disclosure, depth + 1)
     # 用 tmp 换掉链接位置：Linux rename 拒绝 dir→非 dir（NotADirectory），
     # 必须先摘除链接再 rename（shadow 为进程私有，无并发竞争）
-    p.unlink(missing_ok=True)
-    os.rename(tmp, p)
+    try:
+        p.unlink(missing_ok=True)
+        os.rename(tmp, p)
+    except OSError as e:
+        # §SPEC-074：只读父目录内的最终替换 unlink 同样转领域错误
+        raise CanonicalError(
+            f"shadow symlink dereference replace failed: {p}: {e}") from e
     disclosure["symlinks_dereferenced"] += 1
 
 

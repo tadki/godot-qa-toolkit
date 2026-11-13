@@ -124,6 +124,8 @@ class TestDefaultParallelRouting:
             "inject_scheme", "slot_mode", "freshness",
             "exec_scheme",
             "stage_timings", "rss_peak_mb", "disk_delta_bytes",
+            # SEE-1576 §SPEC-613：自动选测披露（只加不改；显式 --tests 缺席）
+            "test_selection",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")

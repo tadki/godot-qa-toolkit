@@ -303,9 +303,11 @@ def _run_mutation_core(file_path: str,
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
 
     clock = StageClock()
+    selection_meta: dict = {}
     if tests_glob is None:
         with clock.stage("test_scan"):
-            tests_glob = _auto_scan_tests_glob(str(path), project_root)
+            tests_glob, selection_meta = _auto_scan_tests_glob_meta(
+                str(path), project_root)
     scoped = tests_glob is not None
 
     original_src = path.read_text(encoding="utf-8")
@@ -359,6 +361,9 @@ def _run_mutation_core(file_path: str,
     # 反例实证：白付一轮 108s baseline）。
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
+    if selection_meta.get("derived_glob"):
+        # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
+        disclosures["test_selection"] = selection_meta
     if total_sites > budget:
         disclosures["total_sites"] = total_sites
         # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid
@@ -521,15 +526,32 @@ def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
     SEE-1405 §SPEC-004：project_root 显式传给 derive_tests_glob——内部
     换源 gdself 正向索引（间接消费闭包可见）；扫描失败诚实退全量。
     """
+    glob, _meta = _auto_scan_tests_glob_meta(file_path, project_root)
+    return glob
+
+
+def _auto_scan_tests_glob_meta(file_path: str,
+                               project_root: str) -> tuple[str | None, dict]:
+    """自动选测 + §SPEC-613 披露：弱选测（纯闭包）stderr 一行 + meta 回传。
+
+    meta 由调用方挂入 summary.test_selection（只增键）；显式 --tests 不经
+    本入口、不产生披露（选测未发生）。
+    """
     try:
-        from .testscan import derive_tests_glob
-        return derive_tests_glob(_res_path_of(file_path, project_root),
-                                 Path(project_root) / "tests",
-                                 project_root=project_root)
+        from .testscan import derive_tests_glob_meta
+        glob, meta = derive_tests_glob_meta(
+            _res_path_of(file_path, project_root),
+            Path(project_root) / "tests",
+            project_root=project_root)
     except Exception as e:
         print(f"auto scan failed, falling back to full suite: {e}",
               file=sys.stderr)
-        return None
+        return None, {}
+    if meta.get("weak") and glob:
+        print(f"mutation: weak test selection: {glob} has no direct "
+              f"reference to {file_path} (closure-only) — consider "
+              f"--tests {glob}", file=sys.stderr)
+    return glob, meta
 
 
 def _res_path_of(file_path: str, project_root: str) -> str:

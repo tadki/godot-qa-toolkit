@@ -66,6 +66,13 @@ source of truth.
   `--project-root` (absolute paths pass through unchanged), so target
   resolution never depends on the caller's CWD (SEE-1576).
 
+Without `--tests`, the affected-test subset is auto-derived by
+**direct-reference strength**: depth-1 consumers are weighted by identity
+token + target function-name hit counts (closure-only evidence carries zero
+weight), and closure-only selections are disclosed as weak in
+`summary.test_selection` with a `--tests` override suggestion (SEE-1576
+R-7). Explicit `--tests` bypasses the derivation entirely.
+
 > **Two-library split:** the godot-mcp control plane (launcher / proxy / shim /
 > port arbitration) belongs to the **godot-mcp runtime library**. This repo is
 > the tool-state half: *run-time driving* lives in the runtime library, *test

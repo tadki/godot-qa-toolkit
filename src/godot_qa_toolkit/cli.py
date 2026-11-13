@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -19,6 +21,32 @@ from .doctor import cmd_doctor
 # complexity/coverage/mutation are imported lazily inside their cmd_* handlers:
 # they pull in gdtoolkit, so a gdtoolkit-less environment (e.g. a minimal CI
 # runner) must still start the CLI (§SPEC-114, SEE-1367).
+
+
+def _godot_bin_ready() -> tuple[str, bool]:
+    """§SPEC-075：解析 godot 启动命令并做存在性+可执行校验。
+
+    GQT_GODOT_BIN 与 PATH 均未命中时 godot_command() 回退字面量
+    "godot"，_run_one_gut 的 subprocess.run 会以裸 FileNotFoundError
+    崩溃（真实 CLI stdout 空白 + stderr traceback）——canonical /
+    canonical-diagnose 在拉起任何 Godot 子进程前调用本校验，不可用即
+    以领域错误 fail-loud（CLI 转统一 tool JSON）。"""
+    from .mutation.inject import godot_command
+
+    cmd = godot_command()
+    if os.sep in cmd or (os.altsep or "") in cmd:
+        ok = os.path.isfile(cmd) and os.access(cmd, os.X_OK)
+    else:
+        ok = shutil.which(cmd) is not None
+    return cmd, ok
+
+
+def _emit_godot_unavailable(tool: str, cmd: str) -> int:
+    return _emit({"tool": tool, "ok": False,
+                  "summary": {"error": f"godot binary not found or not "
+                                       f"executable: {cmd} "
+                                       f"(set GQT_GODOT_BIN or --godot-bin)"},
+                  "failures": [{"reason": "godot binary unavailable"}]})
 
 
 def _emit(result: dict) -> int:
@@ -641,6 +669,10 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                           "failures": [{"reason": "intolerant-tests "
                                                   "malformed"}]})
         intolerant_config = it_doc
+    # §SPEC-075：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
+    godot_cmd, godot_ok = _godot_bin_ready()
+    if not godot_ok:
+        return _emit_godot_unavailable("canonical", godot_cmd)
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -711,6 +743,11 @@ def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
     rc = _apply_godot_bin_or_contract("canonical-diagnose", args)
     if rc is not None:
         return rc
+
+    # §SPEC-075：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
+    godot_cmd, godot_ok = _godot_bin_ready()
+    if not godot_ok:
+        return _emit_godot_unavailable("canonical-diagnose", godot_cmd)
 
     recipe_path = _P(args.recipe)
     try:

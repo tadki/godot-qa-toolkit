@@ -530,6 +530,10 @@ def _in_process_cli_baseline(project: Path, tmp_path: Path,
         "--recipe", str(recipe_path),
         "--stability-baseline", baseline,
         "--out", str(out_path)])
+    # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需 GQT_GODOT_BIN
+    # 指向存在且可执行的二进制（FakeGodot 负责 GUT 执行，不依赖真机）
+    old_bin = os.environ.get("GQT_GODOT_BIN")
+    os.environ["GQT_GODOT_BIN"] = sys.executable
     orig = sp.run
     sp.run = FakeGodot(project)
     try:
@@ -538,6 +542,10 @@ def _in_process_cli_baseline(project: Path, tmp_path: Path,
             code = args.func(args)
     finally:
         sp.run = orig
+        if old_bin is None:
+            os.environ.pop("GQT_GODOT_BIN", None)
+        else:
+            os.environ["GQT_GODOT_BIN"] = old_bin
     assert code == 1
     payload = json.loads(buf.getvalue())
     assert payload["tool"] == "canonical"

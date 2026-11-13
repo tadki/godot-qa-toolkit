@@ -10,8 +10,10 @@ evidence recipe.arm 显式注入（缺省推断保留向后兼容）、失败臂
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess as sp
+import sys
 from pathlib import Path
 
 import pytest
@@ -337,11 +339,16 @@ def test_evidence_arm_injection_explicit_and_default():
     assert rec["recipe"]["arm"] == "gut_full"
 
 
-def test_cli_canonical_end_to_end(project: Path, tmp_path: Path):
+def test_cli_canonical_end_to_end(project: Path, tmp_path: Path,
+                                  monkeypatch):
     import io
     from contextlib import redirect_stdout
 
     from godot_qa_toolkit.cli import build_parser
+
+    # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需可解析到存在且可
+    # 执行的二进制（FakeGodot 负责 GUT 执行，不依赖真实 godot）
+    monkeypatch.setenv("GQT_GODOT_BIN", sys.executable)
     recipe, rpath = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     out_path = tmp_path / "canonical.json"
@@ -1533,13 +1540,14 @@ def test_script_null_rejected_and_absent_script_legal(project, tmp_path):
     assert all("script" not in x for x in d)
 
 
-def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path):
+def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path,
+                                                     monkeypatch):
     """§SPEC-066/R20（Revy R19-L1）：合法 JSON 非 dict recipe 根与
     exclusions 直接消费结构（list/行/reason）非法形状必须转领域错误——
     API 侧 verify_recipe not-ok / build_recipe (None, reason) /
     run_canonical CanonicalError；真实 CLI（canonical 与 canonical-diagnose）
     输出 tool JSON ok=false，不得泄漏 AttributeError/TypeError traceback；
-    合法 exclusions 行为不变。"""
+    合法 exclusions 行为不变。§SPEC-075：CLI 前置 godot 校验需环境可解析。"""
     import io
     from contextlib import redirect_stdout
 
@@ -1549,6 +1557,10 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path):
         verify_recipe,
     )
     from godot_qa_toolkit.cli import build_parser
+
+    # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需可解析到存在且
+    # 可执行的二进制（sys.executable 恒满足；FakeGodot 负责 GUT 执行）
+    monkeypatch.setenv("GQT_GODOT_BIN", sys.executable)
 
     # API：verify_recipe 非 dict 根 → not-ok + reason（原 AttributeError）
     for bad_root in ([1, 2], "recipe", 7, None):
@@ -1631,18 +1643,22 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path):
 
 
 def test_spec066_stability_baseline_illegal_shapes_domain_errors(
-        project, tmp_path):
+        project, tmp_path, monkeypatch):
     """§SPEC-066/R20（Revy R19-L2）：stability baseline 合法 JSON 非 dict
     根与 unions/per_fid/crap.records 直接消费结构非法形状必须转
     CanonicalError；真实 CLI 输出 tool JSON ok=false canonical_error:true，
     不得泄漏 AttributeError/TypeError/KeyError；含 union=null 行、
-    total=null、标量行集的合法基线路径不变。"""
+    total=null、标量行集的合法基线路径不变。§SPEC-075：CLI 前置 godot
+    校验需环境可解析。"""
     import io
     from contextlib import redirect_stdout
 
     from godot_qa_toolkit.canonical.orchestrator import _load_baseline_report
     from godot_qa_toolkit.cli import build_parser
 
+    # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需可解析到存在且
+    # 可执行的二进制（sys.executable 恒满足；FakeGodot 负责 GUT 执行）
+    monkeypatch.setenv("GQT_GODOT_BIN", sys.executable)
     recipe, rpath = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
 

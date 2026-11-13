@@ -908,4 +908,7 @@ def test_cli_readonly_dangling_emits_tool_json_no_traceback(
     payload = json.loads(buf.getvalue())
     assert payload["tool"] == "canonical" and payload["ok"] is False
     assert payload["summary"]["canonical_error"] is True
-    assert "readonly-outer" in payload["summary"]["error"]
+    # 消息锚点为 shadow 内实际失败路径（悬空链接无 base 出处可引用，
+    # 目录链接解引用副本的确定性失败位置即诊断信息）
+    assert "dangling symlink cannot be removed" in payload["summary"]["error"]
+    assert "dangling.gd" in payload["summary"]["error"]

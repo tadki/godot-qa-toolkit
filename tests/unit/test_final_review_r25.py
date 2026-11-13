@@ -1129,17 +1129,18 @@ def test_canonical_parser_has_godot_bin_flag_consistent():
 
 
 def test_godot_bin_ready_resolution_semantics(project, tmp_path):
-    """§SPEC-073 helper 单元钉定：相对路径按 project_root 解析；
-    exec-format 拒绝；ELF/#! 可执行文件通过；裸名走 PATH。"""
+    """§SPEC-073/077 helper 单元钉定：相对路径含分隔符按 project_root
+    解析；exec-format 拒绝；ELF/#! 可执行文件通过；裸名走 PATH。"""
     from godot_qa_toolkit.cli import _godot_bin_ready
-    # 相对路径 + project_root 下存在 → True
+    # 相对路径（含分隔符）+ project_root 下存在 → True
     (project / "grel").write_text("#!/bin/sh\nexit 0\n")
     (project / "grel").chmod(0o755)
-    cmd, ok, reason = _godot_bin_ready(project, "grel")
-    assert ok is True and reason == ""
+    cmd, ok, reason = _godot_bin_ready(project, "./grel")
+    assert cmd == "./grel" and ok is True and reason == ""
     # 相对路径 project_root 下缺失 → False
+    # （"missing-godot" 为裸名 → 走 PATH 分支，reason 为 PATH 语义）
     cmd, ok, reason = _godot_bin_ready(project, "missing-godot")
-    assert ok is False and "not found or not executable" in reason
+    assert ok is False and "not found in PATH" in reason
     # exec-format（0755 纯文本）→ False + 精确 reason
     fake = tmp_path / "fake.gd"
     fake.write_text("text only\n")
@@ -1153,3 +1154,67 @@ def test_godot_bin_ready_resolution_semantics(project, tmp_path):
     sh.chmod(0o755)
     cmd, ok, reason = _godot_bin_ready(tmp_path, str(sh))
     assert ok is True and reason == ""
+    # 裸名走 PATH（"sh" 命中；"grel" 未命中 → False）
+    cmd, ok, reason = _godot_bin_ready(project, "sh")
+    assert ok is True and reason == ""
+    cmd, ok, reason = _godot_bin_ready(project, "grel")
+    assert ok is False and "not found in PATH" in reason
+
+
+# ------------------------- §SPEC-077 R33：裸名/路径形态判定修正
+
+def test_godot_bin_ready_bare_name_uses_path_not_project_root(
+        project, tmp_path, monkeypatch):
+    """§SPEC-077（Revy R32-HIGH 闭合）：project_root 内的可执行 `godot`
+    不得使裸名前置校验假通过——裸名一律 PATH 查找；PATH 无 godot 时
+    False + PATH reason。"""
+    from godot_qa_toolkit.cli import _godot_bin_ready
+
+    (project / "godot").write_text("#!/bin/sh\nexit 0\n")
+    (project / "godot").chmod(0o755)
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    cmd, ok, reason = _godot_bin_ready(project)
+    assert cmd == "godot" and ok is False
+    assert "not found in PATH" in reason
+
+
+def test_godot_bin_ready_bare_name_hit_in_path(project, monkeypatch):
+    """§SPEC-077：裸名 PATH 命中（如 sh）→ True（precheck 语义保持）。"""
+    from godot_qa_toolkit.cli import _godot_bin_ready
+
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    cmd, ok, reason = _godot_bin_ready(project, "sh")
+    assert cmd == "sh" and ok is True and reason == ""
+
+
+def test_cli_bare_name_project_root_godot_not_pretpassed(
+        project, tmp_path, monkeypatch):
+    """§SPEC-077 真实 CLI 序列（Atlas 复现）：project_root 内放置可执行
+    `godot`、PATH 无 godot、env 未设 → CLI 前置校验拒之以 tool JSON
+    ok=false（"not found in PATH"），不再假通过后裸 FileNotFoundError。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    (project / "godot").write_text("#!/bin/sh\nexit 0\n")
+    (project / "godot").chmod(0o755)
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    args = build_parser().parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    assert code == 1
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert "godot binary not found or not executable" \
+        in payload["summary"]["error"]
+    assert "not found in PATH" in payload["summary"]["error"]

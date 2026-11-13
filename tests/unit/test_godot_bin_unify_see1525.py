@@ -230,13 +230,15 @@ class TestPrewarmWiring:
 
     def test_seam_does_not_depend_on_executor_subprocess_import(
             self, tmp_path, monkeypatch):
-        """重锚实证：假替身只存在于 prewarm_proof 命名空间。"""
+        """重锚实证 + LOW-1 收口（Final Review）：假替身只存在于
+        prewarm_proof 命名空间，executor 不再携带 subprocess 导入。"""
         seen = self._prewarm(tmp_path, monkeypatch)
         assert seen["argv"][1:] == ["--headless", "--import", "--path",
                                     str(tmp_path / "proj")]
         assert mproof.subprocess.run.__name__ == "fake_run"
-        assert mexec.subprocess is stdlib_subprocess, (
-            "测试不得经 executor 命名空间间接 patch stdlib 模块")
+        assert not hasattr(mexec, "subprocess"), (
+            "executor 不得再携带 subprocess 导入——LOW-1 死 seam 已删除，"
+            "测试 patch 面唯一落在 prewarm_proof 命名空间")
 
     def test_env_set_uses_resolved_binary(self, tmp_path, monkeypatch):
         elf = _mk_binary(tmp_path / "bin", "godot_lin")

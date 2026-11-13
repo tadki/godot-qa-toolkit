@@ -19,6 +19,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from ..source_io import anchor_targets_to_project_root
 from . import cost_priors, shadow
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
@@ -369,8 +370,8 @@ def _run_mutation_files_impl(
     # §SPEC-610（SEE-1576 R-5）：相对目标统一锚定 --project-root（绝对路径
     # 直过）——入口单点归一，后续规划/读取/报告一律以锚定路径为准，路径
     # 解析不依赖调用方 CWD。
-    files = [f if Path(f).is_absolute() else str(Path(project_root) / f)
-             for f in _group_by_file(files)]
+    files = anchor_targets_to_project_root(_group_by_file(files),
+                                           project_root)
     kind = binary_kind or _detect_binary_kind()
     identity = identity_pack(project_root, kind)
     clock = clock or StageClock()

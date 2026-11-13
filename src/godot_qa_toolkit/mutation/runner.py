@@ -21,6 +21,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from ..source_io import anchor_to_project_root
+
 # 变异算子机制在 ops.py（runner <800 行约束拆分）；re-export 保持既有
 # import / monkeypatch 名称空间稳定。
 from .ops import (  # noqa: F401
@@ -291,11 +293,9 @@ def _run_mutation_core(file_path: str,
     返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
     所有 mutant 均被测试杀死。
     """
-    path = Path(file_path)
-    if not path.is_absolute():
-        # §SPEC-610（SEE-1576 R-5）：相对目标锚定 --project-root，路径解析
-        # 不依赖调用方 CWD（绝对路径直过）。
-        path = Path(project_root) / path
+    # §SPEC-610（SEE-1576 R-5）：相对目标锚定 --project-root，路径解析
+    # 不依赖调用方 CWD（绝对路径直过）。
+    path = Path(anchor_to_project_root(file_path, project_root))
     if not path.is_file():
         raise FileNotFoundError(
             f"mutation target not found: {file_path} (anchored: {path})")

@@ -267,7 +267,7 @@ class TestSerialGateDryRunContract:
 
     def test_dry_run_param_does_not_short_circuit(self, tmp_path):
         proj, target = _write_zero_ref_project(tmp_path, GD_WIDE_TARGET)
-        ret, tests_glob = executor._single_file_serial_gate(
+        ret, tests_glob, _selection_meta = executor._single_file_serial_gate(
             [target], proj, budget=50, timeout_s=60, tests_glob=None,
             jobs=1, dry_run=True, resume=False, binary_kind=None,
             timing_store=None, mutation_warning=None, timeout_factor=None,

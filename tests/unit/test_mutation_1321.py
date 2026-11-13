@@ -277,8 +277,8 @@ class TestSpec001AutoScan:
             runner_mod, "_run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
         monkeypatch.setattr(
-            "godot_qa_toolkit.mutation.testscan.derive_tests_glob",
-            lambda *a, **k: None)
+            "godot_qa_toolkit.mutation.testscan.derive_tests_glob_meta",
+            lambda *a, **k: (None, {}))
         s = run_mutation(files[0], proj, budget=1)["summary"]
         assert s["scoped"] is False
 
@@ -288,8 +288,9 @@ class TestSpec002ExplicitWins:
         proj, files = _write_project(tmp_path)
         scanned = {"v": False}
         monkeypatch.setattr(
-            "godot_qa_toolkit.mutation.testscan.derive_tests_glob",
-            lambda *a, **k: scanned.__setitem__("v", True) or "res://tests/x/")
+            "godot_qa_toolkit.mutation.testscan.derive_tests_glob_meta",
+            lambda *a, **k: scanned.__setitem__("v", True) or
+            ("res://tests/x/", {}))
         globs = []
 
         def fake(root, timeout_s=60, tests_glob=None):

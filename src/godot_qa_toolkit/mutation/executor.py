@@ -34,7 +34,7 @@ from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
 from .stagetiming import (StageClock, merge_execution_stages, qa_disk_bytes,
                           self_rss_peak_mb)
-from .runner import _res_path_of, run_mutation
+from .runner import _auto_scan_tests_glob_meta, _res_path_of, run_mutation
 
 # 进程池工厂（可注入替身做单测）
 _worker_pool = ProcessPoolExecutor
@@ -276,14 +276,14 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                              timeout_factor: float | None,
                              mutate_all: bool,
                              worker_channel: bool | None) -> tuple[
-        dict | None, str | None]:
+        dict | None, str | None, dict]:
     """单文件门（判定先于任何 GUT 调用的前置纪律在调用方保持）。
 
     流程：目标缺失检查 → 位点收集 → E2 零引用短路（§SPEC-501）→
     E6-5 成本仲裁（§SPEC-502）→ 小规模/零位点串行分派。
-    返回 (result, tests_glob)：result 非 None 即终态（短路或串行分派），
-    None = 并行路径继续；tests_glob 原样回传（E2 派生 glob 回填后由并行
-    路径 _build_chunks 同源消费）。
+    返回 (result, tests_glob, selection_meta)：result 非 None 即终态（短路
+    或串行分派），None = 并行路径继续；tests_glob 与 §SPEC-613 选测 meta
+    原样回传（派生 glob 回填后由并行路径 _build_chunks 同源消费）。
     """
     # 目标缺失：与串行路径同款 FileNotFoundError（CLI 层
     # failures[0].reason 含 "not found" 的既定 caller 契约）。
@@ -299,8 +299,10 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
     # （零引用轮零 prewarm/零 GUT）。串行（本块与 run_mutation 内）与
     # 并行（_plan_file_chunks）共用 testscan 判据与记录形态——判据唯一
     # 出处 = 派生 glob，禁止 CLI 参数推断（批次二 v1 串行门误判教训）。
+    selection_meta: dict = {}
     if tests_glob is None and not dry_run:
-        derived = _auto_scan_tests_glob(files[0], project_root)
+        derived, selection_meta = _auto_scan_tests_glob_meta(
+            files[0], project_root)
         if derived is None:
             if total > 0:
                 from .testscan import (disclose_zero_ref,
@@ -308,7 +310,7 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                 disclose_zero_ref(files[0])
                 return {"tool": "mutation", "ok": True, "jobs": 1,
                         "results": [zero_ref_short_circuit_result(
-                            files[0])]}, tests_glob
+                            files[0])]}, tests_glob, {}
         else:
             tests_glob = derived
     # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
@@ -328,9 +330,11 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                          mutate_all=mutate_all,
                          worker_channel=worker_channel)
         r["summary"].setdefault("jobs", 1)
+        if selection_meta.get("derived_glob"):
+            r["summary"]["test_selection"] = selection_meta
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
-                "results": [r]}, tests_glob
-    return None, tests_glob
+                "results": [r]}, tests_glob, selection_meta
+    return None, tests_glob, selection_meta
 
 
 def _run_mutation_files_impl(
@@ -396,8 +400,9 @@ def _run_mutation_files_impl(
     # 预跑）之前——变异点太少时走并发路径反而比纯串行慢。判定对缺省与
     # 显式 jobs 一体生效（§SPEC-002：总数 ≤ jobs 即退）；--jobs 1 在上方
     # 串行快路径已拦截。
+    selection_meta: dict = {}
     if len(files) == 1:
-        ret, tests_glob = _single_file_serial_gate(
+        ret, tests_glob, selection_meta = _single_file_serial_gate(
             files, project_root, budget=budget, timeout_s=timeout_s,
             tests_glob=tests_glob, jobs=jobs, dry_run=dry_run, resume=resume,
             binary_kind=binary_kind, timing_store=timing_store,
@@ -418,7 +423,8 @@ def _run_mutation_files_impl(
                                            identity=identity,
                                            worker_channel=worker_channel,
                                            clock=clock,
-                                           knob_state=knob_state)
+                                           knob_state=knob_state,
+                                           selection_meta=selection_meta)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -682,6 +688,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   worker_channel: bool | None = None,
                   clock: StageClock | None = None,
                   knob_state: dict | None = None,
+                  selection_meta: dict | None = None,
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
@@ -707,7 +714,8 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             f, project_root, budget, timeout_s, tests_glob, jobs, resume,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
             reuse_coverage, baselines, baseline_failures, run_id,
-            identity=identity, worker_channel=worker_channel, clock=clock)
+            identity=identity, worker_channel=worker_channel, clock=clock,
+            auto_selection=selection_meta)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
@@ -722,7 +730,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       baseline_failures=None, run_id=None,
                       identity: dict | None = None,
                       worker_channel: bool | None = None,
-                      clock: StageClock | None = None):
+                      clock: StageClock | None = None,
+                      auto_selection: dict | None = None):
     """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
     budget → 分片。
 
@@ -745,8 +754,12 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         print(f"mutation-warning: {raw_total} mutation sites exceed "
               f"--mutation-warning {mutation_warning} in {f} — consider "
               f"splitting this file", file=sys.stderr)
+    selection_meta: dict = auto_selection or {}
     with clock.stage("test_scan"):
-        glob = tests_glob or _auto_scan_tests_glob(f, project_root)
+        if tests_glob:
+            glob = tests_glob
+        else:
+            glob, selection_meta = _auto_scan_tests_glob_meta(f, project_root)
     # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
@@ -804,6 +817,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                          identity=identity,
                          worker_channel=worker_channel)
         r["summary"].setdefault("jobs", 1)
+        if selection_meta.get("derived_glob"):
+            r["summary"]["test_selection"] = selection_meta
         return [], None, r
     ids = [m.stable_id for m in executed_list]
     if baseline is None:
@@ -831,7 +846,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         "plan": plan, "executed": executed_list, "untouched": untouched,
         "header_hash": header_hash, "scope_hashes": scope_hashes,
         "store2": store2, "src": src, "mutants": mutants,
-        "uncovered": uncovered_mutants,
+        "uncovered": uncovered_mutants, "test_selection": selection_meta,
     }
     chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
                               binary_kind, ids, baseline, resume,
@@ -1117,6 +1132,9 @@ def _inject_one(r: dict, ctx: dict) -> None:
     """单文件收尾注入：reused/uncovered 记录 + 差分与覆盖披露 + gate 重算。"""
     plan = ctx["plan"]
     s = r["summary"]
+    if ctx.get("test_selection"):
+        # §SPEC-613：自动选测披露随报告透出（显式 --tests 时缺省缺席）。
+        s["test_selection"] = ctx["test_selection"]
     if plan.reused:
         _inject_reused(r, ctx)
     # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures

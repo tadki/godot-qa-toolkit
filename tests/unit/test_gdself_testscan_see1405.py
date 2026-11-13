@@ -131,10 +131,10 @@ class TestRunnerWiring:
 
         def fake_derive(target, tests_dir, project_root=None):
             seen["project_root"] = project_root
-            return "res://tests/unit/save/test_save.gd"
+            return "res://tests/unit/save/test_save.gd", {}
 
         from godot_qa_toolkit.mutation import testscan
-        monkeypatch.setattr(testscan, "derive_tests_glob", fake_derive)
+        monkeypatch.setattr(testscan, "derive_tests_glob_meta", fake_derive)
         glob = mrunner._auto_scan_tests_glob(
             str(proj / "scripts" / "save_manager.gd"), str(proj))
         assert glob == "res://tests/unit/save/test_save.gd"

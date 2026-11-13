@@ -39,7 +39,15 @@ def _godot_bin_ready(project_root: Path,
     if cmd is None:
         cmd = godot_command()
     cand = Path(cmd)
-    if not cand.is_absolute() and (os.sep in cmd or (os.altsep or "") in cmd):
+    # §SPEC-077 R33：路径分隔符判定修正——POSIX 上 os.altsep=None，
+    # `(os.altsep or "") in cmd` 恒为 True，裸名（如回退字面量 "godot"）
+    # 被误判为路径并按 project_root 解析：project_root 内偶有 godot 时
+    # 前置校验假通过、_run_one_gut 按 PATH 查找失败 → 裸 FileNotFoundError
+    # （R33-HIGH 根因）。仅含 os.sep（或 altsep 非 None 且含 altsep）
+    # 才按 project_root 解析；裸名一律走 PATH 查找。
+    is_path_form = (os.sep in cmd
+                    or (os.altsep is not None and os.altsep in cmd))
+    if not cand.is_absolute() and is_path_form:
         cand = project_root / cand
     if cand.is_absolute():
         ok = cand.is_file() and os.access(cand, os.X_OK)

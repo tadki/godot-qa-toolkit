@@ -54,6 +54,22 @@ def _restore_subprocess():
     sp.run = orig
 
 
+@pytest.fixture(autouse=True)
+def _reset_mutation_process_state():
+    """§SPEC-079-rebase：in-process 测试会改写跨测试进程态——
+    detect_binary_kind 的 per-process 缓存（M2 用 quiet-godot 判出
+    win64 会泄漏给 battery 的 worker 通道）与 runner 的
+    _ACTIVE_ENV/_ACTIVE_SCRIPT/_ACTIVE_GATE_ROOT 全局。每个测试后
+    复位，避免同 pytest 进程内的跨文件状态泄漏。"""
+    yield
+    from godot_qa_toolkit.mutation import inject as _inject
+    from godot_qa_toolkit.mutation import runner as _runner
+    _inject.reset_binary_kind_cache()
+    _runner._ACTIVE_ENV = None
+    _runner._ACTIVE_SCRIPT = _runner.GUT_SCRIPT_RES_PATH
+    _runner._ACTIVE_GATE_ROOT = None
+
+
 @pytest.fixture()
 def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
@@ -65,8 +81,12 @@ def project(tmp_path: Path) -> Path:
         {"dirs": ["res://tests/"], "include_subdirs": True,
          "prefix": "test_"}))
     (root / "tests" / "unit").mkdir(parents=True)
+    # §SPEC-079 引用面：TestOwnershipIndex 只认 preload/load(...) 调用
+    # 字面量——fixture 以真实 preload 引用 cell.gd，避免 zero-ref 短路在
+    # 启动反例中先于真实拉起点返回（mutation 反例须到达 spawn_godot）。
     (root / "tests" / "unit" / "test_game.gd").write_text(
-        "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
+        "extends GutTest\nconst TARGET := preload(\"res://src_game/cell.gd\")\n"
+        "func test_ok() -> void:\n\tassert_true(true)\n")
     feats = root / "acceptance" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
@@ -1287,7 +1307,11 @@ def test_mutation_missing_godot_clean_env(project, tmp_path):
     payload = _spawn_clean_env(
         ["mutation", _mutation_target(project)], project, tmp_path)
     assert payload["tool"] == "mutation"
-    assert "godot binary not found in PATH" in payload["summary"]["error"]
+    # §SPEC-079 rebase 集成：master O-1 预导入守卫先于 GUT 拉起——缺
+    # godot 时 summary.error 为类目行，精确根因在 failures[0].reason
+    # （import cache 缺失、须先 godot --import）。根因可见即契约。
+    reason = payload["failures"][0]["reason"]
+    assert "import cache" in reason and "godot" in reason, reason
 
 
 def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
@@ -1295,7 +1319,8 @@ def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
         ["mutation", "--jobs", "1", _mutation_target(project)],
         project, tmp_path)
     assert payload["tool"] == "mutation"
-    assert "godot binary not found in PATH" in payload["summary"]["error"]
+    reason = payload["failures"][0]["reason"]
+    assert "import cache" in reason and "godot" in reason, reason
 
 
 def test_coverage_measure_missing_godot_clean_env(project, tmp_path):
@@ -1446,6 +1471,11 @@ def test_flag_relative_godot_bin_project_only_accepted(
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json"),
         "--godot-bin", "./quiet-godot"])
+    # §SPEC-079-rebase：apply_godot_bin_override 把解析后的绝对路径写进
+    # os.environ（绕过 monkeypatch 的 setenv 快照）——必须手动保存/恢复，
+    # 否则假二进制路径泄漏到同进程后续测试（曾致 worker battery 的
+    # godot --import 拿 quiet-godot 跑出空 .godot → O-1 拦截 ×3）。
+    old_bin = os.environ.get("GQT_GODOT_BIN")
     orig = sp.run
     sp.run = FakeGodot(project)
     try:
@@ -1454,6 +1484,10 @@ def test_flag_relative_godot_bin_project_only_accepted(
             code = args.func(args)
     finally:
         sp.run = orig
+        if old_bin is None:
+            os.environ.pop("GQT_GODOT_BIN", None)
+        else:
+            os.environ["GQT_GODOT_BIN"] = old_bin
     assert code == 0
     payload = json.loads(buf.getvalue())
     assert payload["tool"] == "canonical" and payload["ok"] is True

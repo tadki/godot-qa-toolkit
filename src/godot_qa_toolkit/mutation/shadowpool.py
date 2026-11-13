@@ -312,6 +312,25 @@ def _acquire_fresh(project_root: str, kind: str, targets: list[str],
     slot.freshness.append(
         f"fresh-farm:created(linked={provision['linked']},"
         f"copied={provision['copied']})")
+    # B2a §4.2：fresh 农场 proof-aware 制备——复制后重算双摘要，失配
+    # 废弃重建一次（MUST_REBUILD；baseline 计数在复核通过前为 0）。
+    from . import prewarm_proof
+
+    def _rebuild_once() -> None:
+        nonlocal root, provision
+        shutil.rmtree(root, ignore_errors=True)
+        root, provision = shadow.create_slot(project_root, kind)
+        slot.root = str(root)
+        slot.provision = provision
+
+    ok, reason = prewarm_proof.guard_baseline_root(str(root), project_root)
+    if not ok:
+        slot.freshness.append(f"proof-drift:{reason}→rebuild")
+        _rebuild_once()
+        ok, reason = prewarm_proof.guard_baseline_root(str(root),
+                                                       project_root)
+        slot.freshness.append("proof-bound" if ok
+                              else f"proof-drift-persists:{reason}")
     return slot
 
 
@@ -355,6 +374,18 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
             rec["wiring_hash"] = wiring_hash
             rec["sentinel"] = shadow.godot_sentinel(project_root)
             _save_pool(project_root, pool)
+            # B2a §4.2：win64 warm 复用枝 proof 双绑定——失配整槽重建一次
+            # （既有歧义整槽重建纪律不变，本守卫只加不改）。
+            from . import prewarm_proof
+            ok, reason = prewarm_proof.guard_baseline_root(slot.root,
+                                                           project_root)
+            if not ok:
+                slot.freshness.append(f"proof-drift:{reason}→rebuild")
+                _rebuild_locked(project_root, pool, slot, rec, wiring_hash, now)
+                ok, reason = prewarm_proof.guard_baseline_root(slot.root,
+                                                               project_root)
+                slot.freshness.append("proof-bound" if ok
+                                      else f"proof-drift-persists:{reason}")
             slot.freshness.insert(0, "warm:reused")
             return slot
         # 无可复用槽 → 新建（id 含 uuid：同秒同 PID 的并发 acquire 不得碰撞）
@@ -378,6 +409,21 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
         slot.freshness.append(
             f"warm:created(linked={provision['linked']},"
             f"copied={provision['copied']})")
+        # B2a §4.2：win64 warm 新建枝 proof 双绑定（失配重建一次）。
+        from . import prewarm_proof
+        ok, reason = prewarm_proof.guard_baseline_root(slot.root, project_root)
+        if not ok:
+            slot.freshness.append(f"proof-drift:{reason}→rebuild")
+            shutil.rmtree(slot.root, ignore_errors=True)
+            root, provision = shadow.create_slot(
+                project_root, "win64",
+                slot_dir=_pool_dir(project_root) / "slots" / slot_id)
+            slot.root = str(root)
+            slot.provision = provision
+            ok, reason = prewarm_proof.guard_baseline_root(slot.root,
+                                                           project_root)
+            slot.freshness.append("proof-bound" if ok
+                                  else f"proof-drift-persists:{reason}")
         return slot
 
 

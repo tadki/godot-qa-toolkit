@@ -158,25 +158,28 @@ def prewarm_import(project_root: str) -> None:
     非 Godot 项目目录（无 project.godot，如单测 toy fixture）跳过——
     godot --import 会退化为全盘资源扫描挂住。预热失败（含超时）降级为
     告警继续——预热是优化项，其失败不得打破统一 JSON 契约（LOW-5）。
+
+    SEE-1571 §SPEC-509：预热走新鲜度证明流（mutation/prewarm_proof.py，
+    §SPEC-507 定案设计经质量门全闭）——默认启用，输入与导入产物双内容
+    摘要与证书逐位一致才跳过导入；`GQT_PREWARM_SENTINEL=0|false|no` 为
+    逃生门（始终导入）；fresh-skip 时 stderr 披露 proof_id 与双摘要前缀，
+    重导入披露具体原因。
     """
     if not os.path.isfile(os.path.join(project_root, "project.godot")):
         return
-    try:
-        # §SPEC-1525-002：预热启动点同源 godot_command()——原字面量 "godot"
-        # 使显式 env（Linux ELF）下预热仍走 PATH 首匹配，判定与预热双引擎。
-        # --path 保持原样直传（既有语义：win64 下预热失败本就降级放行，
-        # 未设变量路径不得在此引入新转换）。
-        subprocess.run(
-            [godot_command(), "--headless", "--import", "--path", project_root],
-            capture_output=True, text=True, timeout=_PREWARM_TIMEOUT_S,
-            cwd=project_root,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"prewarm import timed out after {_PREWARM_TIMEOUT_S}s for "
-              f"{project_root} — continuing without prewarm", file=sys.stderr)
-    except OSError as e:
-        print(f"prewarm import failed for {project_root}: {e} — continuing "
-              f"without prewarm", file=sys.stderr)
+    from . import prewarm_proof
+    prewarm_proof.prewarm_with_proof(project_root)
+
+
+def _guard_baseline(root: str, project_root: str) -> tuple[bool, str]:
+    """SEE-1571 §SPEC-507 §4：baseline 执行根双绑定（缺证 = 守卫不激活
+    并披露；失配时调用方必须保持 baseline 计数 0 并走 MUST_REBUILD）。"""
+    from . import prewarm_proof
+    ok, reason = prewarm_proof.guard_baseline_root(root, project_root)
+    if ok and reason.startswith("guard inactive"):
+        print(f"mutation: baseline double-binding inactive ({reason})",
+              file=sys.stderr)
+    return ok, reason
 
 
 def run_mutation_files(
@@ -922,13 +925,50 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
                 try:
                     root, _prov = create_slot(project_root, "linux")
                     farm_root, farm_slot = str(root), root
-                    knob_state["baseline_in_farm"] = True
+                    # §SPEC-507 §4：baseline-in-farm 执行根双绑定——复制后、
+                    # 任何 baseline 启动前重算 input+output 双摘要；失配废弃
+                    # 重建一次（MUST_REBUILD），仍失配退回真实仓。
+                    ok, reason = _guard_baseline(farm_root, project_root)
+                    if not ok:
+                        print(f"mutation: baseline-in-farm root drift "
+                              f"({reason}) — rebuilding slot once",
+                              file=sys.stderr)
+                        shutil.rmtree(farm_slot, ignore_errors=True)
+                        root, _prov = create_slot(project_root, "linux")
+                        farm_root, farm_slot = str(root), root
+                        ok, reason = _guard_baseline(farm_root, project_root)
+                    if not ok:
+                        print(f"mutation: baseline-in-farm root still "
+                              f"drifted ({reason}) — baseline falls back to "
+                              f"the real repo", file=sys.stderr)
+                        farm_root, farm_slot = project_root, None
+                    else:
+                        knob_state["baseline_in_farm"] = True
                 except SlotProvisionError as e:
                     knob_state["baseline_in_farm"] = False
                     print(f"mutation: baseline-in-farm requested but slot "
                           f"provisioning failed ({e}) — baseline runs on the "
                           f"real repo (D5 authority unchanged)",
                           file=sys.stderr)
+            else:
+                # §SPEC-507 §4：真实仓 baseline 前双绑定（缺证 = 守卫不激活，
+                # 如实披露；失配 → MUST_REBUILD 重签证一次）。
+                ok, reason = _guard_baseline(farm_root, project_root)
+                if not ok:
+                    print(f"mutation: real-repo baseline drift ({reason}) — "
+                          f"reissuing prewarm proof before baseline",
+                          file=sys.stderr)
+                    from . import prewarm_proof
+                    prewarm_proof.reissue_after_drift(project_root)
+                    ok, reason = _guard_baseline(farm_root, project_root)
+                    if not ok:
+                        print(f"mutation: real-repo proof still drifted "
+                              f"({reason}) — baselines withheld (count=0)",
+                              file=sys.stderr)
+                        return baselines, {g: f"prewarm proof drift "
+                                            f"persists: {reason}"
+                                            for g in set(globs.values())
+                                            if g is not None}
         for g in set(globs.values()):
             if g is None:
                 continue

@@ -1014,3 +1014,142 @@ def test_real_cli_missing_godot_clean_env_emits_tool_json(
     assert "godot binary not found or not executable" \
         in payload["summary"]["error"]
     assert "Traceback" not in proc.stderr
+
+
+# ------------------------- §SPEC-076 R32：启动校验与拉起条件一致
+
+def _spawn_cli_mismatch(tool: str, godot_bin_env: str, project: Path,
+                        tmp_path: Path, monkeypatch):
+    """§SPEC-076 四形态真实 CLI 反例驱动：spawn cwd = tmp_path（CLI cwd，
+    放置诱饵 wrapper/伪二进制），project root（= 子进程 cwd）不含任何
+    godot——校验与拉起条件一致后两形态均须 tool JSON ok=false。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    monkeypatch.chdir(tmp_path)
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    tail = ["canonical", str(project / "src_game"),
+            "--project-root", str(project),
+            "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")]
+    if tool == "canonical-diagnose":
+        tail = ["canonical-diagnose", str(project / "src_game"),
+                "--project-root", str(project),
+                "--recipe", str(recipe_path), "--features", "demo",
+                "--out", str(tmp_path / "diag.json")]
+    args = build_parser().parse_args(tail)
+    old_bin = os.environ.get("GQT_GODOT_BIN")
+    old_path = os.environ.get("PATH")
+    os.environ["GQT_GODOT_BIN"] = godot_bin_env
+    os.environ["PATH"] = "/usr/bin:/bin"
+    orig = sp.run
+    sp.run = FakeGodot(project)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = args.func(args)
+    finally:
+        sp.run = orig
+        if old_bin is None:
+            os.environ.pop("GQT_GODOT_BIN", None)
+        else:
+            os.environ["GQT_GODOT_BIN"] = old_bin
+        if old_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = old_path
+    assert code == 1
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == tool and payload["ok"] is False
+    assert payload["summary"]["error"]
+    return payload
+
+
+def test_cli_relative_cwd_drift_canonical(project, tmp_path, monkeypatch):
+    """§SPEC-076 形态 1（canonical × cwd 漂移）：CLI cwd 放可执行
+    wrapper、子进程 cwd（project root）不放——前置校验按子进程 cwd
+    解析后拒绝（CanonicalError→JSON），不再裸 FileNotFoundError。"""
+    wrap = tmp_path / "godot"
+    wrap.write_text("#!/bin/sh\nexit 0\n")
+    wrap.chmod(0o755)
+    payload = _spawn_cli_mismatch("canonical", "./godot", project,
+                                  tmp_path, monkeypatch)
+    assert "godot binary not found or not executable" \
+        in payload["summary"]["error"]
+
+
+def test_cli_relative_cwd_drift_diagnose(project, tmp_path, monkeypatch):
+    wrap = tmp_path / "godot"
+    wrap.write_text("#!/bin/sh\nexit 0\n")
+    wrap.chmod(0o755)
+    payload = _spawn_cli_mismatch("canonical-diagnose", "./godot", project,
+                                  tmp_path, monkeypatch)
+    assert "godot binary not found or not executable" \
+        in payload["summary"]["error"]
+
+
+def test_cli_exec_format_canonical(project, tmp_path, monkeypatch):
+    """§SPEC-076 形态 2（canonical × exec-format）：0755 纯文本文件
+    （无 ELF/#! 头）→ 前置校验拒绝（不再 OS exec Errno 8 裸
+    traceback）。"""
+    fake = tmp_path / "fake-godot"
+    fake.write_text("this is not an executable\n")
+    fake.chmod(0o755)
+    payload = _spawn_cli_mismatch("canonical", str(fake), project,
+                                  tmp_path, monkeypatch)
+    assert "not an executable format" in payload["summary"]["error"]
+
+
+def test_cli_exec_format_diagnose(project, tmp_path, monkeypatch):
+    fake = tmp_path / "fake-godot"
+    fake.write_text("this is not an executable\n")
+    fake.chmod(0o755)
+    payload = _spawn_cli_mismatch("canonical-diagnose", str(fake), project,
+                                  tmp_path, monkeypatch)
+    assert "not an executable format" in payload["summary"]["error"]
+
+
+def test_canonical_parser_has_godot_bin_flag_consistent():
+    """§SPEC-076 LOW：canonical 错误提示建议的 --godot-bin 旗标必须
+    真实存在于 canonical 子解析器（提示与旗标一致）。"""
+    from godot_qa_toolkit.cli import build_parser
+    parser = build_parser()
+    can_parser = None
+    for a in parser._actions:
+        choices = getattr(a, "choices", None)
+        if choices and "canonical" in choices:
+            can_parser = choices["canonical"]
+            break
+    assert can_parser is not None
+    opt_strings = [opt for act in can_parser._actions
+                   for opt in act.option_strings]
+    assert "--godot-bin" in opt_strings
+
+
+def test_godot_bin_ready_resolution_semantics(project, tmp_path):
+    """§SPEC-073 helper 单元钉定：相对路径按 project_root 解析；
+    exec-format 拒绝；ELF/#! 可执行文件通过；裸名走 PATH。"""
+    from godot_qa_toolkit.cli import _godot_bin_ready
+    # 相对路径 + project_root 下存在 → True
+    (project / "grel").write_text("#!/bin/sh\nexit 0\n")
+    (project / "grel").chmod(0o755)
+    cmd, ok, reason = _godot_bin_ready(project, "grel")
+    assert ok is True and reason == ""
+    # 相对路径 project_root 下缺失 → False
+    cmd, ok, reason = _godot_bin_ready(project, "missing-godot")
+    assert ok is False and "not found or not executable" in reason
+    # exec-format（0755 纯文本）→ False + 精确 reason
+    fake = tmp_path / "fake.gd"
+    fake.write_text("text only\n")
+    fake.chmod(0o755)
+    cmd, ok, reason = _godot_bin_ready(tmp_path, str(fake))
+    assert ok is False
+    assert "not an executable format" in reason
+    # shebang 脚本（绝对路径）→ True
+    sh = tmp_path / "sh-godot"
+    sh.write_text("#!/bin/sh\nexit 0\n")
+    sh.chmod(0o755)
+    cmd, ok, reason = _godot_bin_ready(tmp_path, str(sh))
+    assert ok is True and reason == ""

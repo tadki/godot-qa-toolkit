@@ -45,7 +45,7 @@ from .ops import (  # noqa: F401
 from .inject import (cleanup_temp_files, forget_temp, godot_command, host_script_res,
                      _impl_fs_path, _interrupt_guard, make_sigterm_restore_handler,
                      godot_project_path as _unified_godot_project_path,
-                     mutant_env, seed_host_script)  # noqa: F401
+                     mutant_env, seed_host_script, spawn_godot)  # noqa: F401
 # 统一 mutant 明细记录形态（SEE-1416 扩列）与结果塑形契约在 reporting.py
 # （<800 行纪律拆分）；re-export 保持既有 import / monkeypatch 名称空间稳定。
 from .reporting import (  # noqa: F401
@@ -124,7 +124,7 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     # SEE-1400 §SPEC-003：跨进程槽位闸包裹真实 godot 子进程（等槽时间不计
     # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
     with GlobalGodotGate(project_root):
-        r = subprocess.run(
+        r = spawn_godot(
             [godot_command(), "--headless", "--path",
              _godot_project_path(project_root),
              "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],

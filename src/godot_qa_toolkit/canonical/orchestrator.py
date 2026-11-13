@@ -57,7 +57,7 @@ from ..coverage.runner import (
 )
 from ..coverage.union import arm_record_from_bundle, union_file
 from ..mutation.godot_gate import GlobalGodotGate
-from ..mutation.inject import godot_command
+from ..mutation.inject import BinaryConfigError, godot_command, spawn_godot
 from .recipe import verify_recipe
 
 REPORT_VERSION = "canonical-report/1"
@@ -394,13 +394,17 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
             "-s", "res://addons/gut/gut_cmdln.gd", *gut_args, "-gexit"]
     with GlobalGodotGate(str(gate_root or project_root)):
         try:
-            r = subprocess.run(argv, capture_output=True, text=True,
-                               timeout=timeout_s, cwd=str(project_root),
-                               env=env)
+            r = spawn_godot(argv, capture_output=True, text=True,
+                            timeout=timeout_s, cwd=str(project_root),
+                            env=env)
         except subprocess.TimeoutExpired as e:
             raise CanonicalError(
                 f"GUT timed out after {timeout_s}s "
                 f"(args: {' '.join(gut_args)})") from e
+        except BinaryConfigError as e:
+            # §SPEC-079 C：静态前置漏判时的拉起点兜底（双防线）——
+            # 归一为 canonical 领域错误，cli 既有 CanonicalError 出口转 JSON。
+            raise CanonicalError(str(e)) from e
     return r, time.monotonic() - t0
 
 

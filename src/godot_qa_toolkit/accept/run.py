@@ -20,7 +20,7 @@ from pathlib import Path
 from . import OPS_VERSION
 from .compile import GENERATED_DIR, sha256_of
 from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
-from ..mutation.inject import godot_command
+from ..mutation.inject import godot_command, spawn_godot
 from ..mutation.godot_gate import GlobalGodotGate
 
 
@@ -122,7 +122,7 @@ def run_suite(project_root: str | Path, feature_key: str,
     env = dict(os.environ)
     try:
         with GlobalGodotGate(str(root)):
-            r = subprocess.run(
+            r = spawn_godot(
                 [godot_command(), "--headless", "--path", str(root),
                  "-s", "res://addons/gut/gut_cmdln.gd",
                  "-gdir=res://" + GENERATED_DIR, "-gexit"],

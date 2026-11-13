@@ -33,7 +33,7 @@ from .compile import compile_feature
 from .run import AcceptRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.gutrun import _looks_like_godot_launch_failure
-from ..mutation.inject import godot_command
+from ..mutation.inject import godot_command, spawn_godot
 
 SUITES_VERSION = "acceptance-suite/1"
 PROBE_VERSION = "acceptance-probe/1"
@@ -243,7 +243,7 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     rel = suite_dir.relative_to(root).as_posix()
     try:
         with GlobalGodotGate(str(root)):
-            r = subprocess.run(
+            r = spawn_godot(
                 [godot_command(), "--headless", "--path", str(root),
                  "-s", "res://addons/gut/gut_cmdln.gd",
                  "-gdir=res://" + rel + "/generated", "-gexit"],

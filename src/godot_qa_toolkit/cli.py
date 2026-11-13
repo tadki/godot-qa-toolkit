@@ -23,28 +23,54 @@ from .doctor import cmd_doctor
 # runner) must still start the CLI (§SPEC-114, SEE-1367).
 
 
-def _godot_bin_ready() -> tuple[str, bool]:
-    """§SPEC-075：解析 godot 启动命令并做存在性+可执行校验。
+def _godot_bin_ready(project_root: Path,
+                     cmd: str | None = None) -> tuple[str, bool, str]:
+    """§SPEC-075/076：解析 godot 启动命令并做存在性+可执行校验——
+    校验条件与 `_run_one_gut` 的子进程实际拉起条件一致。
 
-    GQT_GODOT_BIN 与 PATH 均未命中时 godot_command() 回退字面量
-    "godot"，_run_one_gut 的 subprocess.run 会以裸 FileNotFoundError
-    崩溃（真实 CLI stdout 空白 + stderr traceback）——canonical /
-    canonical-diagnose 在拉起任何 Godot 子进程前调用本校验，不可用即
-    以领域错误 fail-loud（CLI 转统一 tool JSON）。"""
+    - 相对路径按子进程 cwd（= project_root）解析后校验（消除 CLI cwd
+      与子进程 cwd 的漂移窗口，R32-M 形态 1）；
+    - 裸名走继承 PATH 查找（与 subprocess 语义一致）；
+    - 「有执行位但内容不可执行」（文本/垃圾字节，无 ELF/#!/MZ 头）→
+      拒绝（R32-M 形态 2——OS exec 会抛 Errno 8 裸 traceback）。
+    返回 (cmd, ok, reason)；reason 仅供诊断消息。cmd 参数供测试注入。"""
     from .mutation.inject import godot_command
 
-    cmd = godot_command()
-    if os.sep in cmd or (os.altsep or "") in cmd:
-        ok = os.path.isfile(cmd) and os.access(cmd, os.X_OK)
+    if cmd is None:
+        cmd = godot_command()
+    cand = Path(cmd)
+    if not cand.is_absolute() and (os.sep in cmd or (os.altsep or "") in cmd):
+        cand = project_root / cand
+    if cand.is_absolute():
+        ok = cand.is_file() and os.access(cand, os.X_OK)
+        reason = "" if ok else "not found or not executable"
+        if ok and not _has_exec_format(cand):
+            ok = False
+            reason = "file has the executable bit but is not an executable format"
     else:
         ok = shutil.which(cmd) is not None
-    return cmd, ok
+        reason = "" if ok else "not found in PATH"
+    return cmd, ok, reason
 
 
-def _emit_godot_unavailable(tool: str, cmd: str) -> int:
+def _has_exec_format(path: Path) -> bool:
+    """§SPEC-076 形态 2：有执行位但内容不可执行（如纯文本）→ 拒绝。
+    接受 ELF、shebang 脚本与 PE（MZ，win64 互操作）三种可启动形态。"""
+    try:
+        with path.open("rb") as fh:
+            magic = fh.read(4)
+    except OSError:
+        return False
+    if magic.startswith(b"\x7fELF") or magic.startswith(b"#!"):
+        return True
+    return magic.startswith(b"MZ")
+
+
+def _emit_godot_unavailable(tool: str, cmd: str, reason: str = "") -> int:
+    detail = f": {reason}" if reason else ""
     return _emit({"tool": tool, "ok": False,
                   "summary": {"error": f"godot binary not found or not "
-                                       f"executable: {cmd} "
+                                       f"executable: {cmd}{detail} "
                                        f"(set GQT_GODOT_BIN or --godot-bin)"},
                   "failures": [{"reason": "godot binary unavailable"}]})
 
@@ -608,6 +634,10 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     from .canonical.orchestrator import CanonicalError, run_canonical
     from .canonical.recipe import verify_recipe
 
+    rc = _apply_godot_bin_or_contract("canonical", args)
+    if rc is not None:
+        return rc
+
     recipe_path = _P(args.recipe)
     try:
         recipe = _json.loads(recipe_path.read_text(encoding="utf-8"))
@@ -677,10 +707,10 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                           "failures": [{"reason": "intolerant-tests "
                                                   "malformed"}]})
         intolerant_config = it_doc
-    # §SPEC-075：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
-    godot_cmd, godot_ok = _godot_bin_ready()
+    # §SPEC-075/076：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
+    godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
-        return _emit_godot_unavailable("canonical", godot_cmd)
+        return _emit_godot_unavailable("canonical", godot_cmd, godot_reason)
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -752,10 +782,11 @@ def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
     if rc is not None:
         return rc
 
-    # §SPEC-075：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
-    godot_cmd, godot_ok = _godot_bin_ready()
+    # §SPEC-075/076：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
+    godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
-        return _emit_godot_unavailable("canonical-diagnose", godot_cmd)
+        return _emit_godot_unavailable("canonical-diagnose", godot_cmd,
+                                       godot_reason)
 
     recipe_path = _P(args.recipe)
     try:
@@ -843,6 +874,7 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--evidence-dir", default=None,
                      help="optional coverage-evidence/2 output dir for "
                           "per-arm bundles")
+    _add_godot_bin_arg(can)
     can.set_defaults(func=cmd_canonical)
 
     ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")

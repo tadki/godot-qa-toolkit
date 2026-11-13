@@ -818,3 +818,94 @@ def test_shadow_deref_copy_failure_is_fail_loud(project, tmp_path):
             _prepare_shadow(project, "r29lock", 0)
     finally:
         os.chmod(locked_file, 0o644)
+
+
+# ------------------------- §SPEC-074 R30：只读目录 + 泄漏 + CLI 契约
+
+def _shadow_leak_count() -> int:
+    import glob as _g
+    return len(_g.glob(str(Path(tempfile.gettempdir()) / "gqt-shadow-*")))
+
+
+def _readonly_dangling_base(project, tmp_path) -> Path:
+    """构造只读目录（0555）内含悬空链接的 base；返回只读目录路径。
+    非 root 环境专用（root 无法构造写位缺失）。"""
+    ro = project / "readonly-outer"
+    ro.mkdir()
+    (ro / "dangling.gd").symlink_to(tmp_path / "nonexistent.gd")
+    os.chmod(ro, 0o555)
+    return ro
+
+
+def test_readonly_dir_dangling_top_level_is_domain_error(
+        project, tmp_path):
+    """§SPEC-074 R29-M1 顶层路径：0555 只读目录内悬空链接（find 顶层
+    命中）的 unlink 被拒 → CanonicalError（非裸 PermissionError），
+    shadow 目录零泄漏。"""
+    import shutil as _sh
+    if hasattr(os, "getuid") and os.getuid() == 0:
+        return  # root 环境无法构造写位缺失
+    ro = _readonly_dangling_base(project, tmp_path)
+    before = _shadow_leak_count()
+    try:
+        with pytest.raises(CanonicalError):
+            _prepare_shadow(project, "r30ro-top", 0)
+        assert _shadow_leak_count() == before, (
+            "失败路径不得泄漏已 mkdtemp 的 shadow 目录")
+    finally:
+        os.chmod(ro, 0o755)
+        _sh.rmtree(project, ignore_errors=True)
+
+
+def test_readonly_dir_dangling_recursive_is_domain_error(
+        project, tmp_path):
+    """§SPEC-074 R29-M1 递归路径：dirlink → 只读目录（内含悬空链接）——
+    copytree 后内层解引用的 unlink 在只读副本内被拒 → CanonicalError，
+    shadow 目录零泄漏。"""
+    import shutil as _sh
+    if hasattr(os, "getuid") and os.getuid() == 0:
+        return  # root 环境无法构造写位缺失
+    ro = _readonly_dangling_base(project, tmp_path)
+    (project / "src_game" / "dirlink").symlink_to(ro)
+    before = _shadow_leak_count()
+    try:
+        with pytest.raises(CanonicalError):
+            _prepare_shadow(project, "r30ro-inner", 0)
+        assert _shadow_leak_count() == before, (
+            "失败路径不得泄漏已 mkdtemp 的 shadow 目录")
+    finally:
+        os.chmod(ro, 0o755)
+        _sh.rmtree(project, ignore_errors=True)
+
+
+def test_cli_readonly_dangling_emits_tool_json_no_traceback(
+        project, tmp_path):
+    """§SPEC-074：真实 CLI 代码路径恒输出可解析 tool JSON ok=false
+    （canonical_error:true），无裸 traceback。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    ro = _readonly_dangling_base(project, tmp_path)
+    (project / "src_game" / "dirlink").symlink_to(ro)
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    args = build_parser().parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
+    orig = sp.run
+    sp.run = FakeGodot(project)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = args.func(args)
+    finally:
+        sp.run = orig
+        os.chmod(ro, 0o755)
+    assert code == 1
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert payload["summary"]["canonical_error"] is True
+    assert "readonly-outer" in payload["summary"]["error"]

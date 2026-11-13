@@ -34,6 +34,10 @@ FX_R3_PRIORS = {"prewarm_s": 3.69, "baseline_s": 0.0,
 KOL_R2_PRIORS = {"prewarm_s": 5.003, "baseline_s": 7.638,
                  "per_mutant_s": 9.396411764705883,
                  "slot_fixed_s": 1.728}
+# A1 慢槽先验（R1 并行腿实测转录——slot_fixed 79.8s 为本机慢槽污染态）
+A1_SLOW_SLOT_PRIORS = {"prewarm_s": 5.375, "baseline_s": 7.296,
+                       "per_mutant_s": 9.29029411764706,
+                       "slot_fixed_s": 79.789}
 
 
 def _write_priors(proj: str, priors: dict) -> None:
@@ -238,3 +242,56 @@ class TestExecutorWiring:
                                         dry_run=False, jobs=1)
         assert d["jobs"] == 1
         assert "cost-aware:" not in capsys.readouterr().err
+
+
+class TestSmallScaleDomainGate:
+    """A1b（Owner 终裁 B）：「降级到串行」限定在小规模目标域——
+    KOL 量级永不降级；四键先验与决策公式骨架零改动。"""
+
+    def test_slow_slot_kol_scale_never_downgrades(self, tmp_path, capsys):
+        """A1 慢槽先验重放：KOL 量级（17 位点）出域 → 并行，不降级。"""
+        proj, _ = _write_project(tmp_path, GD_WIDE)
+        _write_priors(proj, A1_SLOW_SLOT_PRIORS)
+        assert cost_priors.prefers_serial(proj, total=17, jobs=2) is False
+        err = capsys.readouterr().err
+        assert "out-of-domain" in err
+        assert "-> parallel" in err
+
+    def test_would_be_decision_pinned_for_replay(self):
+        """重放对照锚：模型本体在慢槽先验下会误判串行（门挡住的正是它）。
+
+        A1 实测轨迹：slot_fixed_s=79.8 抬高 parallel_est → 误判串行
+        （实跑 183.6s vs 并行 109.3s）。evaluate 骨架未改动，故仍复算出
+        同一误判——域门在其外层拦截。
+        """
+        v = cost_priors.evaluate(A1_SLOW_SLOT_PRIORS, total=17, jobs=2)
+        assert v is not None and v[0] is True
+        assert round(v[1], 2) == 165.23   # serial_est（A1 R2 决策线逐位）
+        assert round(v[2], 2) == 255.86   # parallel_est（被慢槽先验抬高）
+
+    def test_domain_boundary_consults_inside(self, tmp_path, capsys):
+        proj, _ = _write_project(tmp_path, GD_WIDE)
+        _write_priors(proj, KOL_R2_PRIORS)
+        cost_priors.prefers_serial(
+            proj, total=cost_priors.SMALL_SCALE_SITES, jobs=2)
+        assert "out-of-domain" not in capsys.readouterr().err
+
+    def test_domain_boundary_blocks_above(self, tmp_path, capsys):
+        proj, _ = _write_project(tmp_path, GD_WIDE)
+        _write_priors(proj, KOL_R2_PRIORS)
+        assert cost_priors.prefers_serial(
+            proj, total=cost_priors.SMALL_SCALE_SITES + 1, jobs=2) is False
+        assert "out-of-domain" in capsys.readouterr().err
+
+    def test_archived_batch2_decisions_preserved_under_gate(
+            self, tmp_path, capsys):
+        """批次二留档决策在域门下保持：fixture 5 位点 consult→串行，
+        KOL 17 位点出域→并行（与留档决策线一致）。"""
+        proj, _ = _write_project(tmp_path, GD_WIDE)
+        _write_priors(proj, FX_R1_PRIORS)
+        assert cost_priors.prefers_serial(proj, total=5, jobs=2) is True
+        assert "out-of-domain" not in capsys.readouterr().err
+        proj2, _ = _write_project(tmp_path / "k", GD_WIDE)
+        _write_priors(proj2, KOL_R2_PRIORS)
+        assert cost_priors.prefers_serial(proj2, total=17, jobs=2) is False
+        assert "-> parallel" in capsys.readouterr().err

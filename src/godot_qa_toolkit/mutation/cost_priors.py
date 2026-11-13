@@ -24,6 +24,10 @@ from pathlib import Path
 PRIOR_KEYS = ("prewarm_s", "baseline_s", "per_mutant_s", "slot_fixed_s")
 PRIORS_DIRNAME = ".qa-cache"
 PRIORS_FILENAME = "gqt-mutation-cost-priors.json"
+# A1b 仲裁域上界（小位点数）：域内才允许「模型判串行 → 降级」。锚 = E6-5
+# 原型采用面（fixture 5 位点 −31%）与 KOL 17 位点恒在域外；越界行为 =
+# 并行（现行缺省，fail-safe），KOL 量级永不降级（§SPEC-502）。
+SMALL_SCALE_SITES = 8
 
 
 def _priors_path(project_root: str) -> Path:
@@ -64,9 +68,23 @@ def evaluate(priors: dict, total: int, jobs: int) -> tuple[bool, float, float] |
 
 
 def prefers_serial(project_root: str, total: int, jobs: int) -> bool:
-    """仲裁入口：有先验且模型判串行时 True（stderr 披露决策线，双路同判据）。"""
+    """仲裁入口：小规模域内有先验且模型判串行时 True（stderr 披露决策线）。
+
+    A1b（Owner 终裁 B）：「降级到串行」限定在小规模目标域——超过
+    SMALL_SCALE_SITES 的目标永不仲裁、永不降级（缺省行为 = 并行，fail-safe
+    方向为现行行为）。原型语义锚：E6-5 定义即「小位点数自动退串行，大规模
+    维持并行」；fixture 5 位点在域内（−31% 收益面），KOL 17 位点恒在域外。
+    四键先验与决策公式骨架零改动——本门只挡「模型被慢槽先验污染时的
+    大规模误判」（A1 慢槽重放：slot_fixed_s=79.8 时模型会误判 KOL 串行）。
+    """
     priors = load(project_root)
     if not priors:
+        return False
+    if total > SMALL_SCALE_SITES:
+        print(f"cost-aware: total={total} jobs={jobs} out-of-domain "
+              f"(>{SMALL_SCALE_SITES} sites) -> parallel (no downgrade; "
+              f"priors: {json.dumps({k: priors.get(k, 0.0) for k in PRIOR_KEYS})})",
+              file=sys.stderr)
         return False
     verdict = evaluate(priors, total, jobs)
     if verdict is None:

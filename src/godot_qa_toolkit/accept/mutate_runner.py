@@ -52,7 +52,7 @@ from .mutate import Mutant, mutate_ir
 from .run import AcceptRunError, replay_check
 from ..mutation.gutrun import (_looks_like_godot_launch_failure,
                                _parse_failing_tests)
-from ..mutation.inject import godot_command, register_temp
+from ..mutation.inject import godot_command, register_temp, spawn_godot
 from ..mutation.godot_gate import GlobalGodotGate
 
 
@@ -84,7 +84,7 @@ def _mutated_ir(ir: dict, mutant: Mutant) -> dict:
 def _run_gut(root: Path, timeout_s: int) -> tuple[int, str]:
     try:
         with GlobalGodotGate(str(root)):
-            r = subprocess.run(
+            r = spawn_godot(
                 [godot_command(), "--headless", "--path", str(root),
                  "-s", "res://addons/gut/gut_cmdln.gd",
                  "-gdir=res://" + GENERATED_DIR, "-gexit"],

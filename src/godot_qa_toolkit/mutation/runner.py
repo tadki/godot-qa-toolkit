@@ -47,7 +47,7 @@ from .ops import (  # noqa: F401
 from .inject import (forget_temp, godot_command,
                      detect_binary_kind,
                      godot_project_path as _unified_godot_project_path,
-                     make_user_dir, mutant_env, register_temp)
+                     make_user_dir, mutant_env, register_temp, spawn_godot)
 from . import beacon
 from . import shadow
 from . import shadowpool
@@ -138,7 +138,7 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     # SEE-1400 §SPEC-003：跨进程槽位闸包裹真实 godot 子进程（等槽时间不计
     # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
     with GlobalGodotGate(_ACTIVE_GATE_ROOT or project_root):
-        r = subprocess.run(
+        r = spawn_godot(
             [godot_command(), "--headless", "--path",
              _godot_project_path(project_root),
              "-s", _ACTIVE_SCRIPT, *extra, "-gexit"],

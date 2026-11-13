@@ -220,16 +220,21 @@ def _file_usable(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
-def _shebang_interpreter_issue(path: str) -> str:
-    """§SPEC-078 M1：#! 头解释器可用性校验，与内核 execve 语义一致。
+def _shebang_interpreter_issue(path: str, _depth: int = 0) -> str:
+    """§SPEC-078 M1 + §SPEC-079 C：#! 头解释器可用性校验，与内核 execve
+    语义一致。
 
-    - 解释器含分隔符且为绝对路径 → 文件校验（存在+可执行）；
+    - 解释器含分隔符且为绝对路径 → 文件校验（存在+可执行+**自身
+      exec-format**，§SPEC-079 C——带执行位但非可执行格式的解释器
+      内核必抛 Errno 8）；
     - `#!/usr/bin/env X` → 内核只执行 env 本体（绝对路径校验），随后
-      env(1) 对首个非旗标参数做 PATH 查找——两段各按真实语义校验；
+      env(1) 对首个非旗标参数做 PATH 查找——两段各按真实语义校验，
+      PATH 命中者同样做 exec-format 校验；
     - 直接解释器为裸名 → Linux 内核 shebang 不做 PATH 查找（ENOENT），
       必然拉起失败，前置即拒绝；
     - 相对形态解释器按子进程 cwd 解析、CLI 侧静态判定不可靠 → 不预判
       （避免误拒有效配置，交由真实执行面）。
+    格式校验深度有界（_depth≥1 只查文件可用性），防互指循环。
     可用返回空串；不可用返回诊断串（含 "interpreter not usable"）。"""
     try:
         with open(path, "rb") as fh:
@@ -241,46 +246,65 @@ def _shebang_interpreter_issue(path: str) -> str:
         return "interpreter not usable: empty shebang interpreter"
     parts = line.split()
     interp = parts[0]
-    if os.path.basename(interp) == "env":
-        if not _file_usable(interp):
-            return (f"interpreter not usable: {interp}: "
+
+    def _checked(target: str) -> str:
+        if not _file_usable(target):
+            return (f"interpreter not usable: {target}: "
                     "not found or not executable")
+        if _depth < 1:
+            fmt = _exec_format_issue(target, _depth + 1)
+            if fmt:
+                return f"interpreter not usable: {target}: {fmt}"
+        return ""
+
+    if os.path.basename(interp) == "env":
+        issue = _checked(interp)
+        if issue:
+            return issue
         program = next((p for p in parts[1:] if not p.startswith("-")), None)
         if program is None:
             return ""
         if _is_path_form(program):
-            if os.path.isabs(program):
-                return "" if _file_usable(program) else (
-                    f"interpreter not usable: {program}: "
-                    "not found or not executable")
-            return ""
-        if shutil.which(program) is None:
+            return _checked(program) if os.path.isabs(program) else ""
+        resolved = shutil.which(program)
+        if resolved is None:
             return (f"interpreter not usable: env lookup failed for "
                     f"{program}: not found in PATH")
-        return ""
+        return _checked(resolved)
     if _is_path_form(interp):
-        if os.path.isabs(interp):
-            return "" if _file_usable(interp) else (
-                f"interpreter not usable: {interp}: "
-                "not found or not executable")
-        return ""
+        return _checked(interp) if os.path.isabs(interp) else ""
     return (f"interpreter not usable: {interp}: bare name is not "
             "resolvable by kernel shebang")
 
 
-def _exec_format_issue(path: str) -> str:
-    """§SPEC-076 形态 2 + §SPEC-078 M1：有执行位但内核不可启动的具体
-    原因——非 ELF/#!​/MZ 头，或 #! 头解释器不可用。可用返回空串。"""
+# ELF ident 完整长度（e_ident[EI_NIDENT]=16）：§SPEC-079 C 伪 ELF 判别
+_ELF_IDENT_MIN = 16
+
+
+def _exec_format_issue(path: str, _depth: int = 0) -> str:
+    """§SPEC-076 形态 2 + §SPEC-078 M1 + §SPEC-079 C：有执行位但内核
+    不可启动的具体原因——非 ELF/MZ/#!​头；伪 ELF（仅 4 字节魔数，
+    ident 截断或 class/data/version 非法——截断/损坏下载的常见形态，
+    内核 exec 必抛 Errno 8）；#! 头解释器不可用或自身非可执行格式。
+    可用返回空串。"""
     try:
         with open(path, "rb") as fh:
-            head = fh.read(4)
+            head = fh.read(64)
     except OSError:
         return "file has the executable bit but is not an executable format"
-    if head.startswith(b"\x7fELF") or head.startswith(b"MZ"):
+    if head.startswith(b"\x7fELF"):
+        if (len(head) < _ELF_IDENT_MIN
+                or head[4] not in (1, 2)      # EI_CLASS: 32/64-bit
+                or head[5] not in (1, 2)      # EI_DATA: LE/BE
+                or head[6] != 1):             # EI_VERSION
+            return ("file has the executable bit but is not an executable "
+                    "format (malformed ELF ident)")
+        return ""
+    if head.startswith(b"MZ"):
         return ""
     if not head.startswith(b"#!"):
         return "file has the executable bit but is not an executable format"
-    interp_issue = _shebang_interpreter_issue(path)
+    interp_issue = _shebang_interpreter_issue(path, _depth)
     if interp_issue:
         return f"file has the executable bit but {interp_issue}"
     return ""
@@ -289,8 +313,9 @@ def _exec_format_issue(path: str) -> str:
 def godot_launch_issue(project_root: str,
                        cmd: str | None = None) -> tuple[str, str]:
     """§SPEC-078 M3 同源启动校验核心：存在性 + 执行位 + exec-format +
-    shebang 解释器（M1）。canonical（cli._godot_bin_ready）与 mutation/
-    coverage/accept（ensure_godot_launchable）共用本实现，不得各写一套。
+    shebang 解释器（M1/C）。canonical 前置校验（cli._godot_bin_ready）
+    使用本实现；mutation/coverage/accept 的同等兜底在真实拉起点
+    （spawn_godot，§SPEC-079 B 延迟策略），两条防线共用同一诊断语汇。
 
     路径形态判定沿用 §SPEC-077（仅分隔符语义）；相对路径形态按
     project_root（= 子进程 cwd）解析；裸名走继承 PATH 查找。
@@ -311,20 +336,29 @@ def godot_launch_issue(project_root: str,
     return cmd, ""
 
 
-def ensure_godot_launchable(project_root: str) -> None:
-    """§SPEC-078 M3：mutation/coverage/accept 拉起任何 Godot 子进程前
-    调用——与 canonical 共用 godot_launch_issue 同源校验；不可启动 →
-    BinaryConfigError（cli 层统一转领域 JSON，五路裸 traceback 收口）。"""
-    cmd, reason = godot_launch_issue(str(project_root))
-    if not reason:
-        return
-    if reason == "not found in PATH":
+def spawn_godot(argv: list, **kwargs):
+    """§SPEC-079 B/C：真实拉起点兜底（双防线之二）——内核级启动失败
+    （ENOENT/ENOEXEC/…）统一转 BinaryConfigError 领域错误，杜绝裸
+    traceback。静态前置校验只做轻量预判，最终语义以实际 exec 为准；
+    测试 mock（subprocess.run 替换）不触及本层，因此无 godot CI 形态
+    的既有 mocked 用例不再被入口预检拦截（B：延迟到实际拉起点）。
+    超时等其余异常原样上抛（与 subprocess 语义一致）。"""
+    try:
+        return subprocess.run(argv, **kwargs)
+    except FileNotFoundError as e:
+        cmd = str(argv[0]) if argv else ""
+        if not os.path.isabs(cmd) and not _is_path_form(cmd):
+            raise BinaryConfigError(
+                f"godot binary not found in PATH: {cmd} "
+                f"(set GQT_GODOT_BIN or --godot-bin)") from e
         raise BinaryConfigError(
-            f"godot binary not found in PATH: {cmd} "
-            f"(set GQT_GODOT_BIN or --godot-bin)")
-    raise BinaryConfigError(
-        f"godot binary not found or not executable: {cmd}: {reason} "
-        f"(set GQT_GODOT_BIN or --godot-bin)")
+            f"godot binary not found or not executable: {cmd} "
+            f"(set GQT_GODOT_BIN or --godot-bin)") from e
+    except OSError as e:
+        cmd = str(argv[0]) if argv else ""
+        raise BinaryConfigError(
+            f"godot binary not executable (exec format error): {cmd}: {e} "
+            f"(set GQT_GODOT_BIN or --godot-bin)") from e
 
 
 def _win_env(cfg_fs: str, user_dir: str | None) -> tuple[dict, str]:

@@ -225,3 +225,40 @@ def test_r5_absolute_target_unaffected(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = run_mutation(target, proj, dry_run=True)
     assert result["summary"]["file"] == target
+
+
+# ------------------------------------- not-found 防御分支钉（D2-hardener 补）
+
+def test_r5_mutation_notfound_fail_loud_with_anchored_path(
+        tmp_path, monkeypatch):
+    """D2-hardener：mutation 串行入口 not-found 防御分支必须 fail-loud，
+    且错误消息附锚定后绝对路径（tidy 登记的既有覆盖缺口，见
+    mutation/runner.py 的 target not found raise）。"""
+    proj, _target = _write_project(tmp_path)
+    monkeypatch.chdir(tmp_path)  # CWD != project_root，目标在两处均不存在
+    with pytest.raises(FileNotFoundError) as excinfo:
+        run_mutation("nope/missing.gd", proj, dry_run=True)
+    msg = str(excinfo.value)
+    assert "mutation target not found" in msg, (
+        f"not-found 分支未按语义消息 fail-loud: {msg}")
+    anchored = str(Path(proj) / "nope" / "missing.gd")
+    assert anchored in msg, (
+        f"错误消息缺锚定后路径（fail-loud 排障语义丢失）: {msg}")
+
+
+def test_r5_coverage_notfound_fail_loud_with_anchored_path(
+        tmp_path, monkeypatch):
+    """D2-hardener：coverage 入口 not-found 防御分支必须 fail-loud（抛
+    FileNotFoundError 而非静默走 §SPEC-028 结构化错误档），且消息附锚定
+    后绝对路径（tidy 登记的既有覆盖缺口，见 coverage/runner.py 的
+    target not found raise）。"""
+    proj, _target = _write_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(FileNotFoundError) as excinfo:
+        run_coverage("nope/missing.gd", proj)
+    msg = str(excinfo.value)
+    assert "coverage target not found" in msg, (
+        f"not-found 分支未按语义消息 fail-loud: {msg}")
+    anchored = str(Path(proj) / "nope" / "missing.gd")
+    assert anchored in msg, (
+        f"错误消息缺锚定后路径（fail-loud 排障语义丢失）: {msg}")

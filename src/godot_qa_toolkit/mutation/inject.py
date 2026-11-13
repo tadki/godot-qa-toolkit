@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -63,10 +64,27 @@ class BinaryConfigError(Exception):
     探测操作与输入路径上下文。"""
 
 
-def _require_usable_binary(path: str, source_label: str) -> str:
+def _is_path_form(cmd: str) -> bool:
+    """§SPEC-077：路径形态判定——POSIX 上 os.altsep=None，`(os.altsep
+    or "") in cmd` 恒 True 会把裸名误判为路径；仅含 os.sep（或 altsep
+    非 None 且含 altsep）才算路径形态，裸名一律走 PATH 语义。"""
+    return (os.sep in cmd
+            or (os.altsep is not None and os.altsep in cmd))
+
+
+def _require_usable_binary(path: str, source_label: str,
+                           base_dir: str | None = None) -> str:
     """显式二进制路径校验（env 与 --godot-bin 两通道同款契约）：不存在/
     不可读/不可执行 → BinaryConfigError，消息含来源标签与输入路径——
-    静默回退会把配置错误藏进 verdict（LOW-1 契约）。"""
+    静默回退会把配置错误藏进 verdict（LOW-1 契约）。
+
+    §SPEC-078 M2：路径形态的相对值按 base_dir（= 子进程 cwd，即
+    project_root）解析校验并返回绝对路径——入口层不得按 CLI cwd 误拒
+    project-only 有效配置；裸名保持既有契约（显式配置必须是路径，不
+    隐式转 PATH 语义）。base_dir 为 None 时维持原行为（按进程 cwd）。"""
+    if base_dir is not None and not os.path.isabs(path) \
+            and _is_path_form(path):
+        path = os.path.abspath(os.path.join(base_dir, path))
     if not os.path.isfile(path):
         raise BinaryConfigError(f"{source_label} path does not exist: {path}")
     if not os.access(path, os.R_OK):
@@ -74,6 +92,17 @@ def _require_usable_binary(path: str, source_label: str) -> str:
     if not os.access(path, os.X_OK):
         raise BinaryConfigError(f"{source_label} path is not executable: {path}")
     return path
+
+
+def resolve_env_godot_bin_relative(base_dir: str) -> None:
+    """§SPEC-078 M2 env 通道：显式 GQT_GODOT_BIN 相对路径（路径形态）
+    在入口层按子进程 cwd（project_root）解析为绝对路径写回 env——后续
+    解析链与子进程继承面均见同一绝对路径，消除 CLI cwd 漂移窗口。绝
+    对路径与裸名零动作（§SPEC-1525-006 冻结红线）。"""
+    explicit = os.environ.get(ENV_GODOT_BIN, "").strip()
+    if explicit and not os.path.isabs(explicit) and _is_path_form(explicit):
+        os.environ[ENV_GODOT_BIN] = _require_usable_binary(
+            explicit, ENV_GODOT_BIN, base_dir)
 
 
 def _resolved_godot_path() -> str | None:
@@ -94,13 +123,16 @@ def _resolved_godot_path() -> str | None:
     return None
 
 
-def apply_godot_bin_override(explicit_path: str | None) -> None:
+def apply_godot_bin_override(explicit_path: str | None,
+                             base_dir: str | None = None) -> None:
     """§SPEC-1525-002 per-component 覆盖：--godot-bin > GQT_GODOT_BIN > PATH。
 
     命令级覆盖经 os.environ 写回同源解析链——detect_binary_kind() /
     godot_command() / _godot_project_path 单一出处，各子命令不得另写一套
     解析；校验复用 _require_usable_binary（标签 --godot-bin）。flag 未传
     时零动作（§SPEC-1525-006 冻结红线：不触碰解析面任何字节）。
+    §SPEC-078 M2：base_dir = 子进程 cwd（project_root）——相对路径在此
+    解析为绝对后写回 env，入口层即按子进程 cwd 校验。
     """
     if explicit_path is None:
         return
@@ -108,7 +140,8 @@ def apply_godot_bin_override(explicit_path: str | None) -> None:
     if not stripped:
         raise BinaryConfigError(
             "--godot-bin requires a non-empty path to a godot binary")
-    os.environ[ENV_GODOT_BIN] = _require_usable_binary(stripped, "--godot-bin")
+    os.environ[ENV_GODOT_BIN] = _require_usable_binary(stripped, "--godot-bin",
+                                                       base_dir)
 
 
 def godot_project_path(project_root: str, kind: str | None = None) -> str:
@@ -181,6 +214,117 @@ def reset_binary_kind_cache() -> None:
     """测试钩子：清空 per-process 判定缓存。"""
     global _BINARY_KIND_CACHE
     _BINARY_KIND_CACHE = None
+
+
+def _file_usable(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _shebang_interpreter_issue(path: str) -> str:
+    """§SPEC-078 M1：#! 头解释器可用性校验，与内核 execve 语义一致。
+
+    - 解释器含分隔符且为绝对路径 → 文件校验（存在+可执行）；
+    - `#!/usr/bin/env X` → 内核只执行 env 本体（绝对路径校验），随后
+      env(1) 对首个非旗标参数做 PATH 查找——两段各按真实语义校验；
+    - 直接解释器为裸名 → Linux 内核 shebang 不做 PATH 查找（ENOENT），
+      必然拉起失败，前置即拒绝；
+    - 相对形态解释器按子进程 cwd 解析、CLI 侧静态判定不可靠 → 不预判
+      （避免误拒有效配置，交由真实执行面）。
+    可用返回空串；不可用返回诊断串（含 "interpreter not usable"）。"""
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline()
+    except OSError:
+        return "interpreter not usable: unreadable"
+    line = first[2:].decode("utf-8", errors="replace").strip()
+    if not line:
+        return "interpreter not usable: empty shebang interpreter"
+    parts = line.split()
+    interp = parts[0]
+    if os.path.basename(interp) == "env":
+        if not _file_usable(interp):
+            return (f"interpreter not usable: {interp}: "
+                    "not found or not executable")
+        program = next((p for p in parts[1:] if not p.startswith("-")), None)
+        if program is None:
+            return ""
+        if _is_path_form(program):
+            if os.path.isabs(program):
+                return "" if _file_usable(program) else (
+                    f"interpreter not usable: {program}: "
+                    "not found or not executable")
+            return ""
+        if shutil.which(program) is None:
+            return (f"interpreter not usable: env lookup failed for "
+                    f"{program}: not found in PATH")
+        return ""
+    if _is_path_form(interp):
+        if os.path.isabs(interp):
+            return "" if _file_usable(interp) else (
+                f"interpreter not usable: {interp}: "
+                "not found or not executable")
+        return ""
+    return (f"interpreter not usable: {interp}: bare name is not "
+            "resolvable by kernel shebang")
+
+
+def _exec_format_issue(path: str) -> str:
+    """§SPEC-076 形态 2 + §SPEC-078 M1：有执行位但内核不可启动的具体
+    原因——非 ELF/#!​/MZ 头，或 #! 头解释器不可用。可用返回空串。"""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return "file has the executable bit but is not an executable format"
+    if head.startswith(b"\x7fELF") or head.startswith(b"MZ"):
+        return ""
+    if not head.startswith(b"#!"):
+        return "file has the executable bit but is not an executable format"
+    interp_issue = _shebang_interpreter_issue(path)
+    if interp_issue:
+        return f"file has the executable bit but {interp_issue}"
+    return ""
+
+
+def godot_launch_issue(project_root: str,
+                       cmd: str | None = None) -> tuple[str, str]:
+    """§SPEC-078 M3 同源启动校验核心：存在性 + 执行位 + exec-format +
+    shebang 解释器（M1）。canonical（cli._godot_bin_ready）与 mutation/
+    coverage/accept（ensure_godot_launchable）共用本实现，不得各写一套。
+
+    路径形态判定沿用 §SPEC-077（仅分隔符语义）；相对路径形态按
+    project_root（= 子进程 cwd）解析；裸名走继承 PATH 查找。
+    返回 (cmd, reason)：reason 为空串即可启动，非空为诊断串。"""
+    if cmd is None:
+        cmd = godot_command()
+    cand = cmd
+    if not os.path.isabs(cand) and _is_path_form(cand):
+        cand = os.path.join(project_root, cand)
+    if os.path.isabs(cand):
+        if not _file_usable(cand):
+            return cmd, "not found or not executable"
+        reason = _exec_format_issue(cand)
+        if reason:
+            return cmd, reason
+    elif shutil.which(cmd) is None:
+        return cmd, "not found in PATH"
+    return cmd, ""
+
+
+def ensure_godot_launchable(project_root: str) -> None:
+    """§SPEC-078 M3：mutation/coverage/accept 拉起任何 Godot 子进程前
+    调用——与 canonical 共用 godot_launch_issue 同源校验；不可启动 →
+    BinaryConfigError（cli 层统一转领域 JSON，五路裸 traceback 收口）。"""
+    cmd, reason = godot_launch_issue(str(project_root))
+    if not reason:
+        return
+    if reason == "not found in PATH":
+        raise BinaryConfigError(
+            f"godot binary not found in PATH: {cmd} "
+            f"(set GQT_GODOT_BIN or --godot-bin)")
+    raise BinaryConfigError(
+        f"godot binary not found or not executable: {cmd}: {reason} "
+        f"(set GQT_GODOT_BIN or --godot-bin)")
 
 
 def _win_env(cfg_fs: str, user_dir: str | None) -> tuple[dict, str]:

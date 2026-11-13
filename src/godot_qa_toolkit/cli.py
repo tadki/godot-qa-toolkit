@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -25,53 +23,23 @@ from .doctor import cmd_doctor
 
 def _godot_bin_ready(project_root: Path,
                      cmd: str | None = None) -> tuple[str, bool, str]:
-    """§SPEC-075/076：解析 godot 启动命令并做存在性+可执行校验——
-    校验条件与 `_run_one_gut` 的子进程实际拉起条件一致。
+    """§SPEC-075/076/078：解析 godot 启动命令并做同源启动校验（存在性+
+    执行位+exec-format+shebang 解释器）——校验条件与子进程实际拉起条
+    件一致。核心实现为 mutation.inject.godot_launch_issue（§SPEC-078 M3
+    同源：canonical 与 mutation/coverage/accept 共用同一校验函数）。
 
     - 相对路径按子进程 cwd（= project_root）解析后校验（消除 CLI cwd
       与子进程 cwd 的漂移窗口，R32-M 形态 1）；
-    - 裸名走继承 PATH 查找（与 subprocess 语义一致）；
-    - 「有执行位但内容不可执行」（文本/垃圾字节，无 ELF/#!/MZ 头）→
-      拒绝（R32-M 形态 2——OS exec 会抛 Errno 8 裸 traceback）。
+    - 裸名走继承 PATH 查找（与 subprocess 语义一致，§SPEC-077）；
+    - 「有执行位但内容不可执行」及「#! 头解释器不可用」→ 拒绝
+      （R32-M 形态 2 + §SPEC-078 M1——OS exec 会抛裸 traceback）。
     返回 (cmd, ok, reason)；reason 仅供诊断消息。cmd 参数供测试注入。"""
-    from .mutation.inject import godot_command
+    from .mutation.inject import godot_command, godot_launch_issue
 
     if cmd is None:
         cmd = godot_command()
-    cand = Path(cmd)
-    # §SPEC-077 R33：路径分隔符判定修正——POSIX 上 os.altsep=None，
-    # `(os.altsep or "") in cmd` 恒为 True，裸名（如回退字面量 "godot"）
-    # 被误判为路径并按 project_root 解析：project_root 内偶有 godot 时
-    # 前置校验假通过、_run_one_gut 按 PATH 查找失败 → 裸 FileNotFoundError
-    # （R33-HIGH 根因）。仅含 os.sep（或 altsep 非 None 且含 altsep）
-    # 才按 project_root 解析；裸名一律走 PATH 查找。
-    is_path_form = (os.sep in cmd
-                    or (os.altsep is not None and os.altsep in cmd))
-    if not cand.is_absolute() and is_path_form:
-        cand = project_root / cand
-    if cand.is_absolute():
-        ok = cand.is_file() and os.access(cand, os.X_OK)
-        reason = "" if ok else "not found or not executable"
-        if ok and not _has_exec_format(cand):
-            ok = False
-            reason = "file has the executable bit but is not an executable format"
-    else:
-        ok = shutil.which(cmd) is not None
-        reason = "" if ok else "not found in PATH"
-    return cmd, ok, reason
-
-
-def _has_exec_format(path: Path) -> bool:
-    """§SPEC-076 形态 2：有执行位但内容不可执行（如纯文本）→ 拒绝。
-    接受 ELF、shebang 脚本与 PE（MZ，win64 互操作）三种可启动形态。"""
-    try:
-        with path.open("rb") as fh:
-            magic = fh.read(4)
-    except OSError:
-        return False
-    if magic.startswith(b"\x7fELF") or magic.startswith(b"#!"):
-        return True
-    return magic.startswith(b"MZ")
+    _, reason = godot_launch_issue(str(project_root), cmd)
+    return cmd, not reason, reason
 
 
 def _emit_godot_unavailable(tool: str, cmd: str, reason: str = "") -> int:
@@ -100,10 +68,19 @@ def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | N
     二进制后 binary kind 必须重钉，--path 形态与 timing 键成分取覆盖后真实
     类型（与 mutation 既有 refresh 语义对齐）。"""
     from .mutation.inject import BinaryConfigError, apply_godot_bin_override, \
-        detect_binary_kind
+        detect_binary_kind, resolve_env_godot_bin_relative
 
     try:
-        apply_godot_bin_override(getattr(args, "godot_bin", None))
+        # §SPEC-078 M2：flag/env 显式相对路径统一在入口按子进程 cwd
+        # （project_root）解析校验——project-only 有效配置不得按 CLI
+        # cwd 误拒；解析后的绝对路径写回 env 供后续链与子进程共用。
+        # 无 project_root 的直调方（F-1/F-2 单元契约）保持原语义。
+        project_root = getattr(args, "project_root", None)
+        base_dir = str(project_root) if project_root is not None else None
+        apply_godot_bin_override(getattr(args, "godot_bin", None),
+                                 base_dir=base_dir)
+        if base_dir is not None:
+            resolve_env_godot_bin_relative(base_dir)
         detect_binary_kind(refresh=True)
     except BinaryConfigError as e:
         return _emit({
@@ -211,6 +188,15 @@ def cmd_accept(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("accept", args)
     if early is not None:
         return early
+    # §SPEC-078 M3：拉起任何 Godot 子进程前同源启动校验（compile 不拉起
+    # Godot，不受影响）——不可用即领域 JSON
+    from .mutation.inject import BinaryConfigError, ensure_godot_launchable
+    try:
+        ensure_godot_launchable(str(args.project_root))
+    except BinaryConfigError as e:
+        return _emit({"tool": "accept", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     probe_keys = getattr(args, "acceptance_probe_keys", None)
     suite_dir_arg = getattr(args, "suite_dir", None)
     if args.accept_command == "run" and (probe_keys or suite_dir_arg):
@@ -302,6 +288,17 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("mutation", args)
     if early is not None:
         return early
+    # §SPEC-078 M3：拉起任何 Godot 子进程前同源启动校验——不可用即领域
+    # JSON。--dry-run 只列位点不拉 Godot（SPEC-009 离线路径），不校验。
+    if not args.dry_run:
+        from .mutation.inject import BinaryConfigError, \
+            ensure_godot_launchable
+        try:
+            ensure_godot_launchable(str(args.project_root))
+        except BinaryConfigError as e:
+            return _emit({"tool": "mutation", "ok": False,
+                          "summary": {"error": str(e)},
+                          "failures": [{"reason": str(e)}]})
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
@@ -613,6 +610,15 @@ def cmd_coverage(args: argparse.Namespace) -> int:
                         retention_days=getattr(args, "retain_days", 7))
         result.update({"tool": "coverage", "ok": True})
         return _emit(result)
+    # §SPEC-078 M3：measure 是 coverage 唯一拉起 Godot 的路径——启动前
+    # 同源校验（recover/prune 离线路径与缺 file 的用法错误不受影响）
+    from .mutation.inject import BinaryConfigError, ensure_godot_launchable
+    try:
+        ensure_godot_launchable(str(args.project_root))
+    except BinaryConfigError as e:
+        return _emit({"tool": "coverage", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     try:
         result = run_coverage(
             file_path=args.file,

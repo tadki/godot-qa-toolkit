@@ -292,8 +292,13 @@ def _run_mutation_core(file_path: str,
     所有 mutant 均被测试杀死。
     """
     path = Path(file_path)
+    if not path.is_absolute():
+        # §SPEC-610（SEE-1576 R-5）：相对目标锚定 --project-root，路径解析
+        # 不依赖调用方 CWD（绝对路径直过）。
+        path = Path(project_root) / path
     if not path.is_file():
-        raise FileNotFoundError(f"mutation target not found: {file_path}")
+        raise FileNotFoundError(
+            f"mutation target not found: {file_path} (anchored: {path})")
 
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
 

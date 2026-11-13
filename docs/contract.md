@@ -49,7 +49,7 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - `tool`：子命令名，恒定。
 - `ok`：机器判定总结论（P0' 原则——结论确定可判，工具内不做启发式打分）。
 - `summary`：各工具专属度量（见 §4），结构随工具不同。
-- `failures`：失败明细数组，`ok=true` 时为 `[]`。每项至少含 `reason` 字符串。
+- `failures`：失败明细数组，`ok=true` 时为 `[]`。每项至少含 `reason` 字符串。**killed verdict 永不进 failures**（含差分复用重建的记录——与常规路径同一过滤，见 mutation 差分条）。
 
 各工具的额外顶层字段：
 
@@ -126,9 +126,10 @@ python -m godot_qa_toolkit.cli <subcommand> [args]   # 等价入口
 - **timing store 语义（SEE-1413）**：退串行路径与 `--jobs 1` 串行快路径接线 TimingStore（预算协商/采样不丢）；并发分片路径不接线（worker 分片跳过 store 读写是 SEE-1356 L1 既有契约，adaptive timeout 只放大不收紧）。
 
 - 前置：`<root>/addons/gut/gut_cmdln.gd` 必须存在；目标 godot 二进制必须可解析（见 §6 Godot 二进制定位）。缺失任一 → 统一 JSON failure（exit 1，`failures[0].reason` 含 `not found`）。
+- **目标路径解析（SEE-1576 §SPEC-610）**：`<file.gd>` 相对路径统一锚定 `--project-root`（绝对路径直过），路径解析不依赖调用方 CWD——与文档示例形态（`gqt mutation src/... --project-root .`）一致。mutation 多文件检查点 / `run_mutation` / coverage `run_coverage` 三处同形态检查点同口径；找不到时错误消息附锚定后路径。
 - 执行：baseline GUT（原文件，**永远实测**）→ 差分规划 → 逐 mutant 磁盘影子注入跑 GUT（mutant 写入影子槽内目标 `.gd`，真实仓目标文件零写入——机制见上 M0 条；旧内存注入生产路径已物理删除）。
 - **kill 判定 = 失败测试名集合相对 baseline 的差集**，不看 exit code——被测项目基线在无头环境可能自带 pre-existing failures，按 rc 判定会全部误杀。
-- **差分默认开启（SEE-1420 定案 D4，行为变更）**：v2 resume manifest 在场即差分——未改 scope 且上次 killed/suspect/invalid_mutant → 复用跳过；survived / timeout / timeout_pinned / run_error → **永远重跑**（survived 永不缓存信任——红线）。`--mutate-all` 显式退路（全位点执行）。**CI 迁移点**：升级后首跑全量重跑一次（见下 resume v2）；此后 CI 红绿面由「每次全量」变为「差分 retry 面」——survived 位点仍每轮重跑，红不会因缓存变绿。
+- **差分默认开启（SEE-1420 定案 D4，行为变更）**：v2 resume manifest 在场即差分——未改 scope 且上次 killed/suspect/invalid_mutant → 复用跳过；survived / timeout / timeout_pinned / run_error → **永远重跑**（survived 永不缓存信任——红线）。`--mutate-all` 显式退路（全位点执行）。**CI 迁移点**：升级后首跑全量重跑一次（见下 resume v2）；此后 CI 红绿面由「每次全量」变为「差分 retry 面」——survived 位点仍每轮重跑，红不会因缓存变绿。**复用记录口径（SEE-1576 §SPEC-609）**：复用重建的记录与常规路径同口径——killed 复用条目**不进 failures[]**（经 `summary` 计数 + `diff_skipped` 披露呈现），suspect 等非 killed 复用条目保留在 failures[]；各 summary 计数语义不变。
 - **scope manifest / 稳定 id（定案 D1/D2/D3）**：scope 集 = 顶层 func + 内部 class 整体黑盒 + module（非 func 顶层声明）；header hash 只收非 func 顶层声明、func 变更绝不触发全文件重跑（单向保守）；无位点 scope 不进 manifest。位点 id = `<file>#<scope_id>#<n>`（scope_id = `func:`/`class:` kind 前缀 + 语义名，同 kind 同名消歧 `func:foo#2`——跨 kind 同名 func/class 不碰撞（Final Review MEDIUM-2）；n 为 scope 内 1-based 扫描序），**id 仅为寻址提示**——复用前必过全签名 (line, column, kind, original, mutated) + scope hash 双校验，任一漂移 = stderr 告警 + 拒绝复用 + 降级重跑，绝不静默按 id 取条目。
 - **`# gqt: no-mutate`（定案 L6）**：注释过滤。marker 在顶层 func 定义行（含行尾注释）或其紧邻上方 → 函数级（抑制至下一顶层声明）；其余位置行级（仅 marker 所在行）。被过滤位点不产 mutant、其 scope 不进 manifest。
 - **resume v2 store（一次 schema bump，OPS_VERSION `see1420/1`）**：

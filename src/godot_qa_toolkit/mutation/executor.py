@@ -366,7 +366,11 @@ def _run_mutation_files_impl(
     SEE-1550：身份包在父层计算一次并随 chunk 注入（多 worker 同 key）；
     reuse_coverage 默认自动启用（store fresh ∧ 身份包全匹配才生效）。
     """
-    files = _group_by_file(files)
+    # §SPEC-610（SEE-1576 R-5）：相对目标统一锚定 --project-root（绝对路径
+    # 直过）——入口单点归一，后续规划/读取/报告一律以锚定路径为准，路径
+    # 解析不依赖调用方 CWD。
+    files = [f if Path(f).is_absolute() else str(Path(project_root) / f)
+             for f in _group_by_file(files)]
     kind = binary_kind or _detect_binary_kind()
     identity = identity_pack(project_root, kind)
     clock = clock or StageClock()
@@ -1097,7 +1101,11 @@ def _inject_reused(r: dict, ctx: dict) -> None:
             continue
         rec = _mutant_record(m, entry["verdict"],
                              entry.get("reason", ""), src=ctx["src"])
-        r["failures"].append(rec)
+        # §SPEC-609（SEE-1576 R-4）：failures[] 与常规路径 reporting 口径一致
+        # （verdict != killed 才进）；killed 复用记录经 summary 计数 +
+        # diff_skipped 呈现，不回放进 failures。
+        if rec["verdict"] != "killed":
+            r["failures"].append(rec)
         if rec["verdict"] in _VERDICT_SUMMARY_KEY:
             s[_VERDICT_SUMMARY_KEY[rec["verdict"]]] += 1
         s["mutants"] += 1

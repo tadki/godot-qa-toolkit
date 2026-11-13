@@ -34,7 +34,8 @@ from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
 from .stagetiming import (StageClock, merge_execution_stages, qa_disk_bytes,
                           self_rss_peak_mb)
-from .runner import _auto_scan_tests_glob_meta, _res_path_of, run_mutation
+from .runner import (_auto_scan_tests_glob_meta, _resolve_auto_glob,
+                     _res_path_of, run_mutation)
 
 # 进程池工厂（可注入替身做单测）
 _worker_pool = ProcessPoolExecutor
@@ -330,8 +331,8 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                          mutate_all=mutate_all,
                          worker_channel=worker_channel)
         r["summary"].setdefault("jobs", 1)
-        if selection_meta.get("derived_glob"):
-            r["summary"]["test_selection"] = selection_meta
+        from .testscan import selection_disclosure
+        r["summary"].update(selection_disclosure(selection_meta))
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}, tests_glob, selection_meta
     return None, tests_glob, selection_meta
@@ -756,10 +757,9 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
               f"splitting this file", file=sys.stderr)
     selection_meta: dict = auto_selection or {}
     with clock.stage("test_scan"):
-        if tests_glob:
-            glob = tests_glob
-        else:
-            glob, selection_meta = _auto_scan_tests_glob_meta(f, project_root)
+        glob, selection_meta = _resolve_auto_glob(tests_glob, f,
+                                                  project_root,
+                                                  selection_meta)
     # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
@@ -817,8 +817,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                          identity=identity,
                          worker_channel=worker_channel)
         r["summary"].setdefault("jobs", 1)
-        if selection_meta.get("derived_glob"):
-            r["summary"]["test_selection"] = selection_meta
+        from .testscan import selection_disclosure
+        r["summary"].update(selection_disclosure(selection_meta))
         return [], None, r
     ids = [m.stable_id for m in executed_list]
     if baseline is None:
@@ -1132,9 +1132,9 @@ def _inject_one(r: dict, ctx: dict) -> None:
     """单文件收尾注入：reused/uncovered 记录 + 差分与覆盖披露 + gate 重算。"""
     plan = ctx["plan"]
     s = r["summary"]
-    if ctx.get("test_selection"):
-        # §SPEC-613：自动选测披露随报告透出（显式 --tests 时缺省缺席）。
-        s["test_selection"] = ctx["test_selection"]
+    # §SPEC-613：自动选测披露随报告透出（显式 --tests 时缺省缺席）。
+    from .testscan import selection_disclosure
+    s.update(selection_disclosure(ctx["test_selection"]))
     if plan.reused:
         _inject_reused(r, ctx)
     # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures

@@ -125,6 +125,18 @@ def derive_tests_glob_meta(target_res_path: str, tests_dir: Path,
     return glob, meta
 
 
+def selection_disclosure(selection_meta: dict | None) -> dict:
+    """§SPEC-613 选测披露片段（summary 透出的唯一拼装点）。
+
+    自动选测且派生 glob 在场 → {"test_selection": meta}；显式 --tests、
+    零消费者或空 meta → 空片（update 即无操作）。四个披露位（串行门 /
+    规划无分片 / _inject_one / runner disclosures）共用本口径。
+    """
+    if selection_meta and selection_meta.get("derived_glob"):
+        return {"test_selection": selection_meta}
+    return {}
+
+
 def _strength_glob(project_root: str, target_res_path: str,
                    tests_dir: Path) -> tuple[str | None, dict]:
     """gdself 闭包 → 直连强度选测（R-7 判据实现，含弱选测回退）。"""
@@ -156,13 +168,13 @@ def _strength_glob(project_root: str, target_res_path: str,
         only = next(iter(closure))
         rel = only[len(tests_abs):].strip("/")
         glob = "res://tests/" + rel
-        score = _direct_strength_counts(project_root, target_res_path,
-                                        tests_dir, direct).get(only, 0)
+        score = _direct_strength_counts(project_root,
+                                        target_res_path, direct).get(only, 0)
         return glob, {"derived_glob": glob, "strength_score": score,
                       "direct_files": 1 if score else 0,
                       "weak": not score}
     strength = _direct_strength_counts(project_root, target_res_path,
-                                       tests_dir, direct)
+                                       direct)
     if not strength:
         # 纯闭包：无任何直接引用 → 回退既有目录文件计数（保持可跑，
         # 不误触 E2 短路），并标记弱选测供披露与 --tests 覆写建议。
@@ -175,14 +187,14 @@ def _strength_glob(project_root: str, target_res_path: str,
                   "direct_files": files, "weak": False}
 
 
-def _direct_strength_counts(project_root: str, target_res_path: str,
-                            tests_dir: Path,
-                            direct: dict[str, int]) -> dict[str, int]:
-    """直连 consumer 文件 → 目标引用强度（身份 token + 目标函数名命中次数）。
+def _target_strength_words(project_root: str,
+                           target_res_path: str) -> list[re.Pattern]:
+    """目标身份 token（class_name/autoload/stem）+ 目标函数名 → 整词模式。
 
     函数名 token 是关键信号：专用套件按 API 语义调用（add_tag/has_tag/
     advance…），而 setup 清理型弱引用只出现身份名（TagManager._targets.clear）
-    ——仅数身份 token 无法区分二者（F7 实证）。
+    ——仅数身份 token 无法区分二者（F7 实证）。目标读失败不静默：降级为
+    仅身份 token 并披露到 stderr。
     """
     from .gdself import _identities, _target_key_of
     index = _INDEX_CACHE[str(Path(project_root).resolve())]
@@ -198,14 +210,23 @@ def _direct_strength_counts(project_root: str, target_res_path: str,
         target_src = ""
     tokens.update(m.casefold() for m in re.findall(
         r"^(?:static\s+)?func\s+([A-Za-z_]\w*)", target_src, re.M))
-    words = [re.compile(r"\b" + re.escape(t) + r"\b") for t in tokens]
+    return [re.compile(r"\b" + re.escape(t) + r"\b") for t in tokens]
+
+
+def _direct_strength_counts(project_root: str, target_res_path: str,
+                            direct: dict[str, int]) -> dict[str, int]:
+    """直连 consumer 文件 → 目标引用强度（res 字面量 + token 整词命中次数）。
+
+    consumer 读失败不静默：该文件按 0 权降级（不影响其他候选），披露到
+    stderr。
+    """
+    words = _target_strength_words(project_root, target_res_path)
     counts: dict[str, int] = {}
     for fs_path in direct:
         try:
             text = Path(fs_path).read_text(encoding="utf-8",
                                            errors="replace")
         except OSError as e:
-            # 读失败不静默：该文件按 0 权降级（不影响其他候选），披露到 stderr
             print(f"test selection: unreadable consumer {fs_path}: {e}",
                   file=sys.stderr)
             continue
@@ -264,29 +285,3 @@ def _glob_from_counts(counts: dict[str, int], tests_dir: Path) -> str | None:
 # E6-4（§SPEC-503）：gdself 索引进程内复用——规划相位只读、按 project_root
 # 命中即复用、零持久化（进程级保守口径，跨 run 场景以新进程天然失效）。
 _INDEX_CACHE: dict[str, dict] = {}
-
-
-def _index_ref_counts(project_root: str, target_res_path: str,
-                      tests_dir: Path) -> dict[str, int]:
-    """gdself 正向索引 → 每命中测试文件计数（keys 与反查同形：绝对路径）。
-
-    计数 = 该测试文件的命中源种类数（path/class/autoload/stem/dynamic），
-    与反查的「引用次数」同为强度代理，供同一 tie-break 消费。
-    """
-    from .gdself import build_index, query_consumers
-    cache_key = str(Path(project_root).resolve())
-    index = _INDEX_CACHE.get(cache_key)
-    if index is None:
-        index = build_index(project_root)
-        _INDEX_CACHE[cache_key] = index
-    out = query_consumers(project_root, target_res_path, tests_dir,
-                          index=index)
-    tests_abs = str(tests_dir.absolute()).replace("\\", "/")
-    counts: dict[str, int] = {}
-    for consumer in out["consumers"]:
-        if not consumer["res"].startswith("res://tests/"):
-            continue  # 生产/资产消费者只作闭包中转，不进 tests glob
-        fs_path = str(Path(project_root).resolve()
-                      / consumer["res"].removeprefix("res://"))
-        counts[fs_path] = counts.get(fs_path, 0) + len(consumer["sources"])
-    return counts

@@ -361,9 +361,9 @@ def _run_mutation_core(file_path: str,
     # 反例实证：白付一轮 108s baseline）。
     if not executed_list and not reused:
         return _no_sites_result(str(path), scoped)
-    if selection_meta.get("derived_glob"):
-        # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
-        disclosures["test_selection"] = selection_meta
+    from .testscan import selection_disclosure
+    # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
+    disclosures.update(selection_disclosure(selection_meta))
     if total_sites > budget:
         disclosures["total_sites"] = total_sites
         # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid
@@ -528,6 +528,19 @@ def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
     """
     glob, _meta = _auto_scan_tests_glob_meta(file_path, project_root)
     return glob
+
+
+def _resolve_auto_glob(tests_glob: str | None, file_path: str,
+                       project_root: str,
+                       selection_meta: dict) -> tuple[str | None, dict]:
+    """显式 `--tests` 直过（选测未发生，披露 meta 原样保留）；否则自动选测。
+
+    §SPEC-613 判据唯一出处的守门形态：并行规划/串行门共用，禁止按 CLI
+    参数推断选测是否发生。
+    """
+    if tests_glob:
+        return tests_glob, selection_meta
+    return _auto_scan_tests_glob_meta(file_path, project_root)
 
 
 def _auto_scan_tests_glob_meta(file_path: str,

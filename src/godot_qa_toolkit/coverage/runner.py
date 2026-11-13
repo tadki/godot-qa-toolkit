@@ -320,8 +320,13 @@ def run_coverage(
     落盘即清 sink；不传则 stdout 契约与 011b87d 逐字节一致（零漂移）。
     """
     path = Path(file_path)
+    if not path.is_absolute():
+        # §SPEC-610（SEE-1576 R-5）：与 mutation 三检查点同口径——相对目标
+        # 锚定 --project-root（绝对路径直过）。
+        path = Path(project_root) / path
     if not path.is_file():
-        raise FileNotFoundError(f"coverage target not found: {file_path}")
+        raise FileNotFoundError(
+            f"coverage target not found: {file_path} (anchored: {path})")
 
     from .evidence import (
         build_bundle,
@@ -336,7 +341,7 @@ def run_coverage(
     )
     from ..source_io import read_gd_source
 
-    original_src, read_error = read_gd_source(file_path)
+    original_src, read_error = read_gd_source(str(path))
     if read_error is not None:
         # §SPEC-028: single-file reads fail structurally, never crash
         return {

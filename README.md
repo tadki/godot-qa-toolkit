@@ -62,7 +62,9 @@ source of truth.
 - `--project-root` is the *only* channel through which the test subject
   enters the tool: zero discovery, zero environment guessing, zero writes
   outside the target `.gd` (always restored) and the coverage probe sink
-  under `user://`.
+  under `user://`. Relative `<file.gd>` targets are anchored to
+  `--project-root` (absolute paths pass through unchanged), so target
+  resolution never depends on the caller's CWD (SEE-1576).
 
 > **Two-library split:** the godot-mcp control plane (launcher / proxy / shim /
 > port arbitration) belongs to the **godot-mcp runtime library**. This repo is
@@ -436,7 +438,8 @@ speed anything up by itself.
 
 ### Survivor location in the report
 
-Every verdict record (in `failures`, killed records included) now carries
+Every verdict record (any `failures` entry; killed records are never listed
+there but their rebuilt records share the same shape) carries
 `column`, `operator`, and `line_text` (the exact source line that was
 mutated) on top of the existing `file/line/kind/original/mutated/verdict/
 reason` — locate the failure without opening the source file.

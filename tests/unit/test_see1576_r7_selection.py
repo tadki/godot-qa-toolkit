@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation import executor
+from godot_qa_toolkit.mutation import testscan as testscan_mod
 from godot_qa_toolkit.mutation.testscan import (
     derive_tests_glob,
     derive_tests_glob_meta,
@@ -192,3 +193,74 @@ def test_summary_carries_test_selection(tmp_path, monkeypatch):
     assert sel is not None, "summary 缺 test_selection 披露键"
     assert sel["weak"] is False
     assert sel["derived_glob"] == "res://tests/unit/save/test_save.gd"
+
+
+# ------------------------------- 函数名 token 判别力（D3-hardener 补钉）
+
+def test_function_name_token_is_decisive_like_f7(tmp_path):
+    """F7 形态回归钉：身份 token 打平/落后时，目标函数名 token 必须决定胜负。
+
+    container 型弱引用只出现身份名（setup 清理），专用套件按 API 函数名
+    调用——若函数名 token 从判据中剔除，专用套件 2 分 < 弱引用 3 分，
+    glob 翻转回归目录（假 0kill 复现）。本钉钉住「函数名 token 是关键
+    成分」这一 D3 实现要点（见 impl comment 设计补充点）。
+    """
+    root = tmp_path / "proj"
+    (root / "svc").mkdir(parents=True)
+    (root / "tests" / "unit" / "clock").mkdir(parents=True)
+    (root / "tests" / "regression").mkdir(parents=True)
+    (root / "project.godot").write_text(
+        "[autoload]\n"
+        'Clock="*res://svc/clock.gd"\n',
+        encoding="utf-8")
+    (root / "svc" / "clock.gd").write_text(
+        "extends Node\nfunc tick(d):\n\tpass\nfunc advance(d):\n\tpass\n",
+        encoding="utf-8")
+    # 专用套件：按 API 函数名调用（tick/advance 各 1 次 + 身份名 Clock ×2）
+    (root / "tests" / "unit" / "clock" / "test_clock.gd").write_text(
+        "func test_tick() -> void:\n\tClock.tick(1)\n"
+        "func test_advance() -> void:\n\tClock.advance(1)\n",
+        encoding="utf-8")
+    # 弱引用：仅身份名 setup 清理 ×3（无任何目标函数名 token）
+    (root / "tests" / "regression" / "test_r.gd").write_text(
+        "func before_each() -> void:\n"
+        "\tClock._targets.clear()\n"
+        "\tClock._targets.clear()\n"
+        "\tClock._targets.clear()\n"
+        "func test_x() -> void:\n\tpass\n",
+        encoding="utf-8")
+    glob, meta = derive_tests_glob_meta("res://svc/clock.gd", root / "tests",
+                                        project_root=str(root))
+    assert glob is not None and glob.startswith("res://tests/unit/clock/"), (
+        f"函数名 token 未参与判据（专用套件未胜出）：{glob} / {meta}")
+    assert meta["weak"] is False
+
+
+# ----------------------- 两处 OSError 披露分支钉（D3-hardener 补钉）
+
+def test_unreadable_target_disclosed_and_degraded(tmp_path, capsys):
+    """target 读失败（索引后消失）：不得崩溃，降级为身份 token 并 stderr 披露。"""
+    root = _dilution_project(tmp_path)
+    derive_tests_glob_meta("res://svc/svc_clock.gd", root / "tests",
+                           project_root=str(root))  # 先建索引（E6-4 缓存）
+    (root / "svc" / "svc_clock.gd").unlink()  # 索引后目标不可读
+    words = testscan_mod._target_strength_words(str(root),
+                                                "res://svc/svc_clock.gd")
+    err = capsys.readouterr().err
+    assert "unreadable target" in err and "svc_clock.gd" in err, (
+        f"读失败未披露到 stderr: {err!r}")
+    assert words, "降级后身份 token 模式不得为空（不得崩溃/静默清空）"
+
+
+def test_unreadable_consumer_disclosed_and_zero_weighted(tmp_path, capsys):
+    """consumer 读失败：该文件按 0 权降级（不影响其他候选），stderr 披露。"""
+    root = _dilution_project(tmp_path)
+    derive_tests_glob_meta("res://svc/svc_clock.gd", root / "tests",
+                           project_root=str(root))  # 先建索引
+    ghost = str(root / "tests" / "unit" / "svc" / "test_ghost.gd")
+    counts = testscan_mod._direct_strength_counts(
+        str(root), "res://svc/svc_clock.gd", {ghost: 1})
+    err = capsys.readouterr().err
+    assert "unreadable consumer" in err and "test_ghost.gd" in err, (
+        f"consumer 读失败未披露到 stderr: {err!r}")
+    assert counts == {}, "不可读 consumer 必须按 0 权降级（不得计入/崩溃）"

@@ -13,6 +13,7 @@ import io
 import json
 import os
 import subprocess as sp
+import sys
 import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -28,6 +29,8 @@ from godot_qa_toolkit.canonical.orchestrator import (
     _rel_within_root,
     run_canonical,
 )
+
+REPO = Path(__file__).resolve().parents[2]
 from godot_qa_toolkit.canonical.recipe import build_recipe
 from godot_qa_toolkit.cli import build_parser
 
@@ -260,12 +263,16 @@ def test_run_canonical_root_external_target_is_domain_error(
         run_canonical(project, [str(outside)], _recipe(project))
 
 
-def test_cli_root_external_target_emits_tool_json(project, tmp_path):
+def test_cli_root_external_target_emits_tool_json(project, tmp_path,
+                                                  monkeypatch):
     outside_dir = tmp_path / "outside-root"
     outside_dir.mkdir()
     (outside_dir / "out.gd").write_text(
         "extends RefCounted\nfunc x():\n\treturn 1\n")
     recipe_path = tmp_path / "recipe.json"
+    # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需可解析到存在且
+    # 可执行的二进制（sys.executable 恒满足）
+    monkeypatch.setenv("GQT_GODOT_BIN", sys.executable)
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
     args = build_parser().parse_args([
         "canonical", str(outside_dir),
@@ -879,14 +886,16 @@ def test_readonly_dir_dangling_recursive_is_domain_error(
 
 
 def test_cli_readonly_dangling_emits_tool_json_no_traceback(
-        project, tmp_path):
+        project, tmp_path, monkeypatch):
     """§SPEC-074：真实 CLI 代码路径恒输出可解析 tool JSON ok=false
-    （canonical_error:true），无裸 traceback。"""
+    （canonical_error:true），无裸 traceback。§SPEC-075：CI 纯净环境
+    需 GQT_GODOT_BIN 通过 CLI 前置校验。"""
     import io
     from contextlib import redirect_stdout
 
     from godot_qa_toolkit.cli import build_parser
 
+    monkeypatch.setenv("GQT_GODOT_BIN", sys.executable)
     ro = _readonly_dangling_base(project, tmp_path)
     (project / "src_game" / "dirlink").symlink_to(ro)
     recipe_path = tmp_path / "recipe.json"
@@ -912,3 +921,96 @@ def test_cli_readonly_dangling_emits_tool_json_no_traceback(
     # 目录链接解引用副本的确定性失败位置即诊断信息）
     assert "dangling symlink cannot be removed" in payload["summary"]["error"]
     assert "dangling.gd" in payload["summary"]["error"]
+
+
+# ------------------------- §SPEC-075 R31：godot 二进制启动校验
+
+def test_cli_missing_godot_env_unset_emits_tool_json(
+        project, tmp_path, monkeypatch):
+    """§SPEC-075：GQT_GODOT_BIN 未设且 PATH 无 godot → CLI 前置校验以
+    tool JSON ok=false fail-loud（不进入任何 Godot 子进程拉起）。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    args = build_parser().parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    assert code == 1
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert "godot binary not found or not executable" \
+        in payload["summary"]["error"]
+
+
+def test_cli_diagnose_missing_godot_env_unset_emits_tool_json(
+        project, tmp_path, monkeypatch):
+    """§SPEC-075：canonical-diagnose 同前置校验。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    args = build_parser().parse_args([
+        "canonical-diagnose", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(recipe_path), "--features", "demo",
+        "--out", str(tmp_path / "diag.json")])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = args.func(args)
+    assert code == 1
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "canonical-diagnose"
+    assert payload["ok"] is False
+    assert "godot binary not found or not executable" \
+        in payload["summary"]["error"]
+
+
+def test_real_cli_missing_godot_clean_env_emits_tool_json(
+        project, tmp_path, monkeypatch):
+    """§SPEC-075 真实 CLI 反例（Atlas 复现序列）：env -i 级纯净环境
+    （PATH 无 godot、无 GQT_GODOT_BIN）→ exit 1、stdout 可解析 tool
+    JSON ok=false、stderr 零 traceback。"""
+    import shutil as _sh
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    clean_env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "LANG": "C.UTF-8",
+    }
+    (tmp_path / "home").mkdir()
+    (tmp_path / "tmp").mkdir()
+    recipe, err = build_recipe(project)
+    assert err is None
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items()
+           if k in ("PYTHONPATH", "PYTHONUSERBASE")}
+    env.update(clean_env)
+    env["PYTHONPATH"] = str(REPO / "src")
+    proc = sp.run(
+        [sys.executable, "-m", "godot_qa_toolkit.cli", "canonical",
+         str(project / "src_game"), "--project-root", str(project),
+         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout)
+    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert "godot binary not found or not executable" \
+        in payload["summary"]["error"]
+    assert "Traceback" not in proc.stderr

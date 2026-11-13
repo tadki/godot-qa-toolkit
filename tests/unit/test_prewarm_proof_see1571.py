@@ -138,6 +138,19 @@ class TestCalibrationAndFreshSkip:
         assert r["decision"] != "fresh_skip"
         assert r["import_calls"] >= 1
 
+    def test_output_seal_change_forces_reimport(self, tmp_path, sealed):
+        """输出封印变化（输入逐位未变）必须重导入——只比 input 不够。
+
+        §4.3 双绑定语义：产物面被外部改写而输入不变时，旧证不得放行跳过。
+        """
+        proj = _make_project(tmp_path)
+        pp.prewarm_with_proof(str(proj))
+        before = _proof(proj)["input_digest"]
+        _write(proj / ".godot" / "uid_cache.bin", b"post-import-drift")
+        r = pp.prewarm_with_proof(str(proj))
+        assert r["decision"] != "fresh_skip"
+        assert _proof(proj)["input_digest"] == before  # 输入确实未变
+
     def test_escape_hatch_always_imports(self, tmp_path, sealed,
                                          monkeypatch, capsys):
         proj = _make_project(tmp_path)
@@ -259,7 +272,9 @@ class TestNoCertFailClosed:
     def test_symlink_in_tree(self, tmp_path):
         proj = _make_project(tmp_path, with_imports=False)
         os.symlink(proj / "src.gd", proj / "link.gd")
-        with pytest.raises(pp.TreeAmbiguity, match="symlink"):
+        # 首词锚定披露文本：裸 "symlink" 会被 tmp_path 里的用例名命中
+        # （路径含 test_symlink_in_tree_0），断言形同虚设。
+        with pytest.raises(pp.TreeAmbiguity, match=r"symlink not supported: "):
             pp._scan_state(str(proj))
 
     def test_pre_import_scan_without_cert_not_required(
@@ -299,6 +314,18 @@ class TestG12ChainResolution:
         targets = pp._godot_targets(outer)
         assert [t.name for t in targets] == ["inner"]
 
+    def test_launcher_self_reference_not_a_chain_target(self, tmp_path):
+        """启动器文本中提及自身路径不得充当链目标（自引用即链目标会
+        让每次解析都撞 cycle 而永久 NO_CERT——A5 变异存活点）。"""
+        proj, outer, inner, fin = self._chain_project(tmp_path)
+        fin.write_bytes(b"\x7fELF\x00final-binary")
+        fin.chmod(0o755)
+        outer.write_text(f'#!/bin/sh\n# wrapper: {outer}\nexec "{inner}" "$@"\n')
+        targets = pp._godot_targets(outer)
+        assert [t.name for t in targets] == ["inner"]
+        assert [c.name for c in pp._resolve_chain(outer)] == [
+            "outer", "inner", "fin"]
+
     def test_unresolvable_chain_is_no_cert(self, tmp_path):
         """链无法判定终端实体（变量化路径）→ TreeAmbiguity → NO_CERT。"""
         proj, outer, inner, fin = self._chain_project(tmp_path)
@@ -311,7 +338,10 @@ class TestG12ChainResolution:
         proj, outer, inner, fin = self._chain_project(tmp_path)
         outer.write_text(f'#!/bin/sh\nexec "{inner}" "$@"\n')
         inner.write_text(f'#!/bin/sh\nexec "{outer}" "$@"\n')
-        with pytest.raises(pp.TreeAmbiguity, match="cycle"):
+        # 锚定披露文本：裸 "cycle" 会被 tmp_path 里的用例名命中
+        # （路径含 test_chain_cycle_is_no_cert_0），断言形同虚设。
+        with pytest.raises(pp.TreeAmbiguity,
+                           match=r"wrapper chain cycle at "):
             pp._resolve_chain(outer)
 
     def test_final_binary_swap_detected_via_hot_check(

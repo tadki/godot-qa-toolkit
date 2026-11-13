@@ -30,7 +30,7 @@ from ..timing import BUDGET_CAP_S, explicit_timing_meta, resolve_budget, suggest
 # §SPEC-1525-001/002：coverage 启动点与 --path 形态接入 mutation.inject
 # 单一解析源（godot_command / godot_project_path）——原硬编码 "godot" 使
 # GQT_GODOT_BIN 对 coverage 无效，且路径转换与二进制类型脱钩。
-from ..mutation.inject import godot_command
+from ..mutation.inject import godot_command, spawn_godot
 from ..mutation.inject import godot_project_path as _unified_godot_project_path
 from ..registry.lines import (
     EXECUTABLE_NODE_NAMES as _EXECUTABLE_NODE_NAMES,
@@ -770,7 +770,7 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
                 # SEE-1400 §SPEC-003：coverage 与 mutation 同受跨进程槽位闸。
                 from ..mutation.godot_gate import GlobalGodotGate
                 with GlobalGodotGate(project_root):
-                    r = subprocess.run(
+                    r = spawn_godot(
                         [godot_command(), "--headless", "--path", _godot_project_path(project_root),
                          "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
                         capture_output=True,

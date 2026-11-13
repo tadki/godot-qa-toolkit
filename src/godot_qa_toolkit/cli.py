@@ -188,15 +188,10 @@ def cmd_accept(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("accept", args)
     if early is not None:
         return early
-    # §SPEC-078 M3：拉起任何 Godot 子进程前同源启动校验（compile 不拉起
-    # Godot，不受影响）——不可用即领域 JSON
-    from .mutation.inject import BinaryConfigError, ensure_godot_launchable
-    try:
-        ensure_godot_launchable(str(args.project_root))
-    except BinaryConfigError as e:
-        return _emit({"tool": "accept", "ok": False,
-                      "summary": {"error": str(e)},
-                      "failures": [{"reason": str(e)}]})
+    # §SPEC-079 B：启动校验不在入口静态拦截（无 godot CI 形态的 mocked
+    # 用例不得在 mock 生效前被打回），真实拉起点的 spawn_godot 统一把
+    # 内核级启动失败转 BinaryConfigError，由下方领域 JSON 出口收口。
+    from .mutation.inject import BinaryConfigError
     probe_keys = getattr(args, "acceptance_probe_keys", None)
     suite_dir_arg = getattr(args, "suite_dir", None)
     if args.accept_command == "run" and (probe_keys or suite_dir_arg):
@@ -226,6 +221,12 @@ def cmd_accept(args: argparse.Namespace) -> int:
                                    timeout_s=args.timeout)
             return _emit({"tool": "accept", "ok": record["ok"],
                           "summary": record, "failures": []})
+        except BinaryConfigError as e:
+            return _emit({
+                "tool": "accept", "ok": False,
+                "summary": {"error": str(e)},
+                "failures": [{"reason": str(e)}],
+            })
         except AcceptRunError as e:
             return _emit({
                 "tool": "accept", "ok": False,
@@ -254,6 +255,12 @@ def cmd_accept(args: argparse.Namespace) -> int:
         return _emit(run_suite(args.directory if args.directory
                                else args.project_root, args.key,
                                timeout_s=args.timeout))
+    except BinaryConfigError as e:
+        return _emit({
+            "tool": "accept", "ok": False,
+            "summary": {"error": str(e)},
+            "failures": [{"reason": str(e)}],
+        })
     except AcceptRunError as e:
         return _emit({
             "tool": "accept", "ok": False,
@@ -288,20 +295,17 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("mutation", args)
     if early is not None:
         return early
-    # §SPEC-078 M3：拉起任何 Godot 子进程前同源启动校验——不可用即领域
-    # JSON。--dry-run 只列位点不拉 Godot（SPEC-009 离线路径），不校验。
-    if not args.dry_run:
-        from .mutation.inject import BinaryConfigError, \
-            ensure_godot_launchable
-        try:
-            ensure_godot_launchable(str(args.project_root))
-        except BinaryConfigError as e:
-            return _emit({"tool": "mutation", "ok": False,
-                          "summary": {"error": str(e)},
-                          "failures": [{"reason": str(e)}]})
+    # §SPEC-079 B：入口不做静态启动拦截（mocked 用例/--dry-run 离线路径
+    # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
+    # 领域 JSON 出口收口。
+    from .mutation.inject import BinaryConfigError
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
+    except BinaryConfigError as e:
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     except FileNotFoundError as e:
         result = {
             "tool": "mutation",
@@ -610,15 +614,10 @@ def cmd_coverage(args: argparse.Namespace) -> int:
                         retention_days=getattr(args, "retain_days", 7))
         result.update({"tool": "coverage", "ok": True})
         return _emit(result)
-    # §SPEC-078 M3：measure 是 coverage 唯一拉起 Godot 的路径——启动前
-    # 同源校验（recover/prune 离线路径与缺 file 的用法错误不受影响）
-    from .mutation.inject import BinaryConfigError, ensure_godot_launchable
-    try:
-        ensure_godot_launchable(str(args.project_root))
-    except BinaryConfigError as e:
-        return _emit({"tool": "coverage", "ok": False,
-                      "summary": {"error": str(e)},
-                      "failures": [{"reason": str(e)}]})
+    # §SPEC-079 B：measure 是 coverage 唯一拉起 Godot 的路径——入口不做
+    # 静态拦截（recover/prune 离线路径与 mocked 用例不受影响），
+    # 拉起点的 BinaryConfigError 由下方领域 JSON 出口收口。
+    from .mutation.inject import BinaryConfigError
     try:
         result = run_coverage(
             file_path=args.file,
@@ -630,6 +629,10 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             tests_glob=args.tests,
             evidence_out=getattr(args, "evidence_out", None),
         )
+    except BinaryConfigError as e:
+        return _emit({"tool": "coverage", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     except FileNotFoundError as e:
         result = {
             "tool": "coverage",

@@ -1221,28 +1221,29 @@ def test_cli_bare_name_project_root_godot_not_pretpassed(
     assert "not found in PATH" in payload["summary"]["error"]
 
 
-# ------------------------- §SPEC-078 R34：三命令五路同源启动校验
+# ------------------------- §SPEC-078/079：启动失败领域收口
 
-def _spawn_tool_clean_env(tool_args, project, tmp_path):
-    """§SPEC-078 M3：纯净环境（PATH 无 godot、无 GQT_GODOT_BIN）真实
-    CLI 子进程——三命令五路（accept run/mutate、mutation 并发/串行、
-    coverage measure）的启动失败统一收口为领域 JSON ok=false，错误含
-    "godot binary not found in PATH"，stderr 零 traceback。"""
+def _spawn_clean_env(tool_args, project, tmp_path, extra_env=None):
+    """纯净环境（PATH 无 godot、无 GQT_GODOT_BIN，可经 extra_env 覆写）
+    真实 CLI 子进程驱动：断言 exit 1 + 领域 JSON ok=false + stderr 零
+    traceback（具体错误消息断言由调用方追加）。§SPEC-079 B 后启动失败
+    由真实拉起点 spawn_godot 收口，入口不再静态拦截。"""
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
            "TMPDIR": str(tmp_path / "tmp"), "LANG": "C.UTF-8",
            "PYTHONPATH": str(REPO / "src")}
+    if extra_env:
+        env.update(extra_env)
     (tmp_path / "home").mkdir()
     (tmp_path / "tmp").mkdir()
     proc = sp.run(
         [sys.executable, "-m", "godot_qa_toolkit.cli", *tool_args,
          "--project-root", str(project)],
-        capture_output=True, text=True, timeout=60, env=env,
+        capture_output=True, text=True, timeout=120, env=env,
         cwd=str(REPO))
-    assert proc.returncode == 1
+    assert proc.returncode == 1, proc.stderr[-800:]
     payload = json.loads(proc.stdout)
     assert payload["ok"] is False
-    assert "godot binary not found in PATH" in payload["summary"]["error"]
-    assert "Traceback" not in proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr[-800:]
     assert proc.stdout.strip(), "stdout 非空"
     return payload
 
@@ -1251,35 +1252,111 @@ def _mutation_target(project):
     return str(project / "src_game" / "cell.gd")
 
 
-def test_accept_run_missing_godot_clean_env(project, tmp_path):
-    payload = _spawn_tool_clean_env(
-        ["accept", "run", "--key", "demo"], project, tmp_path)
+def _compile_demo_suite(project, tmp_path):
+    """编译 fixture 的 demo 特性到标准 acceptance/ir（mutate 前置——
+    replay_check 需要已编译 IR；compile 不拉 Godot）。"""
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
+           "TMPDIR": str(tmp_path / "tmp"), "LANG": "C.UTF-8",
+           "PYTHONPATH": str(REPO / "src")}
+    proc = sp.run(
+        [sys.executable, "-m", "godot_qa_toolkit.cli", "accept", "compile",
+         str(project / "acceptance" / "features" / "demo.feature"),
+         "--project-root", str(project), "--write"],
+        capture_output=True, text=True, timeout=60, env=env,
+        cwd=str(REPO))
+    assert proc.returncode == 0, proc.stderr[-800:]
+
+
+def test_accept_run_probe_missing_godot_clean_env(project, tmp_path):
+    payload = _spawn_clean_env(
+        ["accept", "run", "--acceptance-probe-keys", "demo"],
+        project, tmp_path)
     assert payload["tool"] == "accept"
+    assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
 def test_accept_mutate_missing_godot_clean_env(project, tmp_path):
-    payload = _spawn_tool_clean_env(
+    _compile_demo_suite(project, tmp_path)
+    payload = _spawn_clean_env(
         ["accept", "mutate", "--key", "demo"], project, tmp_path)
     assert payload["tool"] == "accept"
+    assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
 def test_mutation_missing_godot_clean_env(project, tmp_path):
-    payload = _spawn_tool_clean_env(
+    payload = _spawn_clean_env(
         ["mutation", _mutation_target(project)], project, tmp_path)
     assert payload["tool"] == "mutation"
+    assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
 def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
-    payload = _spawn_tool_clean_env(
+    payload = _spawn_clean_env(
         ["mutation", "--jobs", "1", _mutation_target(project)],
         project, tmp_path)
     assert payload["tool"] == "mutation"
+    assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
 def test_coverage_measure_missing_godot_clean_env(project, tmp_path):
-    payload = _spawn_tool_clean_env(
+    payload = _spawn_clean_env(
         ["coverage", _mutation_target(project)], project, tmp_path)
     assert payload["tool"] == "coverage"
+    assert "godot binary not found in PATH" in payload["summary"]["error"]
+
+
+# ------------------------- §SPEC-079 R35：伪格式五路领域收口
+
+def _pseudo_elf(tmp_path):
+    """R34-M1 形态 1：仅 4 字节魔数 + 垃圾（截断/损坏下载常见形态）。"""
+    f = tmp_path / "pseudo-elf-godot"
+    f.write_bytes(b"\x7fELFgarbage-not-a-real-executable")
+    f.chmod(0o755)
+    return f
+
+
+def _bad_interpreter_godot(tmp_path):
+    """R34-M1 形态 2：外层 #! 的解释器带执行位但自身非可执行格式。"""
+    interp = tmp_path / "interpreter-not-format"
+    interp.write_text("I only have the executable bit\n")
+    interp.chmod(0o755)
+    outer = tmp_path / "outer-bad-interpreter"
+    outer.write_text(f"#!{interp}\nexit 0\n")
+    outer.chmod(0o755)
+    return outer
+
+
+@pytest.mark.parametrize("bad", ["pseudo_elf", "bad_interpreter"])
+@pytest.mark.parametrize("route", ["canonical", "canonical-diagnose",
+                                   "mutation", "coverage", "accept_probe"])
+def test_pseudo_format_five_routes_domain_json(route, bad, project,
+                                               tmp_path):
+    """§SPEC-079 C：伪 ELF / 坏格式解释器两形态在五命令均领域 JSON
+    ok=false、stderr 零 traceback（canonical 系静态前置、三命令拉起点
+    spawn_godot 兜底，双防线收口）。"""
+    fake = (_pseudo_elf(tmp_path) if bad == "pseudo_elf"
+            else _bad_interpreter_godot(tmp_path))
+    out = tmp_path / "out.json"
+    if route in ("canonical", "canonical-diagnose"):
+        recipe_path = tmp_path / "recipe.json"
+        recipe_path.write_text(json.dumps(_recipe(project)),
+                               encoding="utf-8")
+        args = [route, str(project / "src_game"),
+                "--recipe", str(recipe_path), "--out", str(out)]
+        if route == "canonical-diagnose":
+            args += ["--features", "demo"]
+    elif route == "mutation":
+        args = ["mutation", _mutation_target(project)]
+    elif route == "coverage":
+        args = ["coverage", _mutation_target(project)]
+    else:
+        args = ["accept", "run", "--acceptance-probe-keys", "demo"]
+    payload = _spawn_clean_env(args, project, tmp_path,
+                               extra_env={"GQT_GODOT_BIN": str(fake)})
+    assert payload["tool"].split("-")[0] in ("canonical", "mutation",
+                                             "coverage", "accept")
+    assert payload["ok"] is False
+    assert payload["summary"]["error"]
 
 
 def test_shebang_missing_interpreter_rejected_at_precheck(

@@ -319,11 +319,11 @@ def run_coverage(
     coverage-evidence/2 生命周期：per-run UUID sink + run 记录 + bundle
     落盘即清 sink；不传则 stdout 契约与 011b87d 逐字节一致（零漂移）。
     """
-    path = Path(file_path)
-    if not path.is_absolute():
-        # §SPEC-610（SEE-1576 R-5）：与 mutation 三检查点同口径——相对目标
-        # 锚定 --project-root（绝对路径直过）。
-        path = Path(project_root) / path
+    from ..source_io import anchor_to_project_root, read_gd_source
+
+    # §SPEC-610（SEE-1576 R-5）：与 mutation 两处检查点同口径——相对目标
+    # 锚定 --project-root（绝对路径直过）。
+    path = Path(anchor_to_project_root(file_path, project_root))
     if not path.is_file():
         raise FileNotFoundError(
             f"coverage target not found: {file_path} (anchored: {path})")
@@ -339,8 +339,6 @@ def run_coverage(
         write_bundle,
         write_run_record,
     )
-    from ..source_io import read_gd_source
-
     original_src, read_error = read_gd_source(str(path))
     if read_error is not None:
         # §SPEC-028: single-file reads fail structurally, never crash

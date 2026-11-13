@@ -241,6 +241,67 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
   `--mutation-warning` / `--timeout-factor` / `timeout_streak` never enter
   any resume key.
 
+### Planning fast paths (SEE-1571, default-on)
+
+- **Zero-reference targets short-circuit instead of falling back to the full
+  suite.** When `--tests` is omitted and the derived test glob has **zero**
+  references for a target that has executable mutation sites, gqt records an
+  intentional non-execution result instead of running every GUT test: the file
+  reports `ok=true` with zero verdict counts, `jobs=0`,
+  `summary.zero_ref_short_circuit=true`, an explanatory `note`, and a matching
+  stderr line. This is a disclosed quality trade-off — potential kills are
+  intentionally not executed because no test references the target. Explicit
+  `--tests`, `--dry-run`, zero-site targets and collection errors never take
+  this short-circuit. In a multi-file run the record stays in `results`; no
+  input file disappears silently.
+- **Planning reuses one in-process gdself index.** Auto-scan planning builds
+  the forward index once per resolved project root and reuses it read-only for
+  every target in the same gqt process. The cache is process-local only (zero
+  persistence), so a new process always sees current files; planning output is
+  identical to rebuilding the index per file.
+- **Small targets may auto-select serial execution from measured priors.** At
+  the completion of a single-file run, gqt normalizes `stage_timings` into
+  `.qa-cache/gqt-mutation-cost-priors.json` (`prewarm_s`, `baseline_s`,
+  `per_mutant_s`, `slot_fixed_s`; single writer, atomic replace; zero samples
+  keep the old prior). For targets of **at most 8 sites**, gqt compares the
+  measured serial and parallel cost models and may choose serial. Targets with
+  more than 8 sites are outside the arbitration domain and always keep the
+  parallel default — even if the prior file is poisoned by a slow slot. Missing,
+  invalid or zero-per-mutant priors also keep parallel. Every arbitration (or
+  out-of-domain refusal) is disclosed on stderr with both estimates and the
+  four priors.
+
+### Prewarm freshness proof (SEE-1571, default-on)
+
+The parallel path's `godot --headless --import` prewarm is guarded by a content
+proof under `.qa-cache/gqt-prewarm/proof.json`. A skip happens only when the
+current project input digest **and** the full `.godot` output seal both match
+the certificate byte-for-byte; a successful proof is issued only after two
+successful imports converge to the same input/output content state. Input
+hashing covers all regular project files except `.git/`, `.qa-cache/`, `.godot/`
+and the exact JUnit report declared by the current `.gutconfig.json`; `.uid`,
+`.import`, unknown extensions and `.gdignore` are all included. Engine identity
+binds the launcher plus every wrapper-chain link through the terminal binary by
+current SHA-256. `importer="keep"` sidecars are non-import configuration input:
+their bytes enter the input digest, they do not join the importer closure, and
+having no remap output is valid.
+
+Anything unclear is fail-closed: unknown importers or custom import plugins,
+symlinks/non-regular files, unreadable or malformed sidecars, missing remap
+outputs, an unresolvable launcher (including a literal bare `godot` command),
+a cyclic/too-deep wrapper chain, lock failure, certificate mismatch, non-zero
+import rc, `ERROR:` output, or non-converging double imports all mean "no
+certificate — import again". Before any baseline consumes the real repo, a
+baseline-in-farm slot, or a normal Linux farm slot, gqt re-checks both digests
+at that execution root; a mismatch forces reproof/rebuild before baseline
+launch.
+
+Set `GQT_PREWARM_SENTINEL=0` (also `false` / `no`) to force the old
+always-import behavior. Fresh skips disclose the proof id and both digest
+prefixes on stderr; re-imports disclose their concrete reason. Serial runs keep
+their existing no-prewarm semantics, so this optimization applies to the
+parallel path.
+
 ### Disk shadow execution layer & cache identity (SEE-1550)
 
 - **Execution layers by platform**: win64/DrvFS uses a persistent warm slot
@@ -423,6 +484,9 @@ always forces serial.
 <summary><strong>Concurrency knobs & resume semantics</strong></summary>
 
 - `--jobs N` — per-process worker pool, clamped to `max(2, cpu//2)`.
+- `GQT_PREWARM_SENTINEL=0|false|no` — escape hatch for the default-on prewarm
+  freshness proof: always run `godot --headless --import` instead of accepting
+  a proof-backed skip.
 - `GQT_GODOT_BIN` — global default Godot binary for every subcommand that
   launches godot (`mutation` / `coverage` / `accept run|mutate`); each of
   them also takes a per-command `--godot-bin <path>` override (priority:
@@ -475,7 +539,9 @@ always forces serial.
 Auto-scan note: when a mutation target is referenced by
 exactly one test file, the scanner now scopes to that file (GUT `-gselect`)
 instead of its directory — same conservative direction (narrower can only
-over-report survivors, never fake kills), cheaper per round.
+over-report survivors, never fake kills), cheaper per round. The underlying
+gdself forward index is built once per gqt process and reused read-only for all
+targets in that process; it is never persisted.
 
 </details>
 

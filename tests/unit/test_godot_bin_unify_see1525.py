@@ -502,9 +502,11 @@ class TestFixRoundF1F2:
         assert rc1 == 0 and rc2 == 0
         assert captured["kind"] == "win64"
 
-    def test_unset_env_dispatch_proceeds_after_pin(self, tmp_path, capsys,
-                                                   monkeypatch):
-        # 冻结面：unset + 无 flag 时重判不抛错，派发照常（PATH 空解析兜底）。
+    def test_unset_env_measure_fail_fast_domain_after_pin(
+            self, tmp_path, capsys, monkeypatch):
+        # 冻结面（§SPEC-078 M3 修订）：unset + 无 flag 时重判不抛错
+        # （detect 层 win64 兜底保持）；但 coverage measure 是拉起 Godot
+        # 的路径，启动校验处 fail-fast 为领域 JSON，不再进入 run_coverage。
         monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
         inject.reset_binary_kind_cache()
@@ -517,7 +519,10 @@ class TestFixRoundF1F2:
                     "failures": []}
 
         monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
+        assert inject.detect_binary_kind() == "win64"
         rc, payload = self._run_main(
             ["coverage", str(target), "--project-root", str(tmp_path)], capsys)
-        assert rc == 0
-        assert captured["called"] is True
+        assert rc == 1
+        assert payload["tool"] == "coverage" and payload["ok"] is False
+        assert "godot binary not found in PATH" in payload["summary"]["error"]
+        assert captured.get("called") is not True

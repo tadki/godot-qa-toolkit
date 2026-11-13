@@ -1068,16 +1068,17 @@ def _spawn_cli_mismatch(tool: str, godot_bin_env: str, project: Path,
 
 
 def test_cli_relative_cwd_drift_canonical(project, tmp_path, monkeypatch):
-    """§SPEC-076 形态 1（canonical × cwd 漂移）：CLI cwd 放可执行
-    wrapper、子进程 cwd（project root）不放——前置校验按子进程 cwd
-    解析后拒绝（CanonicalError→JSON），不再裸 FileNotFoundError。"""
+    """§SPEC-076 形态 1 × §SPEC-078 M2（canonical × cwd 漂移）：CLI cwd
+    放可执行 wrapper、子进程 cwd（project root）不放——入口层即按子
+    进程 cwd 解析校验并拒绝（相对配置解析后的绝对路径出现在错误里），
+    不再裸 FileNotFoundError。"""
     wrap = tmp_path / "godot"
     wrap.write_text("#!/bin/sh\nexit 0\n")
     wrap.chmod(0o755)
     payload = _spawn_cli_mismatch("canonical", "./godot", project,
                                   tmp_path, monkeypatch)
-    assert "godot binary not found or not executable" \
-        in payload["summary"]["error"]
+    assert "path does not exist" in payload["summary"]["error"]
+    assert str(project / "godot") in payload["summary"]["error"]
 
 
 def test_cli_relative_cwd_drift_diagnose(project, tmp_path, monkeypatch):
@@ -1086,8 +1087,8 @@ def test_cli_relative_cwd_drift_diagnose(project, tmp_path, monkeypatch):
     wrap.chmod(0o755)
     payload = _spawn_cli_mismatch("canonical-diagnose", "./godot", project,
                                   tmp_path, monkeypatch)
-    assert "godot binary not found or not executable" \
-        in payload["summary"]["error"]
+    assert "path does not exist" in payload["summary"]["error"]
+    assert str(project / "godot") in payload["summary"]["error"]
 
 
 def test_cli_exec_format_canonical(project, tmp_path, monkeypatch):
@@ -1218,3 +1219,164 @@ def test_cli_bare_name_project_root_godot_not_pretpassed(
     assert "godot binary not found or not executable" \
         in payload["summary"]["error"]
     assert "not found in PATH" in payload["summary"]["error"]
+
+
+# ------------------------- §SPEC-078 R34：三命令五路同源启动校验
+
+def _spawn_tool_clean_env(tool_args, project, tmp_path):
+    """§SPEC-078 M3：纯净环境（PATH 无 godot、无 GQT_GODOT_BIN）真实
+    CLI 子进程——三命令五路（accept run/mutate、mutation 并发/串行、
+    coverage measure）的启动失败统一收口为领域 JSON ok=false，错误含
+    "godot binary not found in PATH"，stderr 零 traceback。"""
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
+           "TMPDIR": str(tmp_path / "tmp"), "LANG": "C.UTF-8",
+           "PYTHONPATH": str(REPO / "src")}
+    (tmp_path / "home").mkdir()
+    (tmp_path / "tmp").mkdir()
+    proc = sp.run(
+        [sys.executable, "-m", "godot_qa_toolkit.cli", *tool_args,
+         "--project-root", str(project)],
+        capture_output=True, text=True, timeout=60, env=env,
+        cwd=str(REPO))
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is False
+    assert "godot binary not found in PATH" in payload["summary"]["error"]
+    assert "Traceback" not in proc.stderr
+    assert proc.stdout.strip(), "stdout 非空"
+    return payload
+
+
+def _mutation_target(project):
+    return str(project / "src_game" / "cell.gd")
+
+
+def test_accept_run_missing_godot_clean_env(project, tmp_path):
+    payload = _spawn_tool_clean_env(
+        ["accept", "run", "--key", "demo"], project, tmp_path)
+    assert payload["tool"] == "accept"
+
+
+def test_accept_mutate_missing_godot_clean_env(project, tmp_path):
+    payload = _spawn_tool_clean_env(
+        ["accept", "mutate", "--key", "demo"], project, tmp_path)
+    assert payload["tool"] == "accept"
+
+
+def test_mutation_missing_godot_clean_env(project, tmp_path):
+    payload = _spawn_tool_clean_env(
+        ["mutation", _mutation_target(project)], project, tmp_path)
+    assert payload["tool"] == "mutation"
+
+
+def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
+    payload = _spawn_tool_clean_env(
+        ["mutation", "--jobs", "1", _mutation_target(project)],
+        project, tmp_path)
+    assert payload["tool"] == "mutation"
+
+
+def test_coverage_measure_missing_godot_clean_env(project, tmp_path):
+    payload = _spawn_tool_clean_env(
+        ["coverage", _mutation_target(project)], project, tmp_path)
+    assert payload["tool"] == "coverage"
+
+
+def test_shebang_missing_interpreter_rejected_at_precheck(
+        project, tmp_path, monkeypatch):
+    """§SPEC-078 M1：`#!/nonexistent-interpreter` 经 shebang 头校验后
+    须在前置即领域拒绝（不再放行后裸 FileNotFoundError traceback）。"""
+    from godot_qa_toolkit.cli import _godot_bin_ready
+    bad = tmp_path / "bad-interp-godot"
+    bad.write_text("#!/nonexistent-interpreter-for-gqt\nexit 0\n")
+    bad.chmod(0o755)
+    cmd, ok, reason = _godot_bin_ready(project, str(bad))
+    assert cmd == str(bad) and ok is False
+    assert "interpreter not usable" in reason \
+        or "not found" in reason
+
+
+def test_shebang_env_interpreter_missing_rejected(project, tmp_path):
+    """§SPEC-078 M1：`#!/usr/bin/env <missing>` → env 转交的下一位经
+    PATH 查找不存在 → 拒绝。"""
+    from godot_qa_toolkit.cli import _godot_bin_ready
+    bad = tmp_path / "bad-env-godot"
+    bad.write_text("#!/usr/bin/env definitely-missing-interpreter\n"
+                   "exit 0\n")
+    bad.chmod(0o755)
+    cmd, ok, reason = _godot_bin_ready(project, str(bad))
+    assert ok is False
+
+
+def test_shebang_env_interpreter_resolved_via_path_ok(project):
+    """§SPEC-078 M1：`#!/usr/bin/env sh` → env 转交 PATH 查找命中 →
+    通过（内核语义一致）。"""
+    from godot_qa_toolkit.cli import _godot_bin_ready
+    cmd, ok, reason = _godot_bin_ready(project, "sh")
+    assert ok is True and reason == ""
+
+
+def test_entry_relative_godot_bin_project_only_accepted(
+        project, tmp_path, monkeypatch):
+    """§SPEC-078 M2：project-only 相对路径（子进程 cwd 有效）在入口层
+    不得被按 CLI cwd 误拒——canonical 以该二进制继续（FakeGodot 负责
+    GUT 执行）。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    wrapper = project / "quiet-godot"
+    wrapper.write_text("#!/bin/sh\nexit 0\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("GQT_GODOT_BIN", "./quiet-godot")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    args = build_parser().parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
+    orig = sp.run
+    sp.run = FakeGodot(project)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = args.func(args)
+    finally:
+        sp.run = orig
+    assert code == 0
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "canonical" and payload["ok"] is True
+
+
+def test_flag_relative_godot_bin_project_only_accepted(
+        project, tmp_path, monkeypatch):
+    """§SPEC-078 M2 flag 通道：--godot-bin ./quiet-godot（子进程 cwd
+    有效）不被入口层误拒。"""
+    import io
+    from contextlib import redirect_stdout
+
+    from godot_qa_toolkit.cli import build_parser
+
+    wrapper = project / "quiet-godot"
+    wrapper.write_text("#!/bin/sh\nexit 0\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
+    args = build_parser().parse_args([
+        "canonical", str(project / "src_game"),
+        "--project-root", str(project),
+        "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json"),
+        "--godot-bin", "./quiet-godot"])
+    orig = sp.run
+    sp.run = FakeGodot(project)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = args.func(args)
+    finally:
+        sp.run = orig
+    assert code == 0
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "canonical" and payload["ok"] is True

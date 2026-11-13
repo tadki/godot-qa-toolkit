@@ -465,7 +465,7 @@ def _cli(recipe_doc, tmp_path: Path, extra_args=(), stdin=None):
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
         "PYTHONPATH": str(REPO / "src"),
         "GQT_GODOT_BIN": os.environ.get(
-            "GQT_GODOT_BIN", "/home/jerry/gqt-probe-bin/godot"),
+            "GQT_GODOT_BIN", sys.executable),
     })
     (tmp_path / "home").mkdir(exist_ok=True)
     (tmp_path / "tmp").mkdir(exist_ok=True)

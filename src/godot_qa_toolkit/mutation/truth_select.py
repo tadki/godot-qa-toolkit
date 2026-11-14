@@ -174,7 +174,7 @@ def _targets_under(roots: list[str]) -> list[str]:
 
 
 def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
-    """默认自动生成：无映射且 mode=auto → canonical --test-attribution 一次。
+    """默认自动生成：无映射且 mode=auto → `gqt measure run --test-attribution` 一次。
 
     生成成功后落在 `<project>/.qa-cache/attribution-map.json` 并写入
     GQT_ATTRIBUTION_MAP；失败 → 台账记录并 raise `MutationSelectionError`

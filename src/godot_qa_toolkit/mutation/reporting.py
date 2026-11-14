@@ -337,10 +337,14 @@ def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
             f"new failures after {m.kind} {m.original}→{m.mutated}: "
             f"{sorted(new_failures)[:3]}", src=original_src)
         if ownership_fn is not None:
-            cert = killer_certificate(new_failures, ownership_fn(),
-                                      project_root)
-            if cert is not None:
-                record["killed_by"] = cert
+            owner = ownership_fn()
+            if owner is not None:
+                cert = killer_certificate(
+                    new_failures, owner, project_root,
+                    ownership_source=getattr(owner, "source",
+                                             "structural_index"))
+                if cert is not None:
+                    record["killed_by"] = cert
         return record
     if baseline_dirty:
         return _mutant_record(

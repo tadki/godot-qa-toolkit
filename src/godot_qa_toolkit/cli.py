@@ -299,6 +299,18 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
     # 领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
+    from .mutation import truth_select as _truth
+    _truth.reset_ledger()
+    if getattr(args, "attribution_map", None):
+        import os as _os
+        _os.environ[_truth.ENV_MAP] = str(args.attribution_map)
+    if getattr(args, "attribution_auto", True) is False:
+        import os as _os
+        _os.environ[_truth.ENV_MODE] = "off"
+    if not getattr(args, "dry_run", False):
+        # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；失败退全脸并披露
+        _truth.ensure_map(str(Path(args.project_root)),
+                          [str(f) for f in args.files])
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
@@ -322,6 +334,9 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             "summary": {"files": args.files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
+    led = _truth.ledger()
+    if led["events"]:
+        result.setdefault("summary", {})["attribution"] = led
     return _emit(result)
 
 
@@ -643,6 +658,54 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return _emit(result)
 
 
+def _attribution_args(args: argparse.Namespace
+                      ) -> tuple[bool, str | None, bool]:
+    """§SPEC-083：`--test-attribution` 开关与其产物路径的默认推导。
+
+    显式 `--test-attribution-out` 优先；否则仅在开关开启时落到
+    `<--out>.attribution.json`（默认关闭路径不产生任何路径）。
+    `--attribution-causal`（R2）依附归属开关：开关未开时忽略（不静默
+    改变默认路径行为）。"""
+    enabled = bool(getattr(args, "test_attribution", False))
+    explicit = getattr(args, "test_attribution_out", None)
+    out = explicit or (f"{args.out}.attribution.json" if enabled else None)
+    causal = bool(getattr(args, "attribution_causal", False)) and enabled
+    return enabled, out, causal
+
+
+def cmd_attr_update(args: argparse.Namespace) -> int:
+    import json as _json
+    from pathlib import Path as _P
+
+    from .canonical.increment import IncrementError, run_attribution_increment
+
+    rc = _apply_godot_bin_or_contract("attr-update", args)
+    if rc is not None:
+        return rc
+    try:
+        recipe = _json.loads(_P(args.recipe).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return _emit({"tool": "attr-update", "ok": False,
+                      "summary": {"error": f"recipe load failed: {e}"},
+                      "failures": [{"reason": f"recipe load failed: {e}"}]})
+    roots = [_P(r) for r in args.roots]
+    targets = sorted({str(p) for root in roots
+                      for p in root.rglob("*.gd") if p.is_file()})
+    try:
+        report = run_attribution_increment(
+            args.project_root, targets, recipe, args.baseline,
+            [str(c) for c in args.changed], args.out,
+            timeout_s=args.timeout,
+            attribution_causal=bool(args.attribution_causal),
+            calibration_every=args.calibration_every)
+    except IncrementError as e:
+        return _emit({"tool": "attr-update", "ok": False,
+                      "summary": {"error": str(e), "increment_error": True},
+                      "failures": [{"reason": f"increment_error: {e}"}]})
+    return _emit({"tool": "attr-update", "ok": True,
+                  "summary": report, "failures": []})
+
+
 def cmd_canonical(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -728,6 +791,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
         return _emit_godot_unavailable("canonical", godot_cmd, godot_reason)
+    test_attribution, attribution_out, attribution_causal = (
+        _attribution_args(args))
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -740,7 +805,13 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             shard_log_dir=getattr(args, "shard_log_dir", None),
             baseline_failures=baseline_failures,
             intolerant_config=intolerant_config,
-            acceptance_repeats=getattr(args, "acceptance_repeats", 3))
+            acceptance_repeats=getattr(args, "acceptance_repeats", 3),
+            test_attribution=test_attribution,
+            attribution_out=attribution_out,
+            attribution_causal=attribution_causal,
+            arms_parallel=bool(getattr(args, "arms_parallel", False)),
+            acceptance_adaptive=bool(
+                getattr(args, "acceptance_adaptive", False)))
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -891,8 +962,58 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--evidence-dir", default=None,
                      help="optional coverage-evidence/2 output dir for "
                           "per-arm bundles")
+    can.add_argument("--test-attribution", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581): attribute probe hits to "
+                          "the GUT test that was running, emitting a "
+                          "test->file mapping artifact; default off, the "
+                          "default path is byte-identical")
+    can.add_argument("--test-attribution-out", default=None,
+                     help="attribution artifact path (default: "
+                          "<--out>.attribution.json)")
+    can.add_argument("--attribution-causal", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 R2): also wrap "
+                          "call_deferred/create_timer creation sites in "
+                          "instrumented files so their callbacks are "
+                          "attributed to the test that created them; "
+                          "requires --test-attribution")
+    can.add_argument("--acceptance-adaptive", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 P1): run acceptance reps "
+                          "round-by-round and stop early once the line-set "
+                          "union stabilises (bound stays --acceptance-"
+                          "repeats); default off")
+    can.add_argument("--arms-parallel", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 P2): run gut_full and "
+                          "acceptance arms concurrently (acceptance is "
+                          "instrumented inside its shard shadows); default "
+                          "off — timing baseline must be redefined when "
+                          "enabled")
     _add_godot_bin_arg(can)
     can.set_defaults(func=cmd_canonical)
+
+    inc = sub.add_parser(
+        "attr-update",
+        help="EXPERIMENTAL (SEE-1581 方向①): incremental rebuild of the "
+             "attribution mapping from a baseline artifact")
+    inc.add_argument("roots", nargs="+",
+                     help="target .gd roots — must be the same universe as "
+                          "the baseline artifact")
+    inc.add_argument("--project-root", required=True)
+    inc.add_argument("--recipe", required=True,
+                     help="canonical-recipe/1 JSON (same content as the "
+                          "baseline run)")
+    inc.add_argument("--baseline", required=True,
+                     help="prior attribution artifact "
+                          "(canonical-test-attribution/4)")
+    inc.add_argument("--changed", action="append", default=[],
+                     help="changed/new/removed file path (repeatable)")
+    inc.add_argument("--out", required=True,
+                     help="incremented attribution artifact output path")
+    inc.add_argument("--timeout", type=int, default=180)
+    inc.add_argument("--calibration-every", type=int, default=5,
+                     help="force a full-face rebuild after N increments")
+    inc.add_argument("--attribution-causal", action="store_true")
+    _add_godot_bin_arg(inc)
+    inc.set_defaults(func=cmd_attr_update)
 
     ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")
     acsub = ac.add_subparsers(dest="accept_command", required=True)
@@ -990,6 +1111,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
                         "re-runs them — every run persists verdicts, resume just "
                         "turns on the skip")
+    m.add_argument("--attribution-map", default=None,
+                   help="SEE-1581: canonical attribution artifact "
+                        "(canonical-test-attribution/4) used as the runtime "
+                        "truth for test selection; default: auto-managed "
+                        ".qa-cache/attribution-map.json")
+    m.add_argument("--no-attribution-auto", dest="attribution_auto",
+                   action="store_false",
+                   help="disable automatic generation/incremental refresh of "
+                        "the attribution map (falls back to the full face)")
     m.add_argument("--mutation-warning", type=int, default=50,
                    help="warn on stderr + summary.attention when the pre-truncation "
                         "mutation site count exceeds N (default 50, aligned with "

@@ -28,6 +28,7 @@ import stat as stat_module
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from ..accept.run import AcceptRunError, replay_check
@@ -54,6 +55,7 @@ from ..coverage.runner import (
     _instrument_blocks,
     _looks_like_godot_launch_failure,
     _read_hits,
+    _rewrite_call_sites,
 )
 from ..coverage.union import arm_record_from_bundle, union_file
 from ..mutation.godot_gate import GlobalGodotGate
@@ -61,6 +63,19 @@ from ..mutation.inject import BinaryConfigError, godot_command, spawn_godot
 from .recipe import verify_recipe
 
 REPORT_VERSION = "canonical-report/1"
+ATTRIBUTION_SCHEMA = "canonical-test-attribution/4"
+# 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
+# 旧模板（缓存键含 algo 但不含探针文本本身）
+ATTRIBUTION_ALGO_TAG = "attr/6"
+# 归属身份的规范形态（映射键），产物与报告同源
+_ATTRIBUTION_IDENTITY = "res://script::test_name"
+# 报告 test_attribution 节从逐臂映射里抽出的汇总键（映射正文留在产物）
+_ATTRIBUTION_SUMMARY_KEYS = (
+    "tests", "scripts", "files", "pairs", "script_pairs", "function_pairs",
+    "attributed_hit_events", "script_hit_events", "unattributed_hit_events",
+    "lanes", "unattributed_phases", "unattributed_hotspots",
+    "attributed_rate", "script_rate", "unattributed_rate",
+    "files_with_unattributed", "unmapped_count", "unmapped_script_count")
 CERTIFICATION = {
     "status": "not_certified",
     "reason": "single round; WP5 owns two-round certification",
@@ -156,6 +171,219 @@ func _notification(what: int) -> void:
 \t\t\tif arr[i] == 1:
 \t\t\t\tf.store_line(str(i))
 \t\tf.close()
+"""
+
+# §SPEC-083 试验（默认关闭）：归属形态的 pre-hook——在既有 finalizer 注册
+# 之上，用 GUT 的 start_script/start_test/end_test/end_script 信号维护
+# 「当前上下文」：Engine meta `gqt_cov_slot` 单整数槽位（0 无主 / 正数 =
+# 组合注册表下标+1，测试与脚本身份共用一个注册表，方向②）。R1 起测试
+# 窗口外的命中落「脚本级」车道而非一律无主。
+# run_uuid 在注入时以占位符替换（每臂独立）。
+_ATTR_RUN_UUID_PLACEHOLDER = "__GQT_RUN_UUID__"
+_ATTR_PRE_HOOK_GD = """extends "res://addons/gut/hook_script.gd"
+# qa-toolkit canonical attribution hook (experimental, SEE-1581, 方向②).
+# Registers the drain node (same R5 discipline as the default hook) and
+# maintains the current context as a single positive slot index over one
+# combined registry (test/script identities share the index space), so the
+# probe hot path is one meta read + two array writes.
+var _gqt_ctx: Array = []
+var _gqt_idx_by_key: Dictionary = {}
+var _gqt_cur_script_slot: int = 0
+
+func run():
+\tvar root: Node = (gut.get_tree().root if gut != null
+\t\t\telse Engine.get_main_loop().root)
+\tvar node: Node = load("res://addons/gqt_cov_flusher.gd").new()
+\tnode.name = "GqtCovFlusherNode"
+\troot.add_child(node)
+\troot.move_child(node, 0)
+\tEngine.set_meta("gqt_cov_ctx_registry", _gqt_ctx)
+\tEngine.set_meta("gqt_cov_attr_registry_sink",
+\t\t\t"qa-cov-attr-tests-__GQT_RUN_UUID__-" + str(OS.get_process_id()) + ".txt")
+\tEngine.set_meta("gqt_cov_slot", 0)
+\tEngine.set_meta("gqt_cov_slot_max", 0)
+\t# 方向③：无主命中的阶段桶（探针仅在 slot==0 时读）
+\t# 0 bootstrap（首个 start_script 之前）/ 1 script_gap（脚本之间）/
+\t# 2 shutdown（GUT end_run 之后）/ 3 other（防御性默认）
+\tEngine.set_meta("gqt_cov_phase", 0)
+\tif gut != null:
+\t\tgut.start_script.connect(_on_start_script)
+\t\tgut.start_test.connect(_on_start_test)
+\t\tgut.end_test.connect(_on_end_test)
+\t\tgut.end_script.connect(_on_end_script)
+\t\tgut.end_run.connect(_on_end_run)
+
+func _on_end_run() -> void:
+\tEngine.set_meta("gqt_cov_phase", 2)
+
+func _gqt_register(kind: String, identity: String) -> int:
+\tvar key: String = kind + "\\t" + identity
+\tvar idx: int = _gqt_idx_by_key.get(key, -1)
+\tif idx < 0:
+\t\tidx = _gqt_ctx.size()
+\t\t_gqt_ctx.append(key)
+\t\t_gqt_idx_by_key[key] = idx
+\t\tEngine.set_meta("gqt_cov_slot_max", idx + 1)
+\t\tif Engine.has_meta("gqt_cov_attr"):
+\t\t\tvar d: Dictionary = Engine.get_meta("gqt_cov_attr")
+\t\t\tfor sink in d.keys():
+\t\t\t\tvar h: Array = d[sink]
+\t\t\t\th[0].resize(idx + 1)
+\t\t\t\th[1].resize(idx + 1)
+\t\t\t\th[0][idx] = 0
+\t\t\t\th[1][idx] = 0
+\treturn idx
+
+func _on_start_script(coll_script) -> void:
+\tvar idx: int = _gqt_register("script",
+\t\t\tstr(coll_script.get_filename_and_inner()))
+\t_gqt_cur_script_slot = idx + 1
+\tEngine.set_meta("gqt_cov_phase", 1)
+\tEngine.set_meta("gqt_cov_slot", idx + 1)
+
+func _on_start_test(test_name) -> void:
+\tvar base: String = ""
+\tif _gqt_cur_script_slot > 0:
+\t\tvar sk: String = str(_gqt_ctx[_gqt_cur_script_slot - 1])
+\t\tif sk.begins_with("script\\t"):
+\t\t\tbase = sk.substr(7) + "::"
+\tvar idx: int = _gqt_register("test", base + str(test_name))
+\tEngine.set_meta("gqt_cov_slot", idx + 1)
+
+func _on_end_test() -> void:
+\tEngine.set_meta("gqt_cov_slot", _gqt_cur_script_slot)
+
+func _on_end_script() -> void:
+\t_gqt_cur_script_slot = 0
+\tEngine.set_meta("gqt_cov_slot", 0)
+\tEngine.set_meta("gqt_cov_phase", 1)
+"""
+
+# §SPEC-083 R2：创建点包装的运行时上下文（注入 res://addons/gqt_cov_ctx.gd）。
+# 归属注册表用 weakref 持目标对象；回调触发时按创建时捕获的 tag 因果归属。
+# tag 编码与钩子一致：>0 测试下标+1，<0 脚本下标+1 的负数。
+_ATTR_CTX_RELPATH = "addons/gqt_cov_ctx.gd"
+_ATTR_CTX_GD = """extends RefCounted
+# NOTE: GDScript 4 has no try/finally — restore is best-effort straight-line.
+# qa-toolkit canonical causal-attribution context (experimental, SEE-1581 R2).
+# 创建点包装：捕获创建时的 tag（当前上下文槽位），回调触发时把 slot
+# 置回该 tag，回调结束（或下一个 idle 相位）恢复原值。tag 编码与钩子一致：
+# 0 无主 / 正数 = 上下文槽位（组合注册表下标+1）。
+
+static func current_tag() -> int:
+\treturn Engine.get_meta("gqt_cov_slot", 0)
+
+static func _enter(tag: int) -> int:
+\tvar prev: int = Engine.get_meta("gqt_cov_slot", 0)
+\tEngine.set_meta("gqt_cov_slot", tag)
+\treturn prev
+
+static func _restore(prev: int) -> void:
+\tEngine.set_meta("gqt_cov_slot", prev)
+
+static func _run_tagged(tag: int, obj_ref, method: String, args: Array) -> void:
+\tvar obj = obj_ref.get_ref() if obj_ref is WeakRef else obj_ref
+\tif obj == null:
+\t\treturn
+\tvar prev: int = _enter(tag)
+\tobj.callv(method, args)
+\t_restore(prev)
+
+static func call_deferred_tagged(obj, call_args: Array) -> void:
+\tif call_args.is_empty():
+\t\treturn
+\tvar tag: int = current_tag()
+\tvar wr := weakref(obj)
+\tvar method: String = str(call_args[0])
+\tvar args: Array = call_args.slice(1)
+\t(func(): _run_tagged(tag, wr, method, args)).call_deferred()
+
+static func _on_timeout(tag: int) -> void:
+\tvar prev: int = _enter(tag)
+\t# timeout 的其余订阅者在本帧同步执行；恢复延到 idle，避免污染后续归属
+\t(func(): _restore(prev)).call_deferred()
+
+static func create_timer_tagged(tree, time_sec: float,
+\t\tprocess_always: bool = true, process_in_physics: bool = false,
+\t\tignore_time_scale: bool = false) -> SceneTreeTimer:
+\tvar tag: int = current_tag()
+\tvar t: SceneTreeTimer = tree.create_timer(time_sec, process_always,
+\t\t\tprocess_in_physics, ignore_time_scale)
+\t# 先于业务侧 connect，确保回调执行时 ctx 已是创建点上下文
+\tt.timeout.connect(func(): _on_timeout(tag))
+\treturn t
+"""
+
+# 归属形态 finalizer：在既有 hits drain 之后，按 attr sink 落盘
+# (test_idx 命中行 + 已归属/无主命中事件计数)，并把测试注册表写入
+# 每进程一个的注册表 sink。所有写入仍是「每文件一次 open + 一次循环」，
+# I/O 与命中事件数无关（§SPEC-046 口径不破）。
+_ATTR_FLUSHER_GD = """extends Node
+# qa-toolkit canonical per-test attribution finalizer (experimental, SEE-1581).
+func _notification(what: int) -> void:
+\tif what != NOTIFICATION_PREDELETE:
+\t\treturn
+\tif Engine.has_meta("gqt_cov_marks"):
+\t\tvar d: Dictionary = Engine.get_meta("gqt_cov_marks")
+\t\tfor sink_name in d.keys():
+\t\t\tvar arr: Array = d[sink_name]
+\t\t\tvar f = FileAccess.open("user://" + sink_name, FileAccess.READ_WRITE)
+\t\t\tif f == null:
+\t\t\t\tf = FileAccess.open("user://" + sink_name, FileAccess.WRITE)
+\t\t\telse:
+\t\t\t\tf.seek_end()
+\t\t\tif f == null:
+\t\t\t\tpush_error("gqt coverage probe sink open failed: user://" + sink_name)
+\t\t\t\tcontinue
+\t\t\tfor i in arr.size():
+\t\t\t\tif arr[i] == 1:
+\t\t\t\t\tf.store_line(str(i))
+\t\t\tf.close()
+\tif Engine.has_meta("gqt_cov_attr"):
+\t\tvar a: Dictionary = Engine.get_meta("gqt_cov_attr")
+\t\tfor attr_sink in a.keys():
+\t\t\tvar h: Array = a[attr_sink]
+\t\t\tvar af = FileAccess.open("user://" + attr_sink, FileAccess.READ_WRITE)
+\t\t\tif af == null:
+\t\t\t\taf = FileAccess.open("user://" + attr_sink, FileAccess.WRITE)
+\t\t\telse:
+\t\t\t\taf.seek_end()
+\t\t\tif af == null:
+\t\t\t\tpush_error("gqt attribution sink open failed: user://" + attr_sink)
+\t\t\t\tcontinue
+\t\t\tvar seen: Array = h[0]
+\t\t\tfor i in seen.size():
+\t\t\t\tif seen[i] == 1:
+\t\t\t\t\taf.store_line("test " + str(i))
+\t\t\tvar cnt: Array = h[1]
+\t\t\tfor i in cnt.size():
+\t\t\t\tif cnt[i] > 0:
+\t\t\t\t\taf.store_line("cnt " + str(i) + " " + str(cnt[i]))
+\t\t\tvar fctx: Dictionary = h[2]
+\t\t\tfor probe_id in fctx.keys():
+\t\t\t\tvar slots: Dictionary = fctx[probe_id]
+\t\t\t\tfor slot in slots.keys():
+\t\t\t\t\taf.store_line("fn " + str(probe_id) + " " + str(slot))
+\t\t\tvar ucounts: Dictionary = h[3]
+\t\t\tfor pid in ucounts.keys():
+\t\t\t\taf.store_line("unattr " + str(pid) + " " + str(ucounts[pid]))
+\t\t\tvar ph: Array = h[4]
+\t\t\taf.store_line("ph " + str(ph[0]) + " " + str(ph[1])
+\t\t\t\t\t+ " " + str(ph[2]) + " " + str(ph[3]))
+\t\t\taf.close()
+\tif Engine.has_meta("gqt_cov_attr_registry_sink"):
+\t\tvar rsink: String = Engine.get_meta("gqt_cov_attr_registry_sink")
+\t\tvar rf = FileAccess.open("user://" + rsink, FileAccess.READ_WRITE)
+\t\tif rf == null:
+\t\t\trf = FileAccess.open("user://" + rsink, FileAccess.WRITE)
+\t\telse:
+\t\t\trf.seek_end()
+\t\tif rf != null:
+\t\t\tif Engine.has_meta("gqt_cov_ctx_registry"):
+\t\t\t\tvar keys: Array = Engine.get_meta("gqt_cov_ctx_registry")
+\t\t\t\tfor i in keys.size():
+\t\t\t\t\trf.store_line("slot " + str(i) + "\\t" + str(keys[i]))
+\t\t\trf.close()
 """
 
 
@@ -634,6 +862,585 @@ def _read_hits_merged(root: Path, run_uuid: str, rel: str,
     return hits, sum(1 for pid in ids if pid in valid)
 
 
+def _attr_pid(sink_file: str, run_uuid: str) -> int | None:
+    """attr/registry sink 文件名 → 进程 PID（`...-<uuid>-<pid>-<key8>.txt`
+    与 `...-<uuid>-<pid>.txt` 两形态）。解析失败返回 None（不猜）。"""
+    stem = sink_file.rsplit(".", 1)[0]
+    idx = stem.find(run_uuid)
+    if idx < 0:
+        return None
+    tail = stem[idx + len(run_uuid):].strip("-")
+    head = tail.split("-", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _iter_attr_sinks(root: Path, run_uuid: str, pattern: str,
+                     xdg_homes: list[str],
+                     consume: bool = True) -> Iterator[tuple[int, str]]:
+    """§SPEC-083：按文件名序遍历各 XDG 下的 attr/registry sink，逐条给出
+    (pid, 文本)；读后即消费（consume=False 仅用于诊断复盘）。
+
+    文件名解析不出 pid 的条目不猜、跳过；read 失败时仍按 consume 口径
+    删除文件（与调用方 finally 语义一致），异常向上抛给调用方。"""
+    proj = _project_name(root)
+    for xdg in xdg_homes:
+        d = _shard_user_dir(xdg, proj)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob(pattern)):
+            pid = _attr_pid(f.name, run_uuid)
+            if pid is None:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            finally:
+                if consume:
+                    f.unlink(missing_ok=True)
+            yield pid, text
+
+
+def _new_attr_rec() -> dict:
+    # fn 级布局：seen/cnt 按上下文槽位，fn 记 (probe, slot) 函数级归属，
+    # unattr_counts 记无主 probe 热点，phases = [bootstrap, gap, shutdown,
+    # other]（方向③）
+    return {"seen": set(), "cnt": {}, "fn": {}, "unattr_counts": {},
+            "phases": [0, 0, 0, 0]}
+
+
+def _accumulate_attr_lines(rec: dict, text: str) -> None:
+    """attr sink 行累加进 rec（方向② fn 级布局）：`test <slot>` 记文件级
+    关系；`cnt <slot> <n>` 按槽位累计命中事件；`fn <probe> <slot>` 记
+    函数级归属；`unattr <probe> <n>` 记无主热点；`ph <4 整数>` 累计四阶段；
+    格式或数值不合法的行跳过。"""
+    for raw in text.splitlines():
+        line = raw.strip()
+        kind, _, body = line.partition(" ")
+        if not body:
+            continue
+        try:
+            if kind == "test":
+                rec["seen"].add(int(body))
+            elif kind == "cnt":
+                slot_s, n_s = body.split()
+                slot, n = int(slot_s), int(n_s)
+                rec["cnt"][slot] = rec["cnt"].get(slot, 0) + n
+            elif kind == "fn":
+                probe_s, slot_s = body.split()
+                probe, slot = int(probe_s), int(slot_s)
+                slot_set = rec["fn"].setdefault(probe, set())
+                slot_set.add(slot)
+            elif kind == "unattr":
+                probe_s, n_s = body.split()
+                probe, n = int(probe_s), int(n_s)
+                rec["unattr_counts"][probe] = (
+                    rec["unattr_counts"].get(probe, 0) + n)
+            elif kind == "ph":
+                vals = [int(x) for x in body.split()]
+                if len(vals) == 4:
+                    for i, v in enumerate(vals):
+                        rec["phases"][i] += v
+        except (ValueError, IndexError):
+            continue
+
+
+def _read_attr_merged(root: Path, run_uuid: str, rel: str,
+                      xdg_homes: list[str], consume: bool = True
+                      ) -> dict[int, dict]:
+    """§SPEC-083：读回 per-file 归属 sink（`qa-coverage-attr-<uuid>-<pid>-
+    <key8>.txt`）。返回 {pid: {"seen", "seen_script", "counts"}}——pid 用于
+    与注册表 join（每进程独立注册表）。"""
+    key8 = file_key8(rel)
+    name = f"qa-coverage-attr-{run_uuid}-*-{key8}.txt"
+    out: dict[int, dict] = {}
+    for pid, text in _iter_attr_sinks(root, run_uuid, name, xdg_homes, consume):
+        _accumulate_attr_lines(out.setdefault(pid, _new_attr_rec()), text)
+    return out
+
+
+def _accumulate_registry_lines(tables: tuple[dict, dict], text: str) -> None:
+    """registry sink 行写入 (test_table, script_table)：组合注册表行
+    `slot <idx>\\t<kind>\\t<identity>`，按 kind 分流入 test/script 两表；
+    格式不符行跳过。"""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("slot "):
+            continue
+        parts = line[5:].split("\t")
+        if len(parts) != 3:
+            continue
+        idx_s, kind, identity = parts
+        try:
+            idx = int(idx_s)
+        except ValueError:
+            continue
+        if kind == "test":
+            tables[0][idx] = identity
+        elif kind == "script":
+            tables[1][idx] = identity
+
+
+def _read_registries(root: Path, run_uuid: str, xdg_homes: list[str],
+                     consume: bool = True
+                     ) -> tuple[dict[int, dict[int, str]], dict[int, dict[int, str]]]:
+    """§SPEC-083：读回每进程组合注册表 `qa-cov-attr-tests-<uuid>-<pid>.txt`
+    → ({pid: {slot: identity}}, {pid: {slot: identity}})（test/script 分表）。"""
+    name = f"qa-cov-attr-tests-{run_uuid}-*.txt"
+    tests: dict[int, dict[int, str]] = {}
+    scripts: dict[int, dict[int, str]] = {}
+    for pid, text in _iter_attr_sinks(root, run_uuid, name, xdg_homes, consume):
+        _accumulate_registry_lines(
+            (tests.setdefault(pid, {}), scripts.setdefault(pid, {})), text)
+    return tests, scripts
+
+
+_UNATTR_PHASES = ("bootstrap", "script_gap", "shutdown", "other")
+
+
+def _hit_rate(value: int, total: int) -> float | None:
+    """命中事件占比（total=0 时 None，不臆造 0）。"""
+    return round(value / total, 6) if total else None
+
+
+def _file_lane_slots(rel: str, per_pid: dict, test_tables: dict,
+                     script_tables: dict) -> tuple:
+    """单文件槽位归属：返回 (test 身份集, script 身份集, test 事件数,
+    script 事件数, 未归属槽位披露)。test 车道优先（窗口内身份）。"""
+    file_tests: set[str] = set()
+    file_scripts: set[str] = set()
+    test_events = 0
+    script_events = 0
+    unmapped: list[dict] = []
+    for pid, rec in sorted(per_pid.items()):
+        ttable = test_tables.get(pid, {})
+        stable = script_tables.get(pid, {})
+        for slot_idx in sorted(rec["seen"]):
+            tident = ttable.get(slot_idx)
+            sident = stable.get(slot_idx)
+            if tident is not None:
+                file_tests.add(tident)
+                test_events += rec["cnt"].get(slot_idx, 0)
+            elif sident is not None:
+                file_scripts.add(sident)
+                script_events += rec["cnt"].get(slot_idx, 0)
+            else:
+                # 组合注册表缺失该槽位——单条披露，不按车道猜测
+                unmapped.append({"file": rel, "pid": pid, "slot": slot_idx})
+    return file_tests, file_scripts, test_events, script_events, unmapped
+
+
+def _file_function_edges(per_pid: dict, test_tables: dict,
+                         script_tables: dict,
+                         fid_by_probe: dict) -> tuple:
+    """单文件函数级边：`fn <probe> <slot>` 对按槽位身份归入 test/script
+    函数集（probe 解析不出 fid 的跳过）。"""
+    test_fns: dict[str, set[str]] = {}
+    script_fns: dict[str, set[str]] = {}
+    for pid, rec in sorted(per_pid.items()):
+        ttable = test_tables.get(pid, {})
+        stable = script_tables.get(pid, {})
+        for probe_id, slots in sorted(rec["fn"].items()):
+            fid = fid_by_probe.get(probe_id)
+            if fid is None:
+                continue
+            for slot_idx in sorted(slots):
+                tident = ttable.get(slot_idx)
+                if tident is not None:
+                    test_fns.setdefault(tident, set()).add(fid)
+                    continue
+                sident = stable.get(slot_idx)
+                if sident is not None:
+                    script_fns.setdefault(sident, set()).add(fid)
+    return test_fns, script_fns
+
+
+def _file_unattributed(per_pid: dict) -> tuple[list[int], dict[int, int]]:
+    """单文件无主阶段计数与热点（probe→命中事件）。"""
+    phases = [0, 0, 0, 0]
+    counts: dict[int, int] = {}
+    for rec in per_pid.values():
+        for i, v in enumerate(rec["phases"]):
+            phases[i] += v
+        for probe_id, n in rec["unattr_counts"].items():
+            counts[probe_id] = counts.get(probe_id, 0) + n
+    return phases, counts
+
+
+def _phase_lane_report(phases_total: list[int], lane_total: int) -> dict:
+    """方向③：无主命中的四阶段桶（速率 + 占无主总量份额）。"""
+    unattributed = sum(phases_total)
+    out: dict[str, dict] = {}
+    for i, name in enumerate(_UNATTR_PHASES):
+        events = phases_total[i]
+        out[name] = {
+            "hit_events": events,
+            "rate": _hit_rate(events, lane_total),
+            "share_of_unattributed": (round(events / unattributed, 6)
+                                      if unattributed else None),
+        }
+    return out
+
+
+def _hotspot_report(hotspot_counts: dict, probe_lines_by_rel,
+                    fid_by_line_by_rel, limit: int) -> list[dict]:
+    """无主热点：probe→行→函数，按命中事件降序（同数按 file/probe 稳定序）。"""
+    merged: list[tuple[int, str, dict]] = []
+    for rel, slot in hotspot_counts.items():
+        probe_lines = (probe_lines_by_rel or {}).get(rel) or []
+        fid_by_line = (fid_by_line_by_rel or {}).get(rel) or {}
+        for probe_id, n in slot.items():
+            line = (probe_lines[probe_id]
+                    if 0 <= probe_id < len(probe_lines) else None)
+            fid = fid_by_line.get(line) if line is not None else None
+            merged.append((n, rel, {
+                "file": rel, "probe_id": probe_id, "line": line,
+                "function_id": fid, "hit_events": n}))
+    merged.sort(key=lambda e: (-e[0], e[1], e[2]["probe_id"]))
+    return [entry for _n, _rel, entry in merged[:max(0, limit)]]
+
+
+def _attribution_payload(arm: str, test_to_files: dict, script_to_files: dict,
+                         test_to_functions: dict, script_to_functions: dict,
+                         file_to_tests: dict, file_to_scripts: dict,
+                         unmapped: list, events: tuple, lane_total: int,
+                         phase_lane: dict, hotspots: list,
+                         files_with_unattributed: int) -> dict:
+    """臂级映射产物（canonical-test-attribution/4 的 arms 条目）。
+
+    键序与口径保持稳定：`attributed_*` 兼容旧口径 = 测试级车道。"""
+    test_events, script_events, unattributed_events = events
+    return {
+        "arm": arm,
+        "tests": len(test_to_files),
+        "scripts": len(script_to_files),
+        "files": len(file_to_tests),
+        "pairs": sum(len(v) for v in test_to_files.values()),
+        "script_pairs": sum(len(v) for v in script_to_files.values()),
+        "function_pairs": sum(len(v) for v in test_to_functions.values()),
+        # 兼容上轮口径：attributed = 测试级车道
+        "attributed_hit_events": test_events,
+        "script_hit_events": script_events,
+        "unattributed_hit_events": unattributed_events,
+        "lanes": {
+            "test": {"hit_events": test_events,
+                     "rate": _hit_rate(test_events, lane_total)},
+            "script": {"hit_events": script_events,
+                       "rate": _hit_rate(script_events, lane_total)},
+            "unattributed": {
+                "hit_events": unattributed_events,
+                "rate": _hit_rate(unattributed_events, lane_total),
+                "phases": phase_lane},
+        },
+        "unattributed_phases": phase_lane,
+        "unattributed_hotspots": hotspots,
+        "attributed_rate": _hit_rate(test_events, lane_total),
+        "script_rate": _hit_rate(script_events, lane_total),
+        "unattributed_rate": _hit_rate(unattributed_events, lane_total),
+        "files_with_unattributed": files_with_unattributed,
+        "unmapped_test_indices": unmapped[:200],
+        "unmapped_count": len(unmapped),
+        # 组合注册表下单一天窗：未知槽位只在 unmapped 单列一次（不按车道猜）
+        "unmapped_script_indices": [],
+        "unmapped_script_count": 0,
+        "test_to_files": {k: sorted(v) for k, v in sorted(test_to_files.items())},
+        "script_to_files": {k: sorted(v)
+                            for k, v in sorted(script_to_files.items())},
+        "test_to_functions": {k: sorted(v)
+                              for k, v in sorted(test_to_functions.items())},
+        "script_to_functions": {k: sorted(v)
+                                for k, v in sorted(script_to_functions.items())},
+        "file_to_tests": file_to_tests,
+        "file_to_scripts": file_to_scripts,
+    }
+
+
+def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
+                          registries: tuple[dict, dict],
+                          probe_lines_by_rel: "dict[str, list[int]] | None" = None,
+                          fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
+                          fid_by_probe_by_rel: "dict[str, dict[int, str]] | None" = None,
+                          hotspot_limit: int = 20) -> dict:
+    """§SPEC-083（方向② fn 级）：per-file 归属证据 → 三条车道 + 映射。
+
+    归属证据按 (file, pid) 记录；pid 对应一个 GUT 进程的组合注册表
+    （test/script 身份共用槽位空间，kind 由注册表行给出）。车道：
+    test（start_test..end_test 窗口内）/ script（窗口外的脚本级上下文，
+    R1）/ unattributed（方向③四阶段桶）。车道事件取自 per-slot cnt；
+    函数级映射取自 `fn <probe> <slot>` 对（fid 由函数入口 probe 映射解析），
+    文件级映射取自 seen 位图。无主热点同方向③（probe→行→函数）。"""
+    test_tables, script_tables = registries
+    test_to_files: dict[str, set[str]] = {}
+    script_to_files: dict[str, set[str]] = {}
+    test_to_functions: dict[str, set[str]] = {}
+    script_to_functions: dict[str, set[str]] = {}
+    file_to_tests: dict[str, set[str]] = {}
+    file_to_scripts: dict[str, set[str]] = {}
+    unmapped: list[dict] = []
+    test_events = 0
+    script_events = 0
+    phases_total = [0, 0, 0, 0]
+    files_with_unattributed = 0
+    hotspot_counts: dict[str, dict[int, int]] = {}
+    for rel, per_pid in sorted(attr_by_rel.items()):
+        file_tests, file_scripts, te, se, um = _file_lane_slots(
+            rel, per_pid, test_tables, script_tables)
+        test_events += te
+        script_events += se
+        unmapped.extend(um)
+        for ident in file_tests:
+            test_to_files.setdefault(ident, set()).add(rel)
+        for ident in file_scripts:
+            script_to_files.setdefault(ident, set()).add(rel)
+        if file_tests:
+            file_to_tests[rel] = sorted(file_tests)
+        if file_scripts:
+            file_to_scripts[rel] = sorted(file_scripts)
+        fn_tests, fn_scripts = _file_function_edges(
+            per_pid, test_tables, script_tables,
+            (fid_by_probe_by_rel or {}).get(rel) or {})
+        for ident, fids in fn_tests.items():
+            test_to_functions.setdefault(ident, set()).update(fids)
+        for ident, fids in fn_scripts.items():
+            script_to_functions.setdefault(ident, set()).update(fids)
+        phases, counts = _file_unattributed(per_pid)
+        for i, v in enumerate(phases):
+            phases_total[i] += v
+        if sum(phases):
+            files_with_unattributed += 1
+        slot = hotspot_counts.setdefault(rel, {})
+        for probe_id, n in counts.items():
+            slot[probe_id] = slot.get(probe_id, 0) + n
+
+    unattributed_events = sum(phases_total)
+    lane_total = test_events + script_events + unattributed_events
+    phase_lane = _phase_lane_report(phases_total, lane_total)
+    hotspots = _hotspot_report(hotspot_counts, probe_lines_by_rel,
+                               fid_by_line_by_rel, hotspot_limit)
+    return _attribution_payload(
+        arm, test_to_files, script_to_files, test_to_functions,
+        script_to_functions, file_to_tests, file_to_scripts, unmapped,
+        (test_events, script_events, unattributed_events), lane_total,
+        phase_lane, hotspots, files_with_unattributed)
+
+
+def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
+                         sink_by_rel, xdg_homes: list[str],
+                         prepared: "dict[str, dict] | None" = None) -> dict | None:
+    """§SPEC-083：xdg 清理前读回归属证据与注册表，聚合成臂级映射；
+    开关关闭时不读任何 sink、返回 None。prepared 提供探针 manifest、
+    func-registry 与函数入口 probe 映射（方向②）。"""
+    if not enabled:
+        return None
+    attr_by_rel = {
+        rel: _read_attr_merged(root, run_uuid, rel, xdg_homes)
+        for rel in sink_by_rel}
+    registries = _read_registries(root, run_uuid, xdg_homes)
+    probe_lines_by_rel: dict[str, list[int]] = {}
+    fid_by_line_by_rel: dict[str, dict[int, str]] = {}
+    fid_by_probe_by_rel: dict[str, dict[int, str]] = {}
+    for rel, item in (prepared or {}).items():
+        probe_lines_by_rel[rel] = list(item.get("probe_lines") or [])
+        fid_by_line: dict[int, str] = {}
+        for entry in (item.get("registry") or {}).get("entries") or []:
+            start = entry.get("start_line")
+            end = entry.get("end_line")
+            if isinstance(start, int) and isinstance(end, int):
+                for line in range(start, end + 1):
+                    fid_by_line.setdefault(line, entry["fid"])
+        fid_by_line_by_rel[rel] = fid_by_line
+        by_probe = item.get("attr_fid_by_probe")
+        if by_probe:
+            fid_by_probe_by_rel[rel] = dict(by_probe)
+    return build_attribution_map(arm, attr_by_rel, registries,
+                                 probe_lines_by_rel=probe_lines_by_rel,
+                                 fid_by_line_by_rel=fid_by_line_by_rel,
+                                 fid_by_probe_by_rel=fid_by_probe_by_rel)
+
+
+def _tests_face_map(root: Path) -> dict[str, str]:
+    """tests/ 树全部 .gd 的 rel→sha256（映射的测试面内容绑定）。"""
+    out: dict[str, str] = {}
+    tests = root / "tests"
+    if not tests.is_dir():
+        return out
+    for p in sorted(tests.rglob("*.gd")):
+        try:
+            rel = str(p.relative_to(root))
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
+def _arms_state(arms: tuple[dict, ...]) -> dict:
+    """臂有效性（失效臂的空映射不得被消费方当真值，fail-loud 于消费侧）。"""
+    out: dict[str, dict] = {}
+    for arm in arms:
+        attribution = arm.get("attribution") or {}
+        out[arm["arm"]] = {
+            "state": arm.get("state"),
+            "invalid_reason": arm.get("invalid_reason"),
+            "bundles": int(arm.get("bundles") or 0),
+            "pairs": len(attribution.get("test_to_files") or {}),
+        }
+    return out
+
+
+def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
+                          project_root: Path, causal_meta: dict,
+                          file_sha256: "dict[str, str] | None",
+                          target_files: "list[str] | None",
+                          tests_face: "dict[str, str] | None",
+                          arms: tuple[dict, ...], arms_attr: dict,
+                          notes: list[str]) -> dict:
+    """归属产物正文：三车道映射 + 臂有效性 + 新鲜绑定（recipe/文件/测试面）。"""
+    return {
+        "schema_version": ATTRIBUTION_SCHEMA,
+        "report_recipe_hash": recipe_hash,
+        # SEE-1581：pristine recipe hash（注入 toolchain 之前）——消费方
+        # 新鲜判据用它做零 godot 依赖的现算对照
+        "recipe_hash_pristine": recipe_pristine_hash,
+        "project_root": str(project_root),
+        "identity": _ATTRIBUTION_IDENTITY,
+        "causal": causal_meta,
+        # SEE-1581：文件级新鲜绑定（mutation 真值选面的 file hash 判据）
+        "file_sha256": dict(file_sha256 or {}),
+        "target_files": list(target_files or []),
+        # 测试面内容绑定：测试脚本内容变化同样使映射过期（recipe 不含
+        # 测试内容；覆盖边却依赖它）
+        "tests_face": dict(tests_face or {}),
+        "arms": arms_attr,
+        "arms_state": _arms_state(arms),
+        "notes": notes,
+    }
+
+
+def _attribution_section(enabled: bool, arms: tuple[dict, ...],
+                         recipe_hash: str, project_root: Path,
+                         attribution_out: str | None,
+                         causal: bool = False,
+                         causal_sites: "list[dict] | None" = None,
+                         file_sha256: "dict[str, str] | None" = None,
+                         target_files: "list[str] | None" = None,
+                         recipe_pristine_hash: str | None = None,
+                         tests_face: "dict[str, str] | None" = None) -> dict:
+    """§SPEC-083：canonical 报告的 test_attribution 节（归属产物在
+    attribution_out 非空时落盘，与报告共用同一 notes 列表）。
+
+    默认关闭返回空 dict——报告形状零变化。"""
+    if not enabled:
+        return {}
+    notes = [
+        "lanes: test = hits inside a GUT test window (start_test..end_test); "
+        "script (R1) = hits between start_script and end_script outside any "
+        "test window (before_all/after_all, inter-test execution); "
+        "unattributed is subdivided into named phase buckets (方向③): "
+        "bootstrap = before the first start_script, script_gap = between "
+        "scripts, shutdown = after GUT end_run, other = defensive fallback",
+        "方向②: attribution probes fire only at function entries (line "
+        "coverage flags stay per-block); lane event counts are therefore "
+        "function-entry events, and the acceptance arm runs the plain "
+        "template (attribution off by design, no attribution data)",
+        "every hit event is counted in exactly one lane/phase; rates use the "
+        "three-lane sum as denominator — no hit is silently assigned",
+        "unattributed_hotspots rank probe sites by unattributed hit events "
+        "with line and function_id resolution",
+        "this is a snapshot of one run bound to recipe_hash; code/"
+        "test changes make it stale — rebuild periodically",
+        "diagnostic evidence only — certification stays full-face "
+        "(not_certified, exploratory)",
+    ]
+    if causal:
+        notes.append(
+            "causal (R2): call_deferred/create_timer creation sites inside "
+            "instrumented files are wrapped so callbacks run under the "
+            "creator's context; deferred callbacks triggered from engine "
+            "internals, uninstrumented code/addons, or after shutdown remain "
+            "unattributed — coverage is bounded by those call sites only")
+    sites = causal_sites or []
+    causal_meta = {
+        "enabled": bool(causal),
+        "files_rewritten": len(sites),
+        "sites_rewritten": sum(int(s["sites"]) for s in sites),
+        "by_file": sites,
+    }
+    arms_attr = {arm["arm"]: arm.get("attribution")
+                 for arm in arms
+                 if arm.get("attribution") is not None}
+    artifact = _attribution_artifact(
+        recipe_hash, recipe_pristine_hash, project_root, causal_meta,
+        file_sha256, target_files, tests_face, arms, arms_attr, notes)
+    artifact_path = None
+    if attribution_out:
+        out_p = Path(attribution_out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        artifact_path = str(out_p)
+    return {"test_attribution": {
+        "schema_version": ATTRIBUTION_SCHEMA,
+        "enabled": True,
+        "artifact": artifact_path,
+        "file_sha256_count": len(file_sha256 or {}),
+        "identity": _ATTRIBUTION_IDENTITY,
+        "causal": causal_meta,
+        "arms": {
+            name: {k: amap.get(k) for k in _ATTRIBUTION_SUMMARY_KEYS}
+            for name, amap in arms_attr.items()},
+        "notes": notes,
+    }}
+
+
+def _function_entry_probes(registry: dict,
+                           probe_lines: list[int]) -> tuple[set[int], dict[int, str]]:
+    """方向②：函数入口 probe 集——每个 instrumentable 函数取其行区间内
+    最小的块入口 probe（函数首语句必然被执行，函数级归属以此为锚）。
+    返回 (probe 集合, probe→fid)。内部类体不在探针面内（既有剪枝口径），
+    自然不参与。"""
+    line_to_probe = {ln: i for i, ln in enumerate(probe_lines)}
+    ids: set[int] = set()
+    fid_by_probe: dict[int, str] = {}
+    for entry in (registry or {}).get("entries") or []:
+        if not entry.get("instrumentable"):
+            continue
+        start, end = entry.get("start_line"), entry.get("end_line")
+        if not isinstance(start, int) or not isinstance(end, int):
+            continue
+        candidates = [i for ln, i in line_to_probe.items()
+                      if start <= ln <= end]
+        if not candidates:
+            continue
+        probe_id = min(candidates)
+        ids.add(probe_id)
+        fid_by_probe[probe_id] = entry["fid"]
+    return ids, fid_by_probe
+
+
+def _algo_used(base_algo: str, test_attribution: bool,
+               causal: bool = False) -> str:
+    """§SPEC-083：归属形态插桩产物不同 → 缓存键必须分形；默认关闭路径
+    algo 原样返回（既有缓存条目继续命中，零漂移）。R2 的创建点包装再
+    分一层（同一归属开关下模板不同，不得互相复用）。"""
+    if not test_attribution:
+        return base_algo
+    suffix = f"{ATTRIBUTION_ALGO_TAG}-causal" if causal else ATTRIBUTION_ALGO_TAG
+    return f"{base_algo}-{suffix}"
+
+
+def _hook_templates(test_attribution: bool,
+                    run_uuid: str) -> tuple[str, str]:
+    """§SPEC-083：归属形态换用 per-test 钩子与 attr finalizer；默认路径
+    返回既有模板（字节不变）。"""
+    if test_attribution:
+        return (_ATTR_FLUSHER_GD,
+                _ATTR_PRE_HOOK_GD.replace(
+                    _ATTR_RUN_UUID_PLACEHOLDER, str(run_uuid)))
+    return _FLUSHER_GD, _PRE_HOOK_GD
+
+
 def _inject_toolchain(root: Path, recipe: dict) -> dict:
     """PR-A L1 预留的编排器职责：测量时注入真实 toolchain 版本并重算
     recipe_hash（注入路径下版本变化即 recipe 变化）。加载态先 verify
@@ -668,6 +1475,189 @@ def _inject_toolchain(root: Path, recipe: dict) -> dict:
     return recipe
 
 
+def _load_cached_templates(root: Path, rel: str, src_sha: str,
+                           recipe_hash: str, base_algo: str, algo_used: str,
+                           test_attribution: bool):
+    """静态准备缓存命中（§SPEC-054）：返回
+    (registry, probe_manifest, template, template_attr, probe_lines,
+    block_map)；未命中或归属模板缺失返回 None（走重新插桩）。"""
+    from . import prepcache
+
+    plain_entry = prepcache.load_entry(
+        root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
+        algo=base_algo)
+    if plain_entry is None:
+        return None
+    template_attr = None
+    if test_attribution:
+        attr_entry = prepcache.load_entry(
+            root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
+            algo=algo_used)
+        if attr_entry is None:
+            return None
+        template_attr = attr_entry["instrumented_template"]
+    return (plain_entry["registry"], plain_entry["probe_manifest"],
+            plain_entry["instrumented_template"], template_attr,
+            list(plain_entry.get("probe_lines", [])),
+            plain_entry.get("block_map") or {})
+
+
+def _instrument_pair(rel: str, src: str, registry: dict,
+                     block_compress: bool, test_attribution: bool,
+                     attribution_causal: bool) -> dict:
+    """生成 plain（acceptance 臂）与 attr（gut 臂）插桩模板，并做生成期
+    re-parse 预检（插桩器 bug 必须 fail-loud，不落盘跑假数据）。
+
+    返回 {"template","template_attr","probe_lines","block_map"}，或
+    {"parse_error": <原因>}（调用方逐文件隔离）。"""
+    from gdtoolkit.parser import parser as gd_parser
+
+    from . import prepcache
+
+    tpl_sink = (f"qa-coverage-hits-{prepcache.SINK_UUID_PLACEHOLDER}"
+                f"-{file_key8(rel)}.txt")
+    if block_compress:
+        inst_plain, probe_lines, block_map = _instrument_blocks(
+            src, tpl_sink, runtime_sink=True)
+    else:
+        inst_plain, probe_lines = _instrument(
+            src, tpl_sink, flags=True, runtime_sink=True)
+        block_map = {}
+    template = inst_plain
+    template_attr = None
+    if test_attribution:
+        inst_src = src
+        if attribution_causal:
+            # §SPEC-083 R2：创建点包装（行号不变，manifest 不受影响）
+            inst_src, _sites = _rewrite_call_sites(src, file_key8(rel))
+        attr_probe_ids, _attr_fids = _function_entry_probes(
+            registry, probe_lines)
+        if block_compress:
+            template_attr = _instrument_blocks(
+                inst_src, tpl_sink, runtime_sink=True,
+                attribution=True, causal=attribution_causal,
+                attr_probe_ids=frozenset(attr_probe_ids))[0]
+        else:
+            template_attr = _instrument(
+                inst_src, tpl_sink, flags=True, runtime_sink=True,
+                attribution=True, causal=attribution_causal)[0]
+    for tpl_text in (template, template_attr):
+        if tpl_text is None:
+            continue
+        try:
+            gd_parser.parse(tpl_text)
+        except Exception as e:  # noqa: BLE001
+            return {"parse_error": f"instrument_parse_error:{e}"}
+    return {"template": template, "template_attr": template_attr,
+            "probe_lines": probe_lines, "block_map": block_map}
+
+
+def _store_prepared_templates(root: Path, rel: str, src: str, src_sha: str,
+                              recipe_hash: str, base_algo: str,
+                              algo_used: str, registry: dict,
+                              probe_manifest: dict, template: str,
+                              template_attr: str | None,
+                              probe_lines: list[int],
+                              block_map: dict) -> str | None:
+    """回写静态准备缓存；写失败返回原因（只影响下一轮准备成本，不阻断）。"""
+    from . import prepcache
+
+    try:
+        prepcache.store_entry(
+            root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
+            registry=registry, probe_manifest=probe_manifest,
+            instrumented_template=template, probe_lines=probe_lines,
+            source_plain=src, block_map=block_map, algo=base_algo)
+        if template_attr is not None:
+            prepcache.store_entry(
+                root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
+                registry=registry, probe_manifest=probe_manifest,
+                instrumented_template=template_attr,
+                probe_lines=probe_lines, source_plain=src,
+                block_map=block_map, algo=algo_used)
+    except OSError as e:
+        return f"cache_write_error:{e}"
+    return None
+
+
+def _causal_site_entry(rel: str, template_attr: str | None) -> dict | None:
+    """R2 创建点包装的改写处数（从模板实测，缓存命中路径同样成立）。"""
+    if template_attr is None:
+        return None
+    n_sites = (template_attr.count(".call_deferred_tagged(")
+               + template_attr.count(".create_timer_tagged("))
+    return {"file": rel, "sites": n_sites} if n_sites else None
+
+
+def _prepare_target_file(root: Path, rel: str, src: str, abs_path: str,
+                         path_str: str, *, recipe_hash: str, base_algo: str,
+                         algo_used: str, block_compress: bool,
+                         test_attribution: bool,
+                         attribution_causal: bool) -> dict:
+    """单目标文件准备：静态准备缓存 → registry/manifest → 两臂插桩模板。
+
+    §SPEC-030 单次 parse 纪律（模块级只 parse 一次）+ §SPEC-054（缓存命中
+    侧跳过全部 parse）+ 方向②③（plain 模板给 acceptance 臂、attr 模板给
+    gut 臂，各自独立缓存键）。
+
+    返回 {"prepared", "unmeasured", "cache_hits", "cache_misses",
+    "causal_site"}：解析/插桩失败逐文件隔离（prepared=None），缓存写失败
+    只记 unmeasured 但条目仍可用（成本损失不阻断测量）。
+    """
+    from ..registry.functions import build_file_registry
+    from ..registry.manifest import build_probe_manifest_v2
+
+    out = {"prepared": None, "unmeasured": None,
+           "cache_hits": 0, "cache_misses": 0, "causal_site": None}
+    src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
+    cached = _load_cached_templates(
+        root, rel, src_sha, recipe_hash, base_algo, algo_used,
+        test_attribution)
+    if cached is not None:
+        (registry, probe_manifest, template, template_attr, probe_lines,
+         block_map) = cached
+        out["cache_hits"] = 1
+    else:
+        try:
+            # §SPEC-053：relative-path fid——身份跨 checkout 稳定（绝对
+            # 路径会把检出位置混入函数身份）
+            registry = build_file_registry(src, file_label=rel)
+            probe_manifest = build_probe_manifest_v2(src, registry)
+        except Exception as e:  # noqa: BLE001 — 逐文件隔离，不阻断全集
+            out["unmeasured"] = {"file": path_str,
+                                 "reason": f"registry_parse_error:{e}"}
+            return out
+        built = _instrument_pair(rel, src, registry, block_compress,
+                                 test_attribution, attribution_causal)
+        if "parse_error" in built:
+            out["unmeasured"] = {"file": rel, "reason": built["parse_error"]}
+            return out
+        template, template_attr = built["template"], built["template_attr"]
+        probe_lines, block_map = built["probe_lines"], built["block_map"]
+        out["cache_misses"] = 1
+        write_error = _store_prepared_templates(
+            root, rel, src, src_sha, recipe_hash, base_algo, algo_used,
+            registry, probe_manifest, template, template_attr, probe_lines,
+            block_map)
+        if write_error is not None:
+            # 缓存写失败不阻断测量（只影响下一轮准备成本）
+            out["unmeasured"] = {"file": rel, "reason": write_error}
+    if attribution_causal:
+        out["causal_site"] = _causal_site_entry(rel, template_attr)
+    attr_probe_ids, attr_fid_by_probe = _function_entry_probes(
+        registry, probe_lines)
+    out["prepared"] = {
+        "abs": abs_path, "src": src,
+        "registry": registry, "probe_manifest": probe_manifest,
+        "template": template, "template_attr": template_attr,
+        "probe_lines": probe_lines,
+        "block_map": block_map,
+        "attr_probe_ids": attr_probe_ids,
+        "attr_fid_by_probe": attr_fid_by_probe,
+    }
+    return out
+
+
 def run_canonical(project_root: str | Path, target_files: list[str],
                   recipe: dict, *, acceptance_keys: list[str] | None = None,
                   probe_keys: list[str] | None = None, timeout_s: int = 180,
@@ -681,7 +1671,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   stability_baseline: str | None = None,
                   baseline_failures: "set[tuple[str, str]] | None" = None,
                   intolerant_config: dict | None = None,
-                  acceptance_repeats: int = 3) -> dict:
+                  acceptance_repeats: int = 3,
+                  test_attribution: bool = False,
+                  attribution_out: str | None = None,
+                  attribution_causal: bool = False,
+                  arms_parallel: bool = False,
+                  acceptance_adaptive: bool = False) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。
 
     baseline_failures（§SPEC-060a/064b）：既有（未插桩）运行的失败
@@ -778,6 +1773,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         raise CanonicalError(f"recipe invalid: {reason}")
     if not target_files:
         raise CanonicalError("no target files given")
+    from .recipe import recipe_hash as _pristine_recipe_hash
+    pristine_recipe_hash = _pristine_recipe_hash(
+        {k: v for k, v in recipe.items() if k != "recipe_hash"})
     if inject_toolchain:
         recipe = _inject_toolchain(root, recipe)
     recipe_hash = recipe["recipe_hash"]
@@ -786,14 +1784,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
 
-    # 目标全集：registry + probe manifest + 插桩模板每文件只建一次
-    # （§SPEC-030 单次 parse 纪律；两臂共用同一模板——同源码同 manifest 的
-    # union 前提）。§SPEC-054：命中静态准备缓存则跳过全部 parse；模板以
-    # uuid 占位符保存（臂间仅占位替换）。parse 失败逐文件隔离进 unmeasured。
-    from ..registry.functions import build_file_registry
-    from ..registry.manifest import build_probe_manifest_v2
-    from gdtoolkit.parser import parser as _gd_parser
-
+    # 目标全集：registry + probe manifest + 插桩模板由 _prepare_target_file
+    # 逐文件准备（§SPEC-030 单次 parse 纪律 / §SPEC-054 静态缓存 /
+    # 方向②③ 两臂分离模板）；parse 失败逐文件隔离进 unmeasured。
     from . import prepcache
 
     prepared: dict[str, dict] = {}
@@ -801,8 +1794,10 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     cache_hits = 0
     cache_misses = 0
     # §SPEC-059a：报告 algo 与实际缓存键同源（flags/4-pid / blocks/6）
-    algo_used = (prepcache.PROBE_ALGO_VERSION if block_compress
+    base_algo = (prepcache.PROBE_ALGO_VERSION if block_compress
                  else "flags/4-pid")
+    algo_used = _algo_used(base_algo, test_attribution, attribution_causal)
+    causal_sites: list[dict] = []
     for path_str in target_files:
         p = Path(path_str)
         if not p.is_file():
@@ -815,67 +1810,20 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                                "reason": f"read_error:{e}"})
             continue
         rel = _rel_within_root(str(p.resolve()), root)
-        src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
-        prep_algo = algo_used
-        entry = prepcache.load_entry(
-            root, rel=rel, src_sha256=src_sha, recipe_hash=recipe_hash,
-            algo=prep_algo)
-        if entry is not None:
-            registry = entry["registry"]
-            probe_manifest = entry["probe_manifest"]
-            template = entry["instrumented_template"]
-            probe_lines = list(entry.get("probe_lines", []))
-            block_map = entry.get("block_map") or {}
-            cache_hits += 1
-        else:
-            try:
-                # §SPEC-053：relative-path fid——身份跨 checkout 稳定（绝对
-                # 路径会把检出位置混入函数身份）
-                registry = build_file_registry(src, file_label=rel)
-                probe_manifest = build_probe_manifest_v2(src, registry)
-            except Exception as e:  # noqa: BLE001 — 逐文件隔离，不阻断全集
-                unmeasured.append({"file": path_str,
-                                   "reason": f"registry_parse_error:{e}"})
-                continue
-            tpl_sink = (f"qa-coverage-hits-{prepcache.SINK_UUID_PLACEHOLDER}"
-                        f"-{file_key8(rel)}.txt")
-            if block_compress:
-                inst0, probe_lines, block_map = _instrument_blocks(
-                    src, tpl_sink, runtime_sink=True)
-            else:
-                inst0, probe_lines = _instrument(
-                    src, tpl_sink, flags=True, runtime_sink=True)
-                block_map = {}
-            if probe_lines:
-                # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug →
-                # 逐文件隔离，拒绝落盘跑假数据（缓存命中侧由校验和守卫）
-                try:
-                    _gd_parser.parse(inst0)
-                except Exception as e:  # noqa: BLE001
-                    unmeasured.append(
-                        {"file": rel,
-                         "reason": f"instrument_parse_error:{e}"})
-                    continue
-            template = inst0
-            cache_misses += 1
-            try:
-                prepcache.store_entry(
-                    root, rel=rel, src_sha256=src_sha,
-                    recipe_hash=recipe_hash, registry=registry,
-                    probe_manifest=probe_manifest,
-                    instrumented_template=template,
-                    probe_lines=probe_lines, source_plain=src,
-                    block_map=block_map, algo=prep_algo)
-            except OSError as e:
-                # 缓存写失败不阻断测量（只影响下一轮准备成本）
-                unmeasured.append({"file": rel,
-                                   "reason": f"cache_write_error:{e}"})
-        prepared[rel] = {
-            "abs": str(p.resolve()), "src": src,
-            "registry": registry, "probe_manifest": probe_manifest,
-            "template": template, "probe_lines": probe_lines,
-            "block_map": block_map,
-        }
+        outcome = _prepare_target_file(
+            root, rel, src, str(p.resolve()), path_str,
+            recipe_hash=recipe_hash, base_algo=base_algo, algo_used=algo_used,
+            block_compress=block_compress, test_attribution=test_attribution,
+            attribution_causal=attribution_causal)
+        if outcome["unmeasured"] is not None:
+            unmeasured.append(outcome["unmeasured"])
+        if outcome["prepared"] is None:
+            continue
+        prepared[rel] = outcome["prepared"]
+        cache_hits += outcome["cache_hits"]
+        cache_misses += outcome["cache_misses"]
+        if outcome["causal_site"] is not None:
+            causal_sites.append(outcome["causal_site"])
 
     # §SPEC-053：subset 不得标 comparable——目标集未覆盖 scope_roots 下全部
     # .gd 时，union/评分的 comparable 一律降为 false 并给原因。
@@ -887,11 +1835,17 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     recovered = _recover_stale_backups(root)
 
 
-    def _arm(name: str, acceptance: dict | None = None) -> dict:
+    def _arm(name: str, acceptance: dict | None = None,
+             shadow_instrument: bool = False,
+             adaptive_reps: bool = False) -> dict:
         """一条批式臂（§SPEC-052 并行分片）：复用全集插桩 → 按目录/feature
         组并行扇出 N 个 GUT 进程（每进程独立 XDG user:// 隔离 + 运行时
         PID sink）→ 合并逐文件 sink 读回 → bundle → 恢复/清理。零可执行行
-        文件进显式 vacuous 车道（§SPEC-042）。"""
+        文件进显式 vacuous 车道（§SPEC-042）。
+
+        shadow_instrument=True（P2 双臂并行）：插桩写入分片 shadow 而非
+        项目根——两臂可并发执行而不互踩 uuid。adaptive_reps=True（P1）：
+        acceptance 臂逐轮执行、并集稳定即提前锁定（上限仍为 reps）。"""
         from concurrent.futures import ThreadPoolExecutor
 
         run_uuid = make_run_uuid()
@@ -902,9 +1856,13 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         sink_by_rel: dict[str, str] = {}
         manifest_by_rel: dict[str, list[int]] = {}
         instrumented_files: dict[str, str] = {}
+        inst_by_rel: dict[str, str] = {}
         vacuous_rels: list[str] = []
         for rel, item in prepared.items():
-            template = item.get("template")
+            # 方向②③：归属只在 gut_full 臂启用——acceptance 臂用 plain
+            # 模板与默认钩子（不为归属多付 parse/运行成本）
+            use_attr = test_attribution and name == "gut_full"
+            template = item.get("template_attr") if use_attr else item.get("template")
             manifest = item.get("probe_lines") or []
             if template is None:
                 continue  # 插桩失败已隔离进 unmeasured
@@ -923,6 +1881,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             sink_by_rel[rel] = sink
             manifest_by_rel[rel] = manifest
             instrumented_files[item["abs"]] = inst
+            inst_by_rel[rel] = inst
         pg_path = root / "project.godot"
         if not pg_path.is_file():
             raise CanonicalError(
@@ -931,8 +1890,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         # pre_run_script 通道注册，不再改写 [autoload] 表
         started["created"] = [str(root / _FLUSHER_RELPATH),
                               str(root / _PRE_HOOK_RELPATH)]
-        (backup_dir / "started.json").write_text(
-            json.dumps(started, ensure_ascii=False), encoding="utf-8")
+        if attribution_causal and name == "gut_full":
+            started["created"].append(str(root / _ATTR_CTX_RELPATH))
+        if not shadow_instrument:
+            (backup_dir / "started.json").write_text(
+                json.dumps(started, ensure_ascii=False), encoding="utf-8")
         # 分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs
         if acceptance is not None:
             plans = [
@@ -956,6 +1918,25 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
         reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
 
+        # P2（双臂并行）：acceptance 臂在 shadow 内插桩——钩子文本按本臂
+        # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）
+        flusher_gd, pre_hook_gd = _hook_templates(
+            test_attribution and name == "gut_full", run_uuid)
+        shadow_hook_files = [(_FLUSHER_RELPATH, flusher_gd),
+                             (_PRE_HOOK_RELPATH, pre_hook_gd)]
+        if attribution_causal and name == "gut_full":
+            shadow_hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
+
+        def _instrument_shadow(shadow: Path) -> None:
+            for rel, inst in inst_by_rel.items():
+                target = shadow / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(inst, encoding="utf-8")
+            for relpath, text in shadow_hook_files:
+                hp = shadow / relpath
+                hp.parent.mkdir(parents=True, exist_ok=True)
+                hp.write_text(text, encoding="utf-8")
+
         def _run_shard(ip):
             idx, plan = ip
             args = list(plan["args"]) + [
@@ -967,6 +1948,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 # §SPEC-056：分片独立 project shadow（rep 间复用）
                 shadow, shadow_disclosure = _prepare_shadow(
                     root, run_uuid, idx)
+                if shadow_instrument:
+                    _instrument_shadow(shadow)
+                prev_union = None
                 for rep in range(reps):
                     xdg = tempfile.mkdtemp(
                         prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-r{rep}-")
@@ -995,6 +1979,18 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     rep_records.append(
                         {"xdg": xdg, "rc": rc, "out": out,
                          "timed_out": rep_timed_out})
+                    if adaptive_reps:
+                        # P1：分片局部累计并集停止增长即提前锁定（判据与
+                        # §SPEC-062C 一致：∪(1..k)==∪(1..N)；无全局 barrier）
+                        shard_union: set[int] = set(prev_union or ())
+                        for rel in sink_by_rel:
+                            hits, _ = _read_hits_merged(
+                                root, run_uuid, rel, manifest_by_rel[rel],
+                                [xdg], consume=False)
+                            shard_union |= set(hits)
+                        if rep >= 1 and frozenset(shard_union) == prev_union:
+                            break
+                        prev_union = frozenset(shard_union)
             finally:
                 _cleanup_shadow(shadow)
             # §SPEC-071 H1：shadow symlink 消解行为显式披露（解引用/悬空移除）
@@ -1002,13 +1998,24 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     "shadow_disclosure": shadow_disclosure}
 
         try:
-            for abs_path, inst in instrumented_files.items():
-                Path(abs_path).write_text(inst, encoding="utf-8")
-            for relpath, text in ((_FLUSHER_RELPATH, _FLUSHER_GD),
-                                  (_PRE_HOOK_RELPATH, _PRE_HOOK_GD)):
-                abs_p = root / relpath
-                abs_p.parent.mkdir(parents=True, exist_ok=True)
-                abs_p.write_text(text, encoding="utf-8")
+            if not shadow_instrument:
+                for abs_path, inst in instrumented_files.items():
+                    Path(abs_path).write_text(inst, encoding="utf-8")
+                # 方向②③：attr 钩子只在归属臂注入；acceptance 臂用默认钩子
+                if attribution_causal and name == "gut_full":
+                    # 注入脚本解析失败会让全部被插桩文件在 load 期失效（探针
+                    # 静默零命中）——生成期先 parse 一次，fail-loud 拒绝跑假数据
+                    from gdtoolkit.parser import parser as _ctx_parser
+                    try:
+                        _ctx_parser.parse(_ATTR_CTX_GD)
+                    except Exception as e:  # noqa: BLE001
+                        raise CanonicalError(
+                            f"causal context script failed to parse: "
+                            f"{e}") from e
+                for relpath, text in shadow_hook_files:
+                    abs_p = root / relpath
+                    abs_p.parent.mkdir(parents=True, exist_ok=True)
+                    abs_p.write_text(text, encoding="utf-8")
             t_arm = time.monotonic()
             try:
                 with ThreadPoolExecutor(
@@ -1112,6 +2119,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
 
         bundles: dict[str, dict] = {}
         convergence = None
+        attribution = None
         try:
             if acceptance is not None and reps > 1:
                 # §SPEC-062C：逐轮行集并集收敛轮数（rep 间独立进程，
@@ -1160,6 +2168,10 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
                                       status="bundle_written")
                 clear_sink(None, str(root), sink)
+            # §SPEC-083：归属证据与注册表必须在 xdg 清理前读回（仅归属臂）
+            attribution = _collect_attribution(
+                test_attribution and name == "gut_full", root, run_uuid, name,
+                sink_by_rel, xdg_homes, prepared=prepared)
         finally:
             for xdg in xdg_homes:
                 shutil.rmtree(xdg, ignore_errors=True)
@@ -1202,6 +2214,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             # §SPEC-062C：验收臂 N 次重复与收敛披露（gut_full 恒单轮）
             "repeats": reps,
             "convergence": convergence,
+            "adaptive_rounds_used": max(
+                (len(r["reps"]) for r in results), default=0)
+            if (acceptance_adaptive and acceptance is not None) else None,
+            "arms_parallel": arms_parallel,
+            "attribution": attribution,
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
             "shards": len(plans),
@@ -1217,37 +2234,50 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             },
         }
 
-    # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
-    arm_a = _arm("gut_full")
+    def _acceptance_flow() -> dict:
+        """臂 acceptance：私有 suite 按分片分组编译/重放 → 并行扇出 GUT。"""
+        keys = list(acceptance_keys) if acceptance_keys else [
+            f["key"] for f in recipe["acceptance_face"]["features"]]
+        snapshot = _snapshot_main(root)
+        groups: list[dict] = []
+        try:
+            n_groups = max(1, min(int(acceptance_shards or 1), len(keys) or 1))
+            chunk = max(1, -(-len(keys) // n_groups))
+            for i in range(0, len(keys), chunk):
+                sub = keys[i:i + chunk]
+                sd = create_suite_dir(root)
+                groups.append({"suite_dir": sd, "keys": sub})
+                compile_keys_to_suite(root, sub, sd)
+                for k in sub:
+                    replay_check(root, k, suite_dir=sd)
+            return _arm("acceptance", acceptance={
+                "groups": groups, "snapshot": snapshot},
+                shadow_instrument=arms_parallel,
+                adaptive_reps=acceptance_adaptive)
+        except (SuiteError, AcceptRunError) as e:
+            for g in groups:
+                _cleanup_suite_dir(Path(g["suite_dir"]))
+            return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
+                    "gut_ok": False, "timed_out": False, "state": "invalid",
+                    "invalid_reason": f"suite_error:{e}", "bundles": 0,
+                    "bundles_data": {}, "reconciliation": None,
+                    "test_failures": {"observed": [], "observed_pairs": [],
+                                      "new": [], "new_pairs": [],
+                                      "instrumentation_intolerant": []},
+                    "repeats": 0, "convergence": None}
 
-    # 臂 acceptance：私有 suite 按分片分组编译/重放 → 并行扇出 GUT
-    keys = list(acceptance_keys) if acceptance_keys else [
-        f["key"] for f in recipe["acceptance_face"]["features"]]
-    snapshot = _snapshot_main(root)
-    groups: list[dict] = []
-    try:
-        n_groups = max(1, min(int(acceptance_shards or 1), len(keys) or 1))
-        chunk = max(1, -(-len(keys) // n_groups))
-        for i in range(0, len(keys), chunk):
-            sub = keys[i:i + chunk]
-            sd = create_suite_dir(root)
-            groups.append({"suite_dir": sd, "keys": sub})
-            compile_keys_to_suite(root, sub, sd)
-            for k in sub:
-                replay_check(root, k, suite_dir=sd)
-        arm_b = _arm("acceptance", acceptance={
-            "groups": groups, "snapshot": snapshot})
-    except (SuiteError, AcceptRunError) as e:
-        for g in groups:
-            _cleanup_suite_dir(Path(g["suite_dir"]))
-        arm_b = {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
-                 "gut_ok": False, "timed_out": False, "state": "invalid",
-                 "invalid_reason": f"suite_error:{e}", "bundles": 0,
-                 "bundles_data": {}, "reconciliation": None,
-                 "test_failures": {"observed": [], "observed_pairs": [],
-                                   "new": [], "new_pairs": [],
-                                   "instrumentation_intolerant": []},
-                 "repeats": 0, "convergence": None}
+    if arms_parallel:
+        # P2：双臂并行——acceptance 在 shadow 内插桩（根树只被 gut 臂触碰）
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=2) as pex:
+            fut_a = pex.submit(_arm, "gut_full")
+            fut_b = pex.submit(_acceptance_flow)
+            arm_a = fut_a.result()
+            arm_b = fut_b.result()
+    else:
+        # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
+        arm_a = _arm("gut_full")
+        arm_b = _acceptance_flow()
 
     # 逐文件 union（coverage-union/1，禁平均）
     unions = []
@@ -1307,12 +2337,22 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     perf = _performance(root, probe_keys, timeout_s)
     perf["gated_core_s"] = gated_core_s
     perf["command_total_s"] = round(time.monotonic() - t_command, 3)
-    return {
+    _file_sha = {rel: hashlib.sha256(item["src"].encode("utf-8")).hexdigest()
+                 for rel, item in prepared.items()}
+    attr_section = _attribution_section(
+        test_attribution, (arm_a, arm_b), recipe_hash, root, attribution_out,
+        causal=attribution_causal, causal_sites=causal_sites,
+        file_sha256=_file_sha,
+        target_files=sorted(prepared.keys()),
+        recipe_pristine_hash=pristine_recipe_hash,
+        tests_face=_tests_face_map(root))
+    report = {
         "report_version": REPORT_VERSION,
         "project_root": str(root),
         "recipe_hash": recipe_hash,
         "arms": [
-            {k: v for k, v in arm.items() if k != "bundles_data"}
+            {k: v for k, v in arm.items()
+             if k not in ("bundles_data", "attribution")}
             for arm in (arm_a, arm_b)
         ],
         "unions": unions,
@@ -1427,6 +2467,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "dynamic_cache": False,
         "ok": union_valid,
     }
+    report.update(attr_section)
+    return report
 
 
 _FAIL_LANES = ("timeout", "run_error", "vacuous", "no_probe_fired",

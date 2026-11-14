@@ -275,7 +275,8 @@ def _zero_ref_terminal(file: str, total: int,
                        selection_meta: dict) -> dict | None:
     """SEE-1581：仅当新鲜映射明确判零测试（zero_ref）才短路。
 
-    None 不再是零引用判据——无新鲜映射时返回 None（调用方按全脸继续）。"""
+    None 不再是零引用判据——无新鲜映射时 resolve_selection fail-loud；
+    仅 `--select full` 显式审计面才以 None 继续。"""
     if total <= 0 or not selection_meta.get("zero_ref"):
         return None
     from .testscan import disclose_zero_ref, zero_ref_short_circuit_result
@@ -767,7 +768,7 @@ def _warn_site_scale(f: str, raw_total: int,
 
 def _ensure_shared_baseline(project_root: str, glob: str | None, jobs: int,
                             timeout_s: int, baselines: dict) -> dict | None:
-    """SEE-1581：全脸默认面（无新鲜映射）也需要父层共享 baseline 快照。
+    """SEE-1581：显式全脸审计面（`--select full`、无 scoped glob）也需要父层共享 baseline 快照。
 
     否则每文件退单 worker 串行、per-mutant 分片并行丢失（旧默认恒有
     scoped glob，此入口不存在）。一次全脸 baseline 换取 N 路分片。"""
@@ -817,7 +818,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         return [], None, _settled_no_sites(f, bool(glob))
     # E2（§SPEC-501）+ SEE-1581：显式 --tests 时 glob 必非 None（门不可达）；
     # 自动面 glob=None 且 fresh 映射判零测试（zero_ref）→ settled 披露记录；
-    # 无新鲜映射（zero_ref=False）→ 全脸继续（tests_glob None 即全量面）。
+    # 显式审计面（source=full_face，zero_ref=False）→ tests_glob None
+    # 即全量面继续；fn/file 不可用时 resolve_selection 已 fail-loud。
     if glob is None and selection_meta.get("zero_ref"):
         from .testscan import disclose_zero_ref, zero_ref_short_circuit_result
         disclose_zero_ref(f)

@@ -41,9 +41,13 @@ OLD_SCHEMA_PREFIXES = ("canonical-recipe/", "canonical-report/",
 # mutation 侧旧「自动回退全脸」文案特征（现行语义：fail-loud / 有界文件级
 # 回退 / zero-ref 终态 / 全脸仅显式审计）。measurement/increment 的「回退全脸」
 # 是映射重建的校准策略，不属此判据，故仅扫 mutation/。
-STALE_FULL_FACE = re.compile(r"退回全脸|走全脸|回退全脸|全脸回退|"
-                             r"falls back to the full face|"
-                             r"falls back to full suite")
+# 覆盖三类表述：旧回退动词（退回/走/回退 + 全脸）、隐式继续（按全脸继续/
+# 全脸继续）、缺省面失实（全脸默认/`= **全脸**`）。合法表述（「全脸仅
+# 显式审计」「显式全脸面/基线」）不含上述组合，不会被误伤。
+STALE_FULL_FACE = re.compile(
+    r"退回全脸|走全脸|回退全脸|全脸回退|"
+    r"按全脸继续|全脸继续|全脸默认|=\s*\*\*全脸\*\*|"
+    r"falls back to the full face|falls back to full suite")
 
 
 def _py_texts(root: Path) -> list[tuple[Path, str]]:

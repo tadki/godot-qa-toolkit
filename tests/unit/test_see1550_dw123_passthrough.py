@@ -148,7 +148,7 @@ def test_cli_flag_absent_maps_none(toy_target, monkeypatch):
         return _fake_report()
 
     monkeypatch.setattr(runner, "run_mutation", lambda *a, **k: _spy(**k))
-    args = _dispatch_args(Path(proj), target, ["--jobs", "1"])
+    args = _dispatch_args(Path(proj), target, ["--jobs", "1", "--select", "full"])
     _dispatch_mutation(args, "linux")
     assert captured and captured[0].get("worker_channel") is None
 
@@ -165,7 +165,8 @@ def test_cli_flag_present_maps_true(toy_target, monkeypatch):
 
     monkeypatch.setattr(runner, "run_mutation", lambda *a, **k: _spy(**k))
     args = _dispatch_args(Path(proj), target,
-                          ["--jobs", "1", "--worker-channel"])
+                          ["--jobs", "1", "--worker-channel",
+                           "--select", "full"])
     _dispatch_mutation(args, "linux")
     assert captured and captured[0].get("worker_channel") is True
 

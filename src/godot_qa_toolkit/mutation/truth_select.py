@@ -31,7 +31,7 @@ from pathlib import Path
 SCHEMA_VERSION = "canonical-test-attribution/4"
 ENV_MAP = "GQT_ATTRIBUTION_MAP"
 ENV_MODE = "GQT_ATTRIBUTION_MAP_MODE"   # "auto"（默认）| "off"
-SELECT_ROOT = ".qa-cache/gqt-attr-select"
+SELECT_ROOT = ".gqt-attr-select"   # 根级点目录：影子树会携带（.qa-cache 被排除）
 DEFAULT_MAP_REL = ".qa-cache/attribution-map.json"
 
 _LEDGER: list[dict] = []
@@ -61,7 +61,47 @@ def _record(event: dict) -> None:
 
 
 class SelectionError(Exception):
-    """映射装载/绑定违例（调用方降级全脸并披露，不静默）。"""
+    """映射装载/绑定违例。"""
+
+
+class MutationSelectionError(SelectionError):
+    """选面不可用 → fail-loud 拒跑（Owner 定稿：取消自动全脸；全脸仅显式审计）。"""
+
+    def __init__(self, reason: str, detail: str | None = None):
+        self.reason = reason
+        self.detail = detail
+        super().__init__(reason + (f": {detail}" if detail else ""))
+
+
+def _refresh_lock(path: str):
+    """映射刷新串行化：同目录 `<map>.lock` 上的 flock（进程死自动释放）。
+
+    fcntl 不可用平台（原生 Windows）降级为无锁（唯一 tmp + 原子 rename 仍
+    防半写；并发合并语义由调用方双检 + 校验兜底并披露）。"""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        if fcntl is None:
+            yield False
+            return
+        lock_path = path + ".lock"
+        lf = open(lock_path, "a+")
+        try:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            yield True
+        finally:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            finally:
+                lf.close()
+    return _cm()
+
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - 原生 Windows 降级
+    fcntl = None
 
 
 def map_path(project_root: str | Path, explicit: str | None = None) -> str | None:
@@ -75,6 +115,42 @@ def map_path(project_root: str | Path, explicit: str | None = None) -> str | Non
 
 def default_map_path(project_root: str | Path) -> str:
     return str(Path(project_root) / DEFAULT_MAP_REL)
+
+
+def _unique_tmp(path: str) -> str:
+    """同目录唯一临时文件（防并发共用同一 tmp 互相覆盖）。"""
+    import tempfile
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".attr-map.", suffix=".tmp")
+    os.close(fd)
+    return tmp
+
+
+def _script_names(doc: dict) -> set[str]:
+    arm = (doc.get("arms") or {}).get("gut_full") or {}
+    return {i.split("::", 1)[0]
+            for i in (arm.get("test_to_files") or {})}
+
+
+def validate_refresh(before: dict, after: dict) -> None:
+    """刷新产物守恒校验：失效即 fail-loud（不得静默交付失真映射）。
+
+    允许变化的边：rerun_scripts（整体替换）与 dropped_scripts（删除）；
+    其余测试身份必须原样保留——并发读-改-写丢边（Revy HIGH-2 451/2654）
+    在此显式拒绝。"""
+    if after.get("schema_version") != SCHEMA_VERSION:
+        raise MutationSelectionError("refresh_schema_mismatch")
+    if not arms_valid(after.get("arms_state") or {}):
+        raise MutationSelectionError("refresh_arms_invalid")
+    inc = after.get("increment") or {}
+    rerun = {str(x) for x in (inc.get("rerun_scripts") or [])}
+    dropped = {str(x) for x in (inc.get("dropped_scripts") or [])}
+    keep_before = _script_names(before) - rerun - dropped
+    missing = keep_before - _script_names(after)
+    if missing:
+        raise MutationSelectionError(
+            "refresh_lost_identities",
+            f"{sorted(missing)[:8]} (+{max(0, len(missing) - 8)} more)")
 
 
 def _roots_of(files: list[str], project_root: str) -> list[str]:
@@ -107,67 +183,103 @@ def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
     existing = map_path(root)
     if existing:
         return existing
+    out = default_map_path(root)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
-    try:
-        from ..canonical.orchestrator import run_canonical
-        from ..canonical.recipe import build_recipe
-        recipe, error = build_recipe(Path(root))
-        if error is not None:
-            raise SelectionError(f"recipe unavailable: {error}")
-        targets = _targets_under(_roots_of(files, root))
-        out = default_map_path(root)
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
-        run_canonical(root, targets, recipe, test_attribution=True,
-                      attribution_out=out)
-        if not arms_valid(load_map(out).get("arms_state") or {}):
-            Path(out).unlink(missing_ok=True)
-            raise SelectionError(
-                "generated mapping has invalid arms (measurement failed)")
-        os.environ[ENV_MAP] = out
-        _record({"action": "generate", "map": out,
-                 "targets": len(targets),
-                 "wall_s": round(time.monotonic() - t0, 3), "ok": True})
-        return out
-    except Exception as e:  # noqa: BLE001 — 生成失败诚实退全脸
-        _record({"action": "generate", "ok": False, "error": str(e),
-                 "wall_s": round(time.monotonic() - t0, 3)})
-        return None
+    with _refresh_lock(out):
+        existing = map_path(root)          # 双检：等锁期间可能已被生成
+        if existing:
+            return existing
+        try:
+            from ..canonical.orchestrator import run_canonical
+            from ..canonical.recipe import build_recipe
+            recipe, error = build_recipe(Path(root))
+            if error is not None:
+                raise SelectionError(f"recipe unavailable: {error}")
+            targets = _targets_under(_roots_of(files, root))
+            tmp = _unique_tmp(out)
+            try:
+                run_canonical(root, targets, recipe, test_attribution=True,
+                              attribution_out=tmp)
+                doc = load_map(tmp)
+                if not arms_valid(doc.get("arms_state") or {}):
+                    raise MutationSelectionError(
+                        "generated mapping has invalid arms "
+                        "(measurement failed)")
+                os.replace(tmp, out)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            os.environ[ENV_MAP] = out
+            _record({"action": "generate", "map": out,
+                     "targets": len(targets),
+                     "wall_s": round(time.monotonic() - t0, 3), "ok": True})
+            return out
+        except MutationSelectionError as e:
+            _record({"action": "generate", "ok": False, "error": str(e),
+                     "wall_s": round(time.monotonic() - t0, 3)})
+            raise
+        except Exception as e:  # noqa: BLE001 — 生成失败 fail-loud
+            _record({"action": "generate", "ok": False, "error": str(e),
+                     "wall_s": round(time.monotonic() - t0, 3)})
+            raise MutationSelectionError("attribution_generate_failed",
+                                         str(e)) from e
 
 
 def _auto_increment(project_root: str, path: str, doc: dict,
                     rel: str,
                     changed_extra: list[str] | None = None
                     ) -> tuple[bool, str | None]:
-    """过期映射默认增量更新（attr-update）；失败/仍不新鲜 → 全脸。"""
-    changed = sorted({rel, *(changed_extra or [])})
-    key = (str(Path(project_root).resolve()), tuple(changed))
-    if key in _INCREMENTED:
-        return True, None
+    """过期映射默认增量更新（串行化 + 守恒校验 + fail-loud）。
+
+    锁内**重读基线**再合并（并发写者读到旧基线是 HIGH-2 丢边的根因），
+    唯一 tmp 落盘后校验「非重跑身份零丢失」，失真直接抛
+    MutationSelectionError（不静默交付、不回退全脸）。"""
+    root = str(Path(project_root).resolve())
     t0 = time.monotonic()
-    try:
-        from ..canonical.increment import run_attribution_increment
-        from ..canonical.recipe import build_recipe
-        root = str(Path(project_root).resolve())
-        recipe, error = build_recipe(Path(root))
-        if error is not None:
-            raise SelectionError(f"recipe unavailable: {error}")
-        targets = [str(Path(root) / f)
-                   for f in (doc.get("target_files") or [])]
-        if not targets:
-            raise SelectionError("baseline missing target_files")
-        tmp = path + ".tmp"
-        report = run_attribution_increment(
-            root, targets, recipe, path, changed, tmp)
-        os.replace(tmp, path)
-        _INCREMENTED.add(key)
-        _record({"action": "increment", "changed": changed, "map": path,
-                 "mode": report.get("mode"),
-                 "wall_s": round(time.monotonic() - t0, 3), "ok": True})
-        return True, None
-    except Exception as e:  # noqa: BLE001 — 增量失败不静默交付
-        _record({"action": "increment", "changed": changed, "ok": False,
-                 "error": str(e), "wall_s": round(time.monotonic() - t0, 3)})
-        return False, str(e)
+    with _refresh_lock(path):
+        current = load_map(path)            # 锁内重读（并发写者可能已更新）
+        changed = sorted({rel, *(changed_extra or [])})
+        drift = _tests_face_drift(root, current)
+        changed = sorted(set(changed) | set(drift["changed"])
+                         | set(drift["removed"]))
+        key = (root, tuple(changed))
+        if key in _INCREMENTED:
+            return True, None
+        try:
+            from ..canonical.increment import run_attribution_increment
+            from ..canonical.recipe import build_recipe
+            recipe, error = build_recipe(Path(root))
+            if error is not None:
+                raise SelectionError(f"recipe unavailable: {error}")
+            targets = [str(Path(root) / f)
+                       for f in (current.get("target_files") or [])]
+            if not targets:
+                raise SelectionError("baseline missing target_files")
+            tmp = _unique_tmp(path)
+            try:
+                report = run_attribution_increment(
+                    root, targets, recipe, path, changed, tmp)
+                validate_refresh(current, load_map(tmp))
+                os.replace(tmp, path)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            _INCREMENTED.add(key)
+            _record({"action": "increment", "changed": changed, "map": path,
+                     "mode": report.get("mode"),
+                     "rerun_scripts": report.get("rerun_scripts") or [],
+                     "wall_s": round(time.monotonic() - t0, 3), "ok": True})
+            return True, None
+        except MutationSelectionError as e:
+            _record({"action": "increment", "changed": changed, "ok": False,
+                     "error": str(e),
+                     "wall_s": round(time.monotonic() - t0, 3)})
+            raise
+        except Exception as e:  # noqa: BLE001 — 增量失败不静默交付
+            _record({"action": "increment", "changed": changed, "ok": False,
+                     "error": str(e),
+                     "wall_s": round(time.monotonic() - t0, 3)})
+            raise MutationSelectionError("attribution_increment_failed",
+                                         str(e)) from e
 
 
 @lru_cache(maxsize=8)
@@ -307,10 +419,14 @@ def _regenerate(project_root: str, path: str, rel: str) -> bool:
                    for f in (doc.get("target_files") or [])]
         if not targets:
             raise SelectionError("baseline missing target_files")
-        tmp = path + ".regen.tmp"
-        run_canonical(root, targets, recipe, test_attribution=True,
-                      attribution_out=tmp)
-        os.replace(tmp, path)
+        tmp = _unique_tmp(path)
+        try:
+            run_canonical(root, targets, recipe, test_attribution=True,
+                          attribution_out=tmp)
+            validate_refresh(load_map(path), load_map(tmp))
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
         _REGENERATED.add(key)
         _record({"action": "regenerate", "map": path, "trigger": rel,
                  "wall_s": round(time.monotonic() - t0, 3), "ok": True})
@@ -322,14 +438,36 @@ def _regenerate(project_root: str, path: str, rel: str) -> bool:
         return False
 
 
-def resolve_selection(project_root: str | Path, target_file: str,
-                      map_path_override: str | None = None) -> dict:
-    """目标 → 选面决策（绝不静默：每个分支都带 source/reason 披露）。
+def _finish(base: dict, strict: bool) -> dict:
+    """收口：strict 模式下非 runtime_mapping 结果一律 fail-loud。"""
+    if strict and base.get("source") != "runtime_mapping":
+        raise MutationSelectionError(
+            base.get("reason") or "attribution_selection_unavailable",
+            _detail_of(base))
+    return base
 
-    mode=auto（默认）：无映射 → 全脸（生成在 CLI 入口 ensure_map 完成）；
-    映射过期 → **默认自动增量更新一次**（attr-update，3–6s）后重判；旧
-    产物（无 file_sha256）→ 整份重建一次；自动更新失败/仍不新鲜 → 全脸，
-    台账如实记录。mode=off：只读不更新。"""
+
+def _detail_of(base: dict) -> str | None:
+    mp = base.get("mapping") or {}
+    bits = []
+    if mp:
+        bits.append(f"file_sha256_bound={mp.get('file_sha256_bound')}")
+        bits.append(f"recipe_ok={mp.get('recipe_hash_ok')}")
+        bits.append(f"tests_face_ok={mp.get('tests_face_ok')}")
+        bits.append(f"arms_valid={mp.get('arms_valid')}")
+    if base.get("ambiguous_names"):
+        bits.append(f"ambiguous={base['ambiguous_names'][:3]}")
+    return ", ".join(bits) or None
+
+
+def resolve_selection(project_root: str | Path, target_file: str,
+                      map_path_override: str | None = None,
+                      strict: bool = True) -> dict:
+    """目标 → 文件级选面决策（严格模式不可用即 fail-loud）。
+
+    mode=auto：映射过期 → 自动增量/重建一次后重判（台账披露）；仍不可用
+    → MutationSelectionError（Owner 定稿：取消自动全脸）。strict=False 供
+    证书归属等只读旁路使用（返回 full_face 描述，不抛）。"""
     root = str(Path(project_root).resolve())
     base = {"source": "full_face", "reason": None, "tests": [],
             "tests_glob": None, "zero_ref": False, "mapping": None,
@@ -337,17 +475,17 @@ def resolve_selection(project_root: str | Path, target_file: str,
     path = map_path(root, map_path_override)
     if path is None:
         base["reason"] = "no_attribution_map"
-        return base
+        return _finish(base, strict)
     try:
         doc = load_map(path)
     except SelectionError as e:
         base["reason"] = f"map_invalid:{e}"
-        return base
+        return _finish(base, strict)
     try:
         rel = _file_rel(root, target_file)
     except ValueError:
         base["reason"] = "target_outside_project"
-        return base
+        return _finish(base, strict)
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path
@@ -366,17 +504,17 @@ def resolve_selection(project_root: str | Path, target_file: str,
                 evaluation["mapping"]["path"] = path
             except SelectionError as e:
                 base["reason"] = f"auto_update_reload_failed:{e}"
-                return base
+                return _finish(base, strict)
     base["mapping"] = evaluation["mapping"]
     if not evaluation["ok"]:
         base["reason"] = ("auto_update_still_stale:" if auto else "") + \
             evaluation["reason"]
-        return base
+        return _finish(base, strict)
     if evaluation["ambiguous"]:
-        # 同名跨脚本 → 身份不可判定：退回全脸（不猜，也不静默丢）
+        # 同名跨脚本 → 身份不可判定：不猜（严格模式 fail-loud）
         base["ambiguous_names"] = evaluation["ambiguous"]
         base["reason"] = "ambiguous_test_names"
-        return base
+        return _finish(base, strict)
     scripts = evaluation["scripts"]
     if not scripts:
         base.update({"source": "runtime_mapping", "zero_ref": True,
@@ -386,10 +524,79 @@ def resolve_selection(project_root: str | Path, target_file: str,
         sel_dir = materialize_selection(root, scripts)
     except OSError as e:
         base["reason"] = f"selection_materialize_failed:{e}"
-        return base
+        return _finish(base, strict)
     base.update({"source": "runtime_mapping", "tests": scripts,
                  "tests_glob": sel_dir, "reason": "fresh_runtime_mapping"})
     return base
+
+
+def function_tests(project_root: str, doc: dict, rel: str,
+                   fid: str) -> tuple[list[str], list[str]]:
+    """映射内 function→tests（test 车道；多轮并集口径即产物边集本身）。
+
+    返回 (测试脚本 res:// 列表, 同名歧义名列表)。"""
+    names: set[str] = set()
+    for identity, fids in ((doc.get("arms") or {}).get("gut_full", {})
+                           .get("test_to_functions") or {}).items():
+        if fid in fids:
+            names.add(identity.split("::", 1)[0])
+    by_name = _test_scripts_by_name(str(Path(project_root).resolve()))
+    scripts: list[str] = []
+    ambiguous: list[str] = []
+    for name in sorted(names):
+        paths = by_name.get(name)
+        if not paths:
+            continue
+        if len(paths) > 1:
+            ambiguous.append(name)
+        scripts.extend(paths)
+    return sorted(set(scripts)), ambiguous
+
+
+def resolve_function_selection(project_root: str | Path, target_file: str,
+                               fid: str,
+                               file_selection: dict | None = None,
+                               map_path_override: str | None = None,
+                               strict: bool = True) -> dict:
+    """fn 级选面：映射 fn→tests → 选择目录；fn 不在映射 → 文件级回退。
+
+    三层：fn 命中 → `source=function_mapping`；fn 未命中（unknown/新函数）
+    → 文件级集合并 `source=file_fallback`（披露 `function_not_in_mapping`）；
+    文件级本身不可用 → fail-loud（全脸仅显式审计开关）。"""
+    root = str(Path(project_root).resolve())
+    file_sel = file_selection or resolve_selection(
+        root, target_file, map_path_override, strict=strict)
+    if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
+        return file_sel                      # 零引用终态 / 不可用（strict 已抛）
+    path = (file_sel.get("mapping") or {}).get("path")
+    try:
+        doc = load_map(path) if path else load_map(map_path(root,
+                                                            map_path_override))
+        rel = _file_rel(root, target_file)
+    except (SelectionError, ValueError) as e:
+        raise MutationSelectionError("function_selection_load_failed",
+                                     str(e)) from e
+    scripts, ambiguous = function_tests(root, doc, rel, fid)
+    if ambiguous:
+        raise MutationSelectionError("ambiguous_test_names",
+                                     str(sorted(ambiguous)[:5]))
+    if not scripts:
+        out = dict(file_sel)
+        out.update({"source": "file_fallback",
+                    "reason": "function_not_in_mapping",
+                    "function_id": fid,
+                    "tests": file_sel.get("tests") or [],
+                    "tests_glob": file_sel.get("tests_glob")})
+        return out
+    try:
+        sel_dir = materialize_selection(root, scripts)
+    except OSError as e:
+        raise MutationSelectionError("selection_materialize_failed",
+                                     str(e)) from e
+    return {"source": "function_mapping", "reason": "function_mapping_fresh",
+            "function_id": fid, "tests": scripts, "tests_glob": sel_dir,
+            "zero_ref": False, "mapping": file_sel.get("mapping"),
+            "ambiguous_names": []}
 
 
 def _tests_for_target(root: str, arm: dict, rel: str) -> tuple[list[str], list[str]]:

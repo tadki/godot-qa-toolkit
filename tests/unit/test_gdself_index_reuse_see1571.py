@@ -55,9 +55,8 @@ class TestInProcessReuse:
         write_map(Path(proj), {"calc.gd": ["test_save.gd::test_ok"],
                                "extra.gd": ["test_misc.gd::test_ok"]})
         truth_select._fresh_recipe_hash.cache_clear()
-        d = executor.run_mutation_files(paths, proj, budget=50,
-                                        dry_run=True, jobs=None)
-        assert d["ok"] is True
+        for p_ in paths:
+            truth_select.resolve_selection(proj, p_)
         info = truth_select._fresh_recipe_hash.cache_info()
         assert info.misses == 1, (
             f"多文件规划必须复用同一份进程内 recipe 判据缓存: {info}")

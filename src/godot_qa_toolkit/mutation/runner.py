@@ -520,31 +520,38 @@ def _record_timing_sample(timing_store, baseline_reused: bool,
         timing_meta["baseline_p90"] = fresh["p90"]
 
 
-def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
-    """SPEC-001：目标 → 扫描 tests/ 引用子集；零命中退回全量（scoped=False）。
+def _auto_scan_tests_glob(file_path: str, project_root: str,
+                          select_mode: str = "full") -> str | None:
+    """SPEC-001：目标 → 选面 glob（SEE-1581：运行时映射；full=显式全脸）。
 
     SEE-1405 §SPEC-004：project_root 显式传给 derive_tests_glob——内部
     换源 gdself 正向索引（间接消费闭包可见）；扫描失败诚实退全量。
     """
-    glob, _meta = _auto_scan_tests_glob_meta(file_path, project_root)
+    glob, _meta = _auto_scan_tests_glob_meta(file_path, project_root,
+                                             select_mode=select_mode)
     return glob
 
 
 def _resolve_auto_glob(tests_glob: str | None, file_path: str,
                        project_root: str,
-                       selection_meta: dict) -> tuple[str | None, dict]:
+                       selection_meta: dict,
+                       select_mode: str = "full") -> tuple[str | None, dict]:
     """显式 `--tests` 直过（选测未发生，披露 meta 原样保留）；否则自动选测。
 
     §SPEC-613 判据唯一出处的守门形态：并行规划/串行门共用，禁止按 CLI
-    参数推断选测是否发生。
+    参数推断选测是否发生。select_mode: fn/file（严格真值选面，不可用即
+    fail-loud）| full（显式审计全脸）。
     """
     if tests_glob:
         return tests_glob, selection_meta
-    return _auto_scan_tests_glob_meta(file_path, project_root)
+    return _auto_scan_tests_glob_meta(file_path, project_root,
+                                      select_mode=select_mode)
 
 
 def _auto_scan_tests_glob_meta(file_path: str,
-                               project_root: str) -> tuple[str | None, dict]:
+                               project_root: str,
+                               select_mode: str = "full"
+                               ) -> tuple[str | None, dict]:
     """SEE-1581：选面改运行时真值映射（静态 TestOwnershipIndex 退出主路径）。
 
     - 新鲜映射（recipe_hash + 目标文件 sha256 绑定）→ 精确测试脚本集，
@@ -554,14 +561,13 @@ def _auto_scan_tests_glob_meta(file_path: str,
       不再派生静态 glob。
     meta 由调用方挂入 summary.test_selection（source/reason/mapping 披露）。
     """
-    from .truth_select import resolve_selection
-    try:
-        sel = resolve_selection(project_root, file_path)
-    except Exception as e:  # noqa: BLE001 — 解析失败诚实退全脸
-        print(f"attribution selection failed, falling back to full suite: "
-              f"{e}", file=sys.stderr)
-        return None, {"source": "full_face", "reason": f"resolve_error:{e}",
-                      "tests": [], "zero_ref": False}
+    from .truth_select import MutationSelectionError, resolve_selection
+    if (select_mode or "fn").lower() == "full":
+        return None, {"source": "full_face", "reason": "explicit_full_face",
+                      "tests": [], "zero_ref": False, "mapping": None,
+                      "ambiguous_names": []}
+    # Owner 定稿：映射不可用 → fail-loud 拒跑（全脸仅显式审计开关）
+    sel = resolve_selection(project_root, file_path)
     meta = {"source": sel["source"], "reason": sel["reason"],
             "mapping": sel.get("mapping"), "tests": sel.get("tests", []),
             "zero_ref": sel.get("zero_ref", False),

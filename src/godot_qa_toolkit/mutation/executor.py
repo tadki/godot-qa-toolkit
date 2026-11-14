@@ -195,6 +195,7 @@ def run_mutation_files(
     mutate_all: bool = False,
     reuse_coverage: bool = True,
     worker_channel: bool | None = None,
+    select_mode: str = "full",
 ) -> dict:
     """多文件 / 多 mutant 编排入口（§SPEC-202 运行级测量面挂载点）。
 
@@ -210,7 +211,8 @@ def run_mutation_files(
             binary_kind=binary_kind, timing_store=timing_store,
             mutation_warning=mutation_warning,
             timeout_factor=timeout_factor, mutate_all=mutate_all,
-            reuse_coverage=reuse_coverage, worker_channel=worker_channel)
+            reuse_coverage=reuse_coverage, worker_channel=worker_channel,
+            select_mode=select_mode)
     clock = StageClock()
     knob_state: dict = {}
     disk_before = qa_disk_bytes(project_root)
@@ -221,7 +223,8 @@ def run_mutation_files(
         binary_kind=binary_kind, timing_store=timing_store,
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, reuse_coverage=reuse_coverage,
-        worker_channel=worker_channel, clock=clock, knob_state=knob_state)
+        worker_channel=worker_channel, clock=clock, knob_state=knob_state,
+        select_mode=select_mode)
     return _finalize_run_envelope(envelope, files, project_root, clock,
                                   knob_state, t0, disk_before)
 
@@ -289,7 +292,8 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                              mutation_warning: int | None,
                              timeout_factor: float | None,
                              mutate_all: bool,
-                             worker_channel: bool | None) -> tuple[
+                             worker_channel: bool | None,
+                             select_mode: str = "full") -> tuple[
         dict | None, str | None, dict]:
     """单文件门（判定先于任何 GUT 调用的前置纪律在调用方保持）。
 
@@ -316,13 +320,18 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
     selection_meta: dict = {}
     if tests_glob is None and not dry_run:
         derived, selection_meta = _auto_scan_tests_glob_meta(
-            files[0], project_root)
+            files[0], project_root, select_mode=select_mode)
         if derived is None:
             terminal = _zero_ref_terminal(files[0], total, selection_meta)
             if terminal is not None:
                 return terminal, tests_glob, {}
         else:
             tests_glob = derived
+    # 第六批：fn 级分组需要 per-group glob，必须走编排分片路径（不做
+    # 单文件串行快路径）；显式 --tests / full 审计模式维持原语义。
+    if (select_mode or "fn").lower() == "fn" and tests_glob is not None \
+            and not dry_run:
+        return None, tests_glob, selection_meta
     # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
     # （退串行判定前置纪律不回退）。total > jobs 才需仲裁（≤ jobs 本就
     # 退串行）；无先验/先验不可用 = 并行缺省（KOL 量级不误降级）。
@@ -365,6 +374,7 @@ def _run_mutation_files_impl(
     worker_channel: bool | None = None,
     clock: StageClock | None = None,
     knob_state: dict | None = None,
+    select_mode: str = "full",
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -417,7 +427,8 @@ def _run_mutation_files_impl(
             tests_glob=tests_glob, jobs=jobs, dry_run=dry_run, resume=resume,
             binary_kind=binary_kind, timing_store=timing_store,
             mutation_warning=mutation_warning, timeout_factor=timeout_factor,
-            mutate_all=mutate_all, worker_channel=worker_channel)
+            mutate_all=mutate_all, worker_channel=worker_channel,
+            select_mode=select_mode)
         if ret is not None:
             return ret
 
@@ -434,7 +445,8 @@ def _run_mutation_files_impl(
                                            worker_channel=worker_channel,
                                            clock=clock,
                                            knob_state=knob_state,
-                                           selection_meta=selection_meta)
+                                           selection_meta=selection_meta,
+                                           select_mode=select_mode)
     chunk_results = []
     if chunks:
         with _worker_pool(max_workers=jobs) as pool:
@@ -446,6 +458,7 @@ def _run_mutation_files_impl(
     _inject_diff_results(results_merged, v2ctx)
     # settled（异常/零变异文件）按输入顺序并入 results——任何输入文件都留痕
     results = _order_results(files, results_merged, settled)
+    _attach_chunk_selection(results, chunks)
     envelope = {**merged, "ok": all(r["ok"] for r in results),
                 "results": results}
     # SEE-1416 §SPEC-1416-3：多文件信封顶层 summary.attention——跨文件
@@ -701,6 +714,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   clock: StageClock | None = None,
                   knob_state: dict | None = None,
                   selection_meta: dict | None = None,
+                  select_mode: str = "full",
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
@@ -727,7 +741,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
             reuse_coverage, baselines, baseline_failures, run_id,
             identity=identity, worker_channel=worker_channel, clock=clock,
-            auto_selection=selection_meta)
+            auto_selection=selection_meta, select_mode=select_mode)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
@@ -774,7 +788,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       identity: dict | None = None,
                       worker_channel: bool | None = None,
                       clock: StageClock | None = None,
-                      auto_selection: dict | None = None):
+                      auto_selection: dict | None = None,
+                      select_mode: str = "full"):
     """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
     budget → 分片。
 
@@ -794,7 +809,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     with clock.stage("test_scan"):
         glob, selection_meta = _resolve_auto_glob(tests_glob, f,
                                                   project_root,
-                                                  selection_meta)
+                                                  selection_meta,
+                                                  select_mode=select_mode)
     # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
@@ -868,6 +884,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         chunk = {
             "file": f, "project_root": project_root, "budget": budget,
             "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
+            "selection_meta": selection_meta, "selection_mode": select_mode,
             "resume": resume, "binary_kind": binary_kind,
             "timeout_factor": timeout_factor, "total_sites": raw_total,
             "attention": attention, "mutate_all": mutate_all,
@@ -882,13 +899,103 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         "header_hash": header_hash, "scope_hashes": scope_hashes,
         "store2": store2, "src": src, "mutants": mutants,
         "uncovered": uncovered_mutants, "test_selection": selection_meta,
+        "selection_mode": select_mode,
     }
+    if select_mode == "fn" and glob is not None \
+            and selection_meta.get("source") == "runtime_mapping":
+        # 第六批：变异体按所在函数分组，每组只跑映射 fn→tests（基线仍用
+        # 文件级并集面——既有失败集是超集，killed 判定语义不变）
+        chunks, groups = _fn_group_chunks(
+            f, project_root, glob, binary_kind, executed_list, src,
+            baseline, resume, timeout_factor, timeout_s, budget, mutate_all,
+            attention, run_id=run_id, identity=identity,
+            worker_channel=worker_channel, selection_meta=selection_meta,
+            total_sites=raw_total)
+        ctx["selection_groups"] = groups
+        return chunks, ctx, None
     chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
                               binary_kind, ids, baseline, resume,
                               timeout_factor, raw_total, attention, jobs,
                               run_id=run_id, identity=identity,
                               worker_channel=worker_channel)
     return chunks, ctx, None
+
+
+def _fid_of_line(registry: dict, line: int) -> str | None:
+    for entry in (registry or {}).get("entries") or []:
+        if not entry.get("instrumentable"):
+            continue
+        start, end = entry.get("start_line"), entry.get("end_line")
+        if isinstance(start, int) and isinstance(end, int) \
+                and start <= line <= end:
+            return entry["fid"]
+    return None
+
+
+def _fn_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
+                     src, baseline, resume, timeout_factor, timeout_s, budget,
+                     mutate_all, attention, *, run_id, identity,
+                     worker_channel, selection_meta, total_sites):
+    """按函数分组出 chunk：每 chunk 独立选择目录 glob，基线共享文件级面。
+
+    函数不在映射（unknown/新函数）→ 文件级回退并披露（source=
+    file_fallback）；组间由 worker 池并发复用 warm 槽。"""
+    from ..registry.functions import build_file_registry
+    from . import truth_select
+
+    rel = _res_path_of(f, project_root).removeprefix("res://")
+    registry = build_file_registry(src, file_label=rel)
+    groups: dict[str | None, list] = {}
+    for m in executed_list:
+        fid = _fid_of_line(registry, getattr(m, "line", -1))
+        groups.setdefault(fid, []).append(m)
+    file_selection = {
+        "source": "runtime_mapping", "zero_ref": False,
+        "tests": selection_meta.get("tests") or [],
+        "tests_glob": file_glob,
+        "mapping": selection_meta.get("mapping"),
+    }
+    chunks: list[dict] = []
+    meta: list[dict] = []
+    for fid, mutants in sorted(groups.items(), key=lambda kv: str(kv[0])):
+        try:
+            sel = truth_select.resolve_function_selection(
+                project_root, f, fid or "", file_selection=file_selection)
+        except truth_select.MutationSelectionError:
+            raise
+        group_glob = sel.get("tests_glob") or file_glob
+        source = ("file_fallback" if fid is None else sel.get("source"))
+        reason = ("module_scope" if fid is None else sel.get("reason"))
+        meta.append({"function_id": fid, "source": source, "reason": reason,
+                     "tests": len(sel.get("tests") or []),
+                     "mutants": len(mutants)})
+        chunks.append({
+            "file": f, "project_root": project_root, "budget": budget,
+            "timeout_s": timeout_s, "tests_glob": group_glob,
+            "resume": resume, "binary_kind": binary_kind,
+            "timeout_factor": timeout_factor, "total_sites": total_sites,
+            "attention": attention, "mutate_all": mutate_all,
+            "retry_ids": [m.stable_id for m in mutants],
+            "baseline": baseline,
+            "progress": {"run_id": run_id, "worker": f"fn:{fid or 'module'}",
+                         "total": len(executed_list)},
+            "identity": identity, "worker_channel": worker_channel,
+        })
+    return chunks, meta
+
+
+def _attach_chunk_selection(results: list[dict], chunks: list[dict]) -> None:
+    """串行回退/无 ctx 的 chunk 也要带选面披露（观测面不因降级而丢失）。"""
+    from .testscan import selection_disclosure
+    by_file = {r.get("summary", {}).get("file"): r for r in results}
+    for ch in chunks:
+        meta = ch.get("selection_meta")
+        r = by_file.get(ch.get("file"))
+        if not meta or r is None:
+            continue
+        r["summary"].update(selection_disclosure(meta))
+        if ch.get("selection_mode"):
+            r["summary"].setdefault("selection_mode", ch["selection_mode"])
 
 
 def _warn_serial_fallback(file: str, reason: str | None) -> None:
@@ -1170,6 +1277,10 @@ def _inject_one(r: dict, ctx: dict) -> None:
     # §SPEC-613：自动选测披露随报告透出（显式 --tests 时缺省缺席）。
     from .testscan import selection_disclosure
     s.update(selection_disclosure(ctx["test_selection"]))
+    if ctx.get("selection_mode"):
+        s["selection_mode"] = ctx["selection_mode"]
+    if ctx.get("selection_groups"):
+        s["selection_groups"] = list(ctx["selection_groups"])
     if plan.reused:
         _inject_reused(r, ctx)
     # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures

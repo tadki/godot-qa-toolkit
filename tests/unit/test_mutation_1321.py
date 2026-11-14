@@ -90,7 +90,8 @@ class TestSpec006XdgIsolation:
         monkeypatch.setattr(
             runner_mod, "_run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
-        run_mutation(files[0], proj, budget=1)
+        executor.run_mutation_files([files[0]], proj, budget=1,
+                                        select_mode="full")
         assert runner_mod._ACTIVE_ENV is None
         assert runner_mod._ACTIVE_SCRIPT == runner_mod.GUT_SCRIPT_RES_PATH
 
@@ -272,9 +273,10 @@ class TestSpec001AutoScan:
         from attribution_fixtures import write_map
         rel = _P(files[0]).resolve().relative_to(_P(proj).resolve()).as_posix()
         write_map(_P(proj), {rel: ["test_save.gd::test_ok"]})
-        run_mutation(files[0], proj, budget=1)
+        executor.run_mutation_files([files[0]], proj, budget=1,
+                                    select_mode="file")
         assert fake_gut["globs"][0].startswith(
-            "res://.qa-cache/gqt-attr-select/")
+            "res://.gqt-attr-select/")
 
     def test_zero_hits_falls_back_to_full(self, tmp_path, monkeypatch):
         proj, files = _write_project(tmp_path)

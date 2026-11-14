@@ -1283,7 +1283,8 @@ def _arms_state(arms: tuple[dict, ...]) -> dict:
             "state": arm.get("state"),
             "invalid_reason": arm.get("invalid_reason"),
             "bundles": int(arm.get("bundles") or 0),
-            "pairs": len(attribution.get("test_to_files") or {}),
+            "pairs": sum(len(v) for v in
+                         (attribution.get("test_to_files") or {}).values()),
         }
     return out
 

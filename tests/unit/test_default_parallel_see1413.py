@@ -107,7 +107,7 @@ class TestDefaultParallelRouting:
         proj, target = _write_project(tmp_path, GD_PARALLEL_TARGET)
         monkeypatch.setattr(executor.os, "cpu_count", lambda: 8)
         args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj])
+            ["mutation", target, "--project-root", proj, "--select", "full"])
         cli_mod.cmd_mutation(args)
         out = cli_mod.json.loads(capsys.readouterr().out)
         assert set(out) == {"tool", "ok", "summary", "failures"}
@@ -126,6 +126,8 @@ class TestDefaultParallelRouting:
             "stage_timings", "rss_peak_mb", "disk_delta_bytes",
             # SEE-1576 §SPEC-613：自动选测披露（只加不改；显式 --tests 缺席）
             "test_selection",
+            # SEE-1581 第六批：选面模式披露（fn 默认 / file / full 审计）
+            "selection_mode",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")
@@ -313,7 +315,7 @@ class TestCliRouting:
 
         monkeypatch.setattr(exec_mod, "run_mutation_files", spy)
         args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj])
+            ["mutation", target, "--project-root", proj, "--select", "full"])
         cli_mod.cmd_mutation(args)
         assert called["executor"] is True
 
@@ -327,7 +329,7 @@ class TestCliRouting:
         spy = Mock(wraps=exec_mod.run_mutation_files)
         monkeypatch.setattr(exec_mod, "run_mutation_files", spy)
         args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj])
+            ["mutation", target, "--project-root", proj, "--select", "full"])
         cli_mod.cmd_mutation(args)
         assert spy.call_args.kwargs["timing_store"] is not None
         out = cli_mod.json.loads(capsys.readouterr().out)
@@ -339,7 +341,8 @@ class TestCliRouting:
         """负 budget 不得让默认单文件解包空 results 并抛出 IndexError。"""
         proj, target = _write_project(tmp_path)
         args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj, "--budget", "-1"])
+            ["mutation", target, "--project-root", proj, "--budget", "-1",
+             "--select", "full"])
         rc = cli_mod.cmd_mutation(args)
         out = cli_mod.json.loads(capsys.readouterr().out)
         assert rc == 0
@@ -353,7 +356,7 @@ class TestCliRouting:
         """CLI 显式 jobs=1 的串行结果同样携带 summary.jobs=1。"""
         proj, target = _write_project(tmp_path)
         args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj, "--jobs", "1"])
+            ["mutation", target, "--project-root", proj, "--jobs", "1", "--select", "full"])
         cli_mod.cmd_mutation(args)
         out = cli_mod.json.loads(capsys.readouterr().out)
         assert set(out) == {"tool", "ok", "summary", "failures"}

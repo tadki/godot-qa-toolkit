@@ -234,7 +234,7 @@ class TestProgressLines:
                                                capsys):
         proj, target = _write_project(tmp_path)
         args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj])
+            ["mutation", target, "--project-root", proj, "--select", "full"])
         cli_mod.cmd_mutation(args)
         captured = capsys.readouterr()
         out = json.loads(captured.out)  # 恰好一个 JSON，进度全在 stderr

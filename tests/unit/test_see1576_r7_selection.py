@@ -137,20 +137,23 @@ def test_runner_mapping_selection_line(tmp_path, capsys):
     root = _dilution_project(tmp_path)
     write_map(root, {"svc/aux.gd": ["test_svc_clock.gd::test_0"]})
     glob, meta = runner_mod._auto_scan_tests_glob_meta(
-        str(root / "svc" / "aux.gd"), str(root))
+        str(root / "svc" / "aux.gd"), str(root), select_mode="file")
     assert glob is not None
-    assert glob.startswith("res://.qa-cache/gqt-attr-select/")
+    assert glob.startswith("res://.gqt-attr-select/")
     assert meta["source"] == "runtime_mapping"
     assert "runtime-mapping selection" in capsys.readouterr().err
 
 
 def test_runner_full_face_without_map(tmp_path, capsys):
-    """无映射：全脸（tests_glob None）+ 零 stderr 噪声，来源进 meta。"""
+    """显式 full 审计面：tests_glob None + 零 stderr 噪声，来源进 meta。
+
+    （映射不可用已改 fail-loud——全脸只在 --select full 显式审计时可达。）"""
     root = _plain_project(tmp_path)
     glob, meta = runner_mod._auto_scan_tests_glob_meta(
-        str(root / "calc.gd"), str(root))
+        str(root / "calc.gd"), str(root), select_mode="full")
     assert glob is None
     assert meta["source"] == "full_face"
+    assert meta["reason"] == "explicit_full_face"
     assert capsys.readouterr().err == ""
 
 
@@ -192,7 +195,8 @@ def test_summary_carries_test_selection(tmp_path, monkeypatch):
             (1, "* test_killed_by_probe\n\t[Failed]\n"))
 
     result = run_mutation_files([str(target)], str(root), budget=10,
-                                timeout_s=60, jobs=4)  # 不传 --tests：走自动选测
+                                timeout_s=60, jobs=4,
+                                select_mode="file")  # 不传 --tests：走自动选测
     s = result["results"][0]["summary"]
     sel = s.get("test_selection")
     assert sel is not None, "summary 缺 test_selection 披露键"

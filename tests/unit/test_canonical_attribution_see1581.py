@@ -23,6 +23,7 @@ from godot_qa_toolkit.canonical.orchestrator import (
     _ATTR_FLUSHER_GD,
     _PRE_HOOK_GD,
     _FLUSHER_GD,
+    _function_entry_probes,
     build_attribution_map,
     run_canonical,
 )
@@ -68,7 +69,7 @@ def test_probe_calls_attribution_emits_identity_writes():
     line_to_id = {4: 0, 5: 1}
     out = "".join(_probe_calls(TARGET_SRC, line_to_id, True, SINK,
                                attribution=True))
-    # 两处探针 → 两组互不重名的临时变量（同名 var 同一作用域会 parse error）
+    # hit 级（无 attr_probe_ids）：两处探针都带归属块
     assert out.count("Engine.get_meta(\"gqt_cov_ctx\", 0)") == 2
     assert out.count("Engine.get_meta(\"gqt_cov_phase\", 0)") == 2
     for pid in ("0", "1"):
@@ -86,6 +87,26 @@ def test_probe_calls_attribution_emits_identity_writes():
     assert "__qa_cov_probe_m_0badf00d[0] = 1" in out
 
 
+def test_probe_calls_fn_mode_only_entry_probes_carry_attribution():
+    """方向②：attr_probe_ids 指定函数入口 probe——只有这些位点带归属块，
+    其余 probe 只保留行覆盖 flag；fn 块走 gqt_cov_slot 单整数槽位。"""
+    line_to_id = {4: 0, 5: 1}
+    out = "".join(_probe_calls(TARGET_SRC, line_to_id, True, SINK,
+                               attribution=True,
+                               attr_probe_ids=frozenset({0})))
+    assert out.count("Engine.get_meta(\"gqt_cov_slot\", 0)") == 1
+    # 函数入口 probe：槽位置位 + 事件计数 + 函数级归属（fctx）
+    assert "__qa_cov_probe_a_0badf00d[0][__qa_cov_probe_t0 - 1] = 1" in out
+    assert "[1][__qa_cov_probe_t0 - 1] = " in out
+    assert ".get_or_add(0, {})" in out
+    # 无主分支：热点 + 阶段
+    assert "__qa_cov_probe_a_0badf00d[3][0] = " in out
+    assert "__qa_cov_probe_a_0badf00d[4][__qa_cov_probe_p0]" in out
+    # 非 probe 集合内的位点只有 flag 写（探针块不出现）
+    assert "__qa_cov_probe_t1" not in out
+    assert "__qa_cov_probe_m_0badf00d[1] = 1" in out
+
+
 def test_flag_probe_block_attribution_registers_attr_sink():
     default = _flag_probe_block(SINK, 2, runtime_sink=True)
     assert "gqt_cov_attr" not in default
@@ -95,6 +116,11 @@ def test_flag_probe_block_attribution_registers_attr_sink():
     assert "gqt_cov_attr" in attr
     assert "qa-coverage-attr-GQTUUIDSENTINEL-" in attr
     assert "[[], [], {}, [0, 0, 0, 0, 0, 0]]" in attr
+
+    fn = _flag_probe_block(SINK, 2, runtime_sink=True, attribution=True,
+                           fn_mode=True)
+    assert "[[], [], {}, {}, [0, 0, 0, 0]]" in fn
+    assert "gqt_cov_slot_max" in fn  # 槽位预置尺寸（钩子扩容配合）
 
 
 def test_instrument_blocks_attribution_parses():
@@ -115,12 +141,16 @@ def test_injected_scripts_are_valid_gdscript():
 
 
 def test_hooks_carry_per_test_lifecycle_and_drain():
-    for sig in ("start_script", "start_test", "end_test", "end_script"):
+    for sig in ("start_script", "start_test", "end_test", "end_script",
+                "end_run"):
         assert f"gut.{sig}.connect" in _ATTR_PRE_HOOK_GD
-    assert "gqt_cov_ctx" in _ATTR_PRE_HOOK_GD
-    assert "gqt_cov_script_registry" in _ATTR_PRE_HOOK_GD
+    assert "gqt_cov_slot" in _ATTR_PRE_HOOK_GD
+    assert "gqt_cov_slot_max" in _ATTR_PRE_HOOK_GD
+    assert "gqt_cov_ctx_registry" in _ATTR_PRE_HOOK_GD
     assert "__GQT_RUN_UUID__" in _ATTR_PRE_HOOK_GD
     assert "qa-cov-attr-tests-" in _ATTR_PRE_HOOK_GD
+    # 方向③：阶段桶由钩子维护
+    assert "gqt_cov_phase" in _ATTR_PRE_HOOK_GD
     # 默认钩子不含归属接线（默认路径零变化）
     assert "start_test" not in _PRE_HOOK_GD
     assert "gqt_cov_attr" in _ATTR_FLUSHER_GD
@@ -183,43 +213,76 @@ def test_causal_instrumentation_declares_ctx_preload():
     gdtoolkit_parser.parser.parse(causal)
 
 
+def test_function_entry_probes_pick_min_probe_per_function():
+    registry = {"entries": [
+        {"fid": "src/x.gd::a", "instrumentable": True,
+         "start_line": 2, "end_line": 4},
+        {"fid": "src/x.gd::b", "instrumentable": True,
+         "start_line": 6, "end_line": 9},
+        {"fid": "src/x.gd::inner", "instrumentable": False,
+         "start_line": 11, "end_line": 12},
+    ]}
+    ids, fid_by_probe = _function_entry_probes(registry, [2, 5, 6, 8])
+    assert ids == {0, 2}
+    assert fid_by_probe[0] == "src/x.gd::a"   # 行 2（区间内最小 probe）
+    assert fid_by_probe[2] == "src/x.gd::b"   # 行 6
+    assert len(fid_by_probe) == 2
+
+
 # ---------------------------------------------------------------- 映射聚合
 
 
-def _rec(seen, seen_script, unattr_counts, counts):
-    return {"seen": set(seen), "seen_script": set(seen_script),
+def _rec(seen, cnt, fn, unattr_counts, phases):
+    return {"seen": set(seen), "cnt": dict(cnt), "fn": {k: set(v)
+                                                        for k, v in fn.items()},
             "unattr_counts": dict(unattr_counts),
-            "counts": list(counts)}
+            "phases": list(phases)}
 
 
 def test_build_attribution_map_joins_registry_and_splits_lanes():
+    # 组合注册表：槽位 0/1 = 测试，槽位 2 = 脚本（同一索引空间，方向②）
     attr_by_rel = {
-        "src_game/cell.gd": {101: _rec({0, 1}, {0}, {2: 3, 3: 1},
-                                      [20, 6, 3, 1, 0, 0])},
-        "src_game/node.gd": {101: _rec({1}, set(), {}, [5, 0, 0, 0, 0, 0])},
+        "src_game/cell.gd": {101: _rec(
+            {0, 1, 2}, {0: 20, 1: 5, 2: 6},
+            {7: {0}, 8: {1, 2}}, {2: 3, 3: 1}, [3, 1, 0, 0])},
+        "src_game/node.gd": {101: _rec({1}, {1: 5}, {}, {}, [0, 0, 0, 0])},
     }
     registries = (
         {101: {0: "res://tests/unit/test_a.gd::test_one",
                1: "res://tests/unit/test_b.gd::test_two"}},
-        {101: {0: "res://tests/integration/test_c.gd"}},
+        {101: {2: "res://tests/integration/test_c.gd"}},
     )
     m = build_attribution_map(
         "gut_full", attr_by_rel, registries,
-        probe_lines_by_rel={"src_game/cell.gd": [4, 5, 6]},
+        probe_lines_by_rel={"src_game/cell.gd": [4, 5, 6, 7, 8]},
         fid_by_line_by_rel={"src_game/cell.gd": {4: "src_game/cell.gd::work",
                                                  5: "src_game/cell.gd::work",
-                                                 6: "src_game/cell.gd::x"}})
+                                                 6: "src_game/cell.gd::x",
+                                                 7: "src_game/cell.gd::y",
+                                                 8: "src_game/cell.gd::z"}},
+        fid_by_probe_by_rel={"src_game/cell.gd": {7: "src_game/cell.gd::y",
+                                                  8: "src_game/cell.gd::z"}})
     assert m["arm"] == "gut_full"
     assert m["tests"] == 2 and m["scripts"] == 1
     assert m["files"] == 2
     assert m["pairs"] == 3 and m["script_pairs"] == 1
-    # 三车道：测试级 25 / 脚本级 6 / 无主 4（bootstrap 3 + script_gap 1）
-    assert m["attributed_hit_events"] == 25
+    # 函数级映射（方向②）：fn 对解析 fid——probe 7 槽位 0 = test_a → y；
+    # probe 8 槽位 1 = test_b → z；probe 8 槽位 2 = 脚本槽 → z
+    assert m["function_pairs"] == 2
+    assert m["test_to_functions"]["res://tests/unit/test_a.gd::test_one"] == [
+        "src_game/cell.gd::y"]
+    assert m["test_to_functions"]["res://tests/unit/test_b.gd::test_two"] == [
+        "src_game/cell.gd::z"]
+    assert m["script_to_functions"]["res://tests/integration/test_c.gd"] == [
+        "src_game/cell.gd::z"]
+    # 三车道（事件取 cnt 按槽位 kind 归类）：测试级 30（cell 20+5、node 5）/
+    # 脚本级 6 / 无主 4
+    assert m["attributed_hit_events"] == 30
     assert m["script_hit_events"] == 6
     assert m["unattributed_hit_events"] == 4
-    assert m["lanes"]["test"]["rate"] == round(25 / 35, 6)
-    assert m["lanes"]["script"]["rate"] == round(6 / 35, 6)
-    assert m["lanes"]["unattributed"]["rate"] == round(4 / 35, 6)
+    assert m["lanes"]["test"]["rate"] == round(30 / 40, 6)
+    assert m["lanes"]["script"]["rate"] == round(6 / 40, 6)
+    assert m["lanes"]["unattributed"]["rate"] == round(4 / 40, 6)
     assert sum(v["rate"] for v in m["lanes"].values()) == pytest.approx(1.0)
     phases = m["unattributed_phases"]
     assert phases["bootstrap"]["hit_events"] == 3
@@ -247,15 +310,15 @@ def test_build_attribution_map_joins_registry_and_splits_lanes():
 
 
 def test_build_attribution_map_unmapped_is_disclosed_not_guessed():
-    attr_by_rel = {"src_game/cell.gd": {7: _rec({3}, {5}, {}, [2, 1, 0, 0, 0, 0])}}
+    # 组合注册表缺失槽位 3 —— 单条披露，不按车道猜测归属
+    attr_by_rel = {"src_game/cell.gd": {7: _rec({3}, {3: 2}, {}, {},
+                                                [0, 0, 0, 0])}}
     m = build_attribution_map("gut_full", attr_by_rel, ({7: {}}, {7: {}}))
     assert m["tests"] == 0 and m["scripts"] == 0
     assert m["unmapped_count"] == 1
     assert m["unmapped_test_indices"] == [
-        {"file": "src_game/cell.gd", "pid": 7, "test_index": 3}]
-    assert m["unmapped_script_count"] == 1
-    assert m["unmapped_script_indices"] == [
-        {"file": "src_game/cell.gd", "pid": 7, "script_index": 5}]
+        {"file": "src_game/cell.gd", "pid": 7, "slot": 3}]
+    assert m["unmapped_script_count"] == 0
 
 
 # ---------------------------------------------------------------- 端到端
@@ -343,14 +406,14 @@ class FakeGodot:
                     src):
                 uuid, key8 = m.group(1), m.group(2)
                 (dest / f"qa-coverage-attr-{uuid}-99999-{key8}.txt").write_text(
-                    "test 0\nscript 0\nunattr 0 2\ncounts 10 6 2 0 0 0\n",
+                    "test 0\ntest 1\ncnt 0 10\nfn 0 0\nunattr 0 2\nph 2 0 0 0\n",
                     encoding="utf-8")
         hook_text = self.pre_hook_texts[-1]
         m = re.search(r"qa-cov-attr-tests-([0-9a-f-]{8,36})-", hook_text)
         if m:
             (dest / f"qa-cov-attr-tests-{m.group(1)}-99999.txt").write_text(
-                "test 0\tres://tests/unit/test_game.gd::test_ok\n"
-                "script 0\tres://tests/integration/test_flow.gd\n",
+                "slot 0\ttest\tres://tests/unit/test_game.gd::test_ok\n"
+                "slot 1\tscript\tres://tests/integration/test_flow.gd\n",
                 encoding="utf-8")
 
         class R:
@@ -397,13 +460,15 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     assert summary["artifact"] == str(artifact_path)
     gut = summary["arms"]["gut_full"]
     assert gut["tests"] == 1 and gut["scripts"] == 1
-    # 2 个目标文件各写一份 counts(10,6,2) —— 逐车道按比例断言
+    # 2 个目标文件各写一份证据 —— 车道事件按 cnt 汇总，无主按 ph 汇总
     assert gut["attributed_hit_events"] == 20
-    assert gut["script_hit_events"] == 12
+    assert gut["script_hit_events"] == 0
     assert gut["unattributed_hit_events"] == 4
-    assert gut["lanes"]["test"]["rate"] == round(10 / 18, 6)
-    assert gut["lanes"]["script"]["rate"] == round(6 / 18, 6)
-    assert gut["lanes"]["unattributed"]["rate"] == round(2 / 18, 6)
+    assert gut["lanes"]["test"]["rate"] == round(20 / 24, 6)
+    assert gut["lanes"]["unattributed"]["rate"] == round(4 / 24, 6)
+    assert gut["unattributed_phases"]["bootstrap"]["hit_events"] == 4
+    # acceptance 臂不做归属（方向②③：plain 模板 + 默认钩子）
+    assert "acceptance" not in gut and summary["arms"].keys() == {"gut_full"}
     # 默认关闭的键不得出现
     assert all("attribution" not in arm for arm in report["arms"])
 
@@ -413,6 +478,9 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     mapping = artifact["arms"]["gut_full"]["test_to_files"]
     assert mapping["res://tests/unit/test_game.gd::test_ok"] == [
         "src_game/cell.gd", "src_game/node.gd"]
+    # 函数级映射（方向②）：fn 对经函数入口 probe 解析出 fid
+    fn_mapping = artifact["arms"]["gut_full"]["test_to_functions"]
+    assert fn_mapping["res://tests/unit/test_game.gd::test_ok"]
     # 归属钩子确实注入（含 run_uuid 替换，无占位符残留）
     assert any("start_test.connect" in t for t in fake.pre_hook_texts)
     assert all("__GQT_RUN_UUID__" not in t for t in fake.pre_hook_texts)

@@ -643,15 +643,19 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return _emit(result)
 
 
-def _attribution_args(args: argparse.Namespace) -> tuple[bool, str | None]:
+def _attribution_args(args: argparse.Namespace
+                      ) -> tuple[bool, str | None, bool]:
     """§SPEC-083：`--test-attribution` 开关与其产物路径的默认推导。
 
     显式 `--test-attribution-out` 优先；否则仅在开关开启时落到
-    `<--out>.attribution.json`（默认关闭路径不产生任何路径）。"""
+    `<--out>.attribution.json`（默认关闭路径不产生任何路径）。
+    `--attribution-causal`（R2）依附归属开关：开关未开时忽略（不静默
+    改变默认路径行为）。"""
     enabled = bool(getattr(args, "test_attribution", False))
     explicit = getattr(args, "test_attribution_out", None)
     out = explicit or (f"{args.out}.attribution.json" if enabled else None)
-    return enabled, out
+    causal = bool(getattr(args, "attribution_causal", False)) and enabled
+    return enabled, out, causal
 
 
 def cmd_canonical(args: argparse.Namespace) -> int:
@@ -739,7 +743,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
         return _emit_godot_unavailable("canonical", godot_cmd, godot_reason)
-    test_attribution, attribution_out = _attribution_args(args)
+    test_attribution, attribution_out, attribution_causal = (
+        _attribution_args(args))
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -754,7 +759,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             intolerant_config=intolerant_config,
             acceptance_repeats=getattr(args, "acceptance_repeats", 3),
             test_attribution=test_attribution,
-            attribution_out=attribution_out)
+            attribution_out=attribution_out,
+            attribution_causal=attribution_causal)
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -913,6 +919,12 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--test-attribution-out", default=None,
                      help="attribution artifact path (default: "
                           "<--out>.attribution.json)")
+    can.add_argument("--attribution-causal", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 R2): also wrap "
+                          "call_deferred/create_timer creation sites in "
+                          "instrumented files so their callbacks are "
+                          "attributed to the test that created them; "
+                          "requires --test-attribution")
     _add_godot_bin_arg(can)
     can.set_defaults(func=cmd_canonical)
 

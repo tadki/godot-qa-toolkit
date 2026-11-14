@@ -1355,7 +1355,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   acceptance_repeats: int = 3,
                   test_attribution: bool = False,
                   attribution_out: str | None = None,
-                  attribution_causal: bool = False) -> dict:
+                  attribution_causal: bool = False,
+                  arms_parallel: bool = False,
+                  acceptance_adaptive: bool = False) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。
 
     baseline_failures（§SPEC-060a/064b）：既有（未插桩）运行的失败
@@ -1612,11 +1614,17 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     recovered = _recover_stale_backups(root)
 
 
-    def _arm(name: str, acceptance: dict | None = None) -> dict:
+    def _arm(name: str, acceptance: dict | None = None,
+             shadow_instrument: bool = False,
+             adaptive_reps: bool = False) -> dict:
         """一条批式臂（§SPEC-052 并行分片）：复用全集插桩 → 按目录/feature
         组并行扇出 N 个 GUT 进程（每进程独立 XDG user:// 隔离 + 运行时
         PID sink）→ 合并逐文件 sink 读回 → bundle → 恢复/清理。零可执行行
-        文件进显式 vacuous 车道（§SPEC-042）。"""
+        文件进显式 vacuous 车道（§SPEC-042）。
+
+        shadow_instrument=True（P2 双臂并行）：插桩写入分片 shadow 而非
+        项目根——两臂可并发执行而不互踩 uuid。adaptive_reps=True（P1）：
+        acceptance 臂逐轮执行、并集稳定即提前锁定（上限仍为 reps）。"""
         from concurrent.futures import ThreadPoolExecutor
 
         run_uuid = make_run_uuid()
@@ -1627,6 +1635,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         sink_by_rel: dict[str, str] = {}
         manifest_by_rel: dict[str, list[int]] = {}
         instrumented_files: dict[str, str] = {}
+        inst_by_rel: dict[str, str] = {}
         vacuous_rels: list[str] = []
         for rel, item in prepared.items():
             # 方向②③：归属只在 gut_full 臂启用——acceptance 臂用 plain
@@ -1651,6 +1660,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             sink_by_rel[rel] = sink
             manifest_by_rel[rel] = manifest
             instrumented_files[item["abs"]] = inst
+            inst_by_rel[rel] = inst
         pg_path = root / "project.godot"
         if not pg_path.is_file():
             raise CanonicalError(
@@ -1661,8 +1671,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                               str(root / _PRE_HOOK_RELPATH)]
         if attribution_causal and name == "gut_full":
             started["created"].append(str(root / _ATTR_CTX_RELPATH))
-        (backup_dir / "started.json").write_text(
-            json.dumps(started, ensure_ascii=False), encoding="utf-8")
+        if not shadow_instrument:
+            (backup_dir / "started.json").write_text(
+                json.dumps(started, ensure_ascii=False), encoding="utf-8")
         # 分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs
         if acceptance is not None:
             plans = [
@@ -1686,6 +1697,25 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
         reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
 
+        # P2（双臂并行）：acceptance 臂在 shadow 内插桩——钩子文本按本臂
+        # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）
+        flusher_gd, pre_hook_gd = _hook_templates(
+            test_attribution and name == "gut_full", run_uuid)
+        shadow_hook_files = [(_FLUSHER_RELPATH, flusher_gd),
+                             (_PRE_HOOK_RELPATH, pre_hook_gd)]
+        if attribution_causal and name == "gut_full":
+            shadow_hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
+
+        def _instrument_shadow(shadow: Path) -> None:
+            for rel, inst in inst_by_rel.items():
+                target = shadow / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(inst, encoding="utf-8")
+            for relpath, text in shadow_hook_files:
+                hp = shadow / relpath
+                hp.parent.mkdir(parents=True, exist_ok=True)
+                hp.write_text(text, encoding="utf-8")
+
         def _run_shard(ip):
             idx, plan = ip
             args = list(plan["args"]) + [
@@ -1697,6 +1727,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 # §SPEC-056：分片独立 project shadow（rep 间复用）
                 shadow, shadow_disclosure = _prepare_shadow(
                     root, run_uuid, idx)
+                if shadow_instrument:
+                    _instrument_shadow(shadow)
+                prev_union = None
                 for rep in range(reps):
                     xdg = tempfile.mkdtemp(
                         prefix=f"gqt-shard-{run_uuid[:8]}-{idx}-r{rep}-")
@@ -1725,6 +1758,18 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     rep_records.append(
                         {"xdg": xdg, "rc": rc, "out": out,
                          "timed_out": rep_timed_out})
+                    if adaptive_reps:
+                        # P1：分片局部累计并集停止增长即提前锁定（判据与
+                        # §SPEC-062C 一致：∪(1..k)==∪(1..N)；无全局 barrier）
+                        shard_union: set[int] = set(prev_union or ())
+                        for rel in sink_by_rel:
+                            hits, _ = _read_hits_merged(
+                                root, run_uuid, rel, manifest_by_rel[rel],
+                                [xdg], consume=False)
+                            shard_union |= set(hits)
+                        if rep >= 1 and frozenset(shard_union) == prev_union:
+                            break
+                        prev_union = frozenset(shard_union)
             finally:
                 _cleanup_shadow(shadow)
             # §SPEC-071 H1：shadow symlink 消解行为显式披露（解引用/悬空移除）
@@ -1732,28 +1777,24 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     "shadow_disclosure": shadow_disclosure}
 
         try:
-            for abs_path, inst in instrumented_files.items():
-                Path(abs_path).write_text(inst, encoding="utf-8")
-            # 方向②③：attr 钩子只在归属臂注入；acceptance 臂用默认钩子
-            flusher_gd, pre_hook_gd = _hook_templates(
-                test_attribution and name == "gut_full", run_uuid)
-            if attribution_causal and name == "gut_full":
-                # 注入脚本解析失败会让全部被插桩文件在 load 期失效（探针
-                # 静默零命中）——生成期先 parse 一次，fail-loud 拒绝跑假数据
-                from gdtoolkit.parser import parser as _ctx_parser
-                try:
-                    _ctx_parser.parse(_ATTR_CTX_GD)
-                except Exception as e:  # noqa: BLE001
-                    raise CanonicalError(
-                        f"causal context script failed to parse: {e}") from e
-            hook_files = [(_FLUSHER_RELPATH, flusher_gd),
-                          (_PRE_HOOK_RELPATH, pre_hook_gd)]
-            if attribution_causal and name == "gut_full":
-                hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
-            for relpath, text in hook_files:
-                abs_p = root / relpath
-                abs_p.parent.mkdir(parents=True, exist_ok=True)
-                abs_p.write_text(text, encoding="utf-8")
+            if not shadow_instrument:
+                for abs_path, inst in instrumented_files.items():
+                    Path(abs_path).write_text(inst, encoding="utf-8")
+                # 方向②③：attr 钩子只在归属臂注入；acceptance 臂用默认钩子
+                if attribution_causal and name == "gut_full":
+                    # 注入脚本解析失败会让全部被插桩文件在 load 期失效（探针
+                    # 静默零命中）——生成期先 parse 一次，fail-loud 拒绝跑假数据
+                    from gdtoolkit.parser import parser as _ctx_parser
+                    try:
+                        _ctx_parser.parse(_ATTR_CTX_GD)
+                    except Exception as e:  # noqa: BLE001
+                        raise CanonicalError(
+                            f"causal context script failed to parse: "
+                            f"{e}") from e
+                for relpath, text in shadow_hook_files:
+                    abs_p = root / relpath
+                    abs_p.parent.mkdir(parents=True, exist_ok=True)
+                    abs_p.write_text(text, encoding="utf-8")
             t_arm = time.monotonic()
             try:
                 with ThreadPoolExecutor(
@@ -1952,6 +1993,10 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             # §SPEC-062C：验收臂 N 次重复与收敛披露（gut_full 恒单轮）
             "repeats": reps,
             "convergence": convergence,
+            "adaptive_rounds_used": max(
+                (len(r["reps"]) for r in results), default=0)
+            if (acceptance_adaptive and acceptance is not None) else None,
+            "arms_parallel": arms_parallel,
             "attribution": attribution,
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
@@ -1968,37 +2013,50 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             },
         }
 
-    # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
-    arm_a = _arm("gut_full")
+    def _acceptance_flow() -> dict:
+        """臂 acceptance：私有 suite 按分片分组编译/重放 → 并行扇出 GUT。"""
+        keys = list(acceptance_keys) if acceptance_keys else [
+            f["key"] for f in recipe["acceptance_face"]["features"]]
+        snapshot = _snapshot_main(root)
+        groups: list[dict] = []
+        try:
+            n_groups = max(1, min(int(acceptance_shards or 1), len(keys) or 1))
+            chunk = max(1, -(-len(keys) // n_groups))
+            for i in range(0, len(keys), chunk):
+                sub = keys[i:i + chunk]
+                sd = create_suite_dir(root)
+                groups.append({"suite_dir": sd, "keys": sub})
+                compile_keys_to_suite(root, sub, sd)
+                for k in sub:
+                    replay_check(root, k, suite_dir=sd)
+            return _arm("acceptance", acceptance={
+                "groups": groups, "snapshot": snapshot},
+                shadow_instrument=arms_parallel,
+                adaptive_reps=acceptance_adaptive)
+        except (SuiteError, AcceptRunError) as e:
+            for g in groups:
+                _cleanup_suite_dir(Path(g["suite_dir"]))
+            return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
+                    "gut_ok": False, "timed_out": False, "state": "invalid",
+                    "invalid_reason": f"suite_error:{e}", "bundles": 0,
+                    "bundles_data": {}, "reconciliation": None,
+                    "test_failures": {"observed": [], "observed_pairs": [],
+                                      "new": [], "new_pairs": [],
+                                      "instrumentation_intolerant": []},
+                    "repeats": 0, "convergence": None}
 
-    # 臂 acceptance：私有 suite 按分片分组编译/重放 → 并行扇出 GUT
-    keys = list(acceptance_keys) if acceptance_keys else [
-        f["key"] for f in recipe["acceptance_face"]["features"]]
-    snapshot = _snapshot_main(root)
-    groups: list[dict] = []
-    try:
-        n_groups = max(1, min(int(acceptance_shards or 1), len(keys) or 1))
-        chunk = max(1, -(-len(keys) // n_groups))
-        for i in range(0, len(keys), chunk):
-            sub = keys[i:i + chunk]
-            sd = create_suite_dir(root)
-            groups.append({"suite_dir": sd, "keys": sub})
-            compile_keys_to_suite(root, sub, sd)
-            for k in sub:
-                replay_check(root, k, suite_dir=sd)
-        arm_b = _arm("acceptance", acceptance={
-            "groups": groups, "snapshot": snapshot})
-    except (SuiteError, AcceptRunError) as e:
-        for g in groups:
-            _cleanup_suite_dir(Path(g["suite_dir"]))
-        arm_b = {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
-                 "gut_ok": False, "timed_out": False, "state": "invalid",
-                 "invalid_reason": f"suite_error:{e}", "bundles": 0,
-                 "bundles_data": {}, "reconciliation": None,
-                 "test_failures": {"observed": [], "observed_pairs": [],
-                                   "new": [], "new_pairs": [],
-                                   "instrumentation_intolerant": []},
-                 "repeats": 0, "convergence": None}
+    if arms_parallel:
+        # P2：双臂并行——acceptance 在 shadow 内插桩（根树只被 gut 臂触碰）
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=2) as pex:
+            fut_a = pex.submit(_arm, "gut_full")
+            fut_b = pex.submit(_acceptance_flow)
+            arm_a = fut_a.result()
+            arm_b = fut_b.result()
+    else:
+        # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
+        arm_a = _arm("gut_full")
+        arm_b = _acceptance_flow()
 
     # 逐文件 union（coverage-union/1，禁平均）
     unions = []

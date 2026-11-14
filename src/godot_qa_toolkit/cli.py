@@ -793,7 +793,10 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             acceptance_repeats=getattr(args, "acceptance_repeats", 3),
             test_attribution=test_attribution,
             attribution_out=attribution_out,
-            attribution_causal=attribution_causal)
+            attribution_causal=attribution_causal,
+            arms_parallel=bool(getattr(args, "arms_parallel", False)),
+            acceptance_adaptive=bool(
+                getattr(args, "acceptance_adaptive", False)))
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -958,6 +961,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "instrumented files so their callbacks are "
                           "attributed to the test that created them; "
                           "requires --test-attribution")
+    can.add_argument("--acceptance-adaptive", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 P1): run acceptance reps "
+                          "round-by-round and stop early once the line-set "
+                          "union stabilises (bound stays --acceptance-"
+                          "repeats); default off")
+    can.add_argument("--arms-parallel", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 P2): run gut_full and "
+                          "acceptance arms concurrently (acceptance is "
+                          "instrumented inside its shard shadows); default "
+                          "off — timing baseline must be redefined when "
+                          "enabled")
     _add_godot_bin_arg(can)
     can.set_defaults(func=cmd_canonical)
 

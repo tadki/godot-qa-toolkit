@@ -41,13 +41,16 @@ OLD_SCHEMA_PREFIXES = ("canonical-recipe/", "canonical-report/",
 # mutation 侧旧「自动回退全脸」文案特征（现行语义：fail-loud / 有界文件级
 # 回退 / zero-ref 终态 / 全脸仅显式审计）。measurement/increment 的「回退全脸」
 # 是映射重建的校准策略，不属此判据，故仅扫 mutation/。
-# 覆盖三类表述：旧回退动词（退回/走/回退 + 全脸）、隐式继续（按全脸继续/
-# 全脸继续）、缺省面失实（全脸默认/`= **全脸**`）。合法表述（「全脸仅
-# 显式审计」「显式全脸面/基线」）不含上述组合，不会被误伤。
+# 覆盖三类表述：旧回退动词（退回/走/回退/使用/退化为 + 全脸）、隐式继续
+# （按全脸继续/全脸继续）、缺省面失实（全脸默认/缺省全脸/`= **全脸**`/
+# defaults to the full face/uses the full face）。合法表述（「全脸仅
+# 显式审计」「显式全脸面/基线」「取消自动全脸」）不含上述组合，不会被误伤。
 STALE_FULL_FACE = re.compile(
     r"退回全脸|走全脸|回退全脸|全脸回退|"
     r"按全脸继续|全脸继续|全脸默认|=\s*\*\*全脸\*\*|"
-    r"falls back to the full face|falls back to full suite")
+    r"使用全脸|退化为全脸|缺省全脸|"
+    r"falls back to the full face|falls back to full suite|"
+    r"defaults to the full face|uses the full face")
 
 
 def _py_texts(root: Path) -> list[tuple[Path, str]]:
@@ -162,6 +165,43 @@ class TestStaleTextCleanup:
         # help 不得再宣称回退全 suite / 全脸。
         assert "falls back to full suite" not in cli_text
         assert "falls back to the full face" not in cli_text
+
+
+UNAMBIGUOUS_OLD_WORDS = re.compile(
+    r"\b(accept|attr-update|canonical|canonical-diagnose)\b")
+
+# 旧一级调用形态（`gqt <old> ...`）。arch/complexity/coverage/parity/risk
+# 与新 measure 叶子同名，仅在 gqt 前缀调用形态下才无歧义；
+# `gqt measure complexity` 不含 `gqt complexity`，不会误伤。
+OLD_INVOCATION = re.compile(
+    r"gqt (accept|canonical|canonical-diagnose|attr-update|recipe|registry|"
+    r"arch|complexity|coverage|parity|risk)([^-a-z0-9]|$)")
+
+
+class TestHelpSurfaceLeak:
+    """§SPEC-010：help 面不得泄漏旧命令名或旧调用形态（SEE-1583 无兼容）。"""
+
+    def _iter_help_texts(self, parser, path="root"):
+        yield path, "<epilog>", getattr(parser, "epilog", "") or ""
+        for action in parser._actions:
+            yield path, action.dest, getattr(action, "help", None) or ""
+            choices = getattr(action, "choices", None)
+            if isinstance(choices, dict):
+                # add_parser(help=...) 的文案挂在 subparsers action 的
+                # _choices_actions 伪 action 上，不在子 parser 本体。
+                for pseudo in getattr(action, "_choices_actions", []):
+                    yield path, pseudo.dest, getattr(pseudo, "help", "") or ""
+                for name, sub in choices.items():
+                    yield from self._iter_help_texts(sub, f"{path}/{name}")
+
+    def test_no_old_names_in_help_surface(self):
+        from godot_qa_toolkit.cli import build_parser
+
+        for path, dest, text in self._iter_help_texts(build_parser()):
+            assert not UNAMBIGUOUS_OLD_WORDS.search(text), \
+                f"help leak (old name) at {path}/{dest}: {text!r}"
+            assert not OLD_INVOCATION.search(text), \
+                f"help leak (old invocation) at {path}/{dest}: {text!r}"
 
 
 class TestGeneratedHeaders:

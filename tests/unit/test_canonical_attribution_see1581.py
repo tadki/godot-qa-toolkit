@@ -70,9 +70,10 @@ def test_probe_calls_attribution_emits_identity_writes():
     assert out.count("Engine.get_meta(\"gqt_cov_cur_test\", -1)") == 2
     assert "__qa_cov_probe_t0" in out and "__qa_cov_probe_t1" in out
     assert "__qa_cov_probe_s0" in out and "__qa_cov_probe_s1" in out
-    # 已归属/无主两条计数路径都在
-    assert "__qa_cov_probe_a_0badf00d[1][0] += 1" in out
-    assert "__qa_cov_probe_a_0badf00d[1][1] += 1" in out
+    # 已归属/无主两条计数路径都在；用显式赋值避免 `+=` 触发源文本测试
+    assert "__qa_cov_probe_a_0badf00d[1][0] = " in out
+    assert "__qa_cov_probe_a_0badf00d[1][1] = " in out
+    assert "[1][0] += 1" not in out and "[1][1] += 1" not in out
     # 行覆盖 flag 仍保留（归属是叠加而非替代）
     assert "__qa_cov_probe_m_0badf00d[0] = 1" in out
 

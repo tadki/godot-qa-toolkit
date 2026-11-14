@@ -62,6 +62,9 @@ from .recipe import verify_recipe
 
 REPORT_VERSION = "canonical-report/1"
 ATTRIBUTION_SCHEMA = "canonical-test-attribution/1"
+# 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
+# 旧模板（缓存键含 algo 但不含探针文本本身）
+ATTRIBUTION_ALGO_TAG = "attr/2"
 CERTIFICATION = {
     "status": "not_certified",
     "reason": "single round; WP5 owns two-round certification",
@@ -1065,7 +1068,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                  else "flags/4-pid")
     # §SPEC-083：归属形态插桩产物不同 → 缓存键必须分形，默认关闭路径
     # algo 不变（既有条目继续命中，零漂移）
-    algo_used = f"{base_algo}-attr" if test_attribution else base_algo
+    algo_used = (f"{base_algo}-{ATTRIBUTION_ALGO_TAG}" if test_attribution
+                 else base_algo)
     for path_str in target_files:
         p = Path(path_str)
         if not p.is_file():

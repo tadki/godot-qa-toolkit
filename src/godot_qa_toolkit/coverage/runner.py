@@ -255,11 +255,10 @@ def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
 _CAUSAL_METHODS = ("call_deferred", "create_timer")
 
 
-def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
-    """在调用点文本中定位 `<method>(<args>)`：返回 (开括号下标, 闭括号
-    下标, 接收者文本)。接收者为 `self`（裸调用）或点号前的表达式文本；
-    字符串/注释内的同名片段不参与匹配（本函数只处理 AST 已确认的调用点，
-    文本扫描仅用于取实参原文，按括号深度与字符串状态推进）。"""
+def _find_call_paren(text: str, method: str) -> tuple[int, int] | None:
+    """定位最后一次 `<method>` 调用（允许方法名与左括号间有空白）。
+
+    返回 (方法名起始下标, 左括号下标)；无调用返回 None。"""
     idx = -1
     pos = 0
     while True:
@@ -278,6 +277,11 @@ def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
     open_idx = idx + len(method)
     while open_idx < len(text) and text[open_idx] != "(":
         open_idx += 1
+    return idx, open_idx
+
+
+def _match_paren(text: str, open_idx: int) -> int | None:
+    """从左括号起按括号深度与字符串状态找到配对的右括号下标；未闭合 None。"""
     depth = 0
     quote = ""
     i = open_idx
@@ -298,18 +302,35 @@ def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
             if depth == 0:
                 break
         i += 1
-    if depth != 0:
-        return None
+    return i if depth == 0 else None
+
+
+def _call_receiver(text: str, idx: int) -> str | None:
+    """调用点前缀 → 接收者文本：裸调用 = 隐式 self；点号前表达式取原文。"""
     head = text[:idx].rstrip()
     if head == "":
-        recv = "self"  # 裸调用 = 隐式 self
-    elif head.endswith("."):
-        recv = head[:-1].strip()
-    else:
+        return "self"
+    if head.endswith("."):
+        return head[:-1].strip() or None
+    return None
+
+
+def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
+    """在调用点文本中定位 `<method>(<args>)`：返回 (开括号下标, 闭括号
+    下标, 接收者文本)。接收者为 `self`（裸调用）或点号前的表达式文本；
+    字符串/注释内的同名片段不参与匹配（本函数只处理 AST 已确认的调用点，
+    文本扫描仅用于取实参原文，按括号深度与字符串状态推进）。"""
+    found = _find_call_paren(text, method)
+    if found is None:
         return None
-    if not recv:
+    idx, open_idx = found
+    close_idx = _match_paren(text, open_idx)
+    if close_idx is None:
         return None
-    return open_idx, i, recv
+    recv = _call_receiver(text, idx)
+    if recv is None:
+        return None
+    return open_idx, close_idx, recv
 
 
 def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:

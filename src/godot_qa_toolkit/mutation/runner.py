@@ -52,7 +52,7 @@ from . import beacon
 from . import shadow
 from . import shadowpool
 from .shadow import SlotProvisionError
-from .identity import (COLD_SCHEME, INJECT_SCHEME, TestOwnershipIndex,
+from .identity import (COLD_SCHEME, INJECT_SCHEME,
                        WORKER_SCHEME, identity_pack, killer_certificate,
                        suspected_orphan)
 from .channel_router import CHANNEL_WORKER, route_target
@@ -818,6 +818,26 @@ def _orphan_disclosure(project_root: str, target_res: str) -> bool:
         return False
 
 
+def _attach_killed_certificate(verdict: dict, tail: str,
+                               baseline_failures: set[str], ownership_fn,
+                               project_root: str) -> None:
+    """killed 证书附挂（SEE-1581）：完整失败集 + 运行时归属。
+
+    归属/闭包不确定（owner=None）→ 不附证书 → 下轮保守重跑；fail-safe
+    只偏向重跑。"""
+    if verdict["verdict"] != "killed" or ownership_fn is None:
+        return
+    owner = ownership_fn()
+    if owner is None:
+        return
+    new_failures = _parse_failing_tests(tail) - baseline_failures
+    cert = killer_certificate(
+        new_failures, owner, project_root,
+        ownership_source=getattr(owner, "source", "structural_index"))
+    if cert is not None:
+        verdict["killed_by"] = cert
+
+
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
                        baseline_failures: set[str], baseline_dirty: bool,
@@ -880,19 +900,8 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                     f"{m.kind} {m.original}→{m.mutated} — engine output "
                     f"lacks test-run markers: {tail.strip()[:200]}",
                     src=original_src)
-            # killed 证书（完整失败集；归属/闭包不确定 → 不附 → 下轮保守
-            # 重跑，fail-safe 只偏向重跑）。
-            if verdict["verdict"] == "killed" and ownership_fn is not None:
-                owner = ownership_fn()
-                if owner is not None:
-                    new_failures = (_parse_failing_tests(tail)
-                                    - baseline_failures)
-                    cert = killer_certificate(
-                        new_failures, owner, project_root,
-                        ownership_source=getattr(owner, "source",
-                                                 "structural_index"))
-                    if cert is not None:
-                        verdict["killed_by"] = cert
+            _attach_killed_certificate(verdict, tail, baseline_failures,
+                                       ownership_fn, project_root)
         except subprocess.TimeoutExpired:
             verdict = _mutant_record(m, "timeout",
                                      f"GUT timed out after {m.kind} {m.original}→{m.mutated}",

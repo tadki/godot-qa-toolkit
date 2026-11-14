@@ -1,0 +1,18 @@
+{
+  "recipe_version": "canonical-recipe/1",
+  "recipe_hash": "x",
+  "gut_face": {
+    "dirs": [
+      "res://tests/unit/"
+    ]
+  },
+  "acceptance_face": {
+    "features": [],
+    "count": 1,
+    "excluded": [],
+    "harness": {}
+  },
+  "toolchain": {},
+  "exclusions": [],
+  "failures": []
+}

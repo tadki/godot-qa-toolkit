@@ -66,7 +66,7 @@ def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | N
     出口同形态）。返回 None 表示继续派发；返回 int 为已完成的错误响应。
 
     修复轮 F-1/F-2（hardener 上报）：注入后立即 refresh 重判——(a) 显式 env
-    非法路径在此早验证并转契约，先于 coverage/accept 的 GUT/重放等任何其他
+    非法路径在此早验证并转契约，先于 gherkin/measure coverage 的 GUT/重放等任何其他
     校验（不得被掩盖、不得裸 traceback，与 mutation 同形态）；(b) 同进程切换
     二进制后 binary kind 必须重钉，--path 形态与 timing 键成分取覆盖后真实
     类型（与 mutation 既有 refresh 语义对齐）。"""

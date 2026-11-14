@@ -475,7 +475,7 @@ def _invalidate_proof(project_root: str) -> str:
 
 
 def _run_import(project_root: str) -> tuple[bool, str]:
-    """同源 canonical 导入（godot_command 同源）；rc/输出/OSError 三重门。"""
+    """同源 measurement 导入（godot_command 同源）；rc/输出/OSError 三重门。"""
     from .inject import godot_command
     command = godot_command()
     try:
@@ -531,7 +531,7 @@ def prewarm_with_proof(project_root: str) -> dict:
     """§3.1 签发协议全流程入口（executor.prewarm_import 的新实现）。
 
     返回 {decision, probe_s, proof_id, import_calls, reason?}；
-    任何意外异常 → canonical 导入兜底（LOW-5 契约），绝不 raise。
+    任何意外异常 → measurement 导入兜底（LOW-5 契约），绝不 raise。
     """
     t0 = time.perf_counter()
     out: dict = {"decision": "imported_uncertified", "import_calls": 0,

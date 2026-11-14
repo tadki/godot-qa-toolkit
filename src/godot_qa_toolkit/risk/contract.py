@@ -29,7 +29,7 @@ SCORE_STATUS_VALUES = frozenset(
         "unstable",
         "no_instability_observed",
         "excluded",
-        # §SPEC-060f：canonical 实际产生、此前契约表缺失的两个状态
+        # §SPEC-060f：measurement 实际产生、此前契约表缺失的两个状态
         "no_probe_fired",
         "invalid",
     }

@@ -522,7 +522,7 @@ def _flag_probe_block(sink_name: str, count: int,
     落盘由注入的 finalizer 在 suite 结束统一完成：写次数 = 文件数，与
     命中事件数无关。
 
-    runtime_sink=True（canonical 并行分片臂）：sink 名拼接进程 PID——
+    runtime_sink=True（measurement 并行分片臂）：sink 名拼接进程 PID——
     同一棵插桩树可被多个 GUT 进程并发执行而互不写串（每进程独立 sink，
     读取侧按 run_uuid+key8 模式合并）。
 
@@ -640,7 +640,7 @@ def _probe_func(sink_name: str, count: int) -> str:
 # §SPEC-055/070 FR-4：基本块压缩——控制转移/控制结构/缩进变化处切块。
 # 块入口探针命中会展开为块内全部语句起始行计入覆盖——这是行覆盖**近似**
 # 而非逐语句精确测量：运行期错误中止块内执行时，后继语句仍会被计为已
-# 覆盖（canonical 报告 coverage_semantics 显式披露该近似，不冒充精确
+# 覆盖（measurement 报告 coverage_semantics 显式披露该近似，不冒充精确
 # statement_start_line）。
 _BLOCK_BREAKER_NODES = frozenset(
     {"return_stmt", "break_stmt", "continue_stmt"})
@@ -718,7 +718,7 @@ def _instrument(src: str, sink_name: str, flags: bool = False,
     """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
     文件尾追加探针机制。返回 (插桩源码, probe_id→行号 manifest)。
 
-    flags=True（§SPEC-046 canonical 批式臂）：命中点只做内存 flag 标记
+    flags=True（§SPEC-046 measurement 批式臂）：命中点只做内存 flag 标记
     （预置尺寸静态 Array 索引写），落盘由编排器注入的 finalizer 在 suite
     结束统一完成；direct（缺省）保持既有逐命中追加写形态，单文件/risk
     路径行为与产物字节不变。"""

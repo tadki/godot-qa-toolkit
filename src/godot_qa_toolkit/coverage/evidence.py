@@ -52,7 +52,7 @@ def write_run_record(evidence_dir: Path, record: dict,
     """Atomic write: recovery treats a malformed record as failed-start and
     reports it — it must never observe a half-written record as valid.
     name_suffix disambiguates batch-mode records that share one run_uuid
-    across files (canonical: per-file key8 suffix)."""
+    across files (batch/measurement: per-file key8 suffix)."""
     evidence_dir.mkdir(parents=True, exist_ok=True)
     tmp = evidence_dir / f"{record['run_uuid']}{name_suffix}.record.tmp"
     tmp.write_text(
@@ -80,7 +80,7 @@ def update_run_record(evidence_dir: Path, run_uuid: str,
 
 
 def _resolve_arm(tests_glob: str | None, arm: str | None) -> str:
-    # §SPEC-037：recipe.arm 显式参数注入（canonical 编排器传入）；
+    # §SPEC-037：recipe.arm 显式参数注入（measurement 编排器传入）；
     # 不传 arm 时保留 tests_glob 推断（既有调用方 stdout 契约零漂移）。
     if arm is not None:
         return arm
@@ -232,7 +232,7 @@ def build_bundle(
 def write_bundle(evidence_dir: Path, bundle: dict,
                  name_suffix: str = "") -> Path:
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    # name_suffix: batch 模式（canonical）同臂所有文件共享 run_uuid，无后缀
+    # name_suffix: batch 模式（measurement run）同臂所有文件共享 run_uuid，无后缀
     # 会互相覆盖——每臂只剩最后一份 bundle（R3 实证缺陷）。
     out = evidence_dir / f"{bundle['run_uuid']}{name_suffix}.json"
     out.write_text(

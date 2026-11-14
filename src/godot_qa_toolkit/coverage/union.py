@@ -5,7 +5,7 @@
 state=valid、整臂替换禁拼接（两臂臂名必须不同且各引用单一 run_uuid）、
 **禁平均**——coverage = |∪C| / total（行集并集，任何百分比平均都是实现
 缺陷，反向探针 fixture 钉死）。comparable 仅在两臂 recipe_hash 一致且等于
-canonical recipe_hash 时 true（unit-only/core/affected 子集为 false）。
+measurement recipe_hash 时 true（unit-only/core/affected 子集为 false）。
 """
 
 from __future__ import annotations

@@ -305,7 +305,9 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
         derived, selection_meta = _auto_scan_tests_glob_meta(
             files[0], project_root)
         if derived is None:
-            if total > 0:
+            # SEE-1581：None 不再是零引用判据——仅当新鲜映射明确说
+            # "无测试"（zero_ref）才短路；否则 = 无新鲜映射 → 全脸继续
+            if total > 0 and selection_meta.get("zero_ref"):
                 from .testscan import (disclose_zero_ref,
                                        zero_ref_short_circuit_result)
                 disclose_zero_ref(files[0])
@@ -580,6 +582,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
     passthrough_keys = (
         "adaptive_timeout_s", "timing_source", "samples_n", "baseline_p90",
         "run_error", "error", "inject_scheme", "slot_mode", "exec_scheme",
+        # SEE-1581：真值选面披露随分片结果透出（只增不改）
+        "test_selection",
     )
     per_file: dict[str, dict] = {}
     resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
@@ -764,11 +768,10 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
         return [], None, _settled_no_sites(f, bool(glob))
-    # E2（§SPEC-501）：并行规划路径同判据收口——显式 --tests 时 glob 必非
-    # None（门不可达）；glob=None ⟺ 派生 glob 零命中 → settled 披露记录，
-    # 不落 baseline-None 串行 fallback chunk（该 chunk 会在 worker 内跑全量
-    # GUT，正是 >361s 不可信中止的并发面形态）。
-    if glob is None:
+    # E2（§SPEC-501）+ SEE-1581：显式 --tests 时 glob 必非 None（门不可达）；
+    # 自动面 glob=None 且 fresh 映射判零测试（zero_ref）→ settled 披露记录；
+    # 无新鲜映射（zero_ref=False）→ 全脸继续（tests_glob None 即全量面）。
+    if glob is None and selection_meta.get("zero_ref"):
         from .testscan import disclose_zero_ref, zero_ref_short_circuit_result
         disclose_zero_ref(f)
         return [], None, zero_ref_short_circuit_result(f)
@@ -799,6 +802,15 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             identity=identity)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     baseline = baselines.get(glob)
+    if baseline is None and glob is None and jobs > 1:
+        # SEE-1581：全脸默认面（无新鲜映射）同样需要父层共享 baseline，
+        # 否则每文件退单 worker 串行、per-mutant 分片并行丢失（旧默认恒有
+        # scoped glob，此入口不存在）。一次全脸 baseline 换取 N 路分片。
+        baseline = _run_baseline_snapshot(project_root, None, timeout_s)
+        if baseline and baseline.get("rc") == 0:
+            baselines[None] = baseline
+        else:
+            baseline = None
     if not executed_list:
         # 差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
         # GUT + 1 baseline 锚），报告由 run_mutation 自建。父层已预跑的

@@ -1180,11 +1180,30 @@ def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
                                  fid_by_probe_by_rel=fid_by_probe_by_rel)
 
 
+def _tests_face_map(root: Path) -> dict[str, str]:
+    """tests/ 树全部 .gd 的 rel→sha256（映射的测试面内容绑定）。"""
+    out: dict[str, str] = {}
+    tests = root / "tests"
+    if not tests.is_dir():
+        return out
+    for p in sorted(tests.rglob("*.gd")):
+        try:
+            rel = str(p.relative_to(root))
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
 def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          recipe_hash: str, project_root: Path,
                          attribution_out: str | None,
                          causal: bool = False,
-                         causal_sites: "list[dict] | None" = None) -> dict:
+                         causal_sites: "list[dict] | None" = None,
+                         file_sha256: "dict[str, str] | None" = None,
+                         target_files: "list[str] | None" = None,
+                         recipe_pristine_hash: str | None = None,
+                         tests_face: "dict[str, str] | None" = None) -> dict:
     """§SPEC-083：canonical 报告的 test_attribution 节（归属产物在
     attribution_out 非空时落盘，与报告共用同一 notes 列表）。
 
@@ -1231,10 +1250,28 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
     artifact = {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe_hash,
+        # SEE-1581：pristine recipe hash（注入 toolchain 之前）——消费方
+        # 新鲜判据用它做零 godot 依赖的现算对照
+        "recipe_hash_pristine": recipe_pristine_hash,
         "project_root": str(project_root),
         "identity": _ATTRIBUTION_IDENTITY,
         "causal": causal_meta,
+        # SEE-1581：文件级新鲜绑定（mutation 真值选面的 file hash 判据）
+        "file_sha256": dict(file_sha256 or {}),
+        "target_files": list(target_files or []),
+        # 测试面内容绑定：测试脚本内容变化同样使映射过期（recipe 不含
+        # 测试内容；覆盖边却依赖它）
+        "tests_face": dict(tests_face or {}),
         "arms": arms_attr,
+        # SEE-1581：臂有效性随产物落盘——失效测量（如缺 godot 的 run）
+        # 产出的"空映射"不得被消费方当作真值（fail-loud 于消费侧）
+        "arms_state": {arm["arm"]: {
+            "state": arm.get("state"),
+            "invalid_reason": arm.get("invalid_reason"),
+            "bundles": int(arm.get("bundles") or 0),
+            "pairs": len(((arm.get("attribution") or {})
+                          .get("test_to_files") or {})),
+        } for arm in arms},
         "notes": notes,
     }
     artifact_path = None
@@ -1249,6 +1286,7 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
         "schema_version": ATTRIBUTION_SCHEMA,
         "enabled": True,
         "artifact": artifact_path,
+        "file_sha256_count": len(file_sha256 or {}),
         "identity": _ATTRIBUTION_IDENTITY,
         "causal": causal_meta,
         "arms": {
@@ -1454,6 +1492,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         raise CanonicalError(f"recipe invalid: {reason}")
     if not target_files:
         raise CanonicalError("no target files given")
+    from .recipe import recipe_hash as _pristine_recipe_hash
+    pristine_recipe_hash = _pristine_recipe_hash(
+        {k: v for k, v in recipe.items() if k != "recipe_hash"})
     if inject_toolchain:
         recipe = _inject_toolchain(root, recipe)
     recipe_hash = recipe["recipe_hash"]
@@ -2116,9 +2157,15 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     perf = _performance(root, probe_keys, timeout_s)
     perf["gated_core_s"] = gated_core_s
     perf["command_total_s"] = round(time.monotonic() - t_command, 3)
+    _file_sha = {rel: hashlib.sha256(item["src"].encode("utf-8")).hexdigest()
+                 for rel, item in prepared.items()}
     attr_section = _attribution_section(
         test_attribution, (arm_a, arm_b), recipe_hash, root, attribution_out,
-        causal=attribution_causal, causal_sites=causal_sites)
+        causal=attribution_causal, causal_sites=causal_sites,
+        file_sha256=_file_sha,
+        target_files=sorted(prepared.keys()),
+        recipe_pristine_hash=pristine_recipe_hash,
+        tests_face=_tests_face_map(root))
     report = {
         "report_version": REPORT_VERSION,
         "project_root": str(root),

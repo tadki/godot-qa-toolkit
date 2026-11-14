@@ -545,26 +545,36 @@ def _resolve_auto_glob(tests_glob: str | None, file_path: str,
 
 def _auto_scan_tests_glob_meta(file_path: str,
                                project_root: str) -> tuple[str | None, dict]:
-    """自动选测 + §SPEC-613 披露：弱选测（纯闭包）stderr 一行 + meta 回传。
+    """SEE-1581：选面改运行时真值映射（静态 TestOwnershipIndex 退出主路径）。
 
-    meta 由调用方挂入 summary.test_selection（只增键）；显式 --tests 不经
-    本入口、不产生披露（选测未发生）。
+    - 新鲜映射（recipe_hash + 目标文件 sha256 绑定）→ 精确测试脚本集，
+      tests_glob 指向选择目录（`.qa-cache/gqt-attr-select/<id>/`）；
+    - 映射说零测试 → zero_ref=True（零引用短路以真值为准）；
+    - 无映射 / 过期 / 歧义 → tests_glob=None = **全脸**（安全零配置），
+      不再派生静态 glob。
+    meta 由调用方挂入 summary.test_selection（source/reason/mapping 披露）。
     """
+    from .truth_select import resolve_selection
     try:
-        from .testscan import derive_tests_glob_meta
-        glob, meta = derive_tests_glob_meta(
-            _res_path_of(file_path, project_root),
-            Path(project_root) / "tests",
-            project_root=project_root)
-    except Exception as e:
-        print(f"auto scan failed, falling back to full suite: {e}",
+        sel = resolve_selection(project_root, file_path)
+    except Exception as e:  # noqa: BLE001 — 解析失败诚实退全脸
+        print(f"attribution selection failed, falling back to full suite: "
+              f"{e}", file=sys.stderr)
+        return None, {"source": "full_face", "reason": f"resolve_error:{e}",
+                      "tests": [], "zero_ref": False}
+    meta = {"source": sel["source"], "reason": sel["reason"],
+            "mapping": sel.get("mapping"), "tests": sel.get("tests", []),
+            "zero_ref": sel.get("zero_ref", False),
+            "ambiguous_names": sel.get("ambiguous_names", [])}
+    if sel["source"] == "runtime_mapping" and not sel.get("zero_ref"):
+        print(f"mutation: runtime-mapping selection for {file_path} -> "
+              f"{len(sel['tests'])} test script(s)", file=sys.stderr)
+    elif sel.get("zero_ref"):
+        print(f"mutation: runtime mapping says no test touches {file_path}",
               file=sys.stderr)
-        return None, {}
-    if meta.get("weak") and glob:
-        print(f"mutation: weak test selection: {glob} has no direct "
-              f"reference to {file_path} (closure-only) — consider "
-              f"--tests {glob}", file=sys.stderr)
-    return glob, meta
+    # 全脸回退不额外打 stderr（source/reason 已进 summary.test_selection，
+    # 报告即披露口径；保持既有 stderr 契约面零噪声）
+    return sel["tests_glob"], meta
 
 
 def _res_path_of(file_path: str, project_root: str) -> str:
@@ -711,12 +721,15 @@ def _run_mutant_loop(
         slot = shadowpool.acquire_slot(project_root, kind, [target_rel],
                                        idpack.get("boot_wiring_hash", ""),
                                        targeted_only=targeted_only)
-        # killed 证书的归属索引懒构建（零 killed 的 run 零支付）
+        # killed 证书归属（SEE-1581）：以新鲜运行时映射为准；无新鲜映射 →
+        # None（证书不产出，fail-safe 只偏向重跑），不与静态索引混用。
         ownership_holder: list = []
 
-        def _ownership() -> TestOwnershipIndex:
+        def _ownership():
             if not ownership_holder:
-                ownership_holder.append(TestOwnershipIndex(project_root))
+                from .truth_select import ownership_for
+                ownership_holder.append(
+                    ownership_for(str(project_root), str(path)))
             return ownership_holder[0]
 
         # R-DW6 默认启用实测轮：身份与执行同源解析（resolve_exec_scheme 统一
@@ -870,11 +883,16 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
             # killed 证书（完整失败集；归属/闭包不确定 → 不附 → 下轮保守
             # 重跑，fail-safe 只偏向重跑）。
             if verdict["verdict"] == "killed" and ownership_fn is not None:
-                new_failures = _parse_failing_tests(tail) - baseline_failures
-                cert = killer_certificate(new_failures, ownership_fn(),
-                                          project_root)
-                if cert is not None:
-                    verdict["killed_by"] = cert
+                owner = ownership_fn()
+                if owner is not None:
+                    new_failures = (_parse_failing_tests(tail)
+                                    - baseline_failures)
+                    cert = killer_certificate(
+                        new_failures, owner, project_root,
+                        ownership_source=getattr(owner, "source",
+                                                 "structural_index"))
+                    if cert is not None:
+                        verdict["killed_by"] = cert
         except subprocess.TimeoutExpired:
             verdict = _mutant_record(m, "timeout",
                                      f"GUT timed out after {m.kind} {m.original}→{m.mutated}",

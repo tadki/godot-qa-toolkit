@@ -266,10 +266,15 @@ class TestSpec009ContractCompat:
 
 class TestSpec001AutoScan:
     def test_auto_scan_scopes_when_refs_found(self, tmp_path, monkeypatch, fake_gut):
+        """SEE-1581：新鲜运行时映射 → 精确测试脚本集（选择目录包装）。"""
         proj, files = _write_project(tmp_path)
+        from pathlib import Path as _P
+        from attribution_fixtures import write_map
+        rel = _P(files[0]).resolve().relative_to(_P(proj).resolve()).as_posix()
+        write_map(_P(proj), {rel: ["test_save.gd::test_ok"]})
         run_mutation(files[0], proj, budget=1)
-        # SEE-1400 §SPEC-005：单命中收敛到文件级 -gselect 通道
-        assert fake_gut["globs"][0] == "res://tests/unit/save/test_save.gd"
+        assert fake_gut["globs"][0].startswith(
+            "res://.qa-cache/gqt-attr-select/")
 
     def test_zero_hits_falls_back_to_full(self, tmp_path, monkeypatch):
         proj, files = _write_project(tmp_path)

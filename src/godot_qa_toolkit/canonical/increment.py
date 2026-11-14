@@ -20,6 +20,7 @@ function_pairs 由合并后的边精确重算）。行为耦合超出圈定面�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -362,10 +363,16 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
+        "recipe_hash_pristine": baseline.get("recipe_hash_pristine"),
         "project_root": str(root),
         "identity": baseline.get("identity"),
         "causal": baseline.get("causal"),
+        "file_sha256": _merged_file_sha(root, baseline, classes),
+        "target_files": list(baseline.get("target_files")
+                             or sorted((baseline.get("file_sha256") or {}))),
+        "tests_face": _merged_tests_face(root, baseline, classes),
         "arms": {"gut_full": merged},
+        "arms_state": dict(baseline.get("arms_state") or {}),
         "notes": list(baseline.get("notes") or []),
         "increment": {
             "mode": "incremental",
@@ -383,6 +390,30 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
             "rerun_executions": executions or [],
         },
     }
+
+
+def _merged_tests_face(root: Path, baseline: dict,
+                       classes: dict) -> dict:
+    """测试面内容绑定继承 + 变更/新增测试脚本按当前内容重算、删除剔除。"""
+    face = dict(baseline.get("tests_face") or {})
+    for rel in classes.get("test_changed", []) + classes.get("test_new", []):
+        p = Path(root) / rel
+        if p.is_file():
+            face[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    for rel in classes.get("test_removed", []):
+        face.pop(rel, None)
+    return face
+
+
+def _merged_file_sha(root: Path, baseline: dict,
+                     classes: dict) -> dict:
+    """基线文件哈希继承 + 变更生产文件按当前内容重算（增量新鲜绑定）。"""
+    shas = dict(baseline.get("file_sha256") or {})
+    for rel in classes.get("prod_changed", []) + classes.get("prod_new", []):
+        p = Path(root) / rel
+        if p.is_file():
+            shas[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return shas
 
 
 def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,

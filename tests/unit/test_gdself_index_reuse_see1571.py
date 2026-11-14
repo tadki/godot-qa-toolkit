@@ -1,9 +1,10 @@
-"""SEE-1571 §SPEC-503：E6-4 gdself 索引进程内复用转正。
+"""SEE-1571 §SPEC-503 + SEE-1581：选面层的进程内复用与零持久化。
 
-钉死行为（蓝本 = SEE-1568 批次二原型语义）：
-- 规划相位只读前提下进程内复用（多文件规划只建一次索引）；
-- 进程级零持久化（无落盘缓存面）；
-- 多文件规划结果与逐文件构建逐位一致（glob/计划输出等价）。
+SEE-1581 起 mutation 选面改运行时真值映射（gdself 静态选面退役），本文件
+的复用/零持久化断言相应迁移到新选面层：
+- 多文件规划复用同一份进程内**映射解析缓存**（recipe hash 记忆化）；
+- 唯一允许的落盘是确定性选择目录 `.qa-cache/gqt-attr-select/`；
+- 旧的 gdself 复用/等价用例保留为静态模块自测（模块未删，主路径不用）。
 """
 
 import sys
@@ -45,23 +46,22 @@ def _write_multi_target_project(tmp_path: Path) -> tuple[str, list[str]]:
 
 
 class TestInProcessReuse:
-    def test_build_index_called_once_for_multifile_planning(
+    def test_mapping_resolution_cached_for_multifile_planning(
             self, tmp_path, monkeypatch):
-        """多文件规划：索引只构建一次（其余查询复用进程内缓存）。"""
+        """多文件规划：映射新鲜判据按 project_root 记忆化（只算一次）。"""
+        from attribution_fixtures import write_map
+        from godot_qa_toolkit.mutation import truth_select
         proj, paths = _write_multi_target_project(tmp_path)
-        calls = {"n": 0}
-        orig = gdself.build_index
-
-        def counting_build(root: str) -> dict:
-            calls["n"] += 1
-            return orig(root)
-
-        monkeypatch.setattr(gdself, "build_index", counting_build)
+        write_map(Path(proj), {"calc.gd": ["test_save.gd::test_ok"],
+                               "extra.gd": ["test_misc.gd::test_ok"]})
+        truth_select._fresh_recipe_hash.cache_clear()
         d = executor.run_mutation_files(paths, proj, budget=50,
                                         dry_run=True, jobs=None)
         assert d["ok"] is True
-        assert calls["n"] == 1, "多文件规划必须复用同一份进程内索引"
-        assert len(_INDEX_CACHE) == 1
+        info = truth_select._fresh_recipe_hash.cache_info()
+        assert info.misses == 1, (
+            f"多文件规划必须复用同一份进程内 recipe 判据缓存: {info}")
+        assert info.hits >= 1
 
     def test_reused_results_identical_to_fresh_build(self, tmp_path):
         """复用查询与逐文件新建的规划结果逐位一致（glob 等价）。"""
@@ -89,13 +89,22 @@ class TestInProcessReuse:
         assert first == second == "res://tests/unit/save/test_save.gd"
 
     def test_zero_persistence_no_disk_cache(self, tmp_path):
-        """进程级零持久化：复用不产生任何落盘缓存面。"""
+        """零非预期落盘：唯一写入是确定性选择目录（映射解析不落盘）。"""
+        from attribution_fixtures import write_map
         proj, paths = _write_multi_target_project(tmp_path)
+        write_map(Path(proj), {"calc.gd": ["test_save.gd::test_ok"],
+                               "extra.gd": ["test_misc.gd::test_ok"]})
         executor.run_mutation_files(paths, proj, budget=50,
                                     dry_run=True, jobs=None)
         cache_dir = Path(proj) / ".qa-cache"
-        assert not cache_dir.exists() or list(cache_dir.rglob("*")) == []
-        assert len(_INDEX_CACHE) == 1, "复用面只在进程内（内存缓存）"
+        entries = sorted(str(p.relative_to(cache_dir))
+                         for p in cache_dir.rglob("*")) if cache_dir.exists() \
+            else []
+        assert entries, "新鲜映射应物化确定性选择目录"
+        assert all(e == "gqt-attr-select" or
+                   e.startswith("gqt-attr-select/") or
+                   e == "attribution-map.json" for e in entries), (
+            f"非预期落盘面: {entries}")
 
     def test_distinct_project_roots_get_distinct_entries(
             self, tmp_path):

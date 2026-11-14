@@ -132,7 +132,8 @@ def selection_disclosure(selection_meta: dict | None) -> dict:
     零消费者或空 meta → 空片（update 即无操作）。四个披露位（串行门 /
     规划无分片 / _inject_one / runner disclosures）共用本口径。
     """
-    if selection_meta and selection_meta.get("derived_glob"):
+    if selection_meta and (selection_meta.get("derived_glob")
+                           or selection_meta.get("source")):
         return {"test_selection": selection_meta}
     return {}
 

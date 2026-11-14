@@ -280,7 +280,9 @@ def deps_closure_sha1(project_root: str, script_res: str,
 
 
 def killer_certificate(failures: set[str], ownership: TestOwnershipIndex,
-                       project_root: str) -> list[dict] | None:
+                       project_root: str,
+                       ownership_source: str = "structural_index",
+                       ) -> list[dict] | None:
     """完整失败集 → killed_by 证书；任一 killer 归属/闭包不确定 → None。
 
     None 语义（终案 §3.5）：fail-safe 只偏向重跑——该 entry 下轮差分重跑，
@@ -298,7 +300,8 @@ def killer_certificate(failures: set[str], ownership: TestOwnershipIndex,
         if deps_sha is None:
             return None
         cert.append({"test_name": name, "script_path": owner_res,
-                     "script_sha1": script_sha, "deps_sha1": deps_sha})
+                     "script_sha1": script_sha, "deps_sha1": deps_sha,
+                     "ownership_source": ownership_source})
     return cert
 
 

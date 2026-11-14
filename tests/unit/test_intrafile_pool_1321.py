@@ -124,6 +124,10 @@ class TestIntraFileJobs:
 
         jobs=2（收集数 3 > 2）保证走分片路径——SEE-1413 起总数 ≤ jobs 退串行。"""
         proj, files = _write_project(tmp_path)
+        from pathlib import Path as _P
+        from attribution_fixtures import write_map
+        rel = _P(files[0]).resolve().relative_to(_P(proj).resolve()).as_posix()
+        write_map(_P(proj), {rel: ["test_save.gd::test_ok"]})
         baselines = {"n": 0}
         monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
         monkeypatch.setattr(

@@ -48,23 +48,29 @@ class _SerialPool:
 
 
 def _write_zero_ref_project(tmp_path: Path, source: str = GD_TARGET) -> tuple[str, str]:
-    """无任何测试引用目标的项目（tests/ 树存在但不引用 target）。"""
+    """SEE-1581 口径：新鲜映射明确说"无测试"（映射说零 → 零引用短路）。
+
+    无映射的全脸默认不再短路（安全零配置），故零引用语义由映射承载。"""
+    from attribution_fixtures import write_map
     proj = tmp_path / "proj"
     (proj / "tests" / "unit").mkdir(parents=True)
     (proj / "tests" / "unit" / "test_other.gd").write_text(
         'preload("res://unrelated.gd")\n')
     target = proj / "calc.gd"
     target.write_text(source)
+    write_map(proj, {"calc.gd": []})
     return str(proj), str(target)
 
 
 def _write_scoped_project(tmp_path: Path) -> tuple[str, str]:
+    from attribution_fixtures import write_map
     proj = tmp_path / "proj"
     (proj / "tests" / "unit" / "save").mkdir(parents=True)
     (proj / "tests" / "unit" / "save" / "test_save.gd").write_text(
         'preload("res://calc.gd")\n')
     target = proj / "calc.gd"
     target.write_text(GD_TARGET)
+    write_map(proj, {"calc.gd": ["test_save.gd::test_ok"]})
     return str(proj), str(target)
 
 
@@ -175,6 +181,43 @@ class TestSerialFace:
         assert s["mutants"] == 0
 
 
+class TestRuntimeTruthBlindSpot:
+    def test_static_zero_ref_blind_spot_not_skipped(
+            self, tmp_path, monkeypatch):
+        """④ 的 24 个静态盲点口径：静态说零引用、运行时映射说有测试 →
+        真值选面必须照跑（零引用短路以映射为准，不再误杀）。"""
+        from attribution_fixtures import write_map
+        proj = tmp_path / "proj"
+        (proj / "tests" / "unit").mkdir(parents=True)
+        (proj / "tests" / "unit" / "test_other.gd").write_text(
+            "extends GutTest\nfunc test_x() -> void:\n\tpass\n")
+        target = proj / "calc.gd"
+        target.write_text(GD_TARGET)
+        # 静态面：test_other.gd 不引用 calc.gd（gdself 判零）
+        from godot_qa_toolkit.mutation.testscan import derive_tests_glob_meta
+        static_glob, _meta = derive_tests_glob_meta(
+            "res://calc.gd", proj / "tests", project_root=str(proj))
+        assert static_glob is None, "夹具应复现静态盲点"
+        # 运行时真值：映射说该文件被 test_other.gd 触达
+        write_map(proj, {"calc.gd": ["test_other.gd::test_x"]})
+        monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
+        monkeypatch.setattr(
+            executor, "_run_baseline_snapshot",
+            lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
+        monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
+        monkeypatch.setattr(
+            runner_mod, "_run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
+        d = executor.run_mutation_files([str(target)], str(proj), budget=2,
+                                        dry_run=False, jobs=2)
+        s = d["results"][0]["summary"]
+        assert "zero_ref_short_circuit" not in s, "真值有测试 → 不得短路"
+        assert s["scoped"] is True
+        assert s["mutants"] > 0
+        sel = s.get("test_selection") or {}
+        assert sel.get("source") == "runtime_mapping"
+
+
 class TestNonZeroRefUntouched:
     def test_scoped_target_runs_normally(
             self, tmp_path, monkeypatch,
@@ -237,6 +280,9 @@ class TestReportCompleteness:
         scoped.write_text(GD_TARGET)
         zero_ref = proj / "lonely.gd"
         zero_ref.write_text(GD_TARGET)
+        from attribution_fixtures import write_map
+        write_map(proj, {"calc.gd": ["test_save.gd::test_ok"],
+                         "lonely.gd": []})
         monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
         monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
         monkeypatch.setattr(

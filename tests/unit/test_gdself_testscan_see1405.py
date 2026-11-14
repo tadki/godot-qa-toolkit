@@ -126,18 +126,22 @@ class TestTestsRootFallback:
 
 class TestRunnerWiring:
     def test_auto_scan_passes_project_root(self, direct_hit_tree, monkeypatch):
+        """SEE-1581：选面接线改经运行时映射解析器（项目根仍显式传递）。"""
         proj = direct_hit_tree
         seen = {}
 
-        def fake_derive(target, tests_dir, project_root=None):
+        def fake_resolve(project_root, target_file, map_path_override=None):
             seen["project_root"] = project_root
-            return "res://tests/unit/save/test_save.gd", {}
+            seen["target"] = target_file
+            return {"source": "full_face", "reason": "no_attribution_map",
+                    "tests": [], "tests_glob": None, "zero_ref": False,
+                    "mapping": None, "ambiguous_names": []}
 
-        from godot_qa_toolkit.mutation import testscan
-        monkeypatch.setattr(testscan, "derive_tests_glob_meta", fake_derive)
+        from godot_qa_toolkit.mutation import truth_select
+        monkeypatch.setattr(truth_select, "resolve_selection", fake_resolve)
         glob = mrunner._auto_scan_tests_glob(
             str(proj / "scripts" / "save_manager.gd"), str(proj))
-        assert glob == "res://tests/unit/save/test_save.gd"
+        assert glob is None  # 无映射 → 全脸（不再派生静态 glob）
         assert seen["project_root"] == str(proj)
 
     def test_scan_failure_degrades_to_full_suite(self, tmp_path, monkeypatch):

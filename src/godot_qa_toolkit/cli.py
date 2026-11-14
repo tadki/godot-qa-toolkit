@@ -299,6 +299,18 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
     # 领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
+    from .mutation import truth_select as _truth
+    _truth.reset_ledger()
+    if getattr(args, "attribution_map", None):
+        import os as _os
+        _os.environ[_truth.ENV_MAP] = str(args.attribution_map)
+    if getattr(args, "attribution_auto", True) is False:
+        import os as _os
+        _os.environ[_truth.ENV_MODE] = "off"
+    if not getattr(args, "dry_run", False):
+        # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；失败退全脸并披露
+        _truth.ensure_map(str(Path(args.project_root)),
+                          [str(f) for f in args.files])
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
@@ -322,6 +334,9 @@ def cmd_mutation(args: argparse.Namespace) -> int:
             "summary": {"files": args.files, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
+    led = _truth.ledger()
+    if led["events"]:
+        result.setdefault("summary", {})["attribution"] = led
     return _emit(result)
 
 
@@ -1096,6 +1111,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
                         "re-runs them — every run persists verdicts, resume just "
                         "turns on the skip")
+    m.add_argument("--attribution-map", default=None,
+                   help="SEE-1581: canonical attribution artifact "
+                        "(canonical-test-attribution/4) used as the runtime "
+                        "truth for test selection; default: auto-managed "
+                        ".qa-cache/attribution-map.json")
+    m.add_argument("--no-attribution-auto", dest="attribution_auto",
+                   action="store_false",
+                   help="disable automatic generation/incremental refresh of "
+                        "the attribution map (falls back to the full face)")
     m.add_argument("--mutation-warning", type=int, default=50,
                    help="warn on stderr + summary.attention when the pre-truncation "
                         "mutation site count exceeds N (default 50, aligned with "

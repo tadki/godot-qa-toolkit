@@ -131,24 +131,27 @@ def test_meta_shape_direct(tmp_path):
 
 # ------------------------------------------------- 披露接线（runner/报告面）
 
-def test_runner_weak_disclosure_line(tmp_path, capsys):
-    """弱选测：runner 扫描入口向 stderr 输出披露行（建议 --tests 覆写）。"""
+def test_runner_mapping_selection_line(tmp_path, capsys):
+    """SEE-1581：新鲜映射 → 选择目录 + stderr 一行运行面披露。"""
+    from attribution_fixtures import write_map
     root = _dilution_project(tmp_path)
-    target = root / "svc" / "aux.gd"
-    glob, meta = runner_mod._auto_scan_tests_glob_meta(str(target), str(root))
-    assert glob is not None and meta["weak"] is True
-    err = capsys.readouterr().err
-    assert "weak test selection" in err
-    assert "--tests" in err
+    write_map(root, {"svc/aux.gd": ["test_svc_clock.gd::test_0"]})
+    glob, meta = runner_mod._auto_scan_tests_glob_meta(
+        str(root / "svc" / "aux.gd"), str(root))
+    assert glob is not None
+    assert glob.startswith("res://.qa-cache/gqt-attr-select/")
+    assert meta["source"] == "runtime_mapping"
+    assert "runtime-mapping selection" in capsys.readouterr().err
 
 
-def test_runner_direct_no_weak_line(tmp_path, capsys):
-    """直连面：不得输出弱选测噪声行。"""
+def test_runner_full_face_without_map(tmp_path, capsys):
+    """无映射：全脸（tests_glob None）+ 零 stderr 噪声，来源进 meta。"""
     root = _plain_project(tmp_path)
     glob, meta = runner_mod._auto_scan_tests_glob_meta(
         str(root / "calc.gd"), str(root))
-    assert meta["weak"] is False
-    assert "weak test selection" not in capsys.readouterr().err
+    assert glob is None
+    assert meta["source"] == "full_face"
+    assert capsys.readouterr().err == ""
 
 
 class _SerialPool:
@@ -176,6 +179,8 @@ def test_summary_carries_test_selection(tmp_path, monkeypatch):
     target = root / "calc.gd"
     target.write_text("func add(a, b):\n\tif a > b:\n\t\treturn a - b\n"
                       "\treturn a + b\n", encoding="utf-8")
+    from attribution_fixtures import write_map
+    write_map(root, {"calc.gd": ["test_save.gd::test_ok"]})
 
     monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
     monkeypatch.setattr(executor, "_run_baseline_snapshot",
@@ -191,8 +196,8 @@ def test_summary_carries_test_selection(tmp_path, monkeypatch):
     s = result["results"][0]["summary"]
     sel = s.get("test_selection")
     assert sel is not None, "summary 缺 test_selection 披露键"
-    assert sel["weak"] is False
-    assert sel["derived_glob"] == "res://tests/unit/save/test_save.gd"
+    assert sel["source"] == "runtime_mapping"
+    assert sel["tests"] == ["res://tests/unit/save/test_save.gd"]
 
 
 # ------------------------------- 函数名 token 判别力（D3-hardener 补钉）

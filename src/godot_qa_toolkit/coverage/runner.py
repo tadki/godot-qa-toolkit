@@ -302,9 +302,11 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
                         f"{_PROBE_PREFIX}t{pid} + 1)\n"
                         f"{indent}\t{_PROBE_PREFIX}s{pid}"
                         f"[{_PROBE_PREFIX}t{pid}] = 1\n"
-                        f"{indent}\t{attr}[1][0] += 1\n"
+                        # 显式赋值而非 `+=`：被测仓存在「断言源码无 +=」的
+                        # 源文本测试（KOL test_see1116），复合赋值会被误判
+                        f"{indent}\t{attr}[1][0] = {attr}[1][0] + 1\n"
                         f"{indent}else:\n"
-                        f"{indent}\t{attr}[1][1] += 1\n")
+                        f"{indent}\t{attr}[1][1] = {attr}[1][1] + 1\n")
             else:
                 out.append(f"{indent}{_PROBE_PREFIX}{pid}()\n")
         out.append(line_text)

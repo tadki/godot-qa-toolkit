@@ -557,8 +557,8 @@ def _auto_scan_tests_glob_meta(file_path: str,
     - 新鲜映射（recipe_hash + 目标文件 sha256 绑定）→ 精确测试脚本集，
       tests_glob 指向选择目录（`.qa-cache/gqt-attr-select/<id>/`）；
     - 映射说零测试 → zero_ref=True（零引用短路以真值为准）；
-    - 无映射 / 过期 / 歧义 → tests_glob=None = **全脸**（安全零配置），
-      不再派生静态 glob。
+    - fn/file 面：无映射 / 过期 / 歧义 → resolve_selection fail-loud 拒跑
+      （唯 `--select full` 显式审计面 tests_glob=None，不再派生静态 glob）。
     meta 由调用方挂入 summary.test_selection（source/reason/mapping 披露）。
     """
     from .truth_select import MutationSelectionError, resolve_selection

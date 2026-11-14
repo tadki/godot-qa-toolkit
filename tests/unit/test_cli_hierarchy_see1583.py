@@ -39,6 +39,20 @@ NEW_TOOLS = {"gherkin", "mutation", "measure.suite", "measure.run",
              "measure.complexity", "measure.arch", "measure.parity",
              "measure.registry-diff", "measure.risk"}
 
+# §SPEC-004 全参数面共用的 argv：拆两个断言组（attribution / shard+output）
+# 以守住复杂度阈值，两组解析同一 argv，断言覆盖范围与拆分前完全一致。
+_MEASURE_RUN_FULL_ARGV = [
+    "measure", "run", "res://src", "--project-root", "p",
+    "--recipe", "r.json", "--out", "o.json",
+    "--test-attribution", "--attribution-causal",
+    "--acceptance-adaptive", "--arms-parallel",
+    "--acceptance-probe-keys", "a,b",
+    "--baseline-failures", "bf.json", "--intolerant-tests", "it.json",
+    "--stability-baseline", "sb.json", "--evidence-dir", "ev",
+    "--shard-width", "4", "--acceptance-shards", "2",
+    "--acceptance-repeats", "2", "--shard-log-dir", "logs",
+    "--timeout", "99", "--test-attribution-out", "attr.json"]
+
 
 def _run_cli(*argv: str) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -198,18 +212,8 @@ class TestSpec004See1581Flags:
         assert args.no_reuse_coverage is True
         assert args.worker_channel is True
 
-    def test_measure_run_see1581_flags(self):
-        args = _parser().parse_args(
-            ["measure", "run", "res://src", "--project-root", "p",
-             "--recipe", "r.json", "--out", "o.json",
-             "--test-attribution", "--attribution-causal",
-             "--acceptance-adaptive", "--arms-parallel",
-             "--acceptance-probe-keys", "a,b",
-             "--baseline-failures", "bf.json", "--intolerant-tests", "it.json",
-             "--stability-baseline", "sb.json", "--evidence-dir", "ev",
-             "--shard-width", "4", "--acceptance-shards", "2",
-             "--acceptance-repeats", "2", "--shard-log-dir", "logs",
-             "--timeout", "99", "--test-attribution-out", "attr.json"])
+    def test_measure_run_see1581_attribution_flags(self):
+        args = _parser().parse_args(_MEASURE_RUN_FULL_ARGV)
         assert args.test_attribution is True
         assert args.attribution_causal is True
         assert args.acceptance_adaptive is True
@@ -218,6 +222,9 @@ class TestSpec004See1581Flags:
         assert args.baseline_failures == "bf.json"
         assert args.intolerant_tests == "it.json"
         assert args.stability_baseline == "sb.json"
+
+    def test_measure_run_see1581_shard_output_flags(self):
+        args = _parser().parse_args(_MEASURE_RUN_FULL_ARGV)
         assert args.evidence_dir == "ev"
         assert args.shard_width == 4
         assert args.acceptance_shards == 2

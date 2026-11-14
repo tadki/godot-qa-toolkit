@@ -299,6 +299,7 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
     # 领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
+    from .mutation.truth_select import MutationSelectionError
     from .mutation import truth_select as _truth
     _truth.reset_ledger()
     if getattr(args, "attribution_map", None):
@@ -308,12 +309,17 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         import os as _os
         _os.environ[_truth.ENV_MODE] = "off"
     if not getattr(args, "dry_run", False):
-        # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；失败退全脸并披露
-        _truth.ensure_map(str(Path(args.project_root)),
-                          [str(f) for f in args.files])
+        # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
+        try:
+            _truth.ensure_map(str(Path(args.project_root)),
+                              [str(f) for f in args.files])
+        except MutationSelectionError as e:
+            return _selection_error_payload(args, e)
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
+    except MutationSelectionError as e:
+        return _selection_error_payload(args, e)
     except BinaryConfigError as e:
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
@@ -340,6 +346,27 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     return _emit(result)
 
 
+def _selection_error_payload(args: argparse.Namespace, e) -> int:
+    """选面不可用 → 领域 JSON；呈现根因优先（启动/预导入守卫与 master 同源）。"""
+    reason = str(e)
+    # 顺序与 master 一致：预导入守卫先于启动校验（缺 godot 时用户最先该
+    # 看到的也是"先 --import"这一 master O-1 口径）
+    try:
+        from .mutation.shadow import require_import_cache
+        require_import_cache(args.project_root)
+    except Exception as ge:  # noqa: BLE001 — 预导入守卫原因优先
+        reason = str(ge)
+    else:
+        _cmd, _ok, _launch = _godot_bin_ready(Path(args.project_root))
+        if not _ok and _launch:
+            reason = f"godot binary unusable: {_launch}"
+    return _emit({"tool": "mutation", "ok": False,
+                  "summary": {"error": reason,
+                              "selection_error": True,
+                              "selection_reason": getattr(e, "reason", None)},
+                  "failures": [{"reason": reason}]})
+
+
 def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
     """mutation 子命令派发（串行 / 并发编排两径，<800/复杂度纪律拆分）。"""
     from .timing import TimingStore
@@ -362,6 +389,11 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
     multi_concurrency = (len(files) > 1 or args.jobs is None or args.jobs > 1)
     if selecting:
         multi_concurrency = False
+    # 第六批：fn 级分组需要每文件多 chunk（per-group glob）——除非显式
+    # --tests/--jobs 1 的卡尺语义，一律走编排路径。
+    if getattr(args, "select_mode", "full") == "fn" and not selecting \
+            and not args.tests:
+        multi_concurrency = True
     if not multi_concurrency:
         return _run_mutation_serial(args, binary_kind)
     from .mutation.executor import run_mutation_files
@@ -382,7 +414,8 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         timeout_factor=args.timeout_factor,
         mutate_all=args.mutate_all,
         reuse_coverage=_reuse_coverage_flag(args),
-        worker_channel=True if getattr(args, "worker_channel", False) else None)
+        worker_channel=True if getattr(args, "worker_channel", False) else None,
+        select_mode=getattr(args, "select_mode", "full"))
     if len(files) == 1 and args.jobs is None:
         # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
         envelope = result
@@ -1111,6 +1144,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
                         "re-runs them — every run persists verdicts, resume just "
                         "turns on the skip")
+    m.add_argument("--select", dest="select_mode", default="fn",
+                   choices=["fn", "file", "full"],
+                   help="SEE-1581 test-selection granularity: fn (default, "
+                        "mutants grouped by enclosing function), file "
+                        "(per-file set, legacy/calibration), full (explicit "
+                        "full-face audit; bypasses attribution)")
     m.add_argument("--attribution-map", default=None,
                    help="SEE-1581: canonical attribution artifact "
                         "(canonical-test-attribution/4) used as the runtime "

@@ -1,8 +1,9 @@
 """SEE-1581：mutation 真值选面（truth_select）单元判据。
 
-覆盖：新鲜映射 → 精确脚本集/选择目录；无映射 → 全脸（不派生）；测试面
-漂移/文件漂移 → 过期；臂可用性（硬失败空映射不是真值）；零引用以映射
-为准；kill 证书归属来源（runtime_mapping / structural_index 兜底）。
+覆盖：新鲜映射 → 精确脚本集/选择目录（`.gqt-attr-select/`，位于影子
+排除面之外）；映射不可用/过期/臂失效 → **fail-loud**（Owner 定稿：取消
+自动全脸，全脸仅显式审计）；lenient 旁路（证书归属）返回 full_face 描述；
+零引用以映射为准；kill 证书归属来源两态。
 """
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ def test_fresh_map_yields_exact_selection_dir(tmp_path):
     assert sel["source"] == "runtime_mapping"
     assert sel["zero_ref"] is False
     assert sel["tests"] == ["res://tests/unit/test_hit.gd"]
-    assert sel["tests_glob"].startswith("res://.qa-cache/gqt-attr-select/")
-    wrapper = (proj / ".qa-cache" / "gqt-attr-select" /
+    assert sel["tests_glob"].startswith("res://.gqt-attr-select/")
+    wrapper = (proj / ".gqt-attr-select" /
                sel["tests_glob"].rstrip("/").rsplit("/", 1)[-1] /
                "test_hit.gd")
     assert wrapper.is_file()
@@ -43,13 +44,16 @@ def test_fresh_map_yields_exact_selection_dir(tmp_path):
         encoding="utf-8")
 
 
-def test_no_map_falls_back_to_full_face(tmp_path):
+def test_no_map_fails_loud_strict(tmp_path):
     proj = _project(tmp_path)
-    sel = truth_select.resolve_selection(proj, str(proj / "calc.gd"))
+    with pytest.raises(truth_select.MutationSelectionError) as ei:
+        truth_select.resolve_selection(proj, str(proj / "calc.gd"))
+    assert ei.value.reason == "no_attribution_map"
+    # lenient 旁路（证书归属）返回 full_face 描述，不抛
+    sel = truth_select.resolve_selection(proj, str(proj / "calc.gd"),
+                                         strict=False)
     assert sel["source"] == "full_face"
-    assert sel["reason"] == "no_attribution_map"
     assert sel["tests_glob"] is None
-    assert sel["zero_ref"] is False
 
 
 def test_zero_ref_from_mapping_only(tmp_path):
@@ -66,19 +70,21 @@ def test_test_face_drift_marks_stale(tmp_path):
     write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
     (proj / "tests" / "unit" / "test_hit.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tpass\n# drift\n")
-    sel = truth_select.resolve_selection(proj, str(proj / "calc.gd"))
+    with pytest.raises(truth_select.MutationSelectionError) as ei:
+        truth_select.resolve_selection(proj, str(proj / "calc.gd"))
+    assert "tests_face_drift" in ei.value.reason
+    sel = truth_select.resolve_selection(proj, str(proj / "calc.gd"),
+                                         strict=False)
     assert sel["source"] == "full_face"
-    assert sel["reason"] in ("tests_face_drift",
-                             "auto_update_still_stale:tests_face_drift")
 
 
 def test_file_drift_marks_stale(tmp_path):
     proj = _project(tmp_path)
     write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
     (proj / "calc.gd").write_text(TARGET + "\n# drift\n")
-    sel = truth_select.resolve_selection(proj, str(proj / "calc.gd"))
-    assert sel["source"] == "full_face"
-    assert "file_binding" in (sel["reason"] or "")
+    with pytest.raises(truth_select.MutationSelectionError) as ei:
+        truth_select.resolve_selection(proj, str(proj / "calc.gd"))
+    assert "file_binding" in ei.value.reason
 
 
 def test_hard_failed_measurement_is_not_truth(tmp_path):
@@ -89,9 +95,54 @@ def test_hard_failed_measurement_is_not_truth(tmp_path):
                                       "invalid_reason": "run_error",
                                       "bundles": 0, "pairs": 0}}
     Path(path).write_text(json.dumps(doc), encoding="utf-8")
-    sel = truth_select.resolve_selection(proj, str(proj / "calc.gd"))
-    assert sel["source"] == "full_face"
-    assert "measurement_invalid" in (sel["reason"] or "")
+    with pytest.raises(truth_select.MutationSelectionError) as ei:
+        truth_select.resolve_selection(proj, str(proj / "calc.gd"))
+    assert "measurement_invalid" in ei.value.reason
+
+
+def test_function_selection_and_file_fallback(tmp_path):
+    proj = _project(tmp_path)
+    write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
+    # 构造 fn 边：test_to_functions 由 helper 之外补齐（直接改产物）
+    path = proj / ".qa-cache" / "attribution-map.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["arms"]["gut_full"]["test_to_functions"] = {
+        "test_hit.gd::test_ok": ["calc.gd::add"]}
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    fn = truth_select.resolve_function_selection(proj, str(proj / "calc.gd"),
+                                                 "calc.gd::add")
+    assert fn["source"] == "function_mapping"
+    assert fn["tests"] == ["res://tests/unit/test_hit.gd"]
+    assert fn["tests_glob"].startswith("res://.gqt-attr-select/")
+    # 未命中的函数 → 文件级回退并披露
+    fb = truth_select.resolve_function_selection(proj, str(proj / "calc.gd"),
+                                                 "calc.gd::ghost")
+    assert fb["source"] == "file_fallback"
+    assert fb["reason"] == "function_not_in_mapping"
+
+
+def test_refresh_validation_rejects_lost_identities(tmp_path):
+    proj = _project(tmp_path)
+    write_map(proj, {"calc.gd": ["test_hit.gd::test_ok",
+                                 "test_other.gd::test_y"]})
+    before = truth_select.load_map(proj / ".qa-cache" /
+                                   "attribution-map.json")
+    after = json.loads(json.dumps(before))
+    after["increment"] = {"rerun_scripts": ["test_hit.gd"],
+                          "dropped_scripts": []}
+    after["arms"]["gut_full"]["test_to_files"] = {
+        "test_hit.gd::test_ok": ["calc.gd"]}
+    with pytest.raises(truth_select.MutationSelectionError) as ei:
+        truth_select.validate_refresh(before, after)
+    assert ei.value.reason == "refresh_lost_identities"
+
+
+def test_unique_tmp_files_differ(tmp_path):
+    a = truth_select._unique_tmp(str(tmp_path / "m.json"))
+    b = truth_select._unique_tmp(str(tmp_path / "m.json"))
+    assert a != b and Path(a).parent == tmp_path
+    Path(a).unlink()
+    Path(b).unlink()
 
 
 def test_ownership_source_runtime_vs_structural(tmp_path):

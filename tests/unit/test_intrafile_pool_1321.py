@@ -135,7 +135,7 @@ class TestIntraFileJobs:
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 5.0})
         d = executor.run_mutation_files(
             [files[0]], proj, budget=3, timeout_s=60, dry_run=False,
-            tests_glob=None, jobs=2)
+            tests_glob=None, jobs=2, select_mode="file")
         # fake 全 pass → mutant 存活 → ok=False 是正确判定；
         # 关键断言：父层 scoped glob 推导生效、baseline 零跑双份
         assert all(c["summary"]["scoped"] for c in d["results"])

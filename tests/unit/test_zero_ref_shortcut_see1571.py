@@ -125,7 +125,7 @@ class TestSerialFace:
             lambda root: warm.__setitem__("n", warm["n"] + 1))
         d = executor.run_mutation_files([target], proj, budget=50,
                                         timeout_s=60, dry_run=False,
-                                        jobs=None)
+                                        jobs=None, select_mode="file")
         out = capsys.readouterr()
         assert warm["n"] == 0, "零引用短路不得触发 prewarm"
         assert d["ok"] is True and d["jobs"] == 1
@@ -142,7 +142,7 @@ class TestSerialFace:
         monkeypatch.setattr(executor.os, "cpu_count", lambda: 4)
         d = executor.run_mutation_files([target], proj, budget=50,
                                         timeout_s=60, dry_run=False,
-                                        jobs=None)
+                                        jobs=None, select_mode="file")
         assert d["ok"] is True
         assert d["results"][0]["summary"]["zero_ref_short_circuit"] is True
 
@@ -158,12 +158,9 @@ class TestSerialFace:
         monkeypatch.setattr(
             runner_mod, "_run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
-        args = build_parser().parse_args(
-            ["mutation", target, "--project-root", proj, "--jobs", "1"])
-        rc = cli_mod.cmd_mutation(args)
-        captured = capsys.readouterr()
-        out = cli_mod.json.loads(captured.out)
-        assert rc == 1  # fake GUT 全 pass → survived → ok False
+        # run_mutation 本体不加门（门在编排层）——直接调用验证既有契约
+        out = runner_mod.run_mutation(target, proj, budget=5,
+                                      tests_glob="res://tests/")
         assert "zero_ref_short_circuit" not in out["summary"]
         assert out["summary"]["mutants"] > 0
 
@@ -209,7 +206,8 @@ class TestRuntimeTruthBlindSpot:
             runner_mod, "_run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         d = executor.run_mutation_files([str(target)], str(proj), budget=2,
-                                        dry_run=False, jobs=2)
+                                        dry_run=False, jobs=2,
+                                        select_mode="file")
         s = d["results"][0]["summary"]
         assert "zero_ref_short_circuit" not in s, "真值有测试 → 不得短路"
         assert s["scoped"] is True
@@ -233,7 +231,8 @@ class TestNonZeroRefUntouched:
             runner_mod, "_run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         d = executor.run_mutation_files([target], proj, budget=50,
-                                        dry_run=False, jobs=None)
+                                        dry_run=False, jobs=None,
+                                        select_mode="file")
         err = capsys.readouterr().err
         assert "zero-ref short-circuit" not in err
         s = d["results"][0]["summary"]
@@ -292,7 +291,8 @@ class TestReportCompleteness:
             runner_mod, "_run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: (0, "pass [passed]"))
         d = executor.run_mutation_files([str(scoped), str(zero_ref)], str(proj),
-                                        budget=50, dry_run=False, jobs=None)
+                                        budget=50, dry_run=False, jobs=None,
+                                        select_mode="file")
         by_file = {r["summary"]["file"]: r for r in d["results"]}
         assert len(by_file) == 2, "任何输入文件都不得从报告消失"
         lonely = by_file[str(zero_ref)]["summary"]

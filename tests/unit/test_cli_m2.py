@@ -37,7 +37,8 @@ class TestMutationCli:
         (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
         target = proj / "noop.gd"
         target.write_text("extends Node\nfunc f():\n\tpass\n")
-        rc, out = _run_cli("mutation", str(target), "--project-root", str(proj))
+        rc, out = _run_cli("mutation", str(target), "--project-root",
+                           str(proj), "--select", "full")
         assert rc == 0
         assert out["ok"] is True
 

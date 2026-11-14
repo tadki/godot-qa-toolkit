@@ -172,6 +172,8 @@ def then_summary_keys(bdd_state: dict) -> None:
         "stage_timings",
         "rss_peak_mb",
         "disk_delta_bytes",
+        # SEE-1581 第六批：选面模式披露（只加不改）
+        "selection_mode",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

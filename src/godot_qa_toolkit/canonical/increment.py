@@ -253,6 +253,7 @@ def run_attribution_increment(project_root: str | Path,
     t0 = time.monotonic()
     root = Path(project_root).resolve()
     baseline = load_baseline(baseline_path)
+    raw_recipe = dict(recipe)
     recipe = _inject_toolchain(root, dict(recipe))
     prev = baseline.get("increment") or {}
     since_full = int(prev.get("increments_since_full") or 0)
@@ -274,8 +275,12 @@ def run_attribution_increment(project_root: str | Path,
                               calibration_every, ratio,
                               rerun_full_face_ratio)
     if reason != "incremental":
-        return _fallback_full_face(root, target_files, recipe, out_path,
-                                   classes, reason, attribution_causal, timeout_s, t0)
+        # 全脸回退必须传 **raw recipe**（run_canonical 自行注入并计算
+        # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
+        # 永久"不新鲜"自锁）
+        return _fallback_full_face(root, target_files, raw_recipe, out_path,
+                                   classes, reason, attribution_causal,
+                                   timeout_s, t0)
     arm_exec_s, fresh, executions = _run_increment_arm(
         root, target_files, recipe, rerun, timeout_s, attribution_causal)
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,

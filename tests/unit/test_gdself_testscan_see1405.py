@@ -130,18 +130,22 @@ class TestRunnerWiring:
         proj = direct_hit_tree
         seen = {}
 
-        def fake_resolve(project_root, target_file, map_path_override=None):
+        def fake_resolve(project_root, target_file, map_path_override=None,
+                         strict=True):
             seen["project_root"] = project_root
             seen["target"] = target_file
-            return {"source": "full_face", "reason": "no_attribution_map",
-                    "tests": [], "tests_glob": None, "zero_ref": False,
-                    "mapping": None, "ambiguous_names": []}
+            return {"source": "runtime_mapping", "reason": "fresh",
+                    "tests": ["res://tests/unit/save/test_save.gd"],
+                    "tests_glob": "res://.gqt-attr-select/abc/",
+                    "zero_ref": False, "mapping": None,
+                    "ambiguous_names": []}
 
         from godot_qa_toolkit.mutation import truth_select
         monkeypatch.setattr(truth_select, "resolve_selection", fake_resolve)
         glob = mrunner._auto_scan_tests_glob(
-            str(proj / "scripts" / "save_manager.gd"), str(proj))
-        assert glob is None  # 无映射 → 全脸（不再派生静态 glob）
+            str(proj / "scripts" / "save_manager.gd"), str(proj),
+            select_mode="file")
+        assert glob == "res://.gqt-attr-select/abc/"
         assert seen["project_root"] == str(proj)
 
     def test_scan_failure_degrades_to_full_suite(self, tmp_path, monkeypatch):

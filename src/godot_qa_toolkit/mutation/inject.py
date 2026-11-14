@@ -313,8 +313,8 @@ def _exec_format_issue(path: str, _depth: int = 0) -> str:
 def godot_launch_issue(project_root: str,
                        cmd: str | None = None) -> tuple[str, str]:
     """§SPEC-078 M3 同源启动校验核心：存在性 + 执行位 + exec-format +
-    shebang 解释器（M1/C）。canonical 前置校验（cli._godot_bin_ready）
-    使用本实现；mutation/coverage/accept 的同等兜底在真实拉起点
+    shebang 解释器（M1/C）。measurement 前置校验（cli._godot_bin_ready）
+    使用本实现；mutation/gherkin/measure coverage 的同等兜底在真实拉起点
     （spawn_godot，§SPEC-079 B 延迟策略），两条防线共用同一诊断语汇。
 
     路径形态判定沿用 §SPEC-077（仅分隔符语义）；相对路径形态按

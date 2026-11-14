@@ -1,4 +1,4 @@
-"""§SPEC-054 canonical 静态准备缓存。
+"""§SPEC-054 measurement 静态准备缓存。
 
 按 源码 sha256 / recipe_hash（含 toolchain 注入）/ probe 算法版本 绑定的
 per-file 准备产物（func-registry、probe-manifest、插桩模板）。动态运行数据
@@ -85,7 +85,7 @@ def _probe_lines_ok(entry: dict) -> list | None:
 
 
 def _sha256_obj(obj) -> str:
-    """语义内容完整性指纹：键统一 str + 显式排序后 canonical json——
+    """语义内容完整性指纹：键统一 str + 显式排序后的稳定 JSON——
     JSON 往返把 int 键变 str，指纹必须对往返稳定形态计算。"""
     def canon(o):
         if isinstance(o, dict):

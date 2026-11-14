@@ -146,7 +146,7 @@ func _run_case_by_name(case_name: String) -> void:
 \tif _harness == null:
 \t\t_harness = _make_harness()
 \tif _harness == null:
-\t\tfail_test("accept harness unavailable (res://addons/gqt_accept/harness.gd missing or smoke_check failed)")
+\t\tfail_test("acceptance harness unavailable (res://addons/gqt_accept/harness.gd missing or smoke_check failed)")
 \t\treturn
 \tvar case: Dictionary = _cases_by_name.get(case_name, {{}})
 \tif case.is_empty():

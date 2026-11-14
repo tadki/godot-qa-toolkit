@@ -230,3 +230,58 @@ class TestGeneratedHeaders:
             assert "gqt accept compile" not in text, (
                 f"{path.relative_to(SRC)} still tells users to run "
                 "`gqt accept compile`")
+
+
+# §SPEC-002 旧 CLI 单词守护（SEE-1583 Final Review 扩面）：
+# src 内任何独立单词 accept / canonical 必须命中以下合法类别——变更说明、
+# 机器身份/缓存目录、版本化标识、通道身份、英文规范形术语；其余一律判红
+# （旧命令名残留）。`acceptance` 因无词边界不受本守护影响（域术语合法）。
+OLD_CLI_WORD = re.compile(r"\b(accept|canonical)\b")
+OLD_CLI_WORD_ALLOW = re.compile(
+    r"formerly `accept`"              # cli.py 变更说明（保留清单）
+    r"|原 accept"                     # 同左（中文注释）
+    r"|see1468-accept/2"              # IR ops 版本串
+    r"|gqt-accept-worker"             # 缓存目录（保留清单）
+    r"|gqt-canonical-prep"            # 缓存目录（保留清单）
+    r"|canonical-prep/2"              # 缓存 schema 版本串（保留清单）
+    r"|gqt-canonical-backups"         # per-uid 私有备份根（机器身份）
+    r"|canonical-union/"              # 版本化标识
+    r"|canonical-diagnostic/"         # 版本化标识
+    r"|canonical_recipe_hash"         # 机器面参数名
+    r"|canonical_union"               # 机器面值串
+    r"|canonical cold"                # coverlink 通道身份（保留清单）
+    r"|cold/canonical"                # 同上
+    r"|canonical: Given/When/Then")   # 英文规范形语义（parser 注释）
+
+
+class TestOldCliWordGuard:
+    """SEE-1583 §SPEC-002 扩面：旧命令名单词在 src 全域的机器守护。"""
+
+    def test_src_has_no_old_cli_words_outside_allowlist(self):
+        bad = []
+        for path, text in _py_texts(SRC):
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if OLD_CLI_WORD.search(line) and \
+                        not OLD_CLI_WORD_ALLOW.search(line):
+                    bad.append(f"{path.relative_to(SRC)}:{lineno}: "
+                               f"{line.strip()[:100]}")
+        assert not bad, (
+            "old CLI word (accept/canonical) outside allowlist:\n"
+            + "\n".join(bad[:20]))
+
+    def test_guard_replay_catches_old_copy(self):
+        # 旧文案回放：修复前被点名/同类的表述必须全部判红（守护有效性
+        # 自证；与现行树全绿构成双向判据）。
+        samples = (
+            '"""accept run：headless 执行生成套件',
+            '"""accept mutate runner（SEE-1426 P3',
+            'fail_test("accept harness unavailable ',
+            "# 工具自产 recipe 不得被自家 canonical 拒绝",
+            "# §SPEC-060f：canonical 实际产生、此前契约表缺失",
+            '"""§SPEC-054 canonical 静态准备缓存',
+            "先于 coverage/accept 的 GUT/重放等任何其他",
+            "mutation/coverage/accept 的同等兜底在真实拉起点",
+        )
+        for sample in samples:
+            assert OLD_CLI_WORD.search(sample), sample
+            assert not OLD_CLI_WORD_ALLOW.search(sample), sample

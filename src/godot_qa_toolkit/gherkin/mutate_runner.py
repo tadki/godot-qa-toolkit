@@ -1,4 +1,4 @@
-"""accept mutate runner（SEE-1426 P3，§SPEC-1426-12/13/14；SEE-1468 /2 豁免轮）。
+"""gherkin mutate runner（SEE-1426 P3，§SPEC-1426-12/13/14；SEE-1468 /2 豁免轮）。
 
 闭环：对 IR 全量产 mutants → 逐 mutant 变异 IR → 同一套生成测试判定
 kill/survived。v1 无 stamp：每轮全量、exit 非 0 即打回。

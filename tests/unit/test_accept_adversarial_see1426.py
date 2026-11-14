@@ -220,7 +220,7 @@ def test_generated_carries_smoke_sentinel(project: Path,
     assert error is None
     gd = suite.generated_gd
     assert "if not h.smoke_check():" in gd, "smoke sentinel call missing"
-    assert 'fail_test("accept harness unavailable' in gd, \
+    assert 'fail_test("acceptance harness unavailable' in gd, \
         "harness-unavailable fallback missing"
     assert "case missing from IR" in gd, "IR/generated drift fallback missing"
 

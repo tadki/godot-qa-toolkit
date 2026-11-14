@@ -80,7 +80,7 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
         entry_text = row.get("entry", "")
         reason = row.get("reason")
         # §SPEC-068：scope/entry 与 verify 同一规则（entry strip 后非空）
-        # ——工具自产 recipe 不得被自家 canonical 拒绝；非 str scope 会在
+        # ——工具自产 recipe 不得被自家 measurement 校验拒绝；非 str scope 会在
         # LEGAL_SCOPES frozenset 成员测试上 TypeError，提前拒绝
         if not isinstance(scope, str) or not scope \
                 or not isinstance(entry_text, str) or not entry_text.strip():
@@ -140,12 +140,12 @@ def build_recipe(
 
     dirs = gutconfig.get("dirs", [])
     # §SPEC-068：与 verify 同一规则——dirs 必须是非空字符串列表，否则
-    # build 会产出被自家 canonical 拒绝的 recipe
+    # build 会产出被自家 measurement 校验拒绝的 recipe
     if not isinstance(dirs, list) or not all(
             isinstance(d, str) and d.strip() for d in dirs):
         return None, "gutconfig 'dirs' must be a list of non-empty strings"
     if not dirs:
-        return None, "gutconfig has no dirs — empty GUT face is not canonical"
+        return None, "gutconfig has no dirs — empty GUT face is not a valid measurement suite"
 
     features, feature_count, error = scan_acceptance_features(root)
     if error is not None:
@@ -215,7 +215,7 @@ def recipe_hash(recipe: dict) -> str:
     """Recompute the hash over the recipe minus its own recipe_hash AND
     project_root — the checkout path is provenance, not a measured face
     (§SPEC-041 L2: same content at any path must hash identically). The
-    canonical verification for loaded/recovered recipes."""
+    measurement verification for loaded/recovered recipes."""
     basis = {k: v for k, v in recipe.items()
              if k not in ("recipe_hash", "project_root")}
     return _sha256_text(

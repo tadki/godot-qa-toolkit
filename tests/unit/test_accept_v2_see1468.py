@@ -847,7 +847,7 @@ def test_mutate_harness_missing_baseline_red_is_run_error(
     def fake_run(*a, **k):
         class R:
             returncode = 1
-            stdout = (f"* {tn}\n  [Failed]: accept harness unavailable "
+            stdout = (f"* {tn}\n  [Failed]: acceptance harness unavailable "
                       "(res://addons/gqt_accept/harness.gd missing)\n")
             stderr = ""
         return R()

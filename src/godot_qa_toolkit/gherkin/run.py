@@ -1,4 +1,4 @@
-"""accept run：headless 执行生成套件 + 三件哈希绑定重放校验 + 契约回译。
+"""gherkin run：headless 执行生成套件 + 三件哈希绑定重放校验 + 契约回译。
 
 执行前重放校验（§SPEC-1426-07，失配 = run_error，无告警放行档）：
 manifest 里的 ir_hash / generated_hash 必须与磁盘上 IR、生成 .gd 的实际

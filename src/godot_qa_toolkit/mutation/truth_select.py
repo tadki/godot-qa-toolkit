@@ -136,8 +136,8 @@ def validate_refresh(before: dict, after: dict) -> None:
     """刷新产物守恒校验：失效即 fail-loud（不得静默交付失真映射）。
 
     允许变化的边：rerun_scripts（整体替换）与 dropped_scripts（删除）；
-    其余测试身份必须原样保留——并发读-改-写丢边（Revy HIGH-2 451/2654）
-    在此显式拒绝。"""
+    其余测试身份必须原样保留——并发读-改-写导致映射失真（共享临时文件、
+    无串行化；修复后并发刷新实测零身份丢失）在此显式拒绝。"""
     if after.get("schema_version") != SCHEMA_VERSION:
         raise MutationSelectionError("refresh_schema_mismatch")
     if not arms_valid(after.get("arms_state") or {}):

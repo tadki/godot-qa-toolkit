@@ -15,7 +15,6 @@ from .orchestrator import (
     _ATTR_FLUSHER_GD,
     _ATTR_PRE_HOOK_GD,
     _ATTR_RUN_UUID_PLACEHOLDER,
-    _FLUSHER_GD,
     _FLUSHER_RELPATH,
     _PRE_HOOK_GD,
     _PRE_HOOK_RELPATH,
@@ -108,15 +107,12 @@ def execute_rerun_scripts(root: Path, gut_dirs: list[str],
                                         run_uuid)
         started_files[item["abs"]] = item["src"]
         instrumented[item["abs"]] = inst
-    if causal:
-        flusher_gd = _ATTR_FLUSHER_GD
-        pre_hook_gd = _ATTR_PRE_HOOK_GD.replace(_ATTR_RUN_UUID_PLACEHOLDER,
-                                                run_uuid)
-        extra = [(_ATTR_CTX_RELPATH, _ATTR_CTX_GD)]
-    else:
-        flusher_gd = _FLUSHER_GD
-        pre_hook_gd = _PRE_HOOK_GD
-        extra = []
+    # 归属模板必须配 ATTR finalizer/pre-hook（默认 flusher 不排空
+    # gqt_cov_attr——实测踩过：错配默认 flusher 时 hits 正常、归属静默全空）
+    flusher_gd = _ATTR_FLUSHER_GD
+    pre_hook_gd = _ATTR_PRE_HOOK_GD.replace(_ATTR_RUN_UUID_PLACEHOLDER,
+                                            run_uuid)
+    extra = [(_ATTR_CTX_RELPATH, _ATTR_CTX_GD)] if causal else []
     hook_files = [(_FLUSHER_RELPATH, flusher_gd),
                   (_PRE_HOOK_RELPATH, pre_hook_gd)] + extra
     xdg_homes: list[str] = []

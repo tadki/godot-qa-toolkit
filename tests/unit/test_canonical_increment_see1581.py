@@ -7,6 +7,7 @@ fallback 触发（new_prod / hash 失配）、逐边差分；端到端用 FakeGo
 from __future__ import annotations
 
 import json
+import shutil
 import re
 import subprocess as sp
 from pathlib import Path
@@ -157,6 +158,44 @@ def test_load_baseline_rejects_wrong_schema(tmp_path: Path):
     p.write_text(json.dumps({"schema_version": "x"}), encoding="utf-8")
     with pytest.raises(Exception):
         load_baseline(p)
+
+
+def test_execute_rerun_scripts_writes_attr_flusher(tmp_path: Path):
+    """回归守卫（实测踩过）：增量重跑必须注入 ATTR finalizer/pre-hook——
+    错配默认 flusher 时 hits 正常、归属静默全空。"""
+    import godot_qa_toolkit.canonical.increment_runner as runner
+    project = _project(tmp_path)
+    recipe, targets = _recipe_and_targets(project, tmp_path)
+    templates = runner.prepare_attr_templates(
+        project, targets, recipe, False)
+    captured: list[str] = []
+
+    def fake_run(project_root, gut_args, timeout_s, env=None, gate_root=None):
+        hook = (Path(project_root) / "addons" / "gqt_cov_pre_hook.gd")
+        flusher = (Path(project_root) / "addons" / "gqt_cov_flusher.gd")
+        captured.append(hook.read_text(encoding="utf-8")
+                        + flusher.read_text(encoding="utf-8"))
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return R(), 0.0
+
+    orig = runner._run_one_gut
+    runner._run_one_gut = fake_run
+    try:
+        results, xdg = runner.execute_rerun_scripts(
+            project, ["res://tests/"], ["test_game.gd"], 60, templates,
+            False, "uuid-test")
+    finally:
+        runner._run_one_gut = orig
+    assert captured and "gqt_cov_attr" in captured[0]
+    assert "gqt_cov_slot" in captured[0]
+    assert not (project / "addons" / "gqt_cov_pre_hook.gd").exists()
+    for x in xdg:
+        shutil.rmtree(x, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- 端到端

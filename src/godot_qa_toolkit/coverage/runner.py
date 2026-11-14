@@ -429,7 +429,7 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
                         f"[{_PROBE_PREFIX}t{pid} - 1] = 1\n"
                         # 显式赋值而非 `+=`：被测仓存在「断言源码无 +=」的
                         # 源文本测试（KOL test_see1116），复合赋值会被误判
-                        f"{indent}\t{attr}[2][0] = {attr}[2][0] + 1\n"
+                        f"{indent}\t{attr}[3][0] = {attr}[3][0] + 1\n"
                         f"{indent}elif {_PROBE_PREFIX}t{pid} < 0:\n"
                         f"{indent}\tvar {_PROBE_PREFIX}c{pid} = {attr}[1]\n"
                         f"{indent}\tif -{_PROBE_PREFIX}t{pid} > "
@@ -438,9 +438,18 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
                         f"-{_PROBE_PREFIX}t{pid})\n"
                         f"{indent}\t{_PROBE_PREFIX}c{pid}"
                         f"[-{_PROBE_PREFIX}t{pid} - 1] = 1\n"
-                        f"{indent}\t{attr}[2][1] = {attr}[2][1] + 1\n"
+                        f"{indent}\t{attr}[3][1] = {attr}[3][1] + 1\n"
                         f"{indent}else:\n"
-                        f"{indent}\t{attr}[2][2] = {attr}[2][2] + 1\n")
+                        # 方向③：无主命中记 probe 热点与阶段桶
+                        # （0 bootstrap / 1 script_gap / 2 shutdown / 3 other）
+                        f"{indent}\t{attr}[2][{pid}] = "
+                        f"{attr}[2].get({pid}, 0) + 1\n"
+                        f"{indent}\tvar {_PROBE_PREFIX}p{pid} = "
+                        f"Engine.get_meta(\"gqt_cov_phase\", 0)\n"
+                        f"{indent}\tif {_PROBE_PREFIX}p{pid} >= 0 "
+                        f"and {_PROBE_PREFIX}p{pid} <= 3:\n"
+                        f"{indent}\t\t{attr}[3][{_PROBE_PREFIX}p{pid} + 2]"
+                        f" = {attr}[3][{_PROBE_PREFIX}p{pid} + 2] + 1\n")
             else:
                 out.append(f"{indent}{_PROBE_PREFIX}{pid}()\n")
         out.append(line_text)
@@ -475,9 +484,10 @@ def _flag_probe_block(sink_name: str, count: int,
     读取侧按 run_uuid+key8 模式合并）。
 
     attribution=True（§SPEC-083 试验，默认关闭）：追加归属注册块——
-    `[seen_test, seen_script, counts]` 结构经 Engine meta `gqt_cov_attr`
-    按 attr sink 名登记，finalizer 收尾时按 attr sink 落盘。默认路径不
-    生成任何新代码。"""
+    `[seen_test, seen_script, unattr_counts(字典), counts6]` 结构经 Engine
+    meta `gqt_cov_attr` 按 attr sink 名登记，finalizer 收尾时按 attr sink
+    落盘；counts6 = [test, script, bootstrap, script_gap, shutdown, other]
+    （方向③具名车道）。默认路径不生成任何新代码。"""
     var = _flag_var_name(sink_name)
     key8 = _flag_var_suffix(sink_name)
     reg = f"{_PROBE_PREFIX}reg_{key8}"
@@ -514,7 +524,7 @@ def _flag_probe_block(sink_name: str, count: int,
             f" if Engine.has_meta(\"gqt_cov_attr\") else {{}}\n"
             f"\tvar h: Array = d.get({attr_ref}, [])\n"
             f"\tif h.is_empty():\n"
-            f"\t\th = [[], [], [0, 0, 0]]\n"
+            f"\t\th = [[], [], {{}}, [0, 0, 0, 0, 0, 0]]\n"
             f"\t\td[{attr_ref}] = h\n"
             f"\t\tEngine.set_meta(\"gqt_cov_attr\", d)\n"
             f"\treturn h\n"

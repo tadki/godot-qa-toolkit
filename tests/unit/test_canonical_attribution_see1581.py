@@ -70,13 +70,18 @@ def test_probe_calls_attribution_emits_identity_writes():
                                attribution=True))
     # 两处探针 → 两组互不重名的临时变量（同名 var 同一作用域会 parse error）
     assert out.count("Engine.get_meta(\"gqt_cov_ctx\", 0)") == 2
+    assert out.count("Engine.get_meta(\"gqt_cov_phase\", 0)") == 2
     for pid in ("0", "1"):
-        for name in ("t", "s", "c"):
+        for name in ("t", "s", "c", "p"):
             assert f"__qa_cov_probe_{name}{pid}" in out
     # 三车道计数路径都在；用显式赋值避免 `+=` 触发源文本测试
-    for idx in ("0", "1", "2"):
-        assert f"__qa_cov_probe_a_0badf00d[2][{idx}] = " in out
-    assert "[2][0] += 1" not in out and "[2][2] += 1" not in out
+    for idx in ("0", "1"):
+        assert f"__qa_cov_probe_a_0badf00d[3][{idx}] = " in out
+    assert "[3][0] += 1" not in out and "[3][5] += 1" not in out
+    # 方向③：无主分支记 probe 热点（字典计数）与阶段桶
+    assert "__qa_cov_probe_a_0badf00d[2][0] = " in out
+    assert ".get(0, 0) + 1" in out
+    assert "[__qa_cov_probe_p0 + 2]" in out
     # 行覆盖 flag 仍保留（归属是叠加而非替代）
     assert "__qa_cov_probe_m_0badf00d[0] = 1" in out
 
@@ -89,7 +94,7 @@ def test_flag_probe_block_attribution_registers_attr_sink():
     attr = _flag_probe_block(SINK, 2, runtime_sink=True, attribution=True)
     assert "gqt_cov_attr" in attr
     assert "qa-coverage-attr-GQTUUIDSENTINEL-" in attr
-    assert "[[], [], [0, 0, 0]]" in attr
+    assert "[[], [], {}, [0, 0, 0, 0, 0, 0]]" in attr
 
 
 def test_instrument_blocks_attribution_parses():
@@ -181,27 +186,34 @@ def test_causal_instrumentation_declares_ctx_preload():
 # ---------------------------------------------------------------- 映射聚合
 
 
-def _rec(seen, seen_script, counts):
+def _rec(seen, seen_script, unattr_counts, counts):
     return {"seen": set(seen), "seen_script": set(seen_script),
+            "unattr_counts": dict(unattr_counts),
             "counts": list(counts)}
 
 
 def test_build_attribution_map_joins_registry_and_splits_lanes():
     attr_by_rel = {
-        "src_game/cell.gd": {101: _rec({0, 1}, {0}, [20, 6, 4])},
-        "src_game/node.gd": {101: _rec({1}, set(), [5, 0, 0])},
+        "src_game/cell.gd": {101: _rec({0, 1}, {0}, {2: 3, 3: 1},
+                                      [20, 6, 3, 1, 0, 0])},
+        "src_game/node.gd": {101: _rec({1}, set(), {}, [5, 0, 0, 0, 0, 0])},
     }
     registries = (
         {101: {0: "res://tests/unit/test_a.gd::test_one",
                1: "res://tests/unit/test_b.gd::test_two"}},
         {101: {0: "res://tests/integration/test_c.gd"}},
     )
-    m = build_attribution_map("gut_full", attr_by_rel, registries)
+    m = build_attribution_map(
+        "gut_full", attr_by_rel, registries,
+        probe_lines_by_rel={"src_game/cell.gd": [4, 5, 6]},
+        fid_by_line_by_rel={"src_game/cell.gd": {4: "src_game/cell.gd::work",
+                                                 5: "src_game/cell.gd::work",
+                                                 6: "src_game/cell.gd::x"}})
     assert m["arm"] == "gut_full"
     assert m["tests"] == 2 and m["scripts"] == 1
     assert m["files"] == 2
     assert m["pairs"] == 3 and m["script_pairs"] == 1
-    # 三车道：测试级 25 / 脚本级 6 / 无主 4，合计 35
+    # 三车道：测试级 25 / 脚本级 6 / 无主 4（bootstrap 3 + script_gap 1）
     assert m["attributed_hit_events"] == 25
     assert m["script_hit_events"] == 6
     assert m["unattributed_hit_events"] == 4
@@ -209,6 +221,18 @@ def test_build_attribution_map_joins_registry_and_splits_lanes():
     assert m["lanes"]["script"]["rate"] == round(6 / 35, 6)
     assert m["lanes"]["unattributed"]["rate"] == round(4 / 35, 6)
     assert sum(v["rate"] for v in m["lanes"].values()) == pytest.approx(1.0)
+    phases = m["unattributed_phases"]
+    assert phases["bootstrap"]["hit_events"] == 3
+    assert phases["script_gap"]["hit_events"] == 1
+    assert phases["shutdown"]["hit_events"] == 0
+    assert phases["other"]["hit_events"] == 0
+    assert phases["bootstrap"]["share_of_unattributed"] == round(3 / 4, 6)
+    # 无主热点：probe 2 计 3 次、probe 3 计 1 次，按计数降序并解析行/函数
+    hs = m["unattributed_hotspots"]
+    assert [h["probe_id"] for h in hs] == [2, 3]
+    assert [h["hit_events"] for h in hs] == [3, 1]
+    assert hs[0]["file"] == "src_game/cell.gd"
+    assert hs[0]["line"] == 6 and hs[0]["function_id"] == "src_game/cell.gd::x"
     assert m["files_with_unattributed"] == 1
     assert m["test_to_files"] == {
         "res://tests/unit/test_a.gd::test_one": ["src_game/cell.gd"],
@@ -223,7 +247,7 @@ def test_build_attribution_map_joins_registry_and_splits_lanes():
 
 
 def test_build_attribution_map_unmapped_is_disclosed_not_guessed():
-    attr_by_rel = {"src_game/cell.gd": {7: _rec({3}, {5}, [2, 1, 0])}}
+    attr_by_rel = {"src_game/cell.gd": {7: _rec({3}, {5}, {}, [2, 1, 0, 0, 0, 0])}}
     m = build_attribution_map("gut_full", attr_by_rel, ({7: {}}, {7: {}}))
     assert m["tests"] == 0 and m["scripts"] == 0
     assert m["unmapped_count"] == 1
@@ -319,7 +343,8 @@ class FakeGodot:
                     src):
                 uuid, key8 = m.group(1), m.group(2)
                 (dest / f"qa-coverage-attr-{uuid}-99999-{key8}.txt").write_text(
-                    "test 0\nscript 0\ncounts 10 6 2\n", encoding="utf-8")
+                    "test 0\nscript 0\nunattr 0 2\ncounts 10 6 2 0 0 0\n",
+                    encoding="utf-8")
         hook_text = self.pre_hook_texts[-1]
         m = re.search(r"qa-cov-attr-tests-([0-9a-f-]{8,36})-", hook_text)
         if m:

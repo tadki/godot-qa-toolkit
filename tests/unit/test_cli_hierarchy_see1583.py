@@ -129,6 +129,60 @@ class TestSpec001Hierarchy:
         )
         assert "invalid choice" in proc.stderr
 
+    # §SPEC-010：subprocess 面之外，程序化 main(argv) 调用同样必须走
+    # argparse invalid-choice 拒绝，堵住任何 argv 预改写/别名翻译复活。
+    @pytest.mark.parametrize("old", ("accept", "canonical", "recipe"))
+    def test_old_top_level_rejected_programmatically(self, old, capsys):
+        from godot_qa_toolkit.cli import main
+
+        with pytest.raises(SystemExit) as ei:
+            main([old])
+        assert ei.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+
+class TestSpec010WiringPins:
+    """§SPEC-010：每个叶子 set_defaults(func=...) 精确钉到具名 handler。
+
+    hierarchy flags 测试只覆盖参数面；无 e2e 派发覆盖的叶子
+    （suite/parity/registry-diff/risk/map-update/diagnose）错接 handler
+    时全测试树无反例，故按结构逐叶钉住。
+    """
+
+    EXPECTED_WIRING = {
+        ("gherkin", "compile"): "cmd_gherkin",
+        ("gherkin", "run"): "cmd_gherkin",
+        ("gherkin", "mutate"): "cmd_gherkin",
+        ("measure", "suite"): "cmd_measure_suite",
+        ("measure", "run"): "cmd_measure_run",
+        ("measure", "diagnose"): "cmd_measure_diagnose",
+        ("measure", "map-update"): "cmd_measure_map_update",
+        ("measure", "coverage"): "cmd_measure_coverage",
+        ("measure", "complexity"): "cmd_measure_complexity",
+        ("measure", "arch"): "cmd_measure_arch",
+        ("measure", "parity"): "cmd_measure_parity",
+        ("measure", "registry-diff"): "cmd_measure_registry_diff",
+        ("measure", "risk"): "cmd_measure_risk",
+    }
+
+    @pytest.mark.parametrize("command,leaf", sorted(EXPECTED_WIRING))
+    def test_leaf_wired_to_named_handler(self, command, leaf):
+        from godot_qa_toolkit import cli
+
+        handler = getattr(cli, self.EXPECTED_WIRING[(command, leaf)])
+        leaf_parser = _leaf_parser(command, leaf)
+        assert leaf_parser._defaults.get("func") is handler, (
+            f"{command} {leaf} must wire to "
+            f"{self.EXPECTED_WIRING[(command, leaf)]}"
+        )
+
+    def test_top_level_wiring(self):
+        from godot_qa_toolkit import cli
+
+        choices = _command_choices(_parser())
+        assert choices["mutation"]._defaults.get("func") is cli.cmd_mutation
+        assert choices["doctor"]._defaults.get("func") is cli.cmd_doctor
+
 
 class TestSpec003OutputContract:
     def test_measure_complexity_tool_and_exit0(self):

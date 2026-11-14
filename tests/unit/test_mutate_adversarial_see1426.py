@@ -1,4 +1,4 @@
-"""SEE-1426 Round B hardener — `gqt accept mutate` 对抗性单测（§SPEC-1426-11~15）。
+"""SEE-1426 Round B hardener — `gqt gherkin mutate` 对抗性单测（§SPEC-1426-11~15）。
 
 对抗预设：默认变异闭环会放行作弊。覆盖既有套件未及的面：
 
@@ -26,10 +26,10 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept import OPS_VERSION
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
-from godot_qa_toolkit.accept.mutate_runner import (
+from godot_qa_toolkit.gherkin import OPS_VERSION
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.mutate import mutate_case, mutate_ir
+from godot_qa_toolkit.gherkin.mutate_runner import (
     AcceptRunError,
     _mutated_ir,
     run_mutate,
@@ -43,7 +43,7 @@ PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
 def _restore_subprocess():
     """fake 直接换全局 subprocess 模块属性——autouse 兜底还原防泄漏。"""
     import subprocess as sp
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     orig_run, orig_popen = sp.run, sp.Popen
     yield
     sp.run, sp.Popen = orig_run, orig_popen
@@ -53,7 +53,7 @@ def _restore_subprocess():
 def _fake_gut(returncode: int, output: str,
               baseline: tuple[int, str] | None = None) -> None:
     """F-C：baseline=(rc, output) 时首调用（未变异基线轮）单独供给。"""
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     calls = {"n": 0}
 
@@ -166,7 +166,7 @@ def test_mutated_ir_hits_only_named_case() -> None:
     # 变形只动 mutant 指名的 case，其余 case 必须逐字段不变（串改即
     # verdict 串扰）。
     ir = _two_case_ir()
-    from godot_qa_toolkit.accept.mutate import Mutant
+    from godot_qa_toolkit.gherkin.mutate import Mutant
     mutant = Mutant(mutant_id="x", case_test_name="test_a_000_00",
                     target="left", kind="numeric", original="7",
                     mutated="999", rationale="+1")
@@ -215,7 +215,7 @@ class _FakeWorkerIO:
 
 
 def _fake_worker(rc: int, case_names: list[str]) -> None:
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(rc, case_names)
 
 
@@ -255,7 +255,7 @@ def test_mutant_rounds_isolated_no_accumulation(project: Path,
                                                 tmp_path: Path) -> None:
     """逐 mutant 临时变异：每轮磁盘 IR 相对原 IR 恰好一处差异，轮间不
     累积（变异叠加会让后续轮的 verdict 无法归因到单一 mutant）。"""
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     _compile(project, tmp_path)
     ir = _disk_ir(project)
     expected = {(m.case_test_name, m.target, m.mutated)
@@ -292,7 +292,7 @@ def test_ir_restored_after_timeout_run_error(project: Path,
                                              tmp_path: Path) -> None:
     """mutant 轮超时 run_error：磁盘 IR 仍被 finally 恢复（异常路径不落
     病变 IR——恢复竞态的异常分支）。"""
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     _compile(project, tmp_path)
     original = (project / "acceptance/ir/demo.json").read_text(encoding="utf-8")
 
@@ -351,7 +351,7 @@ def test_mutant_round_launch_failure_sentinel(project: Path,
 def test_sentinel_partial_kill_does_not_shortcircuit(project: Path,
                                                      tmp_path: Path) -> None:
     """首轮 kill 后不得短路：剩余 mutant 轮照跑，逐轮独立判定。"""
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     _compile(project, tmp_path)
     calls = {"n": 0}
 

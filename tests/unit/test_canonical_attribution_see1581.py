@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.canonical.orchestrator import (
+from godot_qa_toolkit.measurement.orchestrator import (
     _ATTR_CTX_GD,
     ATTRIBUTION_SCHEMA,
     _ATTR_PRE_HOOK_GD,
@@ -25,7 +25,7 @@ from godot_qa_toolkit.canonical.orchestrator import (
     _FLUSHER_GD,
     _function_entry_probes,
     build_attribution_map,
-    run_canonical,
+    run_measurement,
 )
 from godot_qa_toolkit.coverage.runner import (
     _flag_probe_block,
@@ -426,7 +426,7 @@ class FakeGodot:
 
 
 def _recipe_and_targets(project: Path, tmp_path: Path):
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(project)
     assert error is None, error
     path = tmp_path / "recipe.json"
@@ -438,7 +438,7 @@ def test_default_run_has_no_attribution_outputs(tmp_path: Path):
     project = _project(tmp_path)
     recipe, targets = _recipe_and_targets(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(project, targets, recipe)
+    report = run_measurement(project, targets, recipe)
     assert "test_attribution" not in report
     assert all("attribution" not in arm for arm in report["arms"])
     assert not any("start_test" in t for t in sp.run.pre_hook_texts)
@@ -451,7 +451,7 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     sp.run = fake
     out = tmp_path / "canonical.json"
     artifact_path = tmp_path / "canonical.attribution.json"
-    report = run_canonical(project, targets, recipe,
+    report = run_measurement(project, targets, recipe,
                            test_attribution=True,
                            attribution_out=str(artifact_path))
     summary = report["test_attribution"]
@@ -491,7 +491,7 @@ def test_attribution_leaves_no_residue(tmp_path: Path):
     recipe, targets = _recipe_and_targets(project, tmp_path)
     before = {p: p.read_bytes() for p in (project / "src_game").glob("*.gd")}
     sp.run = FakeGodot(project)
-    run_canonical(project, targets, recipe, test_attribution=True)
+    run_measurement(project, targets, recipe, test_attribution=True)
     for p, data in before.items():
         assert p.read_bytes() == data
     assert not list(project.glob("qa-coverage-*.txt"))
@@ -517,7 +517,7 @@ def test_causal_run_rewrites_sites_and_discloses_boundary(tmp_path: Path):
     fake = FakeGodot(project)
     sp.run = fake
     artifact_path = tmp_path / "canonical.attribution.json"
-    report = run_canonical(project, targets, recipe,
+    report = run_measurement(project, targets, recipe,
                            test_attribution=True,
                            attribution_causal=True,
                            attribution_out=str(artifact_path))
@@ -536,7 +536,7 @@ def test_causal_run_rewrites_sites_and_discloses_boundary(tmp_path: Path):
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["causal"]["sites_rewritten"] == 2
     # 默认关闭路径不出现 causal 键
-    report_plain = run_canonical(project, targets, recipe,
+    report_plain = run_measurement(project, targets, recipe,
                                  test_attribution=True)
     assert report_plain["test_attribution"]["causal"]["enabled"] is False
     assert report_plain["test_attribution"]["causal"]["sites_rewritten"] == 0

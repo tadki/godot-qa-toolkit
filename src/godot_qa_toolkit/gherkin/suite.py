@@ -1,4 +1,4 @@
-"""accept 私有目录管线（§SPEC-035，acceptance-suite/1）。
+"""gherkin 私有目录管线（§SPEC-035，acceptance-suite/1）。
 
 选择在编译期完成：compile 把选中 keys 写进一次性私有目录
 `acceptance/generated/.gqt-run-<uuid>/`（事先为空，非空即拒），run 对该

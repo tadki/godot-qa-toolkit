@@ -18,23 +18,23 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept import OPS_VERSION
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.mutate import Mutant, mutate_case, mutate_ir
-from godot_qa_toolkit.accept.mutate_runner import (
+from godot_qa_toolkit.gherkin import OPS_VERSION
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.mutate import Mutant, mutate_case, mutate_ir
+from godot_qa_toolkit.gherkin.mutate_runner import (
     AcceptRunError,
     _mutated_ir,
     run_mutate,
 )
-from godot_qa_toolkit.accept.run import replay_check
+from godot_qa_toolkit.gherkin.run import replay_check
 from godot_qa_toolkit.arch.collector import collect_file
-from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
 
 @pytest.fixture(autouse=True)
 def _restore_subprocess():
     """fake 直接换全局 subprocess 模块属性——autouse 兜底还原防泄漏。"""
     import subprocess as sp
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     orig_run, orig_popen = sp.run, sp.Popen
     yield
     sp.run, sp.Popen = orig_run, orig_popen
@@ -111,7 +111,7 @@ def test_def1_unchanged_round_judged(project: Path, tmp_path: Path) -> None:
     """unchanged mutant 轮真实判定：挂 = kill（防伪层③生效），全绿 =
     survived（比对面缺失即打回）——不再是变形 no-op 的假 survived。"""
     _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     # 全绿链：unchanged mutant 不挂 = survived（探针被剥离的作弊形态）
     calls = {"n": 0}
@@ -153,7 +153,7 @@ def test_def2_poison_test_cannot_inflate_kills(project: Path,
       | left |
       | 7    |
 """)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     calls = {"n": 0}
 
@@ -214,7 +214,7 @@ def test_def2_worker_kill_attribution_same_guard(project: Path,
       | left |
       | 7    |
 """)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 1, "executed": 1, "failing": ["test_poison"],
         "ops_version": OPS_VERSION})
@@ -228,7 +228,7 @@ def test_def2_worker_probe_reset_failure_is_run_error(project: Path,
                                                       tmp_path: Path) -> None:
     """worker 硬纪律：自检探针断言复位失败 = run_error verdict。"""
     _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 0, "executed": 1, "failing": [],
         "run_error": "harness unavailable or smoke_check failed after "
@@ -334,7 +334,7 @@ def test_disclosure3_worker_missing_rejected(project: Path,
                                              tmp_path: Path) -> None:
     _compile(project, tmp_path)
     (project / "acceptance/generated/accept_worker.gd").unlink()
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     with pytest.raises(AcceptRunError, match="worker artifact missing"):
         run_mutate(project, "demo", use_worker=True)
 
@@ -396,7 +396,7 @@ def test_worker_exits_early_channel_run_errors(project: Path,
       | left |
       | 7    |
 """)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _DeadWorkerIO(die_on=1)
     result = run_mutate(project, "demo", use_worker=True)
     assert result["ok"] is False
@@ -410,7 +410,7 @@ def test_worker_zero_executed_is_sentinel_error(project: Path,
                                                 tmp_path: Path) -> None:
     """worker executed=0 = 执行链失真 → run_error（哨兵②worker 侧）。"""
     _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 0, "executed": 0, "failing": [],
         "ops_version": OPS_VERSION})
@@ -424,7 +424,7 @@ def test_worker_zero_executed_is_sentinel_error(project: Path,
 def test_worker_ops_version_mismatch_is_run_error(project: Path,
                                                   tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 0, "executed": 1, "failing": [], "ops_version": "bogus/9"})
     result = run_mutate(project, "demo", use_worker=True)
@@ -434,7 +434,7 @@ def test_worker_ops_version_mismatch_is_run_error(project: Path,
 
 def test_worker_spawn_oserror_is_run_error(project: Path,
                                            tmp_path: Path) -> None:
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     def boom(*a, **k):
         raise OSError("no exec")
@@ -471,8 +471,8 @@ def test_qa1_worker_request_line_under_line_buffer(tmp_path: Path) -> None:
     """QA-1 回归：ir_file 协议下请求行恒 <1024B（OS.read_string_from_stdin
     行缓冲上限），且变异 IR 本体落临时文件可被 FileAccess 读回。"""
     ir, size = _big_ir_bytes()
-    from godot_qa_toolkit.accept.mutate import Mutant
-    from godot_qa_toolkit.accept.mutate_runner import _mutated_ir
+    from godot_qa_toolkit.gherkin.mutate import Mutant
+    from godot_qa_toolkit.gherkin.mutate_runner import _mutated_ir
     mutants = []
     for i, case in enumerate(ir["cases"]):
         mutants.append(Mutant(
@@ -522,7 +522,7 @@ def test_qa1_worker_request_carries_no_inline_ir(project: Path,
         def close(self) -> None:
             pass
 
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _CaptureWorkerIO()
     run_mutate(project, "demo", use_worker=True)
     assert captured, "worker 通道必须发出请求"
@@ -536,7 +536,7 @@ def test_qa1_worker_scratch_dir_cleaned(project: Path, tmp_path: Path) -> None:
     """worker 轮转临时文件用后即删：通道结束 .qa-cache/gqt-accept-worker
     不留残留。"""
     _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO({
         "rc": 1, "executed": 1,
         "failing": ["test_s_000_00", "test_s_000_01"],
@@ -611,7 +611,7 @@ def test_medium1_hung_worker_times_out_into_run_errors(project: Path,
       | left |
       | 7    |
 """)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _HungWorkerIO()
     import time
     t0 = time.monotonic()
@@ -669,7 +669,7 @@ def test_medium1_no_fileno_fake_degrades_to_blocking_read(
       | left |
       | 7    |
 """)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _NoFilenoWorkerIO({
         "rc": 1, "executed": 1,
         "failing": ["test_s_000_00", "test_s_000_01"],
@@ -696,7 +696,7 @@ def test_medium1_fileno_raising_fake_degrades(project: Path,
       | left |
       | 7    |
 """)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _RaisingFilenoWorkerIO({
         "rc": 1, "executed": 1,
         "failing": ["test_s_000_00", "test_s_000_01"],

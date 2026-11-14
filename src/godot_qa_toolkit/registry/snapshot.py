@@ -159,7 +159,7 @@ def diff_registries(old: dict, new: dict,
     # unified JSON contract keys: `ok` means "command executed completely"
     # (plan §4.1) — lane anomalies are data, not exit-code semantics
     return {
-        "tool": "registry",
+        "tool": "measure.registry-diff",
         "ok": True,
         "diff_version": DIFF_VERSION,
         "rows": rows,

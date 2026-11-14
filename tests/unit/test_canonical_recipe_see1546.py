@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.canonical.recipe import (
+from godot_qa_toolkit.measurement.recipe import (
     RECIPE_VERSION,
     build_recipe,
     recipe_hash,
@@ -46,7 +46,7 @@ def kol_like(tmp_path: Path) -> Path:
 
 
 def _gutconfig_name() -> str:
-    from godot_qa_toolkit.canonical.recipe import _GUTCONFIG as name
+    from godot_qa_toolkit.measurement.recipe import _GUTCONFIG as name
     return name
 
 
@@ -163,13 +163,13 @@ def test_exclude_res_scheme_entry_parses_colons_correctly():
     raw = "gut_dir:res://tests/unit/quarantine/**:known flaky — SEE-1234"
     parser = build_parser()
     args = parser.parse_args(
-        ["recipe", "--project-root", "/nonexistent-root-for-parse",
+        ["measure", "suite", "--project-root", "/nonexistent-root-for-parse",
          "--exclude", raw]
     )
     # capture the parsed exclusion by monkeypatching build_recipe via cmd path:
     # parse-only check through the recipe builder on a real tmp project instead
     import tempfile
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     root = Path(tempfile.mkdtemp())
     (root / ".gutconfig.json").write_text(
         json.dumps({"dirs": ["res://tests/unit/"]}), encoding="utf-8")
@@ -193,7 +193,7 @@ def test_recipe_hash_is_sensitive_to_harness_bytes(kol_like: Path):
     hash basis)."""
     import hashlib
 
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     harness = kol_like / "acceptance" / "harness" / "harness.gd"
     harness.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +216,7 @@ def test_wiring_sha256_is_the_harness_file_digest(kol_like: Path):
     not of any other file (e.g. the gutconfig) and not a constant."""
     import hashlib
 
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     root = kol_like
     harness = root / "acceptance" / "harness" / "harness.gd"

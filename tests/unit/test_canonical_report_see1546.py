@@ -1,4 +1,4 @@
-"""SEE-1546 WP3 PR-C — gqt canonical 双源批式编排单测（§SPEC-037）。
+"""SEE-1546 WP3 PR-C — gqt measure run 双源批式编排单测（§SPEC-037）。
 
 判据先行（TDD RED）：批式臂（gut_full 一次 + acceptance 私有目录一次）、
 逐文件 sink `qa-coverage-hits-{uuid}-{file_key8}`、在树插桩备份/恢复零残留、
@@ -18,12 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.canonical.orchestrator import (
-    CanonicalError,
+from godot_qa_toolkit.measurement.orchestrator import (
+    MeasurementError,
     REPORT_VERSION,
     batch_sink_name,
     file_key8,
-    run_canonical,
+    run_measurement,
 )
 
 TARGET_SRC = """extends RefCounted
@@ -171,7 +171,7 @@ class FakeGodot:
 
 
 def _recipe(project: Path, tmp_path: Path) -> tuple[dict, Path]:
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(project)
     assert error is None, error
     path = tmp_path / "recipe.json"
@@ -195,7 +195,7 @@ def test_run_canonical_happy_shape(project: Path, tmp_path: Path):
     recipe, rpath = _recipe(project, tmp_path)
     fake = FakeGodot(project)
     sp.run = fake
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     assert report["report_version"] == REPORT_VERSION
     assert len(report["arms"]) == 2
     arms = {a["arm"] for a in report["arms"]}
@@ -215,7 +215,7 @@ def test_union_covers_union_not_average(project: Path, tmp_path: Path):
     recipe, _ = _recipe(project, tmp_path)
     fake = FakeGodot(project)  # acceptance 臂半量命中
     sp.run = fake
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     by_file = {u["file"]: u for u in report["unions"]}
     cell = by_file["res://src_game/cell.gd"]
     a_cov = cell["arms"][0]["covered"]
@@ -231,12 +231,12 @@ def test_tree_restored_and_no_residue(project: Path, tmp_path: Path):
     before = {p: p.read_bytes() for p in (project / "src_game").glob("*.gd")}
     fake = FakeGodot(project)
     sp.run = fake
-    run_canonical(project, _targets(project), recipe)
+    run_measurement(project, _targets(project), recipe)
     for p, data in before.items():
         assert p.read_bytes() == data  # 在树插桩恢复零残留
     assert not list(project.glob("qa-coverage-hits-*.txt"))  # sink 落盘即清
     import glob as g
-    from godot_qa_toolkit.canonical.orchestrator import _backup_base
+    from godot_qa_toolkit.measurement.orchestrator import _backup_base
     assert g.glob(str(_backup_base() / "*")) == []  # 备份目录已清
 
 
@@ -245,7 +245,7 @@ def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
     recipe, _ = _recipe(project, tmp_path)
     fake = FakeGodot(project)
     sp.run = fake
-    run_canonical(project, _targets(project), recipe)
+    run_measurement(project, _targets(project), recipe)
     gut_calls = [c for c in fake.calls if any(
         x == "-s" for x in c) and "gut_cmdln.gd" in " ".join(c)]
     assert len(gut_calls) == 4  # face 1 轮 + acceptance 3 重复（§SPEC-062C）
@@ -264,7 +264,7 @@ def test_unparseable_target_isolated_not_fatal(project: Path, tmp_path: Path):
     recipe, _ = _recipe(project, tmp_path)
     fake = FakeGodot(project)
     sp.run = fake
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     lanes = {u["file"]: u["reason"] for u in report["unmeasured"]}
     assert any("broken.gd" in f for f in lanes)
     assert len(report["unions"]) == 2  # 其余两文件照常测
@@ -275,8 +275,8 @@ def test_invalid_recipe_raises(project: Path, tmp_path: Path):
     recipe, _ = _recipe(project, tmp_path)
     recipe["recipe_hash"] = "0" * 64
     sp.run = FakeGodot(project)
-    with pytest.raises(CanonicalError, match="recipe"):
-        run_canonical(project, _targets(project), recipe)
+    with pytest.raises(MeasurementError, match="recipe"):
+        run_measurement(project, _targets(project), recipe)
 
 
 def test_gut_launch_failure_makes_arm_invalid(project: Path, tmp_path: Path):
@@ -285,7 +285,7 @@ def test_gut_launch_failure_makes_arm_invalid(project: Path, tmp_path: Path):
     fake.returncode = 1
     fake.stderr_text = "ERROR: Cannot open project"
     sp.run = fake
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     assert report["ok"] is False
     states = {a["arm"]: a["state"] for a in report["arms"]}
     assert "invalid" in states.values()
@@ -297,16 +297,16 @@ def test_gut_timeout_records_wall_and_sentinel(project, tmp_path, monkeypatch):
     bundle、invalid_reason=timeout——超时本身也是 §SPEC-039 门量证据。"""
     import time as _t
 
-    from godot_qa_toolkit.canonical import orchestrator as orch
+    from godot_qa_toolkit.measurement import orchestrator as orch
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
 
     def fake_gut(root, gut_args, timeout_s, env=None, gate_root=None):
         _t.sleep(0.01)
-        raise orch.CanonicalError(f"GUT timed out after {timeout_s}s")
+        raise orch.MeasurementError(f"GUT timed out after {timeout_s}s")
 
     monkeypatch.setattr(orch, "_run_one_gut", fake_gut)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     for arm in report["arms"]:
         assert arm["timed_out"] is True
         assert arm["wall_s"] > 0
@@ -353,8 +353,7 @@ def test_cli_canonical_end_to_end(project: Path, tmp_path: Path,
     sp.run = FakeGodot(project)
     out_path = tmp_path / "canonical.json"
     parser = build_parser()
-    args = parser.parse_args([
-        "canonical", str(project / "src_game"),
+    args = parser.parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(rpath), "--out", str(out_path),
     ])
@@ -379,7 +378,7 @@ def test_zero_executable_file_gets_vacuous_lane_not_no_probe(
         "extends RefCounted\n\nsignal alpha\nsignal beta\n")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     vac = [u for u in report["unions"] if "decl.gd" in u["file"]]
     assert vac, "decl.gd 应仍参与 union 披露"
     assert vac[0]["valid"] is False  # §SPEC-036 严格 invalid 语义不变
@@ -396,7 +395,7 @@ def test_measurable_subset_and_unmeasurable_disclosure(
         "extends RefCounted\n\nsignal alpha\nsignal beta\n")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     u = report["union"]
     assert u["measurable"]["all_valid"] is True
     assert u["measurable"]["files"] >= 2
@@ -415,7 +414,7 @@ def test_flag_mode_registers_finalizer_via_hook_and_project_godot_untouched(
     before_pg = (project / "project.godot").read_text(encoding="utf-8")
     fake = FakeGodot(project)
     sp.run = fake
-    run_canonical(project, _targets(project), recipe)
+    run_measurement(project, _targets(project), recipe)
     assert len(fake.pg_at_gut) == 4  # face 1 + acceptance 3 重复
     for pg_text, flusher in zip(fake.pg_at_gut, fake.flusher_at_gut):
         # 测量窗口内 project.godot 零 diff（不再注入 autoload 注册行）
@@ -463,7 +462,7 @@ def test_flag_drain_io_bounded_by_files_not_events():
     """§SPEC-046：统一落盘只在 finalizer 的 _exit_tree 单循环里进行——
     FileAccess 每 sink 恰好一次 open（主+回退两形态）、一次写循环；写入
     次数由文件数决定，不随命中事件数增长。"""
-    from godot_qa_toolkit.canonical.orchestrator import _FLUSHER_GD
+    from godot_qa_toolkit.measurement.orchestrator import _FLUSHER_GD
     assert _FLUSHER_GD.count("FileAccess.open") == 2  # 主 + 回退
     assert _FLUSHER_GD.count("store_line") == 1
     assert _FLUSHER_GD.count("func _notification") == 1  # §SPEC-062A PREDELETE
@@ -477,15 +476,15 @@ def test_canonical_diagnose_shape_and_restore(project: Path,
                                               tmp_path: Path):
     """§SPEC-048：诊断模式逐 feature 输出基线/插桩两腿墙钟、wait 步数与
     归因；运行后树零残留（插桩与 finalizer 全部恢复）。"""
-    from godot_qa_toolkit.canonical.orchestrator import (
-        run_canonical_diagnose)
+    from godot_qa_toolkit.measurement.orchestrator import (
+        run_measurement_diagnose)
 
     recipe, _ = _recipe(project, tmp_path)
     fake = FakeGodot(project)
     sp.run = fake
     out = tmp_path / "diag.json"
     before = {p: p.read_bytes() for p in (project / "src_game").glob("*.gd")}
-    report = run_canonical_diagnose(
+    report = run_measurement_diagnose(
         project, _targets(project), recipe, ["demo"],
         timeout_s=60, progress_out=str(out))
     assert report["report_version"] == "canonical-diagnostic/1"
@@ -503,7 +502,7 @@ def test_canonical_diagnose_shape_and_restore(project: Path,
         assert path.read_bytes() == data  # 零残留
     assert not (project / "addons" / "gqt_cov_flusher.gd").exists()
     import glob as g
-    from godot_qa_toolkit.canonical.orchestrator import _backup_base
+    from godot_qa_toolkit.measurement.orchestrator import _backup_base
     assert g.glob(str(_backup_base() / "*")) == []
 
 
@@ -545,7 +544,7 @@ def test_canonical_crap_scores_shape_and_relative_fids(project, tmp_path):
     稳定）；分数可由 union 行集 + registry CC 重算一致。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     crap = report["crap"]
     assert crap["version"] == "crap-line/1"
     # §SPEC-070/R26 FR-4：record 级语义按文件测量形态区分；顶层在两种
@@ -590,7 +589,7 @@ def test_canonical_failure_lanes_never_score(project, tmp_path):
     fake.returncode = 1
     fake.stderr_text = "ERROR: Cannot open project"
     sp.run = fake
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     crap = report["crap"]
     assert crap["summary"]["scored"] == 0
     assert crap["records"], "failure lanes still disclose functions"
@@ -606,7 +605,7 @@ def test_canonical_vacuous_file_never_scores(project, tmp_path):
         "extends RefCounted\n\nsignal alpha\n")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     decl = [r for r in report["crap"]["records"]
             if "decl.gd" not in r["function_id"]
             and r["function_id"].startswith("decl.gd")]
@@ -625,7 +624,7 @@ def test_canonical_subset_marks_not_comparable(project, tmp_path):
     subset = [all_targets[0]]
     fake = FakeGodot(project)
     sp.run = fake
-    report = run_canonical(
+    report = run_measurement(
         project, subset, recipe,
         scope_roots=[str(project / "src_game")])
     assert report["crap"]["comparable"] is False
@@ -642,9 +641,9 @@ def test_prep_cache_roundtrip_equivalence(project: Path, tmp_path: Path,
     monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    first = run_canonical(project, _targets(project), recipe)
+    first = run_measurement(project, _targets(project), recipe)
     assert first["preparation"]["cache"]["misses"] >= 2
-    second = run_canonical(project, _targets(project), recipe)
+    second = run_measurement(project, _targets(project), recipe)
     assert second["preparation"]["cache"]["hits"] >= 2
     assert second["preparation"]["cache"]["misses"] == 0
 
@@ -669,20 +668,20 @@ def test_prep_cache_invalidates_on_source_and_recipe(project, tmp_path,
     monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    run_canonical(project, _targets(project), recipe)
+    run_measurement(project, _targets(project), recipe)
     # 源码变更 → 该文件 miss
     (project / "src_game" / "cell.gd").write_text(
         TARGET_SRC + "\n\nfunc extra() -> int:\n\treturn 9\n")
-    r2 = run_canonical(project, _targets(project), recipe)
+    r2 = run_measurement(project, _targets(project), recipe)
     assert r2["preparation"]["cache"]["misses"] >= 1
     # recipe_hash 变更 → 全 miss
     recipe2 = dict(recipe, recipe_hash="1" * 64)
-    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    from godot_qa_toolkit.measurement.orchestrator import MeasurementError
     try:
-        run_canonical(project, _targets(project), recipe2)
-    except CanonicalError:
+        run_measurement(project, _targets(project), recipe2)
+    except MeasurementError:
         pass  # recipe verify 可能拒绝伪造 hash —— 用缓存键层验证
-    from godot_qa_toolkit.canonical import prepcache
+    from godot_qa_toolkit.measurement import prepcache
     sha = __import__("hashlib").sha256(
         (project / "src_game" / "cell.gd").read_text(
             encoding="utf-8").encode()).hexdigest()
@@ -697,13 +696,13 @@ def test_prep_cache_corrupt_entry_quarantined_and_rebuilt(project,
     monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    run_canonical(project, _targets(project), recipe)
-    from godot_qa_toolkit.canonical import prepcache
+    run_measurement(project, _targets(project), recipe)
+    from godot_qa_toolkit.measurement import prepcache
     import glob as g
     entries = g.glob(str(prepcache.prep_dir(project)) + "/*.json")
     assert entries
     open(entries[0], "w").write("{corrupt")
-    r = run_canonical(project, _targets(project), recipe)
+    r = run_measurement(project, _targets(project), recipe)
     assert r["preparation"]["cache"]["misses"] >= 1
     assert g.glob(entries[0] + ".bad"), "corrupt entry must be quarantined"
 
@@ -713,11 +712,11 @@ def test_prep_cache_never_stores_dynamic_data(project: Path, tmp_path: Path,
     """§SPEC-054：动态 hits/union/bundles 永不入缓存。"""
     import glob as g
 
-    from godot_qa_toolkit.canonical import prepcache
+    from godot_qa_toolkit.measurement import prepcache
     monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    run_canonical(project, _targets(project), recipe)
+    run_measurement(project, _targets(project), recipe)
     for path in g.glob(str(prepcache.prep_dir(project)) + "/*.json"):
         entry = json.loads(open(path, encoding="utf-8").read())
         for k in ("hits", "hits_lines", "union", "unions", "bundles",
@@ -745,9 +744,9 @@ def test_block_compression_zero_drift_vs_flags(project, tmp_path):
     """§SPEC-055 前置门：块压缩与逐语句 flags 在 fixture 上逐行零漂移。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    flags = run_canonical(project, _targets(project), recipe,
+    flags = run_measurement(project, _targets(project), recipe,
                           block_compress=False)
-    blocks = run_canonical(project, _targets(project), recipe,
+    blocks = run_measurement(project, _targets(project), recipe,
                            block_compress=True)
 
     def sem(rep):
@@ -792,7 +791,7 @@ def test_stability_baseline_routes_jitter_to_unstable_lane(project,
     """§SPEC-056：跨 run 抖动 fid 必须转 unstable 车道且不出分。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    base = run_canonical(project, _targets(project), recipe)
+    base = run_measurement(project, _targets(project), recipe)
     doc = json.loads(json.dumps(base))
     # 人为制造一个 fid 的行集漂移
     changed_fid = None
@@ -809,7 +808,7 @@ def test_stability_baseline_routes_jitter_to_unstable_lane(project,
     assert changed_fid
     baseline_path = tmp_path / "baseline.json"
     baseline_path.write_text(json.dumps(doc), encoding="utf-8")
-    rerun = run_canonical(project, _targets(project), recipe,
+    rerun = run_measurement(project, _targets(project), recipe,
                           stability_baseline=str(baseline_path))
     lane = {r["function_id"]: r["score_status"]
             for r in rerun["crap"]["records"]}
@@ -823,7 +822,7 @@ def test_stability_baseline_routes_jitter_to_unstable_lane(project,
 def test_unstable_keys_captures_fid_set_changes():
     """§SPEC-057/060d 反例：基线消失/新增/行集变化/total 分母变化必须
     全部捕获（漏报缺陷回归）。"""
-    from godot_qa_toolkit.canonical.orchestrator import _unstable_keys
+    from godot_qa_toolkit.measurement.orchestrator import _unstable_keys
 
     base = {"f.gd": {"a": (frozenset({1, 2}), 3), "b": (frozenset({3}), 2),
                      "gone": (frozenset({4}), 2),
@@ -853,7 +852,7 @@ def test_crap_records_mark_vanished_file_unstable(project, tmp_path):
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     all_targets = _targets(project)
-    base = run_canonical(project, all_targets, recipe)
+    base = run_measurement(project, all_targets, recipe)
     # 基线含全部文件（cell.gd scored）；rerun 仅跑其余目标（cell.gd 本轮
     # 缺席）→ 基线 scored 函数必须回放为显式 unstable
     doc = json.loads(json.dumps(base))
@@ -861,7 +860,7 @@ def test_crap_records_mark_vanished_file_unstable(project, tmp_path):
     baseline_path.write_text(json.dumps(doc), encoding="utf-8")
     rerun_targets = [t for t in all_targets if "cell.gd" not in t]
     assert len(rerun_targets) == len(all_targets) - 1
-    rerun = run_canonical(project, rerun_targets, recipe,
+    rerun = run_measurement(project, rerun_targets, recipe,
                           stability_baseline=str(baseline_path))
     lost = [r for r in rerun["crap"]["records"]
             if r["function_id"].startswith("src_game/cell.gd")]
@@ -880,7 +879,7 @@ def test_prep_algo_report_matches_cache_key(project: Path, tmp_path: Path):
     非块压缩路径 = flags/4-pid，块压缩 = blocks/6，不得错报。"""
     import glob as g
 
-    from godot_qa_toolkit.canonical import prepcache
+    from godot_qa_toolkit.measurement import prepcache
     expected = {"flags/4-pid": False, "blocks/6": True}
     for algo, bc in expected.items():
         # 清理 fixture 项目缓存目录，隔离两轮
@@ -890,7 +889,7 @@ def test_prep_algo_report_matches_cache_key(project: Path, tmp_path: Path):
             sh.rmtree(prep)
         recipe, _ = _recipe(project, tmp_path)
         sp.run = FakeGodot(project)
-        rep = run_canonical(project, _targets(project), recipe,
+        rep = run_measurement(project, _targets(project), recipe,
                             block_compress=bc)
         assert rep["preparation"]["cache"]["algo"] == algo
         assert rep["preparation"]["cache"]["misses"] >= 1
@@ -903,7 +902,7 @@ def test_xdg_tmp_dirs_cleaned_on_sink_read_exception(project: Path,
     import glob as g
     import tempfile as tf
 
-    import godot_qa_toolkit.canonical.orchestrator as orch
+    import godot_qa_toolkit.measurement.orchestrator as orch
 
     def boom(*a, **k):
         raise OSError("sink read exploded")
@@ -917,7 +916,7 @@ def test_xdg_tmp_dirs_cleaned_on_sink_read_exception(project: Path,
     sp.run = FakeGodot(project)
     before = set(g.glob(pattern))
     with pytest.raises(OSError):
-        run_canonical(project, _targets(project), recipe)
+        run_measurement(project, _targets(project), recipe)
     after = set(g.glob(pattern))
     assert after <= before, "xdg tmp dirs must be cleaned on exception"
 
@@ -941,7 +940,7 @@ def test_new_test_failures_gate_arm_and_disclosure(project, tmp_path):
     必须门控本臂：ok=false、union invalid、无 scored、逐名披露。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FailingConfigFaceGodot(project)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     assert report["ok"] is False
     assert report["failures"]["gated"] is True
     assert report["failures"]["arms"]["gut_full"]["observed"] == \
@@ -960,7 +959,7 @@ def test_baseline_failures_absorb_preexisting_failures(project, tmp_path):
     失败集时臂有效、评分照常（配 §SPEC-060b 插桩透明化）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FailingConfigFaceGodot(project)
-    report = run_canonical(project, _targets(project), recipe,
+    report = run_measurement(project, _targets(project), recipe,
                            baseline_failures={("", "test_font_row_height")})
     assert report["ok"] is True
     assert report["failures"]["gated"] is False
@@ -980,7 +979,7 @@ def test_xdg_tmp_dirs_cleaned_on_worker_build_exception(project, tmp_path,
     import glob as g
     import tempfile as tf
 
-    import godot_qa_toolkit.canonical.orchestrator as orch
+    import godot_qa_toolkit.measurement.orchestrator as orch
     pattern = str(Path(tf.gettempdir()) / "gqt-shard-*")
 
     calls = {"n": 0}
@@ -994,7 +993,7 @@ def test_xdg_tmp_dirs_cleaned_on_worker_build_exception(project, tmp_path,
     sp.run = FakeGodot(project)
     before = set(g.glob(pattern))
     with pytest.raises(OSError):
-        run_canonical(project, _targets(project), recipe)
+        run_measurement(project, _targets(project), recipe)
     after = set(g.glob(pattern))
     assert calls["n"] >= 1, "worker must have been invoked after XDG creation"
     assert after <= before, "xdg tmp dirs must be cleaned on worker build " \
@@ -1008,11 +1007,11 @@ def test_prep_cache_tampered_registry_quarantined(project, tmp_path,
     import glob as g
     import json as j
 
-    from godot_qa_toolkit.canonical import prepcache
+    from godot_qa_toolkit.measurement import prepcache
     monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    fresh = run_canonical(project, _targets(project), recipe)
+    fresh = run_measurement(project, _targets(project), recipe)
     fid = next(r["function_id"] for r in fresh["crap"]["records"])
     fresh_cc = next(r["cc"] for r in fresh["crap"]["records"]
                     if r["function_id"] == fid)
@@ -1027,7 +1026,7 @@ def test_prep_cache_tampered_registry_quarantined(project, tmp_path,
             e["cc_oracle"] = 99
         Path(path).write_text(j.dumps(doc), encoding="utf-8")
 
-    warm = run_canonical(project, _targets(project), recipe)
+    warm = run_measurement(project, _targets(project), recipe)
     warm_cc = next(r["cc"] for r in warm["crap"]["records"]
                    if r["function_id"] == fid)
     assert warm_cc == fresh_cc, "tampered cached CC must never reach scoring"
@@ -1058,7 +1057,7 @@ def test_intolerant_declared_bypasses_gating_and_disclosed(project, tmp_path):
     披露理由并作为覆盖率盲点声明。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = TwoFailuresConfigFaceGodot(project)
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         baseline_failures={("", "test_font_row_height")},
         intolerant_config={"tests": [{"name": "test_intolerant_probe_shape",
@@ -1084,7 +1083,7 @@ def test_undeclared_intolerant_failure_still_gates(project, tmp_path):
     """§SPEC-061b 反向：未具名的插桩新增失败照常门控（旁路仅限具名项）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = TwoFailuresConfigFaceGodot(project)
-    report = run_canonical(project, _targets(project), recipe,
+    report = run_measurement(project, _targets(project), recipe,
                            baseline_failures={("", "test_font_row_height")})
     assert report["ok"] is False
     assert report["failures"]["gated"] is True
@@ -1100,7 +1099,7 @@ def test_coverage_limitation_reason_named_on_unstable(project, tmp_path):
     （provenance.stability_reason），报告披露限制清单——不伪造确定性。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    base = run_canonical(project, _targets(project), recipe)
+    base = run_measurement(project, _targets(project), recipe)
     doc = json.loads(json.dumps(base))
     changed_fid = None
     for u in doc["unions"]:
@@ -1117,7 +1116,7 @@ def test_coverage_limitation_reason_named_on_unstable(project, tmp_path):
     rel = changed_fid.split("::")[0]
     baseline_path = tmp_path / "baseline.json"
     baseline_path.write_text(json.dumps(doc), encoding="utf-8")
-    rerun = run_canonical(
+    rerun = run_measurement(
         project, _targets(project), recipe,
         stability_baseline=str(baseline_path),
         intolerant_config={"coverage_limitations": [
@@ -1141,7 +1140,7 @@ def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path):
     确定性 fixture 每轮并集相同 → 第 1 轮即收敛（rounds_used=1 < N）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(project, _targets(project), recipe,
+    report = run_measurement(project, _targets(project), recipe,
                            acceptance_repeats=3)
     arm_b = next(a for a in report["arms"] if a["arm"] == "acceptance")
     assert arm_b["repeats"] == 3
@@ -1160,7 +1159,7 @@ def test_acceptance_repeats_nonconvergence_reported_with_bound(
         project, tmp_path, monkeypatch):
     """§SPEC-062C 反例：逐轮新增命中 → rounds_used == bound 且
     converged=false（未收敛如实披露，不伪造确定性）。"""
-    import godot_qa_toolkit.canonical.orchestrator as orch
+    import godot_qa_toolkit.measurement.orchestrator as orch
 
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
@@ -1184,7 +1183,7 @@ def test_acceptance_repeats_nonconvergence_reported_with_bound(
         return hits, probes
 
     monkeypatch.setattr(orch, "_read_hits_merged", growing_merged)
-    report = run_canonical(project, _targets(project), recipe,
+    report = run_measurement(project, _targets(project), recipe,
                            acceptance_repeats=3)
     arm_b = next(a for a in report["arms"] if a["arm"] == "acceptance")
     conv = arm_b["convergence"]
@@ -1198,7 +1197,7 @@ def test_flusher_drains_in_predelete_not_exit_tree():
     _exit_tree 早于引擎关停相位会丢 autoload shutdown 命中；drain 必须挂
     NOTIFICATION_PREDELETE（孤儿节点析构晚于 autoload 退出相位，隔离实验
     实证双标记全捕获）。"""
-    import godot_qa_toolkit.canonical.orchestrator as orch
+    import godot_qa_toolkit.measurement.orchestrator as orch
 
     assert "NOTIFICATION_PREDELETE" in orch._FLUSHER_GD
     assert "func _exit_tree" not in orch._FLUSHER_GD
@@ -1207,7 +1206,7 @@ def test_flusher_drains_in_predelete_not_exit_tree():
 def test_timeout_cause_tail_decodes_bytes():
     """TimeoutExpired.stdout 恒为 bytes（即便 subprocess text=True）——
     超时路径 tail 拼接必须安全解码，不得 TypeError。"""
-    from godot_qa_toolkit.canonical.orchestrator import _cause_tail
+    from godot_qa_toolkit.measurement.orchestrator import _cause_tail
 
     class FakeTE:
         stdout = b"partial stdout"
@@ -1236,7 +1235,7 @@ def test_unparseable_nonzero_failure_gates_arm(project, tmp_path):
     失败 → run_error 门控（ok=false、union invalid、零 scored）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = UnparseableFaceGodot(project)
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         baseline_failures={("", "test_font_row_height")})
     assert report["ok"] is False
@@ -1267,7 +1266,7 @@ def test_reconciliation_failure_invalidates_union_and_scores(
     union 无效 + 零出分（不得静默 scored）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = ReconcileBreakerGodot(project)
-    report = run_canonical(project, _targets(project), recipe)
+    report = run_measurement(project, _targets(project), recipe)
     acc = next(a for a in report["arms"] if a["arm"] == "acceptance")
     assert acc["state"] == "invalid"
     assert acc["invalid_reason"] == "reconciliation_failed"
@@ -1307,7 +1306,7 @@ def test_same_name_cross_script_exclusion_is_identity_scoped(
         "\tassert_true(false)\n")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = CrossScriptDuplicateGodot(project)
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         intolerant_config={"tests": [
             {"name": "test_duplicate",
@@ -1330,14 +1329,14 @@ def test_intolerant_declaration_requires_reason(project, tmp_path):
     fail-fast 拒绝（不得空论证旁路）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    from godot_qa_toolkit.measurement.orchestrator import MeasurementError
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"tests": [
                           {"name": "test_inf_bookmark_and_share_signals_"
                                    "are_noops"}]})
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"tests": [
                           {"name": "test_x", "reason": "   "}]})
 
@@ -1349,16 +1348,16 @@ def test_prep_cache_non_dict_root_quarantined(project, tmp_path,
     import glob as g
     import json as j
 
-    from godot_qa_toolkit.canonical import prepcache
+    from godot_qa_toolkit.measurement import prepcache
     monkeypatch.setenv("GQT_CANONICAL_PREP_DIR", str(tmp_path / "prep"))
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    run_canonical(project, _targets(project), recipe)
+    run_measurement(project, _targets(project), recipe)
     entries = g.glob(str(prepcache.prep_dir(project)) + "/*.json")
     assert entries
     for path in entries:
         Path(path).write_text("[]", encoding="utf-8")
-    warm = run_canonical(project, _targets(project), recipe)
+    warm = run_measurement(project, _targets(project), recipe)
     assert warm["preparation"]["cache"]["hits"] == 0, \
         "non-dict root entries must be quarantined, not loaded"
     assert g.glob(str(prepcache.prep_dir(project)) + "/*.bad"), \
@@ -1390,7 +1389,7 @@ def test_summary_section_failures_gate_mixed_form(project, tmp_path):
     失败的混合形态必须门控——Summary 失败以 ("", test) 未归因对纳入。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = MixedSummaryGodot(project)
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         baseline_failures={("res://tests/unit/test_game.gd",
                             "test_known_baseline")})
@@ -1414,7 +1413,7 @@ def test_baseline_absorption_is_pair_scoped_and_rejects_bare_names(
         "\tassert_true(false)\n")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = CrossScriptDuplicateGodot(project)
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         baseline_failures={("res://tests/unit/test_game.gd",
                             "test_duplicate")})
@@ -1425,24 +1424,24 @@ def test_baseline_absorption_is_pair_scoped_and_rejects_bare_names(
     assert report["failures"]["gated"] is True
     assert report["ok"] is False
 
-    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    from godot_qa_toolkit.measurement.orchestrator import MeasurementError
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       baseline_failures={"test_duplicate"})
 
 
 def test_coverage_limitation_requires_file_and_reason(project, tmp_path):
     """§SPEC-064c 反例（Revy N-M-1）：coverage_limitations 缺 file 或非空
-    reason → CanonicalError fail-fast（盲点披露不得静默消失）。"""
+    reason → MeasurementError fail-fast（盲点披露不得静默消失）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    from godot_qa_toolkit.measurement.orchestrator import MeasurementError
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"coverage_limitations": [
                           {"file": "scenes/ui/infi/infi_post_visual.gd"}]})
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"coverage_limitations": [
                           {"file": "a.gd", "reason": "  "}]})
 
@@ -1450,7 +1449,7 @@ def test_coverage_limitation_requires_file_and_reason(project, tmp_path):
 def test_parse_failing_pairs_summary_and_gqt_run_normalization():
     """§SPEC-064a/b 解析钉定：Summary 段 ("", test) 未归因对纳入；.gqt-run
     per-run uuid 归一为 `.gqt-run-*`（跨 run 基线可比）。"""
-    from godot_qa_toolkit.canonical.orchestrator import _parse_failing_pairs
+    from godot_qa_toolkit.measurement.orchestrator import _parse_failing_pairs
     out = (
         "res://acceptance/generated/.gqt-run-ab12cd34/generated/test_x.gd\n"
         "* test_known\n"
@@ -1469,10 +1468,10 @@ def test_parse_failing_pairs_summary_and_gqt_run_normalization():
 def test_config_fields_must_be_non_empty_strings(project, tmp_path):
     """§SPEC-065 反例（Revy R17-LOW）：tests.name/script 与
     coverage_limitations.file/reason 须为非空 str——类型错（如 file=123，
-    会在附着层失配静默失效）或空值一律 CanonicalError fail-fast。"""
+    会在附着层失配静默失效）或空值一律 MeasurementError fail-fast。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
+    from godot_qa_toolkit.measurement.orchestrator import MeasurementError
     cases = [
         {"tests": [{"name": 123, "reason": "r"}]},
         {"tests": [{"name": "t", "reason": "r", "script": 123}]},
@@ -1483,8 +1482,8 @@ def test_config_fields_must_be_non_empty_strings(project, tmp_path):
         {"coverage_limitations": ["not-a-dict"]},
     ]
     for cfg in cases:
-        with pytest.raises(CanonicalError):
-            run_canonical(project, _targets(project), recipe,
+        with pytest.raises(MeasurementError):
+            run_measurement(project, _targets(project), recipe,
                           intolerant_config=cfg)
 
 
@@ -1493,7 +1492,7 @@ def test_valid_config_passes_type_validation(project, tmp_path):
     通过类型校验，报告 declared/limitations 逐字段保持非空 str。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         intolerant_config={
             "tests": [{"name": "test_t", "reason": "contract",
@@ -1510,28 +1509,28 @@ def test_valid_config_passes_type_validation(project, tmp_path):
 
 def test_script_null_rejected_and_absent_script_legal(project, tmp_path):
     """§SPEC-065/R19 反例（Revy LOW）：显式 `script:null` 不得静默降级为
-    bare-name 声明——键提供即须通过非空 str 校验（CanonicalError）；
+    bare-name 声明——键提供即须通过非空 str 校验（MeasurementError）；
     键缺省保留既有 bare-name 合法行为（declared 无 script 键）。"""
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
-    from godot_qa_toolkit.canonical.orchestrator import CanonicalError
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    from godot_qa_toolkit.measurement.orchestrator import MeasurementError
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"tests": [
                           {"name": "test_x", "script": None,
                            "reason": "reason"}]})
     # 同类可选顶层键：显式 null / 非 list 拒绝（不得静默当空）
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"tests": None})
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"coverage_limitations": None})
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe,
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe,
                       intolerant_config={"coverage_limitations": "x"})
     # 键缺省（bare-name）合法路径不变：declared 无 script 键
-    report = run_canonical(
+    report = run_measurement(
         project, _targets(project), recipe,
         intolerant_config={"tests": [{"name": "test_t",
                                       "reason": "contract"}]})
@@ -1545,13 +1544,13 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path,
     """§SPEC-066/R20（Revy R19-L1）：合法 JSON 非 dict recipe 根与
     exclusions 直接消费结构（list/行/reason）非法形状必须转领域错误——
     API 侧 verify_recipe not-ok / build_recipe (None, reason) /
-    run_canonical CanonicalError；真实 CLI（canonical 与 canonical-diagnose）
+    run_measurement MeasurementError；真实 CLI（canonical 与 canonical-diagnose）
     输出 tool JSON ok=false，不得泄漏 AttributeError/TypeError traceback；
     合法 exclusions 行为不变。§SPEC-075：CLI 前置 godot 校验需环境可解析。"""
     import io
     from contextlib import redirect_stdout
 
-    from godot_qa_toolkit.canonical.recipe import (
+    from godot_qa_toolkit.measurement.recipe import (
         RECIPE_VERSION,
         build_recipe,
         verify_recipe,
@@ -1589,9 +1588,9 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path,
                                 "junk": {1, 2}})
     assert ok is False and "serializable" in reason
 
-    # API：run_canonical 携带非法 recipe → CanonicalError（统一领域出口）
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), [1, 2])
+    # API：run_measurement 携带非法 recipe → MeasurementError（统一领域出口）
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), [1, 2])
 
     # API：build_recipe exclusions 非法形状 → (None, reason)
     for bad in ({"scope": "x"}, ["x"], "",
@@ -1615,8 +1614,7 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path,
     bad.write_text("[1, 2]", encoding="utf-8")
     out_path = tmp_path / "out.json"
     parser = build_parser()
-    args = parser.parse_args([
-        "canonical", str(project / "src_game"),
+    args = parser.parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(bad), "--out", str(out_path)])
     buf = io.StringIO()
@@ -1624,12 +1622,11 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path,
         code = args.func(args)
     assert code == 1
     doc = json.loads(buf.getvalue())
-    assert doc["tool"] == "canonical" and doc["ok"] is False
+    assert doc["tool"] == "measure.run" and doc["ok"] is False
     assert "must be a JSON object" in doc["summary"]["error"]
 
     # 真实 CLI：canonical-diagnose 同拒
-    args = parser.parse_args([
-        "canonical-diagnose", str(project / "src_game"),
+    args = parser.parse_args(["measure", "diagnose", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(bad), "--features", "demo",
         "--out", str(out_path)])
@@ -1638,7 +1635,7 @@ def test_spec066_recipe_illegal_shapes_domain_errors(project, tmp_path,
         code = args.func(args)
     assert code == 1
     doc = json.loads(buf.getvalue())
-    assert doc["tool"] == "canonical-diagnose" and doc["ok"] is False
+    assert doc["tool"] == "measure.diagnose" and doc["ok"] is False
     assert "must be a JSON object" in doc["summary"]["error"]
 
 
@@ -1646,14 +1643,14 @@ def test_spec066_stability_baseline_illegal_shapes_domain_errors(
         project, tmp_path, monkeypatch):
     """§SPEC-066/R20（Revy R19-L2）：stability baseline 合法 JSON 非 dict
     根与 unions/per_fid/crap.records 直接消费结构非法形状必须转
-    CanonicalError；真实 CLI 输出 tool JSON ok=false canonical_error:true，
+    MeasurementError；真实 CLI 输出 tool JSON ok=false measurement_error:true，
     不得泄漏 AttributeError/TypeError/KeyError；含 union=null 行、
     total=null、标量行集的合法基线路径不变。§SPEC-075：CLI 前置 godot
     校验需环境可解析。"""
     import io
     from contextlib import redirect_stdout
 
-    from godot_qa_toolkit.canonical.orchestrator import _load_baseline_report
+    from godot_qa_toolkit.measurement.orchestrator import _load_baseline_report
     from godot_qa_toolkit.cli import build_parser
 
     # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需可解析到存在且
@@ -1665,8 +1662,8 @@ def test_spec066_stability_baseline_illegal_shapes_domain_errors(
     def _baseline_err(doc) -> str:
         p = tmp_path / "baseline.json"
         p.write_text(json.dumps(doc), encoding="utf-8")
-        with pytest.raises(CanonicalError) as ei:
-            run_canonical(project, _targets(project), recipe,
+        with pytest.raises(MeasurementError) as ei:
+            run_measurement(project, _targets(project), recipe,
                           stability_baseline=str(p))
         return str(ei.value)
 
@@ -1712,12 +1709,11 @@ def test_spec066_stability_baseline_illegal_shapes_domain_errors(
         {"crap": {"records": [{"score": 1}]}})
 
     # 真实 CLI：非 dict 根 baseline → exit 1 + tool JSON ok=false
-    # canonical_error:true（CanonicalError 在 CLI 边界统一转 tool JSON）
+    # measurement_error:true（MeasurementError 在 CLI 边界统一转 tool JSON）
     bad = tmp_path / "bad_baseline.json"
     bad.write_text("[1, 2]", encoding="utf-8")
     out_path = tmp_path / "out.json"
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(rpath),
         "--stability-baseline", str(bad), "--out", str(out_path)])
@@ -1726,8 +1722,8 @@ def test_spec066_stability_baseline_illegal_shapes_domain_errors(
         code = args.func(args)
     assert code == 1
     doc = json.loads(buf.getvalue())
-    assert doc["tool"] == "canonical" and doc["ok"] is False
-    assert doc["summary"]["canonical_error"] is True
+    assert doc["tool"] == "measure.run" and doc["ok"] is False
+    assert doc["summary"]["measurement_error"] is True
     assert "must be a JSON object" in doc["summary"]["error"]
 
     # 合法正例：union=null 行跳过、total=null → 0、str/int 标量行集可读回

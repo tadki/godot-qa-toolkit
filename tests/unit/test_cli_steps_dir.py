@@ -9,9 +9,11 @@ import pytest
 from godot_qa_toolkit.cli import build_parser
 
 
-def test_gherkin_subcommand_is_removed():
+def test_gherkin_subcommand_is_registered():
     parser = build_parser()
-    assert "gherkin" not in parser._subparsers._group_actions[0].choices
+    choices = parser._subparsers._group_actions[0].choices
+    assert "gherkin" in choices
+    assert "accept" not in choices
 
 
 def test_gherkin_args_are_rejected():

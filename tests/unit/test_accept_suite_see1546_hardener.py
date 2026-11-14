@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-import godot_qa_toolkit.accept.suite as suite_mod
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.run import AcceptRunError
-from godot_qa_toolkit.accept.suite import (
+import godot_qa_toolkit.gherkin.suite as suite_mod
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.run import AcceptRunError
+from godot_qa_toolkit.gherkin.suite import (
     SuiteError,
     _executed_scripts,
     _snapshot_main,
@@ -313,13 +313,13 @@ def test_probe_extrapolation_assumption_is_exact_contract_value(
 
 def test_bare_accept_compile_no_feature_no_keys_is_structured_error(
         project: Path):
-    """OBS-1：裸 `accept compile`（无 feature 无 --keys）错误道钉为契约
+    """OBS-1：裸 `gherkin compile`（无 feature 无 --keys）错误道钉为契约
     ——结构化 ok=false rc=1，不走 argparse usage error rc=2。"""
     code, out = _run_cli(
-        ["accept", "compile", "--project-root", str(project)])
+        ["gherkin", "compile", "--project-root", str(project)])
     assert code == 1
     assert out["ok"] is False
-    assert "accept compile needs <feature> or --keys" \
+    assert "gherkin compile needs <feature> or --keys" \
         in out["summary"]["error"]
     assert out["failures"]
 

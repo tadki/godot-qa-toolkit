@@ -215,7 +215,7 @@ def _spawn_worker(root: Path) -> tuple[subprocess.Popen, Path]:
     if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
         raise AcceptRunError(
             f"worker artifact missing: {worker_res} — recompile with "
-            f"gqt accept compile --write")
+            f"gqt gherkin compile --write")
     scratch = Path(root) / ".qa-cache" / "gqt-accept-worker"
     scratch.mkdir(parents=True, exist_ok=True)
     try:
@@ -328,7 +328,7 @@ def _exempt_only_contract(manifest: dict, exempt_count: int,
     ] + baseline_failed
     ok = not run_errors
     return {
-        "tool": "accept",
+        "tool": "gherkin",
         "ok": ok,
         "summary": {
             "feature": manifest["feature"],
@@ -350,7 +350,7 @@ def _baseline_failed_contract(manifest: dict, mutants: list[Mutant],
                               use_worker: bool) -> dict:
     """未变异基线红 → fail-fast：mutant 轮不跑，run_errors 计入门禁。"""
     return {
-        "tool": "accept",
+        "tool": "gherkin",
         "ok": False,
         "summary": {
             "feature": manifest["feature"],
@@ -418,7 +418,7 @@ def _aggregate_verdicts(manifest: dict, mutants: list[Mutant],
 
     ok = not survived and not run_errors
     return {
-        "tool": "accept",
+        "tool": "gherkin",
         "ok": ok,
         "summary": {
             "feature": manifest["feature"],

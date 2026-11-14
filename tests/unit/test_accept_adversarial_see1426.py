@@ -1,4 +1,4 @@
-"""SEE-1426 Round A hardener — accept compile/run 对抗性单测（§SPEC-1426-15）。
+"""SEE-1426 Round A hardener — gherkin compile/run 对抗性单测（§SPEC-1426-15）。
 
 三类强制作弊样本在 run 全链路（run_suite，非仅 replay_check）的机器判定，
 沿 test_gdself_stats_adversarial_see1405.py 先例：
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.run import AcceptRunError, run_suite
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.run import AcceptRunError, run_suite
 
 FEATURE = """Feature: 生命值扣减
   Scenario Outline: 受到 <dmg> 点伤害
@@ -193,7 +193,7 @@ def test_same_name_scenarios_attributed_distinctly(
     assert len(set(names)) == 2, "test names must stay unique"
     assert lines[0] != lines[1]
 
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         class R:
@@ -230,7 +230,7 @@ def test_generated_carries_smoke_sentinel(project: Path,
 def test_run_timeout_is_run_error(project: Path, tmp_path: Path,
                                   monkeypatch) -> None:
     suite = _compile_written(project, tmp_path)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         raise subprocess.TimeoutExpired(cmd="godot", timeout=1)

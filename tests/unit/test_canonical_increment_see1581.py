@@ -14,14 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.canonical.increment import (
+from godot_qa_toolkit.measurement.increment import (
     classify_changes,
     compute_invalidation,
     diff_artifacts,
     load_baseline,
     run_attribution_increment,
 )
-from godot_qa_toolkit.canonical.orchestrator import run_canonical
+from godot_qa_toolkit.measurement.orchestrator import run_measurement
 
 TARGET_SRC = """extends RefCounted
 
@@ -73,7 +73,7 @@ def _baseline_arm() -> dict:
 
 def _baseline_doc() -> dict:
     return {
-        "schema_version": "canonical-test-attribution/4",
+        "schema_version": "test-attribution/5",
         "report_recipe_hash": "h1",
         "arms": {"gut_full": _baseline_arm()},
         "identity": "res://script::test_name",
@@ -117,7 +117,7 @@ def test_invalidation_combines_fn_edges_and_static_candidates(tmp_path: Path):
 
 
 def test_merge_arm_replaces_by_script_and_drops():
-    from godot_qa_toolkit.canonical.increment import _merge_arm
+    from godot_qa_toolkit.measurement.increment import _merge_arm
     fresh = {
         "test_to_files": {"test_a.gd::test_one": ["src_game/cell.gd",
                                                   "src_game/node.gd"]},
@@ -163,7 +163,7 @@ def test_load_baseline_rejects_wrong_schema(tmp_path: Path):
 def test_execute_rerun_scripts_writes_attr_flusher(tmp_path: Path):
     """回归守卫（实测踩过）：增量重跑必须注入 ATTR finalizer/pre-hook——
     错配默认 flusher 时 hits 正常、归属静默全空。"""
-    import godot_qa_toolkit.canonical.increment_runner as runner
+    import godot_qa_toolkit.measurement.increment_runner as runner
     project = _project(tmp_path)
     recipe, targets = _recipe_and_targets(project, tmp_path)
     templates = runner.prepare_attr_templates(
@@ -293,7 +293,7 @@ class BareNameFakeGodot:
 
 
 def _recipe_and_targets(project: Path, tmp_path: Path):
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(project)
     assert error is None, error
     path = tmp_path / "recipe.json"
@@ -307,7 +307,7 @@ def test_increment_end_to_end_refreshes_changed_prod_edges(
     recipe, targets = _recipe_and_targets(project, tmp_path)
     sp.run = BareNameFakeGodot(project)
     base_artifact = tmp_path / "base.attribution.json"
-    run_canonical(project, targets, recipe, test_attribution=True,
+    run_measurement(project, targets, recipe, test_attribution=True,
                   attribution_out=str(base_artifact))
     assert base_artifact.is_file()
     # 生产代码变更：work() 增加一条语句
@@ -347,7 +347,7 @@ def test_increment_falls_back_on_new_prod_file(tmp_path: Path):
     recipe, targets = _recipe_and_targets(project, tmp_path)
     sp.run = BareNameFakeGodot(project)
     base_artifact = tmp_path / "base.attribution.json"
-    run_canonical(project, targets, recipe, test_attribution=True,
+    run_measurement(project, targets, recipe, test_attribution=True,
                   attribution_out=str(base_artifact))
     new_prod = project / "src_game" / "brand_new.gd"
     new_prod.write_text("extends RefCounted\nfunc x() -> void:\n\tpass\n")

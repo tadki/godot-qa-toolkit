@@ -101,7 +101,7 @@ def test_gate_contract_shape(tmp_path: Path) -> None:
     good = _write(tmp_path, "a/good.gd", GOOD_CORE)
     bad = _write(tmp_path, "b/bad.gd", "extends Node\nfunc f() -> void:\n\trandomize()\n")
     result = run_arch_gate([str(good), str(bad)])
-    assert result["tool"] == "arch"
+    assert result["tool"] == "measure.arch"
     assert result["ok"] is False
     assert result["summary"]["violations"] >= 2
     assert set(result["summary"]["by_rule"]) >= {"core/extends-whitelist", "no-bare-global-random"}
@@ -138,9 +138,9 @@ def _run_cli(*argv: str) -> tuple[int, dict]:
 def test_cli_arch_exit_codes(tmp_path: Path) -> None:
     good = _write(tmp_path, "good.gd", GOOD_CORE)
     bad = _write(tmp_path, "bad.gd", "extends Node\n")
-    rc, out = _run_cli("arch", str(good))
-    assert rc == 0 and out["ok"] is True and out["tool"] == "arch"
-    rc, out = _run_cli("arch", str(bad))
+    rc, out = _run_cli("measure", "arch", str(good))
+    assert rc == 0 and out["ok"] is True and out["tool"] == "measure.arch"
+    rc, out = _run_cli("measure", "arch", str(bad))
     assert rc == 1 and out["ok"] is False
     assert out["failures"][0]["rule"] == "core/extends-whitelist"
 
@@ -152,6 +152,6 @@ def test_cli_arch_exit_codes(tmp_path: Path) -> None:
 ])
 def test_fixture_matrix(tmp_path: Path, snippet: str, rule: str) -> None:
     p = _write(tmp_path, "x.gd", snippet)
-    rc, out = _run_cli("arch", str(p))
+    rc, out = _run_cli("measure", "arch", str(p))
     assert rc == 1
     assert any(f.get("rule") == rule for f in out["failures"])

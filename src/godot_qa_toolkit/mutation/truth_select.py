@@ -2,17 +2,18 @@
 
 合同（Owner 2026-11-14 拍板 + ④ 实测数据）：
 
-- **映射来源**：canonical 归属产物（`canonical-test-attribution/4`），路径经
+- **映射来源**：measurement 归属产物（`test-attribution/5`），路径经
   `--attribution-map` 或环境变量 `GQT_ATTRIBUTION_MAP` 给出；
 - **新鲜判据**：产物 `report_recipe_hash` 与本树现值一致（含 toolchain 注入
   口径；按 project_root 记忆化）+ **目标文件 sha256 与产物 `file_sha256`
-  绑定一致**；任一不满足 → 视为过期，退回全脸（不派生、不猜）；
+  绑定一致**；任一不满足 → 视为过期，自动增量/重建一次后重判，仍不可用
+  → fail-loud（`MutationSelectionError`，Owner 定稿：取消自动全脸）；
 - **选面**：file → 测试脚本集（test 车道 ∪ script 车道）→ 选择目录
   （`.qa-cache/gqt-attr-select/<sel-id>/`）内的 `extends` 包装脚本
   （文件名与原名一致，GUT 经继承收集；KOL 实测精确命中 Scripts/Tests 计数）——
   `tests_glob` 仍是单一 res:// 目录，下游 resume/coverage/worker 零分叉；
 - **零引用短路**：新鲜映射且集合为空 → 短路（`zero_ref=True`，来源
-  `runtime_mapping`）；无映射/过期 → `tests_glob=None`（全脸），不短路；
+  `runtime_mapping`）；无映射/过期 → 严格模式 fail-loud 拒跑；
 - **kill 证书归属**：`RuntimeOwnership` 以映射身份（`script.gd::test`）解析
   killer 脚本；无新鲜映射 → 不产出证书（fail-safe 只偏向重跑），不混用静态
   索引。
@@ -28,7 +29,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-SCHEMA_VERSION = "canonical-test-attribution/4"
+SCHEMA_VERSION = "test-attribution/5"
 ENV_MAP = "GQT_ATTRIBUTION_MAP"
 ENV_MODE = "GQT_ATTRIBUTION_MAP_MODE"   # "auto"（默认）| "off"
 SELECT_ROOT = ".gqt-attr-select"   # 根级点目录：影子树会携带（.qa-cache 被排除）
@@ -176,7 +177,8 @@ def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
     """默认自动生成：无映射且 mode=auto → canonical --test-attribution 一次。
 
     生成成功后落在 `<project>/.qa-cache/attribution-map.json` 并写入
-    GQT_ATTRIBUTION_MAP；失败 → 台账记录并返回 None（调用方走全脸）。"""
+    GQT_ATTRIBUTION_MAP；失败 → 台账记录并 raise `MutationSelectionError`
+    （fail-loud；全脸仅显式 `--select full` 审计开关）。"""
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
@@ -191,15 +193,15 @@ def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
         if existing:
             return existing
         try:
-            from ..canonical.orchestrator import run_canonical
-            from ..canonical.recipe import build_recipe
+            from ..measurement.orchestrator import run_measurement
+            from ..measurement.recipe import build_recipe
             recipe, error = build_recipe(Path(root))
             if error is not None:
                 raise SelectionError(f"recipe unavailable: {error}")
             targets = _targets_under(_roots_of(files, root))
             tmp = _unique_tmp(out)
             try:
-                run_canonical(root, targets, recipe, test_attribution=True,
+                run_measurement(root, targets, recipe, test_attribution=True,
                               attribution_out=tmp)
                 doc = load_map(tmp)
                 if not arms_valid(doc.get("arms_state") or {}):
@@ -233,7 +235,7 @@ def _auto_increment(project_root: str, path: str, doc: dict,
 
     锁内**重读基线**再合并（并发写者读到旧基线是 HIGH-2 丢边的根因），
     唯一 tmp 落盘后校验「非重跑身份零丢失」，失真直接抛
-    MutationSelectionError（不静默交付、不回退全脸）。"""
+    MutationSelectionError（不静默交付，fail-loud 拒跑）。"""
     root = str(Path(project_root).resolve())
     t0 = time.monotonic()
     with _refresh_lock(path):
@@ -246,8 +248,8 @@ def _auto_increment(project_root: str, path: str, doc: dict,
         if key in _INCREMENTED:
             return True, None
         try:
-            from ..canonical.increment import run_attribution_increment
-            from ..canonical.recipe import build_recipe
+            from ..measurement.increment import run_attribution_increment
+            from ..measurement.recipe import build_recipe
             recipe, error = build_recipe(Path(root))
             if error is not None:
                 raise SelectionError(f"recipe unavailable: {error}")
@@ -314,7 +316,7 @@ def _fresh_recipe_hash(project_root: str) -> str | None:
     选面正确性只依赖测试面身份（gut dirs/features/harness）——toolchain
     版本漂移不改变"谁测谁"，故不为此在每个消费入口启动 godot --version。
     """
-    from ..canonical.recipe import build_recipe, recipe_hash as _raw
+    from ..measurement.recipe import build_recipe, recipe_hash as _raw
     recipe, error = build_recipe(Path(project_root))
     if error is not None:
         return None
@@ -408,8 +410,8 @@ def _regenerate(project_root: str, path: str, rel: str) -> bool:
         return True
     t0 = time.monotonic()
     try:
-        from ..canonical.orchestrator import run_canonical
-        from ..canonical.recipe import build_recipe
+        from ..measurement.orchestrator import run_measurement
+        from ..measurement.recipe import build_recipe
         root = str(Path(project_root).resolve())
         recipe, error = build_recipe(Path(root))
         if error is not None:
@@ -421,7 +423,7 @@ def _regenerate(project_root: str, path: str, rel: str) -> bool:
             raise SelectionError("baseline missing target_files")
         tmp = _unique_tmp(path)
         try:
-            run_canonical(root, targets, recipe, test_attribution=True,
+            run_measurement(root, targets, recipe, test_attribution=True,
                           attribution_out=tmp)
             validate_refresh(load_map(path), load_map(tmp))
             os.replace(tmp, path)

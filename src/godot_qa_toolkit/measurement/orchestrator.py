@@ -1,4 +1,4 @@
-"""gqt canonical 双源批式编排（§SPEC-037，canonical-report/1）。
+"""gqt measure run 双源批式编排（§SPEC-037，measurement-report/2）。
 
 批式臂（canonical 的唯一可行形态，设计 §2.1）：目标全集一次插桩 → 每臂
 1 次 GUT（gut_full 走 .gutconfig 面 + acceptance 私有目录一次）→ 逐文件
@@ -31,8 +31,8 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from ..accept.run import AcceptRunError, replay_check
-from ..accept.suite import (
+from ..gherkin.run import AcceptRunError, replay_check
+from ..gherkin.suite import (
     SuiteError,
     _cleanup_suite_dir,
     _snapshot_main,
@@ -62,8 +62,8 @@ from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.inject import BinaryConfigError, godot_command, spawn_godot
 from .recipe import verify_recipe
 
-REPORT_VERSION = "canonical-report/1"
-ATTRIBUTION_SCHEMA = "canonical-test-attribution/4"
+REPORT_VERSION = "measurement-report/2"
+ATTRIBUTION_SCHEMA = "test-attribution/5"
 # 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
 # 旧模板（缓存键含 algo 但不含探针文本本身）
 ATTRIBUTION_ALGO_TAG = "attr/6"
@@ -87,12 +87,12 @@ def _backup_base() -> Path:
     可被任意本地用户预置/篡改 started.json（恢复信任边界）。per-uid 私有
     目录 + lstat（不跟随 symlink）+ O_NOFOLLOW dirfd 验证消除
     mkdir/lstat 竞争窗口；无 uid 的非 POSIX 平台显式 fail-loud，不做
-    不安全回退。任一校验失败即 CanonicalError。"""
+    不安全回退。任一校验失败即 MeasurementError。"""
     import stat as _stat
 
     getuid = getattr(os, "getuid", None)
     if getuid is None:
-        raise CanonicalError(
+        raise MeasurementError(
             "private backup root requires a POSIX uid; non-POSIX "
             "platforms are unsupported (fail-loud, no unsafe fallback)")
     uid = getuid()
@@ -104,17 +104,17 @@ def _backup_base() -> Path:
             pass
     st = base.lstat()  # symlink 呈现 S_ISLNK，不跟随
     if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISDIR(st.st_mode):
-        raise CanonicalError(
+        raise MeasurementError(
             f"backup root is not a private directory: {base}")
     if st.st_uid != uid or st.st_mode & 0o077:
-        raise CanonicalError(
+        raise MeasurementError(
             f"backup root is not private: {base} "
             f"(uid={st.st_uid}, mode={oct(st.st_mode & 0o777)})")
     try:
         dir_fd = os.open(base, os.O_RDONLY | os.O_NOFOLLOW
                          | os.O_DIRECTORY)
     except OSError as e:
-        raise CanonicalError(
+        raise MeasurementError(
             f"backup root failed O_NOFOLLOW directory check: {base}: {e}")
     os.close(dir_fd)
     return base
@@ -410,7 +410,7 @@ def _patch_autoload(text: str, entry: str) -> str:
 
 
 
-class CanonicalError(Exception):
+class MeasurementError(Exception):
     """canonical 编排入参/前置违例（recipe 非法、目标缺失、GUT 缺失）。"""
 
 
@@ -419,12 +419,12 @@ def file_key8(relpath: str) -> str:
 
 
 def _rel_within_root(abs_path: str, root: Path) -> str:
-    """§SPEC-070 FR-3：目标不在 project root 内 → CanonicalError
+    """§SPEC-070 FR-3：目标不在 project root 内 → MeasurementError
     fail-loud（裸 ValueError 会在 CLI 泄漏 traceback）。"""
     try:
         return str(Path(abs_path).relative_to(root))
     except ValueError as e:
-        raise CanonicalError(
+        raise MeasurementError(
             f"target outside project root: {abs_path} (root={root})") from e
 
 
@@ -617,7 +617,7 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
     t0 = time.monotonic()
     gut = project_root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
-        raise CanonicalError(f"GUT runner not found: {gut}")
+        raise MeasurementError(f"GUT runner not found: {gut}")
     argv = [godot_command(), "--headless", "--path", str(project_root),
             "-s", "res://addons/gut/gut_cmdln.gd", *gut_args, "-gexit"]
     with GlobalGodotGate(str(gate_root or project_root)):
@@ -626,13 +626,13 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
                             timeout=timeout_s, cwd=str(project_root),
                             env=env)
         except subprocess.TimeoutExpired as e:
-            raise CanonicalError(
+            raise MeasurementError(
                 f"GUT timed out after {timeout_s}s "
                 f"(args: {' '.join(gut_args)})") from e
         except BinaryConfigError as e:
             # §SPEC-079 C：静态前置漏判时的拉起点兜底（双防线）——
-            # 归一为 canonical 领域错误，cli 既有 CanonicalError 出口转 JSON。
-            raise CanonicalError(str(e)) from e
+            # 归一为 canonical 领域错误，cli 既有 MeasurementError 出口转 JSON。
+            raise MeasurementError(str(e)) from e
     return r, time.monotonic() - t0
 
 
@@ -700,7 +700,7 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
     §SPEC-074：任何失败路径不泄漏已 mkdtemp 的 shadow 目录（整体
     try/except 后 _force_rmtree——shadow 可能含 copystat 保留的只读
     模式副本，需先自底向上恢复写位），OS 级失败（含只读目录内悬空
-    链接的 unlink 拒绝）与 cp/find 失败统一转 CanonicalError——真实
+    链接的 unlink 拒绝）与 cp/find 失败统一转 MeasurementError——真实
     CLI 恒输出可解析 tool JSON，无裸 traceback。"""
     import shutil as _shutil
     import subprocess as _sp
@@ -728,22 +728,22 @@ def _prepare_shadow(base_root: Path, run_uuid: str, idx: int
             p = Path(os.fsdecode(raw))
             try:
                 _deref_shadow_symlink(p, disclosure)
-            except CanonicalError:
+            except MeasurementError:
                 raise
             except OSError as e:
                 # §SPEC-074：解引用阶段全部 OS 级失败（含只读目录内悬空
                 # 链接的 unlink 拒绝）转领域错误——顶层命中与递归内层两侧
                 # 统一由本包裹覆盖
-                raise CanonicalError(
+                raise MeasurementError(
                     f"shadow symlink handling failed (OS): {p}: {e}"
                 ) from e
         return shadow, disclosure
-    except CanonicalError:
+    except MeasurementError:
         _force_rmtree(shadow)
         raise
     except (OSError, subprocess.CalledProcessError) as e:
         _force_rmtree(shadow)
-        raise CanonicalError(f"shadow preparation failed: {e}") from e
+        raise MeasurementError(f"shadow preparation failed: {e}") from e
     except BaseException:
         _force_rmtree(shadow)
         raise
@@ -758,12 +758,12 @@ def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
     - 文件链接 → 解引用为常规文件；目录链接 → copytree(symlinks=True)
       实拷贝目录后对内层链接**递归**解引用（深度有界，超限 fail-loud；
       内层悬空/循环移除并计入 dangling——确定性披露）。
-    - 内容拷贝开始后的任何失败 → fail-loud（CanonicalError），不得静默
+    - 内容拷贝开始后的任何失败 → fail-loud（MeasurementError），不得静默
       删除有效链接或虚报计数（R28 反例根因：Linux rename 拒绝
       目录替换 symlink → NotADirectoryError 被宽 except 吞掉）。
     """
     if depth > 8:
-        raise CanonicalError(
+        raise MeasurementError(
             f"shadow symlink dereference depth exceeded: {p}")
     try:
         target_stat = os.stat(p)  # 跟随链接；悬空/循环 → OSError
@@ -773,7 +773,7 @@ def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
         except OSError as e:
             # §SPEC-074：只读父目录内悬空链接无法移除 → 领域错误
             # fail-loud（顶层 find 命中与递归内层两侧统一由调用方包裹）
-            raise CanonicalError(
+            raise MeasurementError(
                 f"shadow dangling symlink cannot be removed: {p}: {e}"
             ) from e
         disclosure["dangling_links_removed"] += 1
@@ -789,7 +789,7 @@ def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
             shutil.copyfile(p, tmp)
     except OSError as e:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise CanonicalError(
+        raise MeasurementError(
             f"shadow symlink dereference failed (link kept): {p}: {e}"
         ) from e
     if stat_module.S_ISDIR(target_stat.st_mode):
@@ -812,7 +812,7 @@ def _deref_shadow_symlink(p: Path, disclosure: dict, depth: int = 0) -> None:
         os.rename(tmp, p)
     except OSError as e:
         # §SPEC-074：只读父目录内的最终替换 unlink 同样转领域错误
-        raise CanonicalError(
+        raise MeasurementError(
             f"shadow symlink dereference replace failed: {p}: {e}") from e
     disclosure["symlinks_dereferenced"] += 1
 
@@ -1107,7 +1107,7 @@ def _attribution_payload(arm: str, test_to_files: dict, script_to_files: dict,
                          unmapped: list, events: tuple, lane_total: int,
                          phase_lane: dict, hotspots: list,
                          files_with_unattributed: int) -> dict:
-    """臂级映射产物（canonical-test-attribution/4 的 arms 条目）。
+    """臂级映射产物（test-attribution/5 的 arms 条目）。
 
     键序与口径保持稳定：`attributed_*` 兼容旧口径 = 测试级车道。"""
     test_events, script_events, unattributed_events = events
@@ -1448,7 +1448,7 @@ def _inject_toolchain(root: Path, recipe: dict) -> dict:
     （防篡改），注入后重 hash 再作为测量身份。"""
     import re as _re
 
-    from ..accept import OPS_VERSION
+    from ..gherkin import OPS_VERSION
     toolchain = dict(recipe.get("toolchain", {}))
     toolchain["ops_version"] = OPS_VERSION
     try:
@@ -1659,7 +1659,7 @@ def _prepare_target_file(root: Path, rel: str, src: str, abs_path: str,
     return out
 
 
-def run_canonical(project_root: str | Path, target_files: list[str],
+def run_measurement(project_root: str | Path, target_files: list[str],
                   recipe: dict, *, acceptance_keys: list[str] | None = None,
                   probe_keys: list[str] | None = None, timeout_s: int = 180,
                   evidence_out: str | None = None,
@@ -1678,13 +1678,13 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   attribution_causal: bool = False,
                   arms_parallel: bool = False,
                   acceptance_adaptive: bool = False) -> dict:
-    """canonical 双源批式编排，产出 canonical-report/1。
+    """measurement 双源批式编排，产出 measurement-report/2。
 
     baseline_failures（§SPEC-060a/064b）：既有（未插桩）运行的失败
     (script, test) 身份对集合——双臂失败对逐对披露后，相对该基线的
     **新增失败对**即门控：臂 run_error → union invalid → ok=false/
     comparable=false，臂不出分。同名跨脚本不互相吸收、未归因仅匹配
-    未归因；裸名字符串身份歧义 → CanonicalError（fail-closed）。
+    未归因；裸名字符串身份歧义 → MeasurementError（fail-closed）。
     缺省（None）按空基线处理：任何失败都是新增（fail-closed）。
 
     intolerant_config（§SPEC-061b/c）：{"tests": [{name, reason}],
@@ -1707,16 +1707,16 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                 and all(isinstance(x, str) for x in entry)):
             baseline_pairs.add((entry[0], entry[1]))
         else:
-            raise CanonicalError(
+            raise MeasurementError(
                 f"baseline failure entry must be a (script, test) pair, "
                 f"got {entry!r} — bare names are identity-ambiguous and "
                 f"rejected (§SPEC-064b)")
     def _req_str(obj: dict, key: str, kind: str) -> str:
-        """§SPEC-065：配置字段统一类型校验——非 str 或空白即 CanonicalError
+        """§SPEC-065：配置字段统一类型校验——非 str 或空白即 MeasurementError
         fail-fast（非 str 会在匹配/附着层失配静默失效，如 file=123）。"""
         v = obj.get(key)
         if not isinstance(v, str) or not v.strip():
-            raise CanonicalError(
+            raise MeasurementError(
                 f"{kind} field {key!r} must be a non-empty string, "
                 f"got {v!r} (§SPEC-065)")
         return v
@@ -1727,12 +1727,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     # 静默降级为缺省）
     tests_decl = cfg.get("tests", [])
     if not isinstance(tests_decl, list):
-        raise CanonicalError(
+        raise MeasurementError(
             "intolerant 'tests' must be a list, "
             f"got {tests_decl!r} (§SPEC-065)")
     limits_decl = cfg.get("coverage_limitations", [])
     if not isinstance(limits_decl, list):
-        raise CanonicalError(
+        raise MeasurementError(
             "intolerant 'coverage_limitations' must be a list, "
             f"got {limits_decl!r} (§SPEC-065)")
     # §SPEC-063e/065：声明 name/reason 统一非空 str 校验——
@@ -1740,7 +1740,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     intolerant_tests = []
     for t in tests_decl:
         if not isinstance(t, dict):
-            raise CanonicalError(
+            raise MeasurementError(
                 "intolerant declaration must be an object, "
                 f"got {t!r} (§SPEC-065)")
         entry = {"name": _req_str(t, "name", "intolerant declaration"),
@@ -1763,7 +1763,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     coverage_limitations = []
     for l in limits_decl:
         if not isinstance(l, dict):
-            raise CanonicalError(
+            raise MeasurementError(
                 "coverage limitation must be an object, "
                 f"got {l!r} (§SPEC-065)")
         coverage_limitations.append(
@@ -1771,9 +1771,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
              "reason": _req_str(l, "reason", "coverage limitation")})
     ok, reason = verify_recipe(recipe)
     if not ok:
-        raise CanonicalError(f"recipe invalid: {reason}")
+        raise MeasurementError(f"recipe invalid: {reason}")
     if not target_files:
-        raise CanonicalError("no target files given")
+        raise MeasurementError("no target files given")
     from .recipe import recipe_hash as _pristine_recipe_hash
     pristine_recipe_hash = _pristine_recipe_hash(
         {k: v for k, v in recipe.items() if k != "recipe_hash"})
@@ -1876,7 +1876,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             inst = template.replace(prepcache.SINK_UUID_PLACEHOLDER,
                                     str(run_uuid))
             if not n_ph:
-                raise CanonicalError(
+                raise MeasurementError(
                     f"sink placeholder missing for {rel} (stale cache?)")
             started["files"][item["abs"]] = item["src"]
             sink_by_rel[rel] = sink
@@ -1885,7 +1885,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             inst_by_rel[rel] = inst
         pg_path = root / "project.godot"
         if not pg_path.is_file():
-            raise CanonicalError(
+            raise MeasurementError(
                 "cannot run measurement: project.godot missing")
         # §SPEC-062A：project.godot 全程只读——finalizer 经 GUT
         # pre_run_script 通道注册，不再改写 [autoload] 表
@@ -1966,7 +1966,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                         out = (r.stdout or "") + "\n" + (r.stderr or "")
                         rc = r.returncode
                         rep_timed_out = False
-                    except CanonicalError as e:
+                    except MeasurementError as e:
                         te = getattr(e, "__cause__", None)
                         out = str(e) + "\n" + _cause_tail(te)
                         rc = None
@@ -2010,7 +2010,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     try:
                         _ctx_parser.parse(_ATTR_CTX_GD)
                     except Exception as e:  # noqa: BLE001
-                        raise CanonicalError(
+                        raise MeasurementError(
                             f"causal context script failed to parse: "
                             f"{e}") from e
                 for relpath, text in shadow_hook_files:
@@ -2600,7 +2600,7 @@ def _crap_replay_vanished_baseline(records: list, lanes: dict,
 
 
 def _cause_tail(te) -> str:
-    """CanonicalError __cause__（TimeoutExpired）的 stdout/stderr 安全解码
+    """MeasurementError __cause__（TimeoutExpired）的 stdout/stderr 安全解码
     ——TimeoutExpired 恒携带 bytes（即便 subprocess text=True）。"""
     if te is None:
         return ""
@@ -2762,7 +2762,7 @@ def _baseline_total(value) -> int:
             and value.is_integer():
         total = int(value)
     if total is None or total < 0:
-        raise CanonicalError(
+        raise MeasurementError(
             f"stability baseline per_fid row 'total' must be a non-negative "
             f"finite integer value or null, got {value!r} (§SPEC-068)")
     return total
@@ -2774,26 +2774,26 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
     （unions 行/union/per_fid 行/file/fid/covered_line_ids/total、
     crap.records 的 function_id/score_status/crap_line/provenance）在
     读取前完成系统校验；身份串 strip 后非空、数值面 bool/NaN/Inf 拒绝，
-    非法形状 CanonicalError，不泄漏 AttributeError/TypeError/KeyError。"""
+    非法形状 MeasurementError，不泄漏 AttributeError/TypeError/KeyError。"""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise CanonicalError(
+        raise MeasurementError(
             f"stability baseline unreadable: {path}: {e}") from e
     if not isinstance(doc, dict):
-        raise CanonicalError(
+        raise MeasurementError(
             f"stability baseline must be a JSON object, got "
             f"{type(doc).__name__} (§SPEC-066)")
     unions = doc.get("unions", [])
     if not isinstance(unions, list):
-        raise CanonicalError(
+        raise MeasurementError(
             f"stability baseline 'unions' must be a list, got {unions!r} "
             f"(§SPEC-066)")
     lines: dict = {}
     seen_files: set = set()
     for u in unions:
         if not isinstance(u, dict):
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline union row must be an object, got "
                 f"{u!r} (§SPEC-066)")
         if u.get("union") is None:
@@ -2802,45 +2802,45 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
             file_raw = u.get("file")
             if isinstance(file_raw, str) and file_raw.strip():
                 if file_raw in seen_files:
-                    raise CanonicalError(
+                    raise MeasurementError(
                         f"stability baseline duplicate union row for file "
                         f"{file_raw!r} (§SPEC-068)")
                 seen_files.add(file_raw)
             continue
         union = u["union"]
         if not isinstance(union, dict):
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline union row 'union' must be an object "
                 f"or null, got {union!r} (§SPEC-066)")
         file = u.get("file")
         if not isinstance(file, str) or not file.strip():
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline union row 'file' must be a non-empty "
                 f"string, got {file!r} (§SPEC-067)")
         # §SPEC-068：重复身份明确拒绝——last-wins 静默覆盖会伪造基线
         if file in seen_files:
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline duplicate union row for file "
                 f"{file!r} (§SPEC-068)")
         seen_files.add(file)
         per_fid = union.get("per_fid", [])
         if not isinstance(per_fid, list):
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline 'per_fid' must be a list, got "
                 f"{per_fid!r} (§SPEC-066)")
         rows: dict = {}
         for row in per_fid:
             if not isinstance(row, dict):
-                raise CanonicalError(
+                raise MeasurementError(
                     f"stability baseline per_fid row must be an object, "
                     f"got {row!r} (§SPEC-066)")
             fid = row.get("fid")
             if not isinstance(fid, str) or not fid.strip():
-                raise CanonicalError(
+                raise MeasurementError(
                     f"stability baseline per_fid row 'fid' must be a "
                     f"non-empty string, got {fid!r} (§SPEC-067)")
             if fid in rows:
-                raise CanonicalError(
+                raise MeasurementError(
                     f"stability baseline duplicate fid {fid!r} in file "
                     f"{file!r} (§SPEC-068)")
             covered = row.get("covered_line_ids")
@@ -2849,7 +2849,7 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
             # 读取前拒绝
             if not isinstance(covered, list) or not all(
                     _is_baseline_line_id(x) for x in covered):
-                raise CanonicalError(
+                raise MeasurementError(
                     f"stability baseline per_fid row 'covered_line_ids' "
                     f"must be a list of finite scalars, got {covered!r} "
                     f"(§SPEC-067)")
@@ -2860,27 +2860,27 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
         lines[file] = rows
     crap = doc.get("crap", {})
     if not isinstance(crap, dict):
-        raise CanonicalError(
+        raise MeasurementError(
             f"stability baseline 'crap' must be an object, got {crap!r} "
             f"(§SPEC-066)")
     records_list = crap.get("records", [])
     if not isinstance(records_list, list):
-        raise CanonicalError(
+        raise MeasurementError(
             f"stability baseline 'crap.records' must be a list, got "
             f"{records_list!r} (§SPEC-066)")
     records: dict = {}
     for r in records_list:
         if not isinstance(r, dict):
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline crap record must be an object, got "
                 f"{r!r} (§SPEC-066)")
         fid = r.get("function_id")
         if not isinstance(fid, str) or not fid.strip():
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline crap record 'function_id' must be a "
                 f"non-empty string, got {fid!r} (§SPEC-067)")
         if fid in records:
-            raise CanonicalError(
+            raise MeasurementError(
                 f"stability baseline duplicate function_id {fid!r} "
                 f"(§SPEC-068)")
         # §SPEC-067：回放字段——`_crap_replay_vanished_baseline` 对
@@ -2888,14 +2888,14 @@ def _load_baseline_report(path: str) -> tuple[dict, dict]:
         for field in ("crap_line", "provenance"):
             v = r.get(field)
             if v is not None and not isinstance(v, dict):
-                raise CanonicalError(
+                raise MeasurementError(
                     f"stability baseline crap record {field!r} must be an "
                     f"object or null, got {v!r} (§SPEC-067)")
         # score_status 只经等值比较消费；非 str / 空白会静默失配 replay
         if "score_status" in r:
             status = r["score_status"]
             if not isinstance(status, str) or not status.strip():
-                raise CanonicalError(
+                raise MeasurementError(
                     f"stability baseline crap record 'score_status' must "
                     f"be a non-empty string, got {status!r} (§SPEC-067)")
         records[fid] = r
@@ -2972,23 +2972,23 @@ def _parse_gut_summary(output: str) -> dict:
 def _diagnose_prepare(recipe: dict, feature_keys: list[str],
                       target_files: list[str]) -> tuple[dict, dict[str, str]]:
     """校验 recipe 与 feature keys，读取目标源码；失败即 raise
-    CanonicalError（与编排器其他入口同款 fail-loud 语义）。"""
+    MeasurementError（与编排器其他入口同款 fail-loud 语义）。"""
     ok, reason = verify_recipe(recipe)
     if not ok:
-        raise CanonicalError(f"recipe invalid: {reason}")
+        raise MeasurementError(f"recipe invalid: {reason}")
     feature_by_key = {f["key"]: f
                       for f in recipe["acceptance_face"]["features"]}
     unknown = [k for spec in feature_keys for k in spec.split("+")
                if k and k not in feature_by_key]
     if unknown:
-        raise CanonicalError(f"unknown acceptance features: {unknown}")
+        raise MeasurementError(f"unknown acceptance features: {unknown}")
     sources: dict[str, str] = {}
     for path_str in target_files:
         p = Path(path_str)
         try:
             sources[str(p.resolve())] = p.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
-            raise CanonicalError(f"target unreadable: {p}: {e}") from e
+            raise MeasurementError(f"target unreadable: {p}: {e}") from e
     return feature_by_key, sources
 
 
@@ -3057,7 +3057,7 @@ def _diagnose_run_flags_leg(root: Path, gut_args: list[str],
                             instrumented: dict[str, str]
                             ) -> tuple[bool, str, int | None, float]:
     """写插桩文件、注入 finalizer、跑 GUT；finally 恢复原树后返回
-    (timed_out, 合并输出, rc, 墙钟秒)。GUT 超时按 CanonicalError 带因
+    (timed_out, 合并输出, rc, 墙钟秒)。GUT 超时按 MeasurementError 带因
     捕获、不向上传播（归因腿仍需读 sink 残余）。"""
     timed_out = False
     out = ""
@@ -3081,7 +3081,7 @@ def _diagnose_run_flags_leg(root: Path, gut_args: list[str],
             wall = time.monotonic() - t0
             rc = r.returncode
             out = (r.stdout or "") + "\n" + (r.stderr or "")
-        except CanonicalError as e:
+        except MeasurementError as e:
             timed_out = True
             wall = time.monotonic() - t0
             out = str(e) + "\n" + _cause_tail(getattr(e, "__cause__", None))
@@ -3127,7 +3127,7 @@ def _diagnose_attribute(entry: dict, wait_commands: int,
                                 f"baseline {base_wall}s")
 
 
-def run_canonical_diagnose(project_root: str | Path,
+def run_measurement_diagnose(project_root: str | Path,
                            target_files: list[str], recipe: dict,
                            feature_keys: list[str], *,
                            timeout_s: int = 480,
@@ -3202,7 +3202,7 @@ def _performance(root: Path, probe_keys: list[str] | None,
                  timeout_s: int) -> dict:
     """W4 acceptance 成本探针（缺省 aidomain_integration）——私有目录管线
     实测「编译 + 执行」墙钟，写入 performance.acceptance_probe。"""
-    from ..accept.suite import run_acceptance_probe
+    from ..gherkin.suite import run_acceptance_probe
     keys = probe_keys if probe_keys else ["aidomain_integration"]
     try:
         probe = run_acceptance_probe(root, keys, timeout_s=timeout_s)

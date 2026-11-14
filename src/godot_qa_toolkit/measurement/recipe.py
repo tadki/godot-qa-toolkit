@@ -1,4 +1,4 @@
-"""Canonical full-recipe builder (canonical-recipe/1, §SPEC-034).
+"""Measurement suite builder (measurement-suite/2, §SPEC-034).
 
 Read-only: scans `.gutconfig.json` (the live non-quarantine GUT face) and
 `acceptance/features/**/*.feature` (per-feature sha256), folds harness and
@@ -15,7 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 
-RECIPE_VERSION = "canonical-recipe/1"
+RECIPE_VERSION = "measurement-suite/2"
 _GUTCONFIG = ".gutconfig.json"
 
 
@@ -123,7 +123,7 @@ def build_recipe(
     godot_version: str = "unknown",
     gut_version: str = "unknown",
 ) -> tuple[dict | None, str | None]:
-    """Build the canonical-recipe/1 dict; returns (recipe, None) or
+    """Build the measurement-suite/2 dict; returns (recipe, None) or
     (None, reason) when the project layout or an exclusion is illegal."""
     root = Path(project_root)
     # §SPEC-066：只有 None 归缺省；其余非 list 交给 _legal_exclusions
@@ -232,7 +232,7 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
     gut_face / acceptance_face / features / key / toolchain 等**全部下游
     直接消费字段**必须在启动编排/注入前完成系统校验（而非在下游异常点
     逐个兜底）；非法形状一律 not-ok + reason（上层编排器转
-    CanonicalError、CLI 转 tool JSON ok=false），绝不泄漏
+    MeasurementError、CLI 转 tool JSON ok=false），绝不泄漏
     AttributeError/TypeError/KeyError。"""
     if not isinstance(recipe, dict):
         return False, (f"recipe must be a JSON object, "

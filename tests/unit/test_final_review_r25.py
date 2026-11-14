@@ -2,7 +2,7 @@
 
 FR-1 备份/恢复信任边界（私有备份根 + ownership/mode + root 限定 +
 symlink 拒绝 + 原子恢复）；FR-2 shadow 不与 base 共享可写 inode；
-FR-3 root 外目标转 CanonicalError；FR-4 块压缩近似显式披露；
+FR-3 root 外目标转 MeasurementError；FR-4 块压缩近似显式披露；
 FR-5 全部 LOW（union:null 重复身份、arm_failures 死代码、diagnose
 ok/--godot-bin、sink_path、str 行号契约、docs 旧阈值）。
 """
@@ -20,18 +20,18 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.canonical.orchestrator import (
-    CanonicalError,
+from godot_qa_toolkit.measurement.orchestrator import (
+    MeasurementError,
     _backup_base,
     _load_baseline_report,
     _prepare_shadow,
     _recover_stale_backups,
     _rel_within_root,
-    run_canonical,
+    run_measurement,
 )
 
 REPO = Path(__file__).resolve().parents[2]
-from godot_qa_toolkit.canonical.recipe import build_recipe
+from godot_qa_toolkit.measurement.recipe import build_recipe
 from godot_qa_toolkit.cli import build_parser
 
 from .test_canonical_report_see1546 import FakeGodot
@@ -269,7 +269,7 @@ def test_shadow_dereferences_symlinks_zero_write_through(
 
 def test_rel_within_root_raises_domain_error(project):
     outside = str(project.parent / "out.gd")
-    with pytest.raises(CanonicalError, match="outside project root"):
+    with pytest.raises(MeasurementError, match="outside project root"):
         _rel_within_root(outside, project)
     assert _rel_within_root(str(project / "src_game" / "cell.gd"),
                             project) == "src_game/cell.gd"
@@ -279,8 +279,8 @@ def test_run_canonical_root_external_target_is_domain_error(
         project, tmp_path):
     outside = tmp_path / "out.gd"
     outside.write_text("extends RefCounted\nfunc x():\n\treturn 1\n")
-    with pytest.raises(CanonicalError, match="outside project root"):
-        run_canonical(project, [str(outside)], _recipe(project))
+    with pytest.raises(MeasurementError, match="outside project root"):
+        run_measurement(project, [str(outside)], _recipe(project))
 
 
 def test_cli_root_external_target_emits_tool_json(project, tmp_path,
@@ -294,8 +294,7 @@ def test_cli_root_external_target_emits_tool_json(project, tmp_path,
     # 可执行的二进制（sys.executable 恒满足）
     monkeypatch.setenv("GQT_GODOT_BIN", sys.executable)
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical", str(outside_dir),
+    args = build_parser().parse_args(["measure", "run", str(outside_dir),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
     orig = sp.run
@@ -308,8 +307,8 @@ def test_cli_root_external_target_emits_tool_json(project, tmp_path,
         sp.run = orig
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical" and payload["ok"] is False
-    assert payload["summary"]["canonical_error"] is True
+    assert payload["tool"] == "measure.run" and payload["ok"] is False
+    assert payload["summary"]["measurement_error"] is True
     assert "outside project root" in payload["summary"]["error"]
 
 
@@ -318,7 +317,7 @@ def test_cli_root_external_target_emits_tool_json(project, tmp_path,
 def test_report_discloses_block_semantics(project, tmp_path):
     # CI 无 godot PATH：GUT 腿必须由 FakeGodot 驱动（不得依赖本机二进制）
     sp.run = FakeGodot(project)
-    report = run_canonical(project, _targets(project), _recipe(project))
+    report = run_measurement(project, _targets(project), _recipe(project))
     sem = report["coverage_semantics"]
     assert sem["block_compressed_files"] >= 1
     assert sem["statement_files"] >= 0
@@ -361,7 +360,7 @@ def test_baseline_duplicate_file_via_null_union_rejected(tmp_path):
     }
     p = tmp_path / "b.json"
     p.write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(CanonicalError, match="duplicate"):
+    with pytest.raises(MeasurementError, match="duplicate"):
         _load_baseline_report(str(p))
 
 
@@ -373,7 +372,7 @@ def test_baseline_non_digit_string_line_id_rejected(tmp_path):
     }
     p = tmp_path / "b.json"
     p.write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(CanonicalError, match="covered_line_ids"):
+    with pytest.raises(MeasurementError, match="covered_line_ids"):
         _load_baseline_report(str(p))
     # 数字字符串仍合法（sink 落盘形态）
     doc["unions"][0]["union"]["per_fid"][0]["covered_line_ids"] = ["0", "1"]
@@ -400,8 +399,7 @@ def test_cli_diagnose_forwards_godot_bin(project, tmp_path):
     契约（ok=false），先于任何 GUT 执行。"""
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical-diagnose", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "diagnose", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--features", "demo",
         "--out", str(tmp_path / "diag.json"),
@@ -411,7 +409,7 @@ def test_cli_diagnose_forwards_godot_bin(project, tmp_path):
         code = args.func(args)
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical-diagnose"
+    assert payload["tool"] == "measure.diagnose"
     assert payload["ok"] is False
 
 
@@ -420,7 +418,7 @@ def test_canonical_evidence_record_has_no_phantom_sink_path(
     # CI 无 godot PATH：GUT 腿必须由 FakeGodot 驱动
     sp.run = FakeGodot(project)
     evidence = tmp_path / "evidence"
-    run_canonical(project, _targets(project), _recipe(project),
+    run_measurement(project, _targets(project), _recipe(project),
                   evidence_out=str(evidence))
     records = [p for p in evidence.glob("*.json")
                if "run_record" in p.name or "record" in p.name]
@@ -437,7 +435,7 @@ def test_canonical_evidence_record_has_no_phantom_sink_path(
 def test_atomic_write_excl_0600_no_leftover(project):
     """O_CREAT|O_EXCL|O_NOFOLLOW + 0600 + 随机后缀（经 pinned dirfd）：
     临时名不可抢注、不跟随 symlink、replace 后零残留、终态 0600。"""
-    from godot_qa_toolkit.canonical.orchestrator import \
+    from godot_qa_toolkit.measurement.orchestrator import \
         _atomic_write_via_dir_fd
     src_dir = project / "src_game"
     target = src_dir / "cell.gd"
@@ -469,7 +467,7 @@ def test_backup_base_rejects_symlink(monkeypatch):
             base.unlink()
     base.symlink_to(real_dir)
     try:
-        with pytest.raises(CanonicalError, match="private directory|not a"):
+        with pytest.raises(MeasurementError, match="private directory|not a"):
             _backup_base()
     finally:
         base.unlink()
@@ -477,9 +475,9 @@ def test_backup_base_rejects_symlink(monkeypatch):
 
 
 def test_backup_base_no_uid_fails_loud(monkeypatch):
-    """无 uid 的非 POSIX 平台：显式 CanonicalError，不做不安全回退。"""
+    """无 uid 的非 POSIX 平台：显式 MeasurementError，不做不安全回退。"""
     monkeypatch.delattr(os, "getuid", raising=False)
-    with pytest.raises(CanonicalError, match="POSIX uid"):
+    with pytest.raises(MeasurementError, match="POSIX uid"):
         _backup_base()
 
 
@@ -488,7 +486,7 @@ def test_backup_base_rejects_tampered_mode():
     import shutil as _sh
     os.chmod(base, 0o755)
     try:
-        with pytest.raises(CanonicalError, match="not private"):
+        with pytest.raises(MeasurementError, match="not private"):
             _backup_base()
     finally:
         os.chmod(base, 0o700)
@@ -617,7 +615,7 @@ def test_ghost_replay_semantics_reconciled_with_current_form():
     """§SPEC-071 L2：ghost 回放 record/crap_line 的 coverage_semantics 与
     本轮该文件实测形态对账；rel 不在本轮测量面时保留 baseline 原值并
     显式标注 carried。"""
-    from godot_qa_toolkit.canonical.orchestrator import (
+    from godot_qa_toolkit.measurement.orchestrator import (
         _crap_replay_vanished_baseline,
         _SEM_BLOCK,
         _SEM_STATEMENT,
@@ -662,7 +660,7 @@ def test_ghost_replay_semantics_reconciled_with_current_form():
 def test_docs_and_negative_line_ids_aligned():
     """§SPEC-071 L3：docs 与 orchestrator docstring 均为 per-uid 私有
     备份根；负整数/负整值浮点行号一律 False（与 docstring 对齐）。"""
-    from godot_qa_toolkit.canonical.orchestrator import _is_baseline_line_id
+    from godot_qa_toolkit.measurement.orchestrator import _is_baseline_line_id
     assert _is_baseline_line_id(-1) is False
     assert _is_baseline_line_id(-2.0) is False
     assert _is_baseline_line_id(0) is True
@@ -673,7 +671,7 @@ def test_docs_and_negative_line_ids_aligned():
     contract = (repo / "docs" / "contract.md").read_text(encoding="utf-8")
     assert "gqt-canonical-backups-<uid>" in contract
     assert "/tmp/gqt-canonical-backups/" not in contract
-    mod_src = (repo / "src" / "godot_qa_toolkit" / "canonical"
+    mod_src = (repo / "src" / "godot_qa_toolkit" / "measurement"
                / "orchestrator.py").read_text(encoding="utf-8")
     assert "gqt-canonical-backups-<uid>" in mod_src
     assert "/tmp/gqt-canonical-backups/" not in mod_src
@@ -829,19 +827,19 @@ def test_shadow_symlink_loop_goes_to_dangling_bucket(project):
 
 def test_shadow_deref_copy_failure_is_fail_loud(project, tmp_path):
     """§SPEC-073：解引用阶段的内容拷贝失败必须 fail-loud
-    （CanonicalError）——不得静默删除有效链接或虚报计数。cp 阶段只复制
+    （MeasurementError）——不得静默删除有效链接或虚报计数。cp 阶段只复制
     链接本身（无需访问目标），deref copyfile 跟随读取不可读目标时才失败。"""
     import shutil as _sh
     if hasattr(os, "getuid") and os.getuid() == 0:
         return  # root 环境无法构造读取障碍
     # 目标放 project 外：cp 只复制链接本身（无需访问目标），deref
-    # copyfile 跟随读取不可读目标时才失败（精确命中 CanonicalError 路径）
+    # copyfile 跟随读取不可读目标时才失败（精确命中 MeasurementError 路径）
     locked_file = tmp_path / "locked-target.gd"
     locked_file.write_text("SECRET")
     (project / "src_game" / "locked.gd").symlink_to(locked_file)
     os.chmod(locked_file, 0o000)
     try:
-        with pytest.raises(CanonicalError, match="dereference failed"):
+        with pytest.raises(MeasurementError, match="dereference failed"):
             _prepare_shadow(project, "r29lock", 0)
     finally:
         os.chmod(locked_file, 0o644)
@@ -867,7 +865,7 @@ def _readonly_dangling_base(project, tmp_path) -> Path:
 def test_readonly_dir_dangling_top_level_is_domain_error(
         project, tmp_path):
     """§SPEC-074 R29-M1 顶层路径：0555 只读目录内悬空链接（find 顶层
-    命中）的 unlink 被拒 → CanonicalError（非裸 PermissionError），
+    命中）的 unlink 被拒 → MeasurementError（非裸 PermissionError），
     shadow 目录零泄漏。"""
     import shutil as _sh
     if hasattr(os, "getuid") and os.getuid() == 0:
@@ -875,7 +873,7 @@ def test_readonly_dir_dangling_top_level_is_domain_error(
     ro = _readonly_dangling_base(project, tmp_path)
     before = _shadow_leak_count()
     try:
-        with pytest.raises(CanonicalError):
+        with pytest.raises(MeasurementError):
             _prepare_shadow(project, "r30ro-top", 0)
         assert _shadow_leak_count() == before, (
             "失败路径不得泄漏已 mkdtemp 的 shadow 目录")
@@ -887,7 +885,7 @@ def test_readonly_dir_dangling_top_level_is_domain_error(
 def test_readonly_dir_dangling_recursive_is_domain_error(
         project, tmp_path):
     """§SPEC-074 R29-M1 递归路径：dirlink → 只读目录（内含悬空链接）——
-    copytree 后内层解引用的 unlink 在只读副本内被拒 → CanonicalError，
+    copytree 后内层解引用的 unlink 在只读副本内被拒 → MeasurementError，
     shadow 目录零泄漏。"""
     import shutil as _sh
     if hasattr(os, "getuid") and os.getuid() == 0:
@@ -896,7 +894,7 @@ def test_readonly_dir_dangling_recursive_is_domain_error(
     (project / "src_game" / "dirlink").symlink_to(ro)
     before = _shadow_leak_count()
     try:
-        with pytest.raises(CanonicalError):
+        with pytest.raises(MeasurementError):
             _prepare_shadow(project, "r30ro-inner", 0)
         assert _shadow_leak_count() == before, (
             "失败路径不得泄漏已 mkdtemp 的 shadow 目录")
@@ -908,7 +906,7 @@ def test_readonly_dir_dangling_recursive_is_domain_error(
 def test_cli_readonly_dangling_emits_tool_json_no_traceback(
         project, tmp_path, monkeypatch):
     """§SPEC-074：真实 CLI 代码路径恒输出可解析 tool JSON ok=false
-    （canonical_error:true），无裸 traceback。§SPEC-075：CI 纯净环境
+    （measurement_error:true），无裸 traceback。§SPEC-075：CI 纯净环境
     需 GQT_GODOT_BIN 通过 CLI 前置校验。"""
     import io
     from contextlib import redirect_stdout
@@ -920,8 +918,7 @@ def test_cli_readonly_dangling_emits_tool_json_no_traceback(
     (project / "src_game" / "dirlink").symlink_to(ro)
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
     orig = sp.run
@@ -935,8 +932,8 @@ def test_cli_readonly_dangling_emits_tool_json_no_traceback(
         os.chmod(ro, 0o755)
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical" and payload["ok"] is False
-    assert payload["summary"]["canonical_error"] is True
+    assert payload["tool"] == "measure.run" and payload["ok"] is False
+    assert payload["summary"]["measurement_error"] is True
     # 消息锚点为 shadow 内实际失败路径（悬空链接无 base 出处可引用，
     # 目录链接解引用副本的确定性失败位置即诊断信息）
     assert "dangling symlink cannot be removed" in payload["summary"]["error"]
@@ -958,8 +955,7 @@ def test_cli_missing_godot_env_unset_emits_tool_json(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
     buf = io.StringIO()
@@ -967,7 +963,7 @@ def test_cli_missing_godot_env_unset_emits_tool_json(
         code = args.func(args)
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert payload["tool"] == "measure.run" and payload["ok"] is False
     assert "godot binary not found or not executable" \
         in payload["summary"]["error"]
 
@@ -984,8 +980,7 @@ def test_cli_diagnose_missing_godot_env_unset_emits_tool_json(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical-diagnose", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "diagnose", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--features", "demo",
         "--out", str(tmp_path / "diag.json")])
@@ -994,7 +989,7 @@ def test_cli_diagnose_missing_godot_env_unset_emits_tool_json(
         code = args.func(args)
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical-diagnose"
+    assert payload["tool"] == "measure.diagnose"
     assert payload["ok"] is False
     assert "godot binary not found or not executable" \
         in payload["summary"]["error"]
@@ -1024,13 +1019,13 @@ def test_real_cli_missing_godot_clean_env_emits_tool_json(
     env.update(clean_env)
     env["PYTHONPATH"] = str(REPO / "src")
     proc = sp.run(
-        [sys.executable, "-m", "godot_qa_toolkit.cli", "canonical",
+        [sys.executable, "-m", "godot_qa_toolkit.cli","measure", "run",
          str(project / "src_game"), "--project-root", str(project),
          "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == 1
     payload = json.loads(proc.stdout)
-    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert payload["tool"] == "measure.run" and payload["ok"] is False
     assert "godot binary not found or not executable" \
         in payload["summary"]["error"]
     assert "Traceback" not in proc.stderr
@@ -1051,11 +1046,11 @@ def _spawn_cli_mismatch(tool: str, godot_bin_env: str, project: Path,
     monkeypatch.chdir(tmp_path)
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    tail = ["canonical", str(project / "src_game"),
+    tail = ["measure", "run", str(project / "src_game"),
             "--project-root", str(project),
             "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")]
-    if tool == "canonical-diagnose":
-        tail = ["canonical-diagnose", str(project / "src_game"),
+    if tool == "measure.diagnose":
+        tail = ["measure", "diagnose", str(project / "src_game"),
                 "--project-root", str(project),
                 "--recipe", str(recipe_path), "--features", "demo",
                 "--out", str(tmp_path / "diag.json")]
@@ -1095,7 +1090,7 @@ def test_cli_relative_cwd_drift_canonical(project, tmp_path, monkeypatch):
     wrap = tmp_path / "godot"
     wrap.write_text("#!/bin/sh\nexit 0\n")
     wrap.chmod(0o755)
-    payload = _spawn_cli_mismatch("canonical", "./godot", project,
+    payload = _spawn_cli_mismatch("measure.run", "./godot", project,
                                   tmp_path, monkeypatch)
     assert "path does not exist" in payload["summary"]["error"]
     assert str(project / "godot") in payload["summary"]["error"]
@@ -1105,7 +1100,7 @@ def test_cli_relative_cwd_drift_diagnose(project, tmp_path, monkeypatch):
     wrap = tmp_path / "godot"
     wrap.write_text("#!/bin/sh\nexit 0\n")
     wrap.chmod(0o755)
-    payload = _spawn_cli_mismatch("canonical-diagnose", "./godot", project,
+    payload = _spawn_cli_mismatch("measure.diagnose", "./godot", project,
                                   tmp_path, monkeypatch)
     assert "path does not exist" in payload["summary"]["error"]
     assert str(project / "godot") in payload["summary"]["error"]
@@ -1118,7 +1113,7 @@ def test_cli_exec_format_canonical(project, tmp_path, monkeypatch):
     fake = tmp_path / "fake-godot"
     fake.write_text("this is not an executable\n")
     fake.chmod(0o755)
-    payload = _spawn_cli_mismatch("canonical", str(fake), project,
+    payload = _spawn_cli_mismatch("measure.run", str(fake), project,
                                   tmp_path, monkeypatch)
     assert "not an executable format" in payload["summary"]["error"]
 
@@ -1127,21 +1122,26 @@ def test_cli_exec_format_diagnose(project, tmp_path, monkeypatch):
     fake = tmp_path / "fake-godot"
     fake.write_text("this is not an executable\n")
     fake.chmod(0o755)
-    payload = _spawn_cli_mismatch("canonical-diagnose", str(fake), project,
+    payload = _spawn_cli_mismatch("measure.diagnose", str(fake), project,
                                   tmp_path, monkeypatch)
     assert "not an executable format" in payload["summary"]["error"]
 
 
 def test_canonical_parser_has_godot_bin_flag_consistent():
-    """§SPEC-076 LOW：canonical 错误提示建议的 --godot-bin 旗标必须
-    真实存在于 canonical 子解析器（提示与旗标一致）。"""
+    """§SPEC-076 LOW：measure run 错误提示建议的 --godot-bin 旗标必须
+    真实存在于 measure run 子解析器（提示与旗标一致；SEE-1583 新路径）。"""
     from godot_qa_toolkit.cli import build_parser
     parser = build_parser()
     can_parser = None
     for a in parser._actions:
         choices = getattr(a, "choices", None)
-        if choices and "canonical" in choices:
-            can_parser = choices["canonical"]
+        if choices and "measure" in choices:
+            ms = choices["measure"]
+            for sub in ms._actions:
+                leaf_choices = getattr(sub, "choices", None)
+                if isinstance(leaf_choices, dict) and "run" in leaf_choices:
+                    can_parser = leaf_choices["run"]
+                    break
             break
     assert can_parser is not None
     opt_strings = [opt for act in can_parser._actions
@@ -1226,8 +1226,7 @@ def test_cli_bare_name_project_root_godot_not_pretpassed(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
     buf = io.StringIO()
@@ -1235,7 +1234,7 @@ def test_cli_bare_name_project_root_godot_not_pretpassed(
         code = args.func(args)
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical" and payload["ok"] is False
+    assert payload["tool"] == "measure.run" and payload["ok"] is False
     assert "godot binary not found or not executable" \
         in payload["summary"]["error"]
     assert "not found in PATH" in payload["summary"]["error"]
@@ -1279,7 +1278,7 @@ def _compile_demo_suite(project, tmp_path):
            "TMPDIR": str(tmp_path / "tmp"), "LANG": "C.UTF-8",
            "PYTHONPATH": str(REPO / "src")}
     proc = sp.run(
-        [sys.executable, "-m", "godot_qa_toolkit.cli", "accept", "compile",
+        [sys.executable, "-m", "godot_qa_toolkit.cli","gherkin", "compile",
          str(project / "acceptance" / "features" / "demo.feature"),
          "--project-root", str(project), "--write"],
         capture_output=True, text=True, timeout=60, env=env,
@@ -1289,17 +1288,17 @@ def _compile_demo_suite(project, tmp_path):
 
 def test_accept_run_probe_missing_godot_clean_env(project, tmp_path):
     payload = _spawn_clean_env(
-        ["accept", "run", "--acceptance-probe-keys", "demo"],
+        ["gherkin", "run", "--acceptance-probe-keys", "demo"],
         project, tmp_path)
-    assert payload["tool"] == "accept"
+    assert payload["tool"] == "gherkin"
     assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
 def test_accept_mutate_missing_godot_clean_env(project, tmp_path):
     _compile_demo_suite(project, tmp_path)
     payload = _spawn_clean_env(
-        ["accept", "mutate", "--key", "demo"], project, tmp_path)
-    assert payload["tool"] == "accept"
+        ["gherkin", "mutate", "--key", "demo"], project, tmp_path)
+    assert payload["tool"] == "gherkin"
     assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
@@ -1325,8 +1324,8 @@ def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
 
 def test_coverage_measure_missing_godot_clean_env(project, tmp_path):
     payload = _spawn_clean_env(
-        ["coverage", _mutation_target(project)], project, tmp_path)
-    assert payload["tool"] == "coverage"
+        ["measure", "coverage", _mutation_target(project)], project, tmp_path)
+    assert payload["tool"] == "measure.coverage"
     assert "godot binary not found in PATH" in payload["summary"]["error"]
 
 
@@ -1352,34 +1351,36 @@ def _bad_interpreter_godot(tmp_path):
 
 
 @pytest.mark.parametrize("bad", ["pseudo_elf", "bad_interpreter"])
-@pytest.mark.parametrize("route", ["canonical", "canonical-diagnose",
-                                   "mutation", "coverage", "accept_probe"])
+@pytest.mark.parametrize("route", [("measure", "run"), ("measure", "diagnose"),
+                                   ("mutation",), ("measure", "coverage"),
+                                   ("gherkin", "run", "--acceptance-probe-keys",
+                                    "demo")])
 def test_pseudo_format_five_routes_domain_json(route, bad, project,
                                                tmp_path):
     """§SPEC-079 C：伪 ELF / 坏格式解释器两形态在五命令均领域 JSON
-    ok=false、stderr 零 traceback（canonical 系静态前置、三命令拉起点
-    spawn_godot 兜底，双防线收口）。"""
+    ok=false、stderr 零 traceback（measure 系静态前置、三命令拉起点
+    spawn_godot 兜底，双防线收口；SEE-1583 新命令路径）。"""
     fake = (_pseudo_elf(tmp_path) if bad == "pseudo_elf"
             else _bad_interpreter_godot(tmp_path))
     out = tmp_path / "out.json"
-    if route in ("canonical", "canonical-diagnose"):
+    if route[0] == "measure" and route[-1] in ("run", "diagnose"):
         recipe_path = tmp_path / "recipe.json"
         recipe_path.write_text(json.dumps(_recipe(project)),
                                encoding="utf-8")
-        args = [route, str(project / "src_game"),
+        args = [*route, str(project / "src_game"),
                 "--recipe", str(recipe_path), "--out", str(out)]
-        if route == "canonical-diagnose":
+        if route[-1] == "diagnose":
             args += ["--features", "demo"]
-    elif route == "mutation":
+    elif route[0] == "mutation":
         args = ["mutation", _mutation_target(project)]
-    elif route == "coverage":
-        args = ["coverage", _mutation_target(project)]
+    elif route == ("measure", "coverage"):
+        args = ["measure", "coverage", _mutation_target(project)]
     else:
-        args = ["accept", "run", "--acceptance-probe-keys", "demo"]
+        args = list(route)
     payload = _spawn_clean_env(args, project, tmp_path,
                                extra_env={"GQT_GODOT_BIN": str(fake)})
-    assert payload["tool"].split("-")[0] in ("canonical", "mutation",
-                                             "coverage", "accept")
+    assert payload["tool"] in ("measure.run", "measure.diagnose", "mutation",
+                               "measure.coverage", "gherkin")
     assert payload["ok"] is False
     assert payload["summary"]["error"]
 
@@ -1434,8 +1435,7 @@ def test_entry_relative_godot_bin_project_only_accepted(
     monkeypatch.setenv("GQT_GODOT_BIN", "./quiet-godot")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json")])
     orig = sp.run
@@ -1448,7 +1448,7 @@ def test_entry_relative_godot_bin_project_only_accepted(
         sp.run = orig
     assert code == 0
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical" and payload["ok"] is True
+    assert payload["tool"] == "measure.run" and payload["ok"] is True
 
 
 def test_flag_relative_godot_bin_project_only_accepted(
@@ -1466,8 +1466,7 @@ def test_flag_relative_godot_bin_project_only_accepted(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path), "--out", str(tmp_path / "out.json"),
         "--godot-bin", "./quiet-godot"])
@@ -1490,4 +1489,4 @@ def test_flag_relative_godot_bin_project_only_accepted(
             os.environ["GQT_GODOT_BIN"] = old_bin
     assert code == 0
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical" and payload["ok"] is True
+    assert payload["tool"] == "measure.run" and payload["ok"] is True

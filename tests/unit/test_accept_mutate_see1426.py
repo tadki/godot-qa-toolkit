@@ -1,4 +1,4 @@
-"""SEE-1426 P3 — `gqt accept mutate` 单测（§SPEC-1426-11/12/13/14/15）。
+"""SEE-1426 P3 — `gqt gherkin mutate` 单测（§SPEC-1426-11/12/13/14/15）。
 
 -11 变异矩阵：数值 ±1/边界、布尔翻转、枚举域内邻值、域外从不生成；
 -12 三层防伪：①变异器对抗性金测（70/71 fixture 恰好 ±1/边界/邻值）
@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept import OPS_VERSION
-from godot_qa_toolkit.accept.compile import compile_feature, sha256_of
-from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
-from godot_qa_toolkit.accept.mutate_runner import AcceptRunError, run_mutate
+from godot_qa_toolkit.gherkin import OPS_VERSION
+from godot_qa_toolkit.gherkin.compile import compile_feature, sha256_of
+from godot_qa_toolkit.gherkin.mutate import mutate_case, mutate_ir
+from godot_qa_toolkit.gherkin.mutate_runner import AcceptRunError, run_mutate
 
 _CASE_KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n* test_s_000_01\n  [Failed]\n"
 _CASE_PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
@@ -28,7 +28,7 @@ _CASE_PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
 def _restore_subprocess():
     """fake 直接换全局 subprocess 模块属性——autouse 兜底还原防泄漏。"""
     import subprocess as sp
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     orig_run, orig_popen = sp.run, sp.Popen
     yield
     sp.run, sp.Popen = orig_run, orig_popen
@@ -39,7 +39,7 @@ def _fake_gut(monkeypatch, *, returncode: int, output: str,
               baseline: tuple[int, str] | None = None) -> None:
     """F-C：baseline=(rc, output) 时首调用（未变异基线轮）单独供给，
     其余调用走主脚本；基线缺省沿用主脚本（适用绿基线形态的测试）。"""
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     calls = {"n": 0}
 
@@ -305,7 +305,7 @@ def test_worker_channel_differential_verdicts(project: Path, tmp_path: Path) -> 
     _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT,
               baseline=(0, _CASE_PASS_OUTPUT))
     batch = run_mutate(project, "demo", use_worker=False)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(
         1, ["test_s_000_00", "test_s_000_01"])
     worker = run_mutate(project, "demo", use_worker=True)
@@ -317,7 +317,7 @@ def test_worker_channel_differential_verdicts(project: Path, tmp_path: Path) -> 
 
 def test_worker_flag_in_contract(project: Path, tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     mr.subprocess.Popen = lambda *a, **k: _FakeWorkerIO(
         1, ["test_s_000_00", "test_s_000_01"])
     result = run_mutate(project, "demo", use_worker=True)

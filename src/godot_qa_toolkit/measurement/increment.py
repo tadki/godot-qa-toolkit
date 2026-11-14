@@ -8,7 +8,7 @@
 - 改生产文件 → 失效面 = 触达该文件的测试（fn 边反查）∪ 静态索引直连
   消费者（gdself depth==1），重跑候选脚本并整体替换其边；
 - 新增生产文件 / recipe_hash 失配 / 校准到期 / 重跑面过大 → 回退全脸
-  （内部转调 run_canonical，provenance.mode 标注原因）；
+  （内部转调 run_measurement，provenance.mode 标注原因）；
 - 删除测试脚本 → 仅删边不重跑；改名 = 旧脚本删边 + 新脚本重跑。
 
 如实边界：车道事件计数（hit_events/rates/phases/hotspots）不做增量合并，
@@ -37,7 +37,7 @@ from .orchestrator import (
     _read_registries,
     build_attribution_map,
     make_run_uuid,
-    run_canonical,
+    run_measurement,
 )
 
 DEFAULT_RERUN_FULL_FACE_RATIO = 0.5
@@ -275,7 +275,7 @@ def run_attribution_increment(project_root: str | Path,
                               calibration_every, ratio,
                               rerun_full_face_ratio)
     if reason != "incremental":
-        # 全脸回退必须传 **raw recipe**（run_canonical 自行注入并计算
+        # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
         # 永久"不新鲜"自锁）
         return _fallback_full_face(root, target_files, raw_recipe, out_path,
@@ -424,7 +424,7 @@ def _merged_file_sha(root: Path, baseline: dict,
 def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
                         out_path: str | Path, classes: dict, reason: str,
                         causal: bool, timeout_s: int, t0: float) -> dict:
-    report = run_canonical(root, target_files, recipe,
+    report = run_measurement(root, target_files, recipe,
                            timeout_s=timeout_s, test_attribution=True,
                            attribution_causal=causal,
                            attribution_out=str(out_path))

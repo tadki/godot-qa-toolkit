@@ -31,16 +31,17 @@ def _args(*argv: str) -> pytest.MonkeyPatch:
 
 
 class TestGherkinSubcommandRemoved:
-    """SEE-1468 M5-b 物理删除收口：gherkin 子命令与 loader 均已自 CLI
-    移除（build_parser 不再注册；cmd_gherkin 不复存在）。"""
+    """SEE-1583 反转 SEE-1468 收口：gherkin 子命令回归现役（原 accept
+    迁入），旧 accept 入口不再注册。"""
 
-    def test_gherkin_subcommand_unregistered(self):
+    def test_gherkin_subcommand_registered(self):
         parser = build_parser()
         choices = parser._subparsers._group_actions[0].choices
-        assert "gherkin" not in choices
+        assert "gherkin" in choices
+        assert "accept" not in choices
 
-    def test_cmd_gherkin_removed_from_cli_module(self):
-        assert not hasattr(cli_mod, "cmd_gherkin")
+    def test_cmd_gherkin_present_in_cli_module(self):
+        assert callable(getattr(cli_mod, "cmd_gherkin", None))
 
     def test_gherkin_args_rejected_at_parse(self):
         with pytest.raises(SystemExit) as exc:

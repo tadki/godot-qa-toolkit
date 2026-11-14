@@ -1,12 +1,15 @@
-"""Unified CLI for godot-qa-toolkit (SEE-1268 M1).
+"""Unified CLI for godot-qa-toolkit (SEE-1268 M1; SEE-1583 hierarchy).
 
 Every subcommand emits the unified JSON contract:
     {"tool": ..., "ok": bool, "summary": {...}, "failures": [...]}
 
 Exit code is 0 on ok, 1 on any failure — the machine verdict consumers rely on.
-The `gherkin` command was retired in SEE-1468 M5-b (runner/expectations
-physically deleted; parser promoted to accept.parser; judgement faces live
-in `gqt accept` and pytest-bdd)."""
+SEE-1583 groups the surface into four top-level entries — `gherkin`
+(acceptance pipeline, formerly `accept`), `mutation`, `measure` (all
+measurement/scoring/diagnostics faces) and `doctor`. Old top-level entries
+are gone without aliases or deprecation shims: unknown names exit 2 via
+argparse. Acceptance-domain terms (`acceptance/`, acceptance-suite/1)
+describe the tested project's acceptance face and are not CLI names."""
 
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ def _godot_bin_ready(project_root: Path,
     """§SPEC-075/076/078：解析 godot 启动命令并做同源启动校验（存在性+
     执行位+exec-format+shebang 解释器）——校验条件与子进程实际拉起条
     件一致。核心实现为 mutation.inject.godot_launch_issue（§SPEC-078 M3
-    同源：canonical 与 mutation/coverage/accept 共用同一校验函数）。
+    同源：measurement 与 mutation/measure coverage/gherkin 共用同一校验函数）。
 
     - 相对路径按子进程 cwd（= project_root）解析后校验（消除 CLI cwd
       与子进程 cwd 的漂移窗口，R32-M 形态 1）；
@@ -98,11 +101,11 @@ def _add_godot_bin_arg(parser: argparse.ArgumentParser) -> None:
                              "this flag > GQT_GODOT_BIN env > PATH (SEE-1525)")
 
 
-def _accept_compile(args: argparse.Namespace) -> int:
+def _gherkin_compile(args: argparse.Namespace) -> int:
     from pathlib import Path as _P
 
-    from .accept.compile import compile_feature
-    from .accept.suite import (SuiteError, compile_keys_to_suite,
+    from .gherkin.compile import compile_feature
+    from .gherkin.suite import (SuiteError, compile_keys_to_suite,
                                create_suite_dir)
 
     keys = getattr(args, "keys", None)
@@ -117,12 +120,12 @@ def _accept_compile(args: argparse.Namespace) -> int:
                                          if k.strip()], suite_dir)
         except SuiteError as e:
             return _emit({
-                "tool": "accept", "ok": False,
+                "tool": "gherkin", "ok": False,
                 "summary": {"error": str(e), "suite_error": True},
                 "failures": [{"reason": f"suite_error: {e}"}],
             })
         return _emit({
-            "tool": "accept", "ok": True,
+            "tool": "gherkin", "ok": True,
             "summary": {
                 "mode": "private-suite",
                 "keys": rec["keys"],
@@ -133,9 +136,9 @@ def _accept_compile(args: argparse.Namespace) -> int:
         })
     if not args.feature:
         return _emit({
-            "tool": "accept", "ok": False,
-            "summary": {"error": "accept compile needs <feature> or --keys"},
-            "failures": [{"reason": "accept compile needs <feature> or "
+            "tool": "gherkin", "ok": False,
+            "summary": {"error": "gherkin compile needs <feature> or --keys"},
+            "failures": [{"reason": "gherkin compile needs <feature> or "
                                     "--keys"}],
         })
     suite, error = compile_feature(
@@ -143,7 +146,7 @@ def _accept_compile(args: argparse.Namespace) -> int:
         write=args.write, clean=not args.no_clean, out_dir=out_dir)
     if error is not None:
         return _emit({
-            "tool": "accept", "ok": False,
+            "tool": "gherkin", "ok": False,
             "summary": {"error": error["reason"]},
             "failures": [error],
         })
@@ -166,7 +169,7 @@ def _accept_compile(args: argparse.Namespace) -> int:
                 f"acceptance/generated/{suite.feature_key}.manifest.json",
             ]
     return _emit({
-        "tool": "accept", "ok": True,
+        "tool": "gherkin", "ok": True,
         "summary": {
             "feature": suite.ir["feature"],
             "feature_key": suite.feature_key,
@@ -178,14 +181,14 @@ def _accept_compile(args: argparse.Namespace) -> int:
     })
 
 
-def cmd_accept(args: argparse.Namespace) -> int:
-    from .accept.run import AcceptRunError, run_suite
-    from .accept.suite import SuiteError, run_acceptance_probe, run_suite_dir
+def cmd_gherkin(args: argparse.Namespace) -> int:
+    from .gherkin.run import AcceptRunError, run_suite
+    from .gherkin.suite import SuiteError, run_acceptance_probe, run_suite_dir
 
-    if args.accept_command == "compile":
-        return _accept_compile(args)
+    if args.gherkin_command == "compile":
+        return _gherkin_compile(args)
     # run / mutate
-    early = _apply_godot_bin_or_contract("accept", args)
+    early = _apply_godot_bin_or_contract("gherkin", args)
     if early is not None:
         return early
     # §SPEC-079 B：启动校验不在入口静态拦截（无 godot CI 形态的 mocked
@@ -194,10 +197,10 @@ def cmd_accept(args: argparse.Namespace) -> int:
     from .mutation.inject import BinaryConfigError
     probe_keys = getattr(args, "acceptance_probe_keys", None)
     suite_dir_arg = getattr(args, "suite_dir", None)
-    if args.accept_command == "run" and (probe_keys or suite_dir_arg):
+    if args.gherkin_command == "run" and (probe_keys or suite_dir_arg):
         if probe_keys and suite_dir_arg:
             return _emit({
-                "tool": "accept", "ok": False,
+                "tool": "gherkin", "ok": False,
                 "summary": {"error": "--acceptance-probe-keys compiles its "
                                      "own private suite dir; --suite-dir "
                                      "is mutually exclusive"},
@@ -209,46 +212,46 @@ def cmd_accept(args: argparse.Namespace) -> int:
                         if k.strip()]
                 if not keys:
                     return _emit({
-                        "tool": "accept", "ok": False,
+                        "tool": "gherkin", "ok": False,
                         "summary": {"error": "no keys parsed"},
                         "failures": [{"reason": "no keys parsed"}],
                     })
                 probe = run_acceptance_probe(args.project_root, keys,
                                              timeout_s=args.timeout)
-                return _emit({"tool": "accept", "ok": probe["suite_ok"],
+                return _emit({"tool": "gherkin", "ok": probe["suite_ok"],
                               "summary": probe, "failures": []})
             record = run_suite_dir(args.project_root, suite_dir_arg,
                                    timeout_s=args.timeout)
-            return _emit({"tool": "accept", "ok": record["ok"],
+            return _emit({"tool": "gherkin", "ok": record["ok"],
                           "summary": record, "failures": []})
         except BinaryConfigError as e:
             return _emit({
-                "tool": "accept", "ok": False,
+                "tool": "gherkin", "ok": False,
                 "summary": {"error": str(e)},
                 "failures": [{"reason": str(e)}],
             })
         except AcceptRunError as e:
             return _emit({
-                "tool": "accept", "ok": False,
+                "tool": "gherkin", "ok": False,
                 "summary": {"error": str(e), "run_error": True},
                 "failures": [{"reason": f"run_error: {e}"}],
             })
         except SuiteError as e:
             return _emit({
-                "tool": "accept", "ok": False,
+                "tool": "gherkin", "ok": False,
                 "summary": {"error": str(e), "suite_error": True},
                 "failures": [{"reason": f"suite_error: {e}"}],
             })
     if not args.key:
         return _emit({
-            "tool": "accept", "ok": False,
+            "tool": "gherkin", "ok": False,
             "summary": {"error": "--key is required without "
                                  "--suite-dir/--acceptance-probe-keys"},
             "failures": [{"reason": "--key is required"}],
         })
     try:
-        if args.accept_command == "mutate":
-            from .accept.mutate_runner import run_mutate
+        if args.gherkin_command == "mutate":
+            from .gherkin.mutate_runner import run_mutate
             return _emit(run_mutate(
                 args.directory if args.directory else args.project_root,
                 args.key, timeout_s=args.timeout, use_worker=args.worker))
@@ -257,26 +260,26 @@ def cmd_accept(args: argparse.Namespace) -> int:
                                timeout_s=args.timeout))
     except BinaryConfigError as e:
         return _emit({
-            "tool": "accept", "ok": False,
+            "tool": "gherkin", "ok": False,
             "summary": {"error": str(e)},
             "failures": [{"reason": str(e)}],
         })
     except AcceptRunError as e:
         return _emit({
-            "tool": "accept", "ok": False,
+            "tool": "gherkin", "ok": False,
             "summary": {"error": str(e), "run_error": True},
             "failures": [{"reason": f"run_error: {e}"}],
         })
 
 
-def cmd_arch(args: argparse.Namespace) -> int:
+def cmd_measure_arch(args: argparse.Namespace) -> int:
     # gdtoolkit 依赖延迟导入（同 complexity/mutation——§SPEC-114 最小 CI 面）。
     from .arch.gate import run_arch_gate
 
     return _emit(run_arch_gate(args.paths))
 
 
-def cmd_complexity(args: argparse.Namespace) -> int:
+def cmd_measure_complexity(args: argparse.Namespace) -> int:
     from .complexity.gate import GateConfig, run_gate
 
     # When --max is lowered below --warn, warn collapses with it: an explicit
@@ -464,10 +467,10 @@ def _reuse_coverage_flag(args: argparse.Namespace) -> bool:
     return not getattr(args, "no_reuse_coverage", False)
 
 
-def cmd_risk(args: argparse.Namespace) -> int:
+def cmd_measure_risk(args: argparse.Namespace) -> int:
     from .risk.shadow import run_shadow_from_paths
 
-    early = _apply_godot_bin_or_contract("risk", args)
+    early = _apply_godot_bin_or_contract("measure.risk", args)
     if early is not None:
         return early
     paths = [Path(p) for p in args.files]
@@ -475,7 +478,7 @@ def cmd_risk(args: argparse.Namespace) -> int:
     if missing:
         return _emit(
             {
-                "tool": "risk",
+                "tool": "measure.risk",
                 "ok": False,
                 "summary": {"error": f"target files not found: {missing}"},
                 "failures": [{"reason": f"target files not found: {missing}"}],
@@ -501,7 +504,7 @@ def cmd_risk(args: argparse.Namespace) -> int:
     scored = report["ranking"]["top"]
     return _emit(
         {
-            "tool": "risk",
+            "tool": "measure.risk",
             "ok": True,
             "summary": {
                 "report": str(report_path),
@@ -519,7 +522,7 @@ def cmd_risk(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_parity(args: argparse.Namespace) -> int:
+def cmd_measure_parity(args: argparse.Namespace) -> int:
     from .complexity.parity import parity_paths
     from .registry.snapshot import save_snapshot
 
@@ -528,7 +531,7 @@ def cmd_parity(args: argparse.Namespace) -> int:
     if missing:
         return _emit(
             {
-                "tool": "parity",
+                "tool": "measure.parity",
                 "ok": False,
                 "summary": {"error": f"paths not found: {missing}"},
                 "failures": [{"reason": f"paths not found: {missing}"}],
@@ -560,7 +563,7 @@ def cmd_parity(args: argparse.Namespace) -> int:
     return _emit(report)
 
 
-def cmd_registry(args: argparse.Namespace) -> int:
+def cmd_measure_registry_diff(args: argparse.Namespace) -> int:
     from .registry.snapshot import diff_registries, load_snapshot, save_snapshot
 
     try:
@@ -571,7 +574,7 @@ def cmd_registry(args: argparse.Namespace) -> int:
         # missing snapshots fail loud with the unified contract (ok=false)
         return _emit(
             {
-                "tool": "registry",
+                "tool": "measure.registry-diff",
                 "ok": False,
                 "summary": {"error": str(e)},
                 "failures": [{"reason": f"snapshot load failed: {e}"}],
@@ -584,8 +587,8 @@ def cmd_registry(args: argparse.Namespace) -> int:
     return _emit(diff)
 
 
-def cmd_recipe(args: argparse.Namespace) -> int:
-    from .canonical.recipe import build_recipe
+def cmd_measure_suite(args: argparse.Namespace) -> int:
+    from .measurement.recipe import build_recipe
 
     exclusions = []
     for raw in args.exclude:
@@ -598,7 +601,7 @@ def cmd_recipe(args: argparse.Namespace) -> int:
             error = (f"--exclude expects scope:entry:reason (entry may contain "
                      f"':' as in res://…), got {raw!r}")
             return _emit({
-                "tool": "recipe",
+                "tool": "measure.suite",
                 "ok": False,
                 "summary": {"error": error},
                 "failures": [{"reason": error}],
@@ -609,7 +612,7 @@ def cmd_recipe(args: argparse.Namespace) -> int:
     )
     if error is not None:
         return _emit({
-            "tool": "recipe",
+            "tool": "measure.suite",
             "ok": False,
             "summary": {"error": error},
             "failures": [{"reason": error}],
@@ -619,7 +622,7 @@ def cmd_recipe(args: argparse.Namespace) -> int:
         json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return _emit({
-        "tool": "recipe",
+        "tool": "measure.suite",
         "ok": True,
         "summary": {
             "recipe_version": recipe["recipe_version"],
@@ -633,13 +636,13 @@ def cmd_recipe(args: argparse.Namespace) -> int:
     })
 
 
-def cmd_coverage(args: argparse.Namespace) -> int:
+def cmd_measure_coverage(args: argparse.Namespace) -> int:
     from .coverage.runner import run_coverage
     from .timing import TimingStore
 
     # §SPEC-1525-001/002：覆盖注入先行——TimingStore 的 key 二进制成分与
     # 启动 argv 解析同源（构造器内 detect_binary_kind 实时解析）。
-    early = _apply_godot_bin_or_contract("coverage", args)
+    early = _apply_godot_bin_or_contract("measure.coverage", args)
     if early is not None:
         return early
     from .coverage.evidence import prune_sinks as _prune, recover_bundle as _recover
@@ -647,7 +650,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
 
     if not getattr(args, "recover", None) and not getattr(args, "prune_sinks", None)             and not args.file:
         return _emit({
-            "tool": "coverage",
+            "tool": "measure.coverage",
             "ok": False,
             "summary": {"error": "measure mode requires a target file "
                                "(or --recover/--prune-sinks)"},
@@ -655,12 +658,12 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         })
     if getattr(args, "recover", None):
         result = _recover(_P(args.recover), project_root=args.project_root)
-        result.update({"tool": "coverage", "ok": True})
+        result.update({"tool": "measure.coverage", "ok": True})
         return _emit(result)
     if getattr(args, "prune_sinks", None):
         result = _prune(args.project_root,
                         retention_days=getattr(args, "retain_days", 7))
-        result.update({"tool": "coverage", "ok": True})
+        result.update({"tool": "measure.coverage", "ok": True})
         return _emit(result)
     # §SPEC-079 B：measure 是 coverage 唯一拉起 Godot 的路径——入口不做
     # 静态拦截（recover/prune 离线路径与 mocked 用例不受影响），
@@ -672,18 +675,17 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             project_root=args.project_root,
             min_percent=args.min_percent,
             timeout_s=args.timeout,
-            timing_store=TimingStore(args.project_root, args.file,
-                                     "coverage", None),
+            timing_store=TimingStore(args.project_root, args.file, "coverage", None),
             tests_glob=args.tests,
             evidence_out=getattr(args, "evidence_out", None),
         )
     except BinaryConfigError as e:
-        return _emit({"tool": "coverage", "ok": False,
+        return _emit({"tool": "measure.coverage", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})
     except FileNotFoundError as e:
         result = {
-            "tool": "coverage",
+            "tool": "measure.coverage",
             "ok": False,
             "summary": {"file": args.file, "error": str(e)},
             "failures": [{"reason": str(e)}],
@@ -706,19 +708,19 @@ def _attribution_args(args: argparse.Namespace
     return enabled, out, causal
 
 
-def cmd_attr_update(args: argparse.Namespace) -> int:
+def cmd_measure_map_update(args: argparse.Namespace) -> int:
     import json as _json
     from pathlib import Path as _P
 
-    from .canonical.increment import IncrementError, run_attribution_increment
+    from .measurement.increment import IncrementError, run_attribution_increment
 
-    rc = _apply_godot_bin_or_contract("attr-update", args)
+    rc = _apply_godot_bin_or_contract("measure.map-update", args)
     if rc is not None:
         return rc
     try:
         recipe = _json.loads(_P(args.recipe).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        return _emit({"tool": "attr-update", "ok": False,
+        return _emit({"tool": "measure.map-update", "ok": False,
                       "summary": {"error": f"recipe load failed: {e}"},
                       "failures": [{"reason": f"recipe load failed: {e}"}]})
     roots = [_P(r) for r in args.roots]
@@ -732,22 +734,22 @@ def cmd_attr_update(args: argparse.Namespace) -> int:
             attribution_causal=bool(args.attribution_causal),
             calibration_every=args.calibration_every)
     except IncrementError as e:
-        return _emit({"tool": "attr-update", "ok": False,
+        return _emit({"tool": "measure.map-update", "ok": False,
                       "summary": {"error": str(e), "increment_error": True},
                       "failures": [{"reason": f"increment_error: {e}"}]})
-    return _emit({"tool": "attr-update", "ok": True,
+    return _emit({"tool": "measure.map-update", "ok": True,
                   "summary": report, "failures": []})
 
 
-def cmd_canonical(args: argparse.Namespace) -> int:
+def cmd_measure_run(args: argparse.Namespace) -> int:
     import json as _json
 
     from pathlib import Path as _P
 
-    from .canonical.orchestrator import CanonicalError, run_canonical
-    from .canonical.recipe import verify_recipe
+    from .measurement.orchestrator import MeasurementError, run_measurement
+    from .measurement.recipe import verify_recipe
 
-    rc = _apply_godot_bin_or_contract("canonical", args)
+    rc = _apply_godot_bin_or_contract("measure.run", args)
     if rc is not None:
         return rc
 
@@ -755,19 +757,19 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     try:
         recipe = _json.loads(recipe_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        return _emit({"tool": "canonical", "ok": False,
+        return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": f"recipe load failed: {e}"},
                       "failures": [{"reason": f"recipe load failed: {e}"}]})
     ok, reason = verify_recipe(recipe)
     if not ok:
-        return _emit({"tool": "canonical", "ok": False,
+        return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": f"recipe invalid: {reason}"},
                       "failures": [{"reason": f"recipe invalid: {reason}"}]})
     roots = [_P(r) for r in args.roots]
     targets = sorted({str(p) for root in roots
                       for p in root.rglob("*.gd") if p.is_file()})
     if not targets:
-        return _emit({"tool": "canonical", "ok": False,
+        return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": "no .gd targets under roots"},
                       "failures": [{"reason": "no .gd targets"}]})
     probe_keys = (args.acceptance_probe_keys or None)
@@ -779,7 +781,7 @@ def cmd_canonical(args: argparse.Namespace) -> int:
         try:
             doc = _json.loads(_P(bf_path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            return _emit({"tool": "canonical", "ok": False,
+            return _emit({"tool": "measure.run", "ok": False,
                           "summary": {"error":
                                       f"baseline-failures load failed: {e}"},
                           "failures": [{"reason":
@@ -790,7 +792,7 @@ def cmd_canonical(args: argparse.Namespace) -> int:
                 or not all(isinstance(x, list) and len(x) == 2
                            and all(isinstance(y, str) for y in x)
                            for x in pairs):
-            return _emit({"tool": "canonical", "ok": False,
+            return _emit({"tool": "measure.run", "ok": False,
                           "summary": {"error":
                                       "baseline-failures must be a JSON "
                                       "array of [script, test] pairs (or "
@@ -805,14 +807,14 @@ def cmd_canonical(args: argparse.Namespace) -> int:
         try:
             it_doc = _json.loads(_P(it_path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            return _emit({"tool": "canonical", "ok": False,
+            return _emit({"tool": "measure.run", "ok": False,
                           "summary": {"error":
                                       f"intolerant-tests load failed: {e}"},
                           "failures": [{"reason":
                                         f"intolerant-tests load failed: "
                                         f"{e}"}]})
         if not isinstance(it_doc, dict):
-            return _emit({"tool": "canonical", "ok": False,
+            return _emit({"tool": "measure.run", "ok": False,
                           "summary": {"error":
                                       "intolerant-tests must be an object "
                                       "with optional tests/coverage_"
@@ -823,11 +825,11 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     # §SPEC-075/076：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
-        return _emit_godot_unavailable("canonical", godot_cmd, godot_reason)
+        return _emit_godot_unavailable("measure.run", godot_cmd, godot_reason)
     test_attribution, attribution_out, attribution_causal = (
         _attribution_args(args))
     try:
-        report = run_canonical(
+        report = run_measurement(
             args.project_root, targets, recipe,
             probe_keys=probe_keys, timeout_s=args.timeout,
             evidence_out=getattr(args, "evidence_dir", None),
@@ -845,15 +847,15 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             arms_parallel=bool(getattr(args, "arms_parallel", False)),
             acceptance_adaptive=bool(
                 getattr(args, "acceptance_adaptive", False)))
-    except CanonicalError as e:
-        return _emit({"tool": "canonical", "ok": False,
-                      "summary": {"error": str(e), "canonical_error": True},
-                      "failures": [{"reason": f"canonical_error: {e}"}]})
+    except MeasurementError as e:
+        return _emit({"tool": "measure.run", "ok": False,
+                      "summary": {"error": str(e), "measurement_error": True},
+                      "failures": [{"reason": f"measurement_error: {e}"}]})
     out_path = _P(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_json.dumps(report, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    return _emit({"tool": "canonical", "ok": report["ok"],
+    return _emit({"tool": "measure.run", "ok": report["ok"],
                   "summary": report,
                   "failures": ([] if report["ok"] else
                                [{"reason": "union invalid or arms invalid"}])})
@@ -890,56 +892,56 @@ def _diagnose_gate(report: dict) -> tuple[bool, list[dict]]:
     return (not timed_out), failures
 
 
-def cmd_canonical_diagnose(args: argparse.Namespace) -> int:
+def cmd_measure_diagnose(args: argparse.Namespace) -> int:
     """§SPEC-048 diagnostic-only acceptance 计时模式。"""
     import json as _json
 
     from pathlib import Path as _P
 
-    from .canonical.orchestrator import CanonicalError, run_canonical_diagnose
-    from .canonical.recipe import verify_recipe
+    from .measurement.orchestrator import MeasurementError, run_measurement_diagnose
+    from .measurement.recipe import verify_recipe
 
-    rc = _apply_godot_bin_or_contract("canonical-diagnose", args)
+    rc = _apply_godot_bin_or_contract("measure.diagnose", args)
     if rc is not None:
         return rc
 
     # §SPEC-075/076：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
-        return _emit_godot_unavailable("canonical-diagnose", godot_cmd,
+        return _emit_godot_unavailable("measure.diagnose", godot_cmd,
                                        godot_reason)
 
     recipe_path = _P(args.recipe)
     try:
         recipe = _json.loads(recipe_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        return _emit({"tool": "canonical-diagnose", "ok": False,
+        return _emit({"tool": "measure.diagnose", "ok": False,
                       "summary": {"error": f"recipe load failed: {e}"},
                       "failures": [{"reason": f"recipe load failed: {e}"}]})
     ok, reason = verify_recipe(recipe)
     if not ok:
-        return _emit({"tool": "canonical-diagnose", "ok": False,
+        return _emit({"tool": "measure.diagnose", "ok": False,
                       "summary": {"error": f"recipe invalid: {reason}"},
                       "failures": [{"reason": f"recipe invalid: {reason}"}]})
     targets = _diagnose_gd_targets([_P(r) for r in args.roots])
     if not targets:
-        return _emit({"tool": "canonical-diagnose", "ok": False,
+        return _emit({"tool": "measure.diagnose", "ok": False,
                       "summary": {"error": "no .gd targets under roots"},
                       "failures": [{"reason": "no .gd targets"}]})
     keys = [k.strip() for k in args.features.split(",") if k.strip()]
     try:
-        report = run_canonical_diagnose(
+        report = run_measurement_diagnose(
             args.project_root, targets, recipe, keys,
             timeout_s=args.timeout, progress_out=args.out)
-    except CanonicalError as e:
-        return _emit({"tool": "canonical-diagnose", "ok": False,
+    except MeasurementError as e:
+        return _emit({"tool": "measure.diagnose", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})
     _P(args.out).write_text(
         _json.dumps(report, ensure_ascii=False, indent=1) + "\n",
         encoding="utf-8")
     ok, failures = _diagnose_gate(report)
-    return _emit({"tool": "canonical-diagnose", "ok": ok,
+    return _emit({"tool": "measure.diagnose", "ok": ok,
                   "summary": _diagnose_summary(report), "failures": failures})
 
 
@@ -947,16 +949,186 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gqt", description="godot-qa-toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    can = sub.add_parser("canonical", help="dual-arm batch coverage orchestration (SEE-1546 WP3 PR-C)")
+    # --- gherkin（原 accept；SEE-1583 名称回归领域标准，管线不变）---
+    gh = sub.add_parser("gherkin", help="Gherkin acceptance pipeline (SEE-1426 P2)")
+    ghsub = gh.add_subparsers(dest="gherkin_command", required=True)
+
+    acc = ghsub.add_parser("compile", help=".feature -> versioned IR + generated GUT tests")
+    acc.add_argument("feature", nargs="?", default=None,
+                     help="path to the .feature file (omit when --keys "
+                          "selects the private-suite set, §SPEC-035)")
+    acc.add_argument("--project-root", required=True,
+                     help="target Godot project root (writes acceptance/ir + acceptance/generated)")
+    acc.add_argument("--write", action="store_true",
+                     help="opt-in: write ir/generated into the project (contract §6 "
+                          "whitelist dirs; omitted = dry compile, summary only)")
+    acc.add_argument("--no-clean", action="store_true",
+                     help="keep existing generated artifacts instead of clean-then-generate")
+    acc.add_argument("--keys", default=None,
+                     help="§SPEC-035: comma-separated feature keys — "
+                          "compile the selected set into a private suite "
+                          "dir (dir = selection set); pairs with --out-dir, "
+                          "or creates a fresh .gqt-run-<uuid> dir")
+    acc.add_argument("--out-dir", default=None,
+                     help="private suite dir to write into instead of "
+                          "acceptance/ir + acceptance/generated")
+    acc.set_defaults(func=cmd_gherkin)
+
+    acr = ghsub.add_parser("run", help="replay-check + headless-run the generated suite")
+    acr.add_argument("directory", nargs="?", default=None,
+                     help="alternative project root (default: --project-root)")
+    acr.add_argument("--project-root", required=True,
+                     help="target Godot project root containing addons/gut/")
+    acr.add_argument("--key", default=None,
+                     help="feature key the suite was compiled under "
+                          "(required without --suite-dir/--acceptance-probe-keys)")
+    acr.add_argument("--suite-dir", default=None,
+                     help="§SPEC-035 private suite dir — run the whole dir "
+                          "(dir = selection set) with acceptance-suite/1 "
+                          "reconciliation")
+    acr.add_argument("--acceptance-probe-keys", nargs="?",
+                     const="aidomain_integration", default=None,
+                     help="W4 cost probe: compile+run these comma-separated "
+                          "keys via the private-dir pipeline and emit a "
+                          "performance.acceptance_probe record (default: "
+                          "aidomain_integration)")
+    acr.add_argument("--timeout", type=int, default=120,
+                     help="GUT timeout seconds (default 120)")
+    _add_godot_bin_arg(acr)
+    acr.set_defaults(func=cmd_gherkin)
+
+    acm = ghsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
+    acm.add_argument("directory", nargs="?", default=None,
+                     help="alternative project root (default: --project-root)")
+    acm.add_argument("--project-root", required=True,
+                     help="target Godot project root containing addons/gut/")
+    acm.add_argument("--key", required=True,
+                     help="feature key the suite was compiled under")
+    acm.add_argument("--timeout", type=int, default=120,
+                     help="GUT timeout seconds per mutant round (default 120)")
+    acm.add_argument("--worker", action="store_true",
+                     help="opt-in true resident-worker channel: the generated "
+                          "accept_worker.gd artifact serves one godot process "
+                          "for the whole matrix via stdin NDJSON + ir_file "
+                          "transfer, with per-mutant hard discipline "
+                          "(release+rebuild+smoke probe, failure = run_error) "
+                          "and a per-round verdict timeout (SEE-1426 §SPEC-14)")
+    _add_godot_bin_arg(acm)
+    acm.set_defaults(func=cmd_gherkin)
+
+    # --- mutation（名称与语义准确，保持一级）---
+    m = sub.add_parser("mutation", help="mutation test one or more .gd files")
+    m.add_argument("files", nargs="+", help="the .gd file(s) to mutate")
+    m.add_argument("--project-root", required=True, help="project root containing addons/gut/")
+    m.add_argument("--budget", type=int, default=50, help="max mutants (default 50)")
+    m.add_argument("--timeout", type=int, default=60, help="GUT timeout seconds (default 60)")
+    m.add_argument("--dry-run", action="store_true",
+                   help="list mutation sites without running GUT (SPEC-009)")
+    m.add_argument("--tests", default=None,
+                   help="scoped GUT dir override, e.g. res://tests/save/ "
+                        "(SPEC-009); omitted = SEE-1581 runtime truth-map "
+                        "selection — a fresh mapping picks the touching test "
+                        "set (zero-ref is a terminal short-circuit, no "
+                        "fallback), an unusable mapping fails the run")
+    m.add_argument("--jobs", type=int, default=None,
+                   help="worker pool size for per-file AND per-mutant slicing "
+                        "(a single file is sliced per-mutant too); default = "
+                        "max(2, cpu//2); --jobs 1 forces serial (SEE-1413)")
+    m.add_argument("--resume", action="store_true",
+                   help="skip mutants whose verdicts are already in the resume store "
+                        "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
+                        "re-runs them — every run persists verdicts, resume just "
+                        "turns on the skip")
+    m.add_argument("--select", dest="select_mode", default="fn",
+                   choices=["fn", "file", "full"],
+                   help="SEE-1581 test-selection granularity: fn (default, "
+                        "mutants grouped by enclosing function), file "
+                        "(per-file set, legacy/calibration), full (explicit "
+                        "full-face audit; bypasses attribution)")
+    m.add_argument("--attribution-map", default=None,
+                   help="SEE-1581: measurement attribution artifact "
+                        "(test-attribution/5) used as the runtime "
+                        "truth for test selection; default: auto-managed "
+                        ".qa-cache/attribution-map.json")
+    m.add_argument("--no-attribution-auto", dest="attribution_auto",
+                   action="store_false",
+                   help="disable automatic generation/incremental refresh of "
+                        "the attribution map; with no usable map present the "
+                        "run fails loud instead of falling back (build one "
+                        "first via `gqt measure map-update` or an explicit "
+                        "`gqt measure run --test-attribution`)")
+    m.add_argument("--mutation-warning", type=int, default=50,
+                   help="warn on stderr + summary.attention when the pre-truncation "
+                        "mutation site count exceeds N (default 50, aligned with "
+                        "the default budget; SEE-1420)")
+    m.add_argument("--timeout-factor", type=float, default=2.0,
+                   help="adaptive per-mutant timeout = max(timeout, baseline*F+1); "
+                        "default 2.0 (overrides the built-in scale only, never "
+                        "tightens; SEE-1420)")
+    m.add_argument("--mutate-all", action="store_true",
+                   help="disable differential skipping for this run (SEE-1420): "
+                        "diff is ON by default when a v2 resume manifest exists "
+                        "(unchanged killed sites are reused, survived/timeout "
+                        "always re-run); this flag forces full execution")
+    m.add_argument("--mutation", default=None, metavar="ID",
+                   help="single-site rerun: '<file>#<scope_id>#<n>' (SEE-1420 "
+                        "P3 caliper) — forces fresh execution of that one "
+                        "site (1 baseline + 1 mutant), bypassing diff reuse; "
+                        "single-file only")
+    m.add_argument("--lines", type=int, default=None, metavar="N",
+                   help="rerun all mutation sites on source line N (SEE-1420 "
+                        "P3); single-file only")
+    m.add_argument("--reuse-coverage", action="store_true",
+                   help="prefilter mutation sites by line coverage from the "
+                        "last `gqt measure coverage` run for this file "
+                        "(SEE-1420 P2; provenance-checked: source/tests/binary "
+                        "must match; uncovered sites are marked 'uncovered' "
+                        "and skipped)")
+    m.add_argument("--no-reuse-coverage", action="store_true",
+                   help="disable the coverage prefilter (SEE-1550 L1: "
+                        "prefilter is ON by default when a fresh coverage "
+                        "store with a matching identity pack exists; "
+                        "uncovered sites never enter the ok gate)")
+    m.add_argument("--worker-channel", action="store_true",
+                   help="force the resident worker channel (SEE-1550 "
+                        "§SPEC-020 worker-reset/1): eligible targets run in "
+                        "a persistent GUT-direct-drive worker under "
+                        "equivalence gates (parity/state-drift/canary "
+                        "disqualification with automatic cold degrade); "
+                        "worker is DEFAULT-ON — static routing sends "
+                        "autoload/GUT-domain/scene-held targets to the cold "
+                        "M0 channel; env GQT_MUTATION_WORKER=0 opts out "
+                        "(cold) and is honored on every execution path "
+                        "(serial, auto-serial, parallel sharding)")
+    _add_godot_bin_arg(m)
+    m.set_defaults(func=cmd_mutation)
+
+    # --- measure（SEE-1583：测量/评分/诊断功能面收敛）---
+    ms = sub.add_parser("measure", help="measurement, scoring and diagnostics (SEE-1583)")
+    mssub = ms.add_subparsers(dest="measure_command", required=True)
+
+    cr = mssub.add_parser(
+        "suite",
+        help="build the measurement suite definition (measurement-suite/2, "
+             "read-only, SEE-1546 WP3)",
+    )
+    cr.add_argument("--project-root", required=True, help="target Godot project root")
+    cr.add_argument("--out", default="recipe.json",
+                    help="where to write the recipe JSON (default ./recipe.json)")
+    cr.add_argument("--exclude", action="append", default=[],
+                    help="exclusion as scope:entry:reason (repeatable; reason required)")
+    cr.set_defaults(func=cmd_measure_suite)
+
+    can = mssub.add_parser("run", help="dual-arm batch coverage orchestration (SEE-1546 WP3 PR-C)")
     can.add_argument("roots", nargs="+",
                      help="target .gd roots (recursive glob); arms run the "
                           "full gutconfig face + acceptance suite over them")
     can.add_argument("--project-root", required=True,
                      help="Godot project root (addons/gut + .gutconfig.json)")
     can.add_argument("--recipe", required=True,
-                     help="canonical-recipe/1 JSON (from `gqt recipe --out`)")
+                     help="measurement-suite/2 JSON (from `gqt measure suite --out`)")
     can.add_argument("--out", required=True,
-                     help="canonical-report/1 output JSON path")
+                     help="measurement-report/2 output JSON path")
     can.add_argument("--baseline-failures", default=None,
                      help="JSON file with pre-existing (un-instrumented) "
                           "failing (script, test) pairs ([[..],..] or "
@@ -977,7 +1149,7 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--timeout", type=int, default=180,
                      help="GUT timeout seconds per arm (default 180)")
     can.add_argument("--stability-baseline", default=None,
-                     help="prior canonical report path: fids whose covered "
+                     help="prior measurement report path: fids whose covered "
                           "lines differ are routed to the unstable lane "
                           "(no score, §SPEC-056)")
     can.add_argument("--shard-width", type=int, default=6,
@@ -1021,22 +1193,43 @@ def build_parser() -> argparse.ArgumentParser:
                           "off — timing baseline must be redefined when "
                           "enabled")
     _add_godot_bin_arg(can)
-    can.set_defaults(func=cmd_canonical)
+    can.set_defaults(func=cmd_measure_run)
 
-    inc = sub.add_parser(
-        "attr-update",
+    cd = mssub.add_parser(
+        "diagnose",
+        help="diagnostic-only per-feature acceptance timing under flags "
+             "instrumentation (§SPEC-048)",
+    )
+    cd.add_argument("roots", nargs="+",
+                    help="directories whose .gd files are instrumented")
+    cd.add_argument("--project-root", required=True,
+                    help="target Godot project root")
+    cd.add_argument("--recipe", required=True,
+                    help="measurement suite json (verify + feature lookup)")
+    cd.add_argument("--features", required=True,
+                    help="comma-separated acceptance feature keys")
+    cd.add_argument("--out", required=True,
+                    help="diagnostic report json path (progress written "
+                         "after each feature)")
+    cd.add_argument("--timeout", type=int, default=480,
+                    help="per-leg GUT timeout seconds (default 480)")
+    _add_godot_bin_arg(cd)
+    cd.set_defaults(func=cmd_measure_diagnose)
+
+    inc = mssub.add_parser(
+        "map-update",
         help="EXPERIMENTAL (SEE-1581 方向①): incremental rebuild of the "
-             "attribution mapping from a baseline artifact")
+             "test-attribution mapping from a baseline artifact")
     inc.add_argument("roots", nargs="+",
                      help="target .gd roots — must be the same universe as "
                           "the baseline artifact")
     inc.add_argument("--project-root", required=True)
     inc.add_argument("--recipe", required=True,
-                     help="canonical-recipe/1 JSON (same content as the "
+                     help="measurement-suite/2 JSON (same content as the "
                           "baseline run)")
     inc.add_argument("--baseline", required=True,
                      help="prior attribution artifact "
-                          "(canonical-test-attribution/4)")
+                          "(test-attribution/5)")
     inc.add_argument("--changed", action="append", default=[],
                      help="changed/new/removed file path (repeatable)")
     inc.add_argument("--out", required=True,
@@ -1046,165 +1239,71 @@ def build_parser() -> argparse.ArgumentParser:
                      help="force a full-face rebuild after N increments")
     inc.add_argument("--attribution-causal", action="store_true")
     _add_godot_bin_arg(inc)
-    inc.set_defaults(func=cmd_attr_update)
+    inc.set_defaults(func=cmd_measure_map_update)
 
-    ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")
-    acsub = ac.add_subparsers(dest="accept_command", required=True)
+    v = mssub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
+    v.add_argument("file", nargs="?", default=None,
+                   help="the .gd file to measure (required unless --recover/--prune-sinks)")
+    v.add_argument("--project-root", required=True, help="project root containing addons/gut/")
+    v.add_argument("--min-percent", type=float, default=80.0,
+                   help="min coverage percent (default 80)")
+    v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
+    v.add_argument("--tests", default=None,
+                   help="scoped GUT dir or single .gd path for per-suite attribution, "
+                        "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
+    v.add_argument("--evidence-out", default=None,
+                   help="§SPEC-025/026: write coverage-evidence/2 bundles + run records "
+                        "here; omit for the legacy stdout-only contract (zero drift)")
+    v.add_argument("--recover", default=None,
+                   help="§SPEC-025: recover started-but-unfinished runs from this "
+                        "evidence dir without re-running GUT")
+    v.add_argument("--prune-sinks", action="store_true",
+                   help="§SPEC-025/W1: delete qa-coverage-hits-* sinks older than "
+                        "--retain-days (default 7) under user:// and project root")
+    v.add_argument("--retain-days", type=int, default=7,
+                   help="retention period for --prune-sinks (default 7)")
+    _add_godot_bin_arg(v)
+    v.set_defaults(func=cmd_measure_coverage)
 
-    acc = acsub.add_parser("compile", help=".feature -> versioned IR + generated GUT tests")
-    acc.add_argument("feature", nargs="?", default=None,
-                     help="path to the .feature file (omit when --keys "
-                          "selects the private-suite set, §SPEC-035)")
-    acc.add_argument("--project-root", required=True,
-                     help="target Godot project root (writes acceptance/ir + acceptance/generated)")
-    acc.add_argument("--write", action="store_true",
-                     help="opt-in: write ir/generated into the project (contract §6 "
-                          "whitelist dirs; omitted = dry compile, summary only)")
-    acc.add_argument("--no-clean", action="store_true",
-                     help="keep existing generated artifacts instead of clean-then-generate")
-    acc.add_argument("--keys", default=None,
-                     help="§SPEC-035: comma-separated feature keys — "
-                          "compile the selected set into a private suite "
-                          "dir (dir = selection set); pairs with --out-dir, "
-                          "or creates a fresh .gqt-run-<uuid> dir")
-    acc.add_argument("--out-dir", default=None,
-                     help="private suite dir to write into instead of "
-                          "acceptance/ir + acceptance/generated")
-    acc.set_defaults(func=cmd_accept)
-
-    acr = acsub.add_parser("run", help="replay-check + headless-run the generated suite")
-    acr.add_argument("directory", nargs="?", default=None,
-                     help="alternative project root (default: --project-root)")
-    acr.add_argument("--project-root", required=True,
-                     help="target Godot project root containing addons/gut/")
-    acr.add_argument("--key", default=None,
-                     help="feature key the suite was compiled under "
-                          "(required without --suite-dir/--acceptance-probe-keys)")
-    acr.add_argument("--suite-dir", default=None,
-                     help="§SPEC-035 private suite dir — run the whole dir "
-                          "(dir = selection set) with acceptance-suite/1 "
-                          "reconciliation")
-    acr.add_argument("--acceptance-probe-keys", nargs="?",
-                     const="aidomain_integration", default=None,
-                     help="W4 cost probe: compile+run these comma-separated "
-                          "keys via the private-dir pipeline and emit a "
-                          "performance.acceptance_probe record (default: "
-                          "aidomain_integration)")
-    acr.add_argument("--timeout", type=int, default=120,
-                     help="GUT timeout seconds (default 120)")
-    _add_godot_bin_arg(acr)
-    acr.set_defaults(func=cmd_accept)
-
-    acm = acsub.add_parser("mutate", help="full-matrix contract mutation over the compiled IR")
-    acm.add_argument("directory", nargs="?", default=None,
-                     help="alternative project root (default: --project-root)")
-    acm.add_argument("--project-root", required=True,
-                     help="target Godot project root containing addons/gut/")
-    acm.add_argument("--key", required=True,
-                     help="feature key the suite was compiled under")
-    acm.add_argument("--timeout", type=int, default=120,
-                     help="GUT timeout seconds per mutant round (default 120)")
-    acm.add_argument("--worker", action="store_true",
-                     help="opt-in true resident-worker channel: the generated "
-                          "accept_worker.gd artifact serves one godot process "
-                          "for the whole matrix via stdin NDJSON + ir_file "
-                          "transfer, with per-mutant hard discipline "
-                          "(release+rebuild+smoke probe, failure = run_error) "
-                          "and a per-round verdict timeout (SEE-1426 §SPEC-14)")
-    _add_godot_bin_arg(acm)
-    acm.set_defaults(func=cmd_accept)
-
-    a = sub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
-    a.add_argument("paths", nargs="+", help=".gd files or directories to scan")
-    a.set_defaults(func=cmd_arch)
-
-    c = sub.add_parser("complexity", help="complexity gate over .gd files")
+    c = mssub.add_parser("complexity", help="complexity gate over .gd files")
     c.add_argument("paths", nargs="+", help=".gd files or directories to scan")
     c.add_argument("--warn", type=int, default=10, help="warn threshold (default 10)")
     c.add_argument("--max", type=int, default=15, help="fail threshold (default 15)")
-    c.set_defaults(func=cmd_complexity)
+    c.set_defaults(func=cmd_measure_complexity)
 
-    m = sub.add_parser("mutation", help="mutation test one or more .gd files")
-    m.add_argument("files", nargs="+", help="the .gd file(s) to mutate")
-    m.add_argument("--project-root", required=True, help="project root containing addons/gut/")
-    m.add_argument("--budget", type=int, default=50, help="max mutants (default 50)")
-    m.add_argument("--timeout", type=int, default=60, help="GUT timeout seconds (default 60)")
-    m.add_argument("--dry-run", action="store_true",
-                   help="list mutation sites without running GUT (SPEC-009)")
-    m.add_argument("--tests", default=None,
-                   help="scoped GUT dir for affected-test subset, e.g. res://tests/save/ (SPEC-009); "
-                        "omitted = auto-scan tests/ references, zero hits falls back to full suite "
-                        "(SEE-1321 SPEC-001/002)")
-    m.add_argument("--jobs", type=int, default=None,
-                   help="worker pool size for per-file AND per-mutant slicing "
-                        "(a single file is sliced per-mutant too); default = "
-                        "max(2, cpu//2); --jobs 1 forces serial (SEE-1413)")
-    m.add_argument("--resume", action="store_true",
-                   help="skip mutants whose verdicts are already in the resume store "
-                        "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
-                        "re-runs them — every run persists verdicts, resume just "
-                        "turns on the skip")
-    m.add_argument("--select", dest="select_mode", default="fn",
-                   choices=["fn", "file", "full"],
-                   help="SEE-1581 test-selection granularity: fn (default, "
-                        "mutants grouped by enclosing function), file "
-                        "(per-file set, legacy/calibration), full (explicit "
-                        "full-face audit; bypasses attribution)")
-    m.add_argument("--attribution-map", default=None,
-                   help="SEE-1581: canonical attribution artifact "
-                        "(canonical-test-attribution/4) used as the runtime "
-                        "truth for test selection; default: auto-managed "
-                        ".qa-cache/attribution-map.json")
-    m.add_argument("--no-attribution-auto", dest="attribution_auto",
-                   action="store_false",
-                   help="disable automatic generation/incremental refresh of "
-                        "the attribution map (falls back to the full face)")
-    m.add_argument("--mutation-warning", type=int, default=50,
-                   help="warn on stderr + summary.attention when the pre-truncation "
-                        "mutation site count exceeds N (default 50, aligned with "
-                        "the default budget; SEE-1420)")
-    m.add_argument("--timeout-factor", type=float, default=2.0,
-                   help="adaptive per-mutant timeout = max(timeout, baseline*F+1); "
-                        "default 2.0 (overrides the built-in scale only, never "
-                        "tightens; SEE-1420)")
-    m.add_argument("--mutate-all", action="store_true",
-                   help="disable differential skipping for this run (SEE-1420): "
-                        "diff is ON by default when a v2 resume manifest exists "
-                        "(unchanged killed sites are reused, survived/timeout "
-                        "always re-run); this flag forces full execution")
-    m.add_argument("--mutation", default=None, metavar="ID",
-                   help="single-site rerun: '<file>#<scope_id>#<n>' (SEE-1420 "
-                        "P3 caliper) — forces fresh execution of that one "
-                        "site (1 baseline + 1 mutant), bypassing diff reuse; "
-                        "single-file only")
-    m.add_argument("--lines", type=int, default=None, metavar="N",
-                   help="rerun all mutation sites on source line N (SEE-1420 "
-                        "P3); single-file only")
-    m.add_argument("--reuse-coverage", action="store_true",
-                   help="prefilter mutation sites by line coverage from the "
-                        "last `gqt coverage` run for this file (SEE-1420 P2; "
-                        "provenance-checked: source/tests/binary must match; "
-                        "uncovered sites are marked 'uncovered' and skipped)")
-    m.add_argument("--no-reuse-coverage", action="store_true",
-                   help="disable the coverage prefilter (SEE-1550 L1: "
-                        "prefilter is ON by default when a fresh coverage "
-                        "store with a matching identity pack exists; "
-                        "uncovered sites never enter the ok gate)")
-    m.add_argument("--worker-channel", action="store_true",
-                   help="force the resident worker channel (SEE-1550 "
-                        "§SPEC-020 worker-reset/1): eligible targets run in "
-                        "a persistent GUT-direct-drive worker under "
-                        "equivalence gates (parity/state-drift/canary "
-                        "disqualification with automatic cold degrade); "
-                        "worker is DEFAULT-ON — static routing sends "
-                        "autoload/GUT-domain/scene-held targets to the cold "
-                        "M0 channel; env GQT_MUTATION_WORKER=0 opts out "
-                        "(cold) and is honored on every execution path "
-                        "(serial, auto-serial, parallel sharding)")
-    _add_godot_bin_arg(m)
-    m.set_defaults(func=cmd_mutation)
+    a = mssub.add_parser("arch", help="Pure Core architecture guard over .gd files (SEE-1426 P1)")
+    a.add_argument("paths", nargs="+", help=".gd files or directories to scan")
+    a.set_defaults(func=cmd_measure_arch)
 
-    r = sub.add_parser(
+    p = mssub.add_parser(
+        "parity",
+        help="full per-function CC parity over the neutral registry (SEE-1546 WP1b, diagnostic-only)",
+    )
+    p.add_argument(
+        "paths",
+        nargs="+",
+        help="directories or .gd files to scan (same roots as the complexity gate)",
+    )
+    p.add_argument("--project-root", required=True, help="project root for relative fids")
+    p.add_argument(
+        "--report",
+        default="parity.json",
+        help="where to write the parity report JSON (default ./parity.json)",
+    )
+    p.add_argument(
+        "--registry-out",
+        default=None,
+        help="optionally write the multi-file registry snapshot JSON",
+    )
+    p.set_defaults(func=cmd_measure_parity)
+
+    rd = mssub.add_parser("registry-diff", help="diff two registry snapshots (func-registry-diff/1)")
+    rd.add_argument("old", help="old snapshot JSON path")
+    rd.add_argument("new", help="new snapshot JSON path")
+    rd.add_argument("--out", default=None, help="optionally write the diff JSON")
+    rd.set_defaults(func=cmd_measure_registry_diff)
+
+    r = mssub.add_parser(
         "risk",
         help="exploratory CRAP-Line shadow over selected files (diagnostic-only, SEE-1546 M2)",
     )
@@ -1241,94 +1340,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="static-only dry run: no GUT rounds executed",
     )
     _add_godot_bin_arg(r)
-    r.set_defaults(func=cmd_risk)
+    r.set_defaults(func=cmd_measure_risk)
 
-    cd = sub.add_parser(
-        "canonical-diagnose",
-        help="diagnostic-only per-feature acceptance timing under flags "
-             "instrumentation (§SPEC-048)",
-    )
-    cd.add_argument("roots", nargs="+",
-                    help="directories whose .gd files are instrumented")
-    cd.add_argument("--project-root", required=True,
-                    help="target Godot project root")
-    cd.add_argument("--recipe", required=True,
-                    help="canonical recipe json (verify + feature lookup)")
-    cd.add_argument("--features", required=True,
-                    help="comma-separated acceptance feature keys")
-    cd.add_argument("--out", required=True,
-                    help="diagnostic report json path (progress written "
-                         "after each feature)")
-    cd.add_argument("--timeout", type=int, default=480,
-                    help="per-leg GUT timeout seconds (default 480)")
-    _add_godot_bin_arg(cd)
-    cd.set_defaults(func=cmd_canonical_diagnose)
-
-    p = sub.add_parser(
-        "parity",
-        help="full per-function CC parity over the neutral registry (SEE-1546 WP1b, diagnostic-only)",
-    )
-    p.add_argument(
-        "paths",
-        nargs="+",
-        help="directories or .gd files to scan (same roots as the complexity gate)",
-    )
-    p.add_argument("--project-root", required=True, help="project root for relative fids")
-    p.add_argument(
-        "--report",
-        default="parity.json",
-        help="where to write the parity report JSON (default ./parity.json)",
-    )
-    p.add_argument(
-        "--registry-out",
-        default=None,
-        help="optionally write the multi-file registry snapshot JSON",
-    )
-    p.set_defaults(func=cmd_parity)
-
-    rg = sub.add_parser("registry", help="registry snapshot operations (SEE-1546 WP1b)")
-    rgsub = rg.add_subparsers(dest="registry_command", required=True)
-    rd = rgsub.add_parser("diff", help="diff two registry snapshots (func-registry-diff/1)")
-    rd.add_argument("old", help="old snapshot JSON path")
-    rd.add_argument("new", help="new snapshot JSON path")
-    rd.add_argument("--out", default=None, help="optionally write the diff JSON")
-    rd.set_defaults(func=cmd_registry)
-
-    cr = sub.add_parser(
-        "recipe",
-        help="build the canonical full recipe (canonical-recipe/1, read-only, SEE-1546 WP3)",
-    )
-    cr.add_argument("--project-root", required=True, help="target Godot project root")
-    cr.add_argument("--out", default="recipe.json",
-                    help="where to write the recipe JSON (default ./recipe.json)")
-    cr.add_argument("--exclude", action="append", default=[],
-                    help="exclusion as scope:entry:reason (repeatable; reason required)")
-    cr.set_defaults(func=cmd_recipe)
-
-    v = sub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
-    v.add_argument("file", nargs="?", default=None,
-                   help="the .gd file to measure (required unless --recover/--prune-sinks)")
-    v.add_argument("--project-root", required=True, help="project root containing addons/gut/")
-    v.add_argument("--min-percent", type=float, default=80.0,
-                   help="min coverage percent (default 80)")
-    v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
-    v.add_argument("--tests", default=None,
-                   help="scoped GUT dir or single .gd path for per-suite attribution, "
-                        "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
-    v.add_argument("--evidence-out", default=None,
-                   help="§SPEC-025/026: write coverage-evidence/2 bundles + run records "
-                        "here; omit for the legacy stdout-only contract (zero drift)")
-    v.add_argument("--recover", default=None,
-                   help="§SPEC-025: recover started-but-unfinished runs from this "
-                        "evidence dir without re-running GUT")
-    v.add_argument("--prune-sinks", action="store_true",
-                   help="§SPEC-025/W1: delete qa-coverage-hits-* sinks older than "
-                        "--retain-days (default 7) under user:// and project root")
-    v.add_argument("--retain-days", type=int, default=7,
-                   help="retention period for --prune-sinks (default 7)")
-    _add_godot_bin_arg(v)
-    v.set_defaults(func=cmd_coverage)
-
+    # --- doctor（保持一级，契约不变）---
     d = sub.add_parser("doctor", help="self-check editable install vs current worktree gitlink")
     d.set_defaults(func=cmd_doctor)
 

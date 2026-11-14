@@ -180,7 +180,7 @@ def test_identity_mismatch_when_radon_count_differs(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# D-WP1b-1: `gqt registry diff` unified JSON contract
+# D-WP1b-1: `gqt measure registry-diff` unified JSON contract
 # --------------------------------------------------------------------------
 
 
@@ -192,14 +192,14 @@ def _diff_entry(fid: str, body_hash: str) -> dict:
 
 
 def test_registry_diff_cli_emits_unified_contract_ok_path(tmp_path: Path):
-    """D-WP1b-1: cmd_registry must emit {tool, ok, ...} like every other
+    """D-WP1b-1: cmd_measure_registry_diff must emit {tool, ok, ...} like every other
     subcommand — the bare diff dict has no `ok` key and used to KeyError."""
     import argparse
     import io
     import json
     from contextlib import redirect_stdout
 
-    from godot_qa_toolkit.cli import cmd_registry
+    from godot_qa_toolkit.cli import cmd_measure_registry_diff
     from godot_qa_toolkit.registry.snapshot import save_snapshot
 
     old = {"files": {"f.gd": {"entries": [_diff_entry("f.gd::a", "h1")]}}}
@@ -210,10 +210,10 @@ def test_registry_diff_cli_emits_unified_contract_ok_path(tmp_path: Path):
     args = argparse.Namespace(old=str(old_p), new=str(new_p), out=None)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = cmd_registry(args)
+        rc = cmd_measure_registry_diff(args)
     payload = json.loads(buf.getvalue())
     assert rc == 0
-    assert payload["tool"] == "registry"
+    assert payload["tool"] == "measure.registry-diff"
     assert payload["ok"] is True
     assert "summary" in payload and "rows" in payload
     assert payload["summary"]["added"] == 0
@@ -225,7 +225,7 @@ def test_registry_diff_cli_fail_loud_on_unparseable_snapshot(tmp_path: Path):
     import json
     from contextlib import redirect_stdout
 
-    from godot_qa_toolkit.cli import cmd_registry
+    from godot_qa_toolkit.cli import cmd_measure_registry_diff
     from godot_qa_toolkit.registry.snapshot import save_snapshot
 
     bad = tmp_path / "bad.json"
@@ -235,10 +235,10 @@ def test_registry_diff_cli_fail_loud_on_unparseable_snapshot(tmp_path: Path):
     args = argparse.Namespace(old=str(bad), new=str(good), out=None)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = cmd_registry(args)
+        rc = cmd_measure_registry_diff(args)
     payload = json.loads(buf.getvalue())
     assert rc == 1
-    assert payload["tool"] == "registry"
+    assert payload["tool"] == "measure.registry-diff"
     assert payload["ok"] is False
     assert payload["failures"] and payload["failures"][0]["reason"]
 

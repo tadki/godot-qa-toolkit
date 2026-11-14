@@ -140,7 +140,7 @@ def run_suite(project_root: str | Path, feature_key: str,
     # 忽略生成文件、被测项目 .gutconfig 覆盖 dirs）= 判定失败，不是绿。
     if r.returncode == 0 and tests_executed == 0:
         return {
-            "tool": "accept", "ok": False,
+            "tool": "gherkin", "ok": False,
             "summary": _run_summary(manifest, feature_key, r.returncode,
                                     tests_executed),
             "failures": [{"test": None, "scenario": None, "line": 0,
@@ -148,7 +148,7 @@ def run_suite(project_root: str | Path, feature_key: str,
                                     "tests (scan/config swallowed it); not a pass"}],
         }
     result: dict = {
-        "tool": "accept",
+        "tool": "gherkin",
         "ok": r.returncode == 0,
         "summary": _run_summary(manifest, feature_key, r.returncode,
                                 tests_executed),

@@ -643,6 +643,17 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return _emit(result)
 
 
+def _attribution_args(args: argparse.Namespace) -> tuple[bool, str | None]:
+    """§SPEC-083：`--test-attribution` 开关与其产物路径的默认推导。
+
+    显式 `--test-attribution-out` 优先；否则仅在开关开启时落到
+    `<--out>.attribution.json`（默认关闭路径不产生任何路径）。"""
+    enabled = bool(getattr(args, "test_attribution", False))
+    explicit = getattr(args, "test_attribution_out", None)
+    out = explicit or (f"{args.out}.attribution.json" if enabled else None)
+    return enabled, out
+
+
 def cmd_canonical(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -728,6 +739,7 @@ def cmd_canonical(args: argparse.Namespace) -> int:
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
         return _emit_godot_unavailable("canonical", godot_cmd, godot_reason)
+    test_attribution, attribution_out = _attribution_args(args)
     try:
         report = run_canonical(
             args.project_root, targets, recipe,
@@ -741,11 +753,8 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             baseline_failures=baseline_failures,
             intolerant_config=intolerant_config,
             acceptance_repeats=getattr(args, "acceptance_repeats", 3),
-            test_attribution=bool(getattr(args, "test_attribution", False)),
-            attribution_out=(
-                getattr(args, "test_attribution_out", None)
-                or (f"{args.out}.attribution.json"
-                    if getattr(args, "test_attribution", False) else None)))
+            test_attribution=test_attribution,
+            attribution_out=attribution_out)
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},

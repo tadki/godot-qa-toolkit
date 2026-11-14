@@ -281,6 +281,7 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
     分别累计已归属/无主命中事件数。变量名带 probe_id 后缀——同一函数内
     多条探针不得重复声明（GDScript "already declared in this scope"）。"""
     out = []
+    attr = _attr_var_name(sink_name)
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
         if idx in line_to_id:
             indent = re.match(r"^(\s*)", line_text).group(1)
@@ -290,7 +291,6 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
                     f"{indent}{_flag_var_name(sink_name)}"
                     f"[{pid}] = 1\n")
                 if attribution:
-                    attr = _attr_var_name(sink_name)
                     out.append(
                         f"{indent}var {_PROBE_PREFIX}t{pid} = "
                         f"Engine.get_meta(\"gqt_cov_cur_test\", -1)\n"

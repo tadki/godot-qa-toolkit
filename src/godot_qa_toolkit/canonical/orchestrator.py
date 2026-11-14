@@ -28,6 +28,7 @@ import stat as stat_module
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from ..accept.run import AcceptRunError, replay_check
@@ -65,6 +66,13 @@ ATTRIBUTION_SCHEMA = "canonical-test-attribution/1"
 # 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
 # 旧模板（缓存键含 algo 但不含探针文本本身）
 ATTRIBUTION_ALGO_TAG = "attr/2"
+# 归属身份的规范形态（映射键），产物与报告同源
+_ATTRIBUTION_IDENTITY = "res://script::test_name"
+# 报告 test_attribution 节从逐臂映射里抽出的汇总键（映射正文留在产物）
+_ATTRIBUTION_SUMMARY_KEYS = (
+    "tests", "files", "pairs", "attributed_hit_events",
+    "unattributed_hit_events", "unattributed_rate",
+    "files_with_unattributed", "unmapped_count")
 CERTIFICATION = {
     "status": "not_certified",
     "reason": "single round; WP5 owns two-round certification",
@@ -763,6 +771,52 @@ def _attr_pid(sink_file: str, run_uuid: str) -> int | None:
         return None
 
 
+def _iter_attr_sinks(root: Path, run_uuid: str, pattern: str,
+                     xdg_homes: list[str],
+                     consume: bool = True) -> Iterator[tuple[int, str]]:
+    """§SPEC-083：按文件名序遍历各 XDG 下的 attr/registry sink，逐条给出
+    (pid, 文本)；读后即消费（consume=False 仅用于诊断复盘）。
+
+    文件名解析不出 pid 的条目不猜、跳过；read 失败时仍按 consume 口径
+    删除文件（与调用方 finally 语义一致），异常向上抛给调用方。"""
+    proj = _project_name(root)
+    for xdg in xdg_homes:
+        d = _shard_user_dir(xdg, proj)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob(pattern)):
+            pid = _attr_pid(f.name, run_uuid)
+            if pid is None:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            finally:
+                if consume:
+                    f.unlink(missing_ok=True)
+            yield pid, text
+
+
+_ATTR_LINE_FIELD = {"T ": "seen", "A ": "attributed", "U ": "unattributed"}
+
+
+def _accumulate_attr_lines(rec: dict, text: str) -> None:
+    """attr sink 行累加进 rec：`T <idx>` 记 test→file 关系，`A/U <n>` 分别
+    累计已归属/无主命中事件数；格式或数值不合法的行跳过。"""
+    for raw in text.splitlines():
+        line = raw.strip()
+        field = _ATTR_LINE_FIELD.get(line[:2])
+        if field is None:
+            continue
+        try:
+            value = int(line[2:])
+        except ValueError:
+            continue
+        if field == "seen":
+            rec["seen"].add(value)
+        else:
+            rec[field] += value
+
+
 def _read_attr_merged(root: Path, run_uuid: str, rel: str,
                       xdg_homes: list[str], consume: bool = True
                       ) -> dict[int, dict]:
@@ -771,41 +825,29 @@ def _read_attr_merged(root: Path, run_uuid: str, rel: str,
     "unattributed": int}}——pid 用于与测试注册表 join（每进程独立注册表）。"""
     key8 = file_key8(rel)
     name = f"qa-coverage-attr-{run_uuid}-*-{key8}.txt"
-    proj = _project_name(root)
     out: dict[int, dict] = {}
-    for xdg in xdg_homes:
-        d = _shard_user_dir(xdg, proj)
-        if not d.is_dir():
-            continue
-        for f in sorted(d.glob(name)):
-            pid = _attr_pid(f.name, run_uuid)
-            if pid is None:
-                continue
-            rec = out.setdefault(
-                pid, {"seen": set(), "attributed": 0, "unattributed": 0})
-            try:
-                text = f.read_text(encoding="utf-8")
-            finally:
-                if consume:
-                    f.unlink(missing_ok=True)
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith("T "):
-                    try:
-                        rec["seen"].add(int(line[2:]))
-                    except ValueError:
-                        continue
-                elif line.startswith("A "):
-                    try:
-                        rec["attributed"] += int(line[2:])
-                    except ValueError:
-                        continue
-                elif line.startswith("U "):
-                    try:
-                        rec["unattributed"] += int(line[2:])
-                    except ValueError:
-                        continue
+    for pid, text in _iter_attr_sinks(root, run_uuid, name, xdg_homes, consume):
+        _accumulate_attr_lines(
+            out.setdefault(
+                pid, {"seen": set(), "attributed": 0, "unattributed": 0}),
+            text)
     return out
+
+
+def _accumulate_registry_lines(table: dict[int, str], text: str) -> None:
+    """registry sink 的 `R <idx>\\t<identity>` 行写入 table；格式不符行跳过。"""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("R "):
+            continue
+        body = line[2:]
+        if "\t" not in body:
+            continue
+        idx_s, identity = body.split("\t", 1)
+        try:
+            table[int(idx_s)] = identity
+        except ValueError:
+            continue
 
 
 def _read_test_registry(root: Path, run_uuid: str, xdg_homes: list[str],
@@ -813,34 +855,9 @@ def _read_test_registry(root: Path, run_uuid: str, xdg_homes: list[str],
     """§SPEC-083：读回每进程测试注册表 `qa-cov-attr-tests-<uuid>-<pid>.txt`
     （行格式 `R <idx>\\t<identity>`）→ {pid: {idx: identity}}。"""
     name = f"qa-cov-attr-tests-{run_uuid}-*.txt"
-    proj = _project_name(root)
     out: dict[int, dict[int, str]] = {}
-    for xdg in xdg_homes:
-        d = _shard_user_dir(xdg, proj)
-        if not d.is_dir():
-            continue
-        for f in sorted(d.glob(name)):
-            pid = _attr_pid(f.name, run_uuid)
-            if pid is None:
-                continue
-            table = out.setdefault(pid, {})
-            try:
-                text = f.read_text(encoding="utf-8")
-            finally:
-                if consume:
-                    f.unlink(missing_ok=True)
-            for line in text.splitlines():
-                line = line.strip()
-                if not line.startswith("R "):
-                    continue
-                body = line[2:]
-                if "\t" not in body:
-                    continue
-                idx_s, identity = body.split("\t", 1)
-                try:
-                    table[int(idx_s)] = identity
-                except ValueError:
-                    continue
+    for pid, text in _iter_attr_sinks(root, run_uuid, name, xdg_homes, consume):
+        _accumulate_registry_lines(out.setdefault(pid, {}), text)
     return out
 
 
@@ -893,6 +910,88 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
         "test_to_files": {k: sorted(v) for k, v in sorted(test_to_files.items())},
         "file_to_tests": file_to_tests,
     }
+
+
+def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
+                         sink_by_rel, xdg_homes: list[str]) -> dict | None:
+    """§SPEC-083：xdg 清理前读回归属证据与测试注册表，聚合成臂级映射；
+    开关关闭时不读任何 sink、返回 None。"""
+    if not enabled:
+        return None
+    attr_by_rel = {
+        rel: _read_attr_merged(root, run_uuid, rel, xdg_homes)
+        for rel in sink_by_rel}
+    registries = _read_test_registry(root, run_uuid, xdg_homes)
+    return build_attribution_map(arm, attr_by_rel, registries)
+
+
+def _attribution_section(enabled: bool, arms: tuple[dict, ...],
+                         recipe_hash: str, project_root: Path,
+                         attribution_out: str | None) -> dict:
+    """§SPEC-083：canonical 报告的 test_attribution 节（归属产物在
+    attribution_out 非空时落盘，与报告共用同一 notes 列表）。
+
+    默认关闭返回空 dict——报告形状零变化。"""
+    if not enabled:
+        return {}
+    notes = [
+        "only hits inside a GUT test window (start_test..end_test) "
+        "are attributed; script-scope (before_all/after_all) and "
+        "async callbacks after the test boundary are counted as "
+        "unattributed hit events, not silently assigned",
+        "this is a snapshot of one run bound to recipe_hash; code/"
+        "test changes make it stale — rebuild periodically",
+        "diagnostic evidence only — certification stays full-face "
+        "(not_certified, exploratory)",
+    ]
+    arms_attr = {arm["arm"]: arm.get("attribution")
+                 for arm in arms
+                 if arm.get("attribution") is not None}
+    artifact = {
+        "schema_version": ATTRIBUTION_SCHEMA,
+        "report_recipe_hash": recipe_hash,
+        "project_root": str(project_root),
+        "identity": _ATTRIBUTION_IDENTITY,
+        "arms": arms_attr,
+        "notes": notes,
+    }
+    artifact_path = None
+    if attribution_out:
+        out_p = Path(attribution_out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        artifact_path = str(out_p)
+    return {"test_attribution": {
+        "schema_version": ATTRIBUTION_SCHEMA,
+        "enabled": True,
+        "artifact": artifact_path,
+        "identity": _ATTRIBUTION_IDENTITY,
+        "arms": {
+            name: {k: amap.get(k) for k in _ATTRIBUTION_SUMMARY_KEYS}
+            for name, amap in arms_attr.items()},
+        "notes": notes,
+    }}
+
+
+def _algo_used(base_algo: str, test_attribution: bool) -> str:
+    """§SPEC-083：归属形态插桩产物不同 → 缓存键必须分形；默认关闭路径
+    algo 原样返回（既有缓存条目继续命中，零漂移）。"""
+    if test_attribution:
+        return f"{base_algo}-{ATTRIBUTION_ALGO_TAG}"
+    return base_algo
+
+
+def _hook_templates(test_attribution: bool,
+                    run_uuid: str) -> tuple[str, str]:
+    """§SPEC-083：归属形态换用 per-test 钩子与 attr finalizer；默认路径
+    返回既有模板（字节不变）。"""
+    if test_attribution:
+        return (_ATTR_FLUSHER_GD,
+                _ATTR_PRE_HOOK_GD.replace(
+                    _ATTR_RUN_UUID_PLACEHOLDER, str(run_uuid)))
+    return _FLUSHER_GD, _PRE_HOOK_GD
 
 
 def _inject_toolchain(root: Path, recipe: dict) -> dict:
@@ -1066,10 +1165,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     # §SPEC-059a：报告 algo 与实际缓存键同源（flags/4-pid / blocks/6）
     base_algo = (prepcache.PROBE_ALGO_VERSION if block_compress
                  else "flags/4-pid")
-    # §SPEC-083：归属形态插桩产物不同 → 缓存键必须分形，默认关闭路径
-    # algo 不变（既有条目继续命中，零漂移）
-    algo_used = (f"{base_algo}-{ATTRIBUTION_ALGO_TAG}" if test_attribution
-                 else base_algo)
+    algo_used = _algo_used(base_algo, test_attribution)
     for path_str in target_files:
         p = Path(path_str)
         if not p.is_file():
@@ -1273,13 +1369,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         try:
             for abs_path, inst in instrumented_files.items():
                 Path(abs_path).write_text(inst, encoding="utf-8")
-            if test_attribution:
-                flusher_gd = _ATTR_FLUSHER_GD
-                pre_hook_gd = _ATTR_PRE_HOOK_GD.replace(
-                    _ATTR_RUN_UUID_PLACEHOLDER, str(run_uuid))
-            else:
-                flusher_gd = _FLUSHER_GD
-                pre_hook_gd = _PRE_HOOK_GD
+            flusher_gd, pre_hook_gd = _hook_templates(
+                test_attribution, run_uuid)
             for relpath, text in ((_FLUSHER_RELPATH, flusher_gd),
                                   (_PRE_HOOK_RELPATH, pre_hook_gd)):
                 abs_p = root / relpath
@@ -1437,14 +1528,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
                                       status="bundle_written")
                 clear_sink(None, str(root), sink)
-            if test_attribution:
-                # §SPEC-083：归属证据与测试注册表必须在 xdg 清理前读回
-                attr_by_rel = {
-                    rel: _read_attr_merged(root, run_uuid, rel, xdg_homes)
-                    for rel in sink_by_rel}
-                registries = _read_test_registry(root, run_uuid, xdg_homes)
-                attribution = build_attribution_map(
-                    name, attr_by_rel, registries)
+            # §SPEC-083：归属证据与测试注册表必须在 xdg 清理前读回
+            attribution = _collect_attribution(
+                test_attribution, root, run_uuid, name, sink_by_rel, xdg_homes)
         finally:
             for xdg in xdg_homes:
                 shutil.rmtree(xdg, ignore_errors=True)
@@ -1593,49 +1679,8 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     perf = _performance(root, probe_keys, timeout_s)
     perf["gated_core_s"] = gated_core_s
     perf["command_total_s"] = round(time.monotonic() - t_command, 3)
-    attribution_report = None
-    if test_attribution:
-        arms_attr = {arm["arm"]: arm.get("attribution")
-                     for arm in (arm_a, arm_b)
-                     if arm.get("attribution") is not None}
-        artifact = {
-            "schema_version": ATTRIBUTION_SCHEMA,
-            "report_recipe_hash": recipe_hash,
-            "project_root": str(root),
-            "identity": "res://script::test_name",
-            "arms": arms_attr,
-            "notes": [
-                "only hits inside a GUT test window (start_test..end_test) "
-                "are attributed; script-scope (before_all/after_all) and "
-                "async callbacks after the test boundary are counted as "
-                "unattributed hit events, not silently assigned",
-                "this is a snapshot of one run bound to recipe_hash; code/"
-                "test changes make it stale — rebuild periodically",
-                "diagnostic evidence only — certification stays full-face "
-                "(not_certified, exploratory)",
-            ],
-        }
-        artifact_path = None
-        if attribution_out:
-            out_p = Path(attribution_out)
-            out_p.parent.mkdir(parents=True, exist_ok=True)
-            out_p.write_text(
-                json.dumps(artifact, ensure_ascii=False, indent=2),
-                encoding="utf-8")
-            artifact_path = str(out_p)
-        attribution_report = {
-            "schema_version": ATTRIBUTION_SCHEMA,
-            "enabled": True,
-            "artifact": artifact_path,
-            "identity": "res://script::test_name",
-            "arms": {
-                name: {k: amap.get(k) for k in (
-                    "tests", "files", "pairs", "attributed_hit_events",
-                    "unattributed_hit_events", "unattributed_rate",
-                    "files_with_unattributed", "unmapped_count")}
-                for name, amap in arms_attr.items()},
-            "notes": artifact["notes"],
-        }
+    attr_section = _attribution_section(
+        test_attribution, (arm_a, arm_b), recipe_hash, root, attribution_out)
     report = {
         "report_version": REPORT_VERSION,
         "project_root": str(root),
@@ -1757,8 +1802,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "dynamic_cache": False,
         "ok": union_valid,
     }
-    if attribution_report is not None:
-        report["test_attribution"] = attribution_report
+    report.update(attr_section)
     return report
 
 

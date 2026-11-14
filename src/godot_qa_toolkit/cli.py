@@ -456,6 +456,9 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
                       else None),
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
+        # §SPEC-012：串行/卡尺与编排路径同源遵守 --select（默认 fn），
+        # 不可静默退化全脸（HIGH-1 修复点）。
+        select_mode=getattr(args, "select_mode", "full"),
     )
     result["summary"].setdefault("jobs", 1)
     return result

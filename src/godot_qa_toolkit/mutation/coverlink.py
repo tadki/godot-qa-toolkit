@@ -1,8 +1,8 @@
 """SEE-1420 Phase 3 — coverage 前置过滤的持久化链路（定案 L3/D7，P2）。
 
 复用自家 JSON 落盘（拒绝 LCOV 外部格式）：
-- ``<project>/.qa-cache/gqt-coverage/<key>.json``——gqt coverage 成功 run 的
-  扩展落盘（stdout 契约的超集：多带全量 covered_lines；stdout 契约不动）；
+- ``<project>/.qa-cache/gqt-coverage/<key>.json``——`gqt measure coverage`
+  成功 run 的扩展落盘（stdout 契约的超集：多带全量 covered_lines；stdout 契约不动）；
 - ``--reuse-coverage`` 读回时做 provenance 校验：schema + 项目内相对路径 +
   源码 sha1 + tests_glob 精确匹配 + 二进制类型——任一不符 = 无该数据
   （mutation 侧告警后【不过滤】继续跑，宁多跑不假阴性）。

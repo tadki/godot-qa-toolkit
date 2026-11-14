@@ -1,6 +1,6 @@
 """gqt measure run 双源批式编排（§SPEC-037，measurement-report/2）。
 
-批式臂（canonical 的唯一可行形态，设计 §2.1）：目标全集一次插桩 → 每臂
+批式臂（measurement 的唯一可行形态，设计 §2.1）：目标全集一次插桩 → 每臂
 1 次 GUT（gut_full 走 .gutconfig 面 + acceptance 私有目录一次）→ 逐文件
 sink（`qa-coverage-hits-{run_uuid}-{file_key8}`）读回 → bundle →
 coverage-union/1 逐文件行集并集。两臂共用同一 registry/probe manifest
@@ -129,7 +129,7 @@ _FLUSHER_RELPATH = "addons/gqt_cov_flusher.gd"
 # 退出序最后 = R5 drain 顺序纪律），测量期 project.godot 零改动
 _PRE_HOOK_RELPATH = "addons/gqt_cov_pre_hook.gd"
 _PRE_HOOK_GD = """extends "res://addons/gut/hook_script.gd"
-# qa-toolkit canonical coverage finalizer registration hook. Registers the
+# qa-toolkit measurement coverage finalizer registration hook. Registers the
 # drain node as root's FIRST child so its _exit_tree runs LAST (reverse
 # exit order = R5 drain discipline) — without touching project.godot.
 func run():
@@ -141,7 +141,7 @@ func run():
 	root.move_child(node, 0)
 """
 _FLUSHER_GD = """extends Node
-# qa-toolkit canonical flag-mode probe finalizer (auto-injected, never in
+# qa-toolkit measurement flag-mode probe finalizer (auto-injected, never in
 # production). Drains every registered per-file flag array to its sink:
 # one open + one write loop per file — sink I/O is bounded by file count
 # and never grows with hit event count (§SPEC-046).
@@ -181,7 +181,7 @@ func _notification(what: int) -> void:
 # run_uuid 在注入时以占位符替换（每臂独立）。
 _ATTR_RUN_UUID_PLACEHOLDER = "__GQT_RUN_UUID__"
 _ATTR_PRE_HOOK_GD = """extends "res://addons/gut/hook_script.gd"
-# qa-toolkit canonical attribution hook (experimental, SEE-1581, 方向②).
+# qa-toolkit measurement attribution hook (experimental, SEE-1581, 方向②).
 # Registers the drain node (same R5 discipline as the default hook) and
 # maintains the current context as a single positive slot index over one
 # combined registry (test/script identities share the index space), so the
@@ -265,7 +265,7 @@ func _on_end_script() -> void:
 _ATTR_CTX_RELPATH = "addons/gqt_cov_ctx.gd"
 _ATTR_CTX_GD = """extends RefCounted
 # NOTE: GDScript 4 has no try/finally — restore is best-effort straight-line.
-# qa-toolkit canonical causal-attribution context (experimental, SEE-1581 R2).
+# qa-toolkit measurement causal-attribution context (experimental, SEE-1581 R2).
 # 创建点包装：捕获创建时的 tag（当前上下文槽位），回调触发时把 slot
 # 置回该 tag，回调结束（或下一个 idle 相位）恢复原值。tag 编码与钩子一致：
 # 0 无主 / 正数 = 上下文槽位（组合注册表下标+1）。
@@ -319,7 +319,7 @@ static func create_timer_tagged(tree, time_sec: float,
 # 每进程一个的注册表 sink。所有写入仍是「每文件一次 open + 一次循环」，
 # I/O 与命中事件数无关（§SPEC-046 口径不破）。
 _ATTR_FLUSHER_GD = """extends Node
-# qa-toolkit canonical per-test attribution finalizer (experimental, SEE-1581).
+# qa-toolkit measurement per-test attribution finalizer (experimental, SEE-1581).
 func _notification(what: int) -> void:
 \tif what != NOTIFICATION_PREDELETE:
 \t\treturn
@@ -411,7 +411,7 @@ def _patch_autoload(text: str, entry: str) -> str:
 
 
 class MeasurementError(Exception):
-    """canonical 编排入参/前置违例（recipe 非法、目标缺失、GUT 缺失）。"""
+    """measurement 编排入参/前置违例（recipe 非法、目标缺失、GUT 缺失）。"""
 
 
 def file_key8(relpath: str) -> str:
@@ -631,7 +631,7 @@ def _run_one_gut(project_root: Path, gut_args: list[str],
                 f"(args: {' '.join(gut_args)})") from e
         except BinaryConfigError as e:
             # §SPEC-079 C：静态前置漏判时的拉起点兜底（双防线）——
-            # 归一为 canonical 领域错误，cli 既有 MeasurementError 出口转 JSON。
+            # 归一为 measurement 领域错误，cli 既有 MeasurementError 出口转 JSON。
             raise MeasurementError(str(e)) from e
     return r, time.monotonic() - t0
 
@@ -1327,7 +1327,7 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          target_files: "list[str] | None" = None,
                          recipe_pristine_hash: str | None = None,
                          tests_face: "dict[str, str] | None" = None) -> dict:
-    """§SPEC-083：canonical 报告的 test_attribution 节（归属产物在
+    """§SPEC-083：measurement 报告的 test_attribution 节（归属产物在
     attribution_out 非空时落盘，与报告共用同一 notes 列表）。
 
     默认关闭返回空 dict——报告形状零变化。"""
@@ -2769,7 +2769,7 @@ def _baseline_total(value) -> int:
 
 
 def _load_baseline_report(path: str) -> tuple[dict, dict]:
-    """§SPEC-056/057 stability baseline：读取历史 canonical 报告的逐 fid
+    """§SPEC-056/057 stability baseline：读取历史 measurement 报告的逐 fid
     行集与函数级 CRAP 记录。§SPEC-066/067：根与**全部直接消费字段**
     （unions 行/union/per_fid 行/file/fid/covered_line_ids/total、
     crap.records 的 function_id/score_status/crap_line/provenance）在

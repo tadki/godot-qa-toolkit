@@ -173,25 +173,53 @@ def _targets_under(roots: list[str]) -> list[str]:
                    for p in Path(r).rglob("*.gd") if p.is_file()})
 
 
-def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
-    """默认自动生成：无映射且 mode=auto → `gqt measure run --test-attribution` 一次。
+def _default_map_reuse(path: str | None, explicit: bool
+                       ) -> tuple[str | None, str | None]:
+    """约定默认/显式位置的产物复用决策（§SPEC-012 HIGH-2 判定唯一出处）。
 
-    生成成功后落在 `<project>/.qa-cache/attribution-map.json` 并写入
-    GQT_ATTRIBUTION_MAP；失败 → 台账记录并 raise `MutationSelectionError`
-    （fail-loud；全脸仅显式 `--select full` 审计开关）。"""
+    返回 (可复用路径, 重建原因)：可用 → (path, None)；显式产物不可用 →
+    (path, None)（只读透传，fail-loud 由 resolve_selection）；默认产物
+    不可用 → (None, 原因)（调用方原子重建）；缺失 → (None, None)。"""
+    if path is None:
+        return None, None
+    try:
+        load_map(path)
+    except SelectionError as e:
+        if explicit:
+            return path, None
+        return None, f"default_map_unusable: {e}"
+    return path, None
+
+
+def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
+    """默认自动生成/重建：约定默认位置缺失或不可用（旧 schema/无效状态）
+    且 mode=auto → `gqt measure run --test-attribution` 一次（原子写、
+    `<map>.lock` 串行化）。
+
+    显式 `--attribution-map`（ENV 指定）只读透传，绝不重建/删除——schema
+    不符由 resolve_selection fail-loud（Owner 约束）。失败 → 台账记录并
+    raise `MutationSelectionError`（fail-loud；全脸仅显式 `--select full`
+    审计开关）。"""
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
-    existing = map_path(root)
+    explicit = bool(os.environ.get(ENV_MAP))
+    existing, rebuild_reason = _default_map_reuse(map_path(root), explicit)
     if existing:
+        # 可用直接复用；显式产物不可用同样原样透传（绝不重建/删除用户
+        # 指定文件——fail-loud 由 resolve_selection）。
         return existing
+    # §SPEC-012 HIGH-2：默认位置旧 schema/无效状态（rebuild_reason=原因串）
+    # → 原子重建（原样返回会让下游必然 fail-loud 且 _regenerate 不可达）。
     out = default_map_path(root)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     with _refresh_lock(out):
-        existing = map_path(root)          # 双检：等锁期间可能已被生成
+        existing, reason = _default_map_reuse(map_path(root), explicit)
         if existing:
-            return existing
+            return existing                # 双检：等锁期间可能已被生成/重建
+        rebuild_reason = rebuild_reason or reason
+        action = "rebuild" if rebuild_reason else "generate"
         try:
             from ..measurement.orchestrator import run_measurement
             from ..measurement.recipe import build_recipe
@@ -212,16 +240,19 @@ def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
             finally:
                 Path(tmp).unlink(missing_ok=True)
             os.environ[ENV_MAP] = out
-            _record({"action": "generate", "map": out,
+            event = {"action": action, "map": out,
                      "targets": len(targets),
-                     "wall_s": round(time.monotonic() - t0, 3), "ok": True})
+                     "wall_s": round(time.monotonic() - t0, 3), "ok": True}
+            if rebuild_reason:
+                event["reason"] = rebuild_reason
+            _record(event)
             return out
         except MutationSelectionError as e:
-            _record({"action": "generate", "ok": False, "error": str(e),
+            _record({"action": action, "ok": False, "error": str(e),
                      "wall_s": round(time.monotonic() - t0, 3)})
             raise
         except Exception as e:  # noqa: BLE001 — 生成失败 fail-loud
-            _record({"action": "generate", "ok": False, "error": str(e),
+            _record({"action": action, "ok": False, "error": str(e),
                      "wall_s": round(time.monotonic() - t0, 3)})
             raise MutationSelectionError("attribution_generate_failed",
                                          str(e)) from e

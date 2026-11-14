@@ -163,9 +163,11 @@ def compute_invalidation(root: Path, baseline: dict,
         for fid in fids:
             fid_to_tests.setdefault(_fid_file_of(fid), set()).add(
                 _script_name_of(identity))
+    explicit_rerun: set[str] = set()
     for rel in classes["test_changed"] + classes["test_new"]:
         name = Path(rel).name
         rerun.add(name)
+        explicit_rerun.add(name)
         sources.setdefault(name, []).append(f"test_changed:{rel}")
     for rel in classes["test_removed"]:
         dropped.add(Path(rel).name)
@@ -179,7 +181,8 @@ def compute_invalidation(root: Path, baseline: dict,
         for name in static:
             sources.setdefault(name, []).append(f"static:{rel}")
         rerun |= static
-    return {"rerun": rerun, "dropped": dropped, "sources": sources}
+    return {"rerun": rerun, "dropped": dropped, "sources": sources,
+            "explicit_rerun": explicit_rerun}
 
 
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str]) -> dict:
@@ -261,8 +264,11 @@ def run_attribution_increment(project_root: str | Path,
         invalidation = compute_invalidation(
             root, baseline, classes, build_index(str(root)))
     known = _baseline_script_names(baseline)
-    rerun = {n for n in invalidation["rerun"] if n in known}
-    ratio = (len(rerun) / len(known)) if known else 0.0
+    # 分类来源（改/增测试脚本）不过 known 闸——新脚本天然不在基线；
+    # 静态候选（可能指向基线外的脚本）必须过滤，防止凭空圈定
+    explicit = set(invalidation.get("explicit_rerun") or ())
+    rerun = explicit | {n for n in invalidation["rerun"] if n in known}
+    ratio = (len(rerun & known) / len(known)) if known else 0.0
     reason = _fallback_reason(hash_ok, classes, since_full,
                               calibration_every, ratio,
                               rerun_full_face_ratio)

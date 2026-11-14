@@ -492,8 +492,8 @@ def run_shadow_from_paths(
     )
     perf_in = performance_input or {}
     report["performance"] = build_performance_block(
-        complexity_runs=perf_in.get("complexity", {"baseline_median_s": 0.0, "head_median_s": 0.0}
-        ),
+        complexity_runs=perf_in.get(
+            "complexity", {"baseline_median_s": 0.0, "head_median_s": 0.0}),
         coverage_runs=perf_in.get("coverage", []),
         risk_static=_risk_static_block(report),
         extra_gut_rounds=0,

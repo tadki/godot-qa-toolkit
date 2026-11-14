@@ -55,7 +55,11 @@ class TestH1CliContract:
             raise AssertionError("CLI --dry-run must not invoke GUT")
 
         monkeypatch.setattr(mr, "_run_gut_on_project", boom)
-        rc = main(["mutation", str(target), "--project-root", str(proj), "--dry-run"])
+        # SEE-1583 §SPEC-012：CLI 默认 select=fn 且无可用映射即 fail-loud
+        # （不再静默全脸）。本用例钉的是「dry-run 零 GUT」契约本身，按其
+        # 书写时的行为面（全脸）显式传 --select full 保持原判据不变。
+        rc = main(["mutation", str(target), "--project-root", str(proj),
+                   "--dry-run", "--select", "full"])
         assert rc == 0
         assert '"dry_run": true' in capsys.readouterr().out
 

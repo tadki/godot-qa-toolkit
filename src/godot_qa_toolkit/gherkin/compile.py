@@ -1,4 +1,4 @@
-"""accept compile：.feature → 版本化 IR JSON → 数据驱动 GUT 测试 + manifest。
+"""gherkin compile：.feature → 版本化 IR JSON → 数据驱动 GUT 测试 + manifest。
 
 产物三件（三件哈希绑定，§SPEC-1426-06）：
 - acceptance/ir/<feature-key>.json        带版本 IR（OPS_VERSION）

@@ -207,6 +207,7 @@ def run_mutation(    file_path: str,
     progress: dict | None = None,
     identity: dict | None = None,
     worker_channel: bool | None = None,
+    select_mode: str = "full",
 ) -> dict:
     """单文件 mutation 入口（§SPEC-202 单位级测量面挂载点）。
 
@@ -225,7 +226,8 @@ def run_mutation(    file_path: str,
         mutate_all=mutate_all, retry_ids=retry_ids,
         resume2_store=resume2_store, select_ids=select_ids,
         select_lines=select_lines, reuse_coverage=reuse_coverage,
-        progress=progress, identity=identity, worker_channel=worker_channel)
+        progress=progress, identity=identity, worker_channel=worker_channel,
+        select_mode=select_mode)
     s = result.get("summary") if isinstance(result, dict) else None
     if isinstance(s, dict) and "stage_timings" in s:
         s["stage_timings"]["total"] = round(time.monotonic() - t0, 3)
@@ -255,6 +257,7 @@ def _run_mutation_core(file_path: str,
     progress: dict | None = None,
     identity: dict | None = None,
     worker_channel: bool | None = None,
+    select_mode: str = "full",
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -305,9 +308,11 @@ def _run_mutation_core(file_path: str,
     clock = StageClock()
     selection_meta: dict = {}
     if tests_glob is None:
+        # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
+        # （CLI 默认 fn）——不可用映射 fail-loud，无静默全脸路径。
         with clock.stage("test_scan"):
             tests_glob, selection_meta = _auto_scan_tests_glob_meta(
-                str(path), project_root)
+                str(path), project_root, select_mode=select_mode)
     scoped = tests_glob is not None
 
     original_src = path.read_text(encoding="utf-8")
@@ -336,11 +341,19 @@ def _run_mutation_core(file_path: str,
     attention = _attention_note(mutation_warning, total_sites, str(path))
 
     if dry_run:
-        return dry_run_estimate(
+        estimate = dry_run_estimate(
             str(path), mutants, budget, scoped, total_sites,
             project_root, tests_glob, binary_kind, resume2_store,
             mutate_all, header_hash, scope_hashes, attention=attention,
             identity=identity)
+        # §SPEC-012：dry-run 同样如实披露选面（串行路径此前整体丢弃
+        # selection meta，silent full-face 无从鉴别）。
+        from .testscan import selection_disclosure
+        estimate["summary"].update(selection_disclosure(selection_meta))
+        if selection_meta.get("source"):
+            estimate["summary"].setdefault(
+                "selection_mode", select_mode)
+        return estimate
 
     if not mutants:
         return _no_sites_result(str(path), scoped)

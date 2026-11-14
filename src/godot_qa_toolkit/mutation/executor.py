@@ -49,7 +49,8 @@ ENV_BASELINE_IN_FARM = "GQT_MUTATION_BASELINE_IN_FARM"
 def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                       tests_glob, resume, binary_kind, timing_store,
                       mutation_warning, timeout_factor, reuse_coverage,
-                      identity, worker_channel=None) -> dict:
+                      identity, worker_channel=None,
+                      select_mode: str = "full") -> dict:
     """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。"""
     r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
                      dry_run=dry_run, tests_glob=tests_glob, resume=resume,
@@ -57,14 +58,15 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
                      reuse_coverage=reuse_coverage, identity=identity,
-                     worker_channel=worker_channel)
+                     worker_channel=worker_channel, select_mode=select_mode)
     r["summary"].setdefault("jobs", 1)
     return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
 
 
 def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                   binary_kind, mutation_warning, timeout_factor,
-                  reuse_coverage, identity, worker_channel=None) -> dict:
+                  reuse_coverage, identity, worker_channel=None,
+                  select_mode: str = "full") -> dict:
     """多文件 dry-run 清点（零 GUT/零预热/零 baseline）。"""
     results = [
         run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
@@ -73,7 +75,7 @@ def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
                      reuse_coverage=reuse_coverage, identity=identity,
-                     worker_channel=worker_channel)
+                     worker_channel=worker_channel, select_mode=select_mode)
         for f in files
     ]
     for result in results:
@@ -348,7 +350,8 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                          mutation_warning=mutation_warning,
                          timeout_factor=timeout_factor,
                          mutate_all=mutate_all,
-                         worker_channel=worker_channel)
+                         worker_channel=worker_channel,
+                         select_mode=select_mode)
         r["summary"].setdefault("jobs", 1)
         from .testscan import selection_disclosure
         r["summary"].update(selection_disclosure(selection_meta))
@@ -409,12 +412,14 @@ def _run_mutation_files_impl(
                                  dry_run, tests_glob, resume, binary_kind,
                                  timing_store, mutation_warning,
                                  timeout_factor, reuse_coverage, identity,
-                                 worker_channel=worker_channel)
+                                 worker_channel=worker_channel,
+                                 select_mode=select_mode)
     if dry_run:
         return _dry_run_list(files, project_root, budget, timeout_s,
                              tests_glob, binary_kind, mutation_warning,
                              timeout_factor, reuse_coverage, identity,
-                             worker_channel=worker_channel)
+                             worker_channel=worker_channel,
+                             select_mode=select_mode)
 
     jobs = default_jobs(jobs)
     # SEE-1413 退串行判定：必须在任何 GUT 调用（prewarm / 共享 baseline
@@ -531,6 +536,9 @@ def _chunk_worker(payload: dict) -> dict:
     binary_kind = payload.get("binary_kind")
     timeout_factor = payload.get("timeout_factor")
     identity = payload.get("identity")
+    # §SPEC-012：worker 与父层同源遵守 select_mode（payload 携带父层
+    # 派发值；tests_glob=None 的显式全脸 chunk 不得被 worker 侧重扫降级）。
+    select_mode = payload.get("selection_mode") or "full"
     if payload.get("serial"):
         return run_mutation(
             payload["file"], payload["project_root"], budget=payload["budget"],
@@ -540,7 +548,8 @@ def _chunk_worker(payload: dict) -> dict:
             mutate_all=bool(payload.get("mutate_all")),
             progress=payload.get("progress"),
             identity=identity,
-            worker_channel=payload.get("worker_channel"))
+            worker_channel=payload.get("worker_channel"),
+            select_mode=select_mode)
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -551,6 +560,7 @@ def _chunk_worker(payload: dict) -> dict:
         progress=payload.get("progress"),
         identity=identity,
         worker_channel=payload.get("worker_channel"),
+        select_mode=select_mode,
     )
 
 
@@ -868,7 +878,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                                    "total": 0},
                          reuse_coverage=reuse_coverage,
                          identity=identity,
-                         worker_channel=worker_channel)
+                         worker_channel=worker_channel,
+                         select_mode=select_mode)
         r["summary"].setdefault("jobs", 1)
         from .testscan import selection_disclosure
         r["summary"].update(selection_disclosure(selection_meta))
@@ -919,7 +930,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                               binary_kind, ids, baseline, resume,
                               timeout_factor, raw_total, attention, jobs,
                               run_id=run_id, identity=identity,
-                              worker_channel=worker_channel)
+                              worker_channel=worker_channel,
+                              select_mode=select_mode)
     return chunks, ctx, None
 
 
@@ -1048,7 +1060,7 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
                      ids, baseline, resume, timeout_factor, raw_total,
                      attention, jobs, run_id=None, identity=None,
-                     worker_channel=None):
+                     worker_channel=None, select_mode: str = "full"):
     """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。
 
     progress（SEE-1525）：各分片共用同一 run_id 与**全局分母** `len(ids)`，
@@ -1079,6 +1091,7 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
                          "total": len(ids)},
             "identity": identity,
             "worker_channel": worker_channel,
+            "selection_mode": select_mode,
         })
     return chunks
 

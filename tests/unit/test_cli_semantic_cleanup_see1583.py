@@ -129,6 +129,22 @@ class TestMachineContract:
                 assert not hits, (
                     f"{path.relative_to(SRC)} still emits tool {old!r}")
 
+    def test_positional_tool_args_use_new_paths(self):
+        # §SPEC-012 LOW-2 盲区收口：`_emit_godot_unavailable` /
+        # `_apply_godot_bin_or_contract` 的首个位置参数也是 tool 契约面，
+        # 字典字面量扫描罩不住——位置参数同样必须落在新命名集合内。
+        positional = re.compile(
+            r'_emit_godot_unavailable\(\s*"([^"]+)"|'
+            r'_apply_godot_bin_or_contract\(\s*"([^"]+)"')
+        hits: dict[str, list[str]] = {}
+        for path, text in _py_texts(SRC):
+            for m in positional.finditer(text):
+                value = m.group(1) or m.group(2)
+                hits.setdefault(value, []).append(
+                    str(path.relative_to(SRC)))
+        bad = {k: v for k, v in hits.items() if k not in ALLOWED_TOOLS}
+        assert not bad, f"positional tool args outside new naming: {bad}"
+
     def test_no_old_schema_versions_in_src(self):
         for path, text in _py_texts(SRC):
             for prefix in OLD_SCHEMA_PREFIXES:

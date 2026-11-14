@@ -740,7 +740,12 @@ def cmd_canonical(args: argparse.Namespace) -> int:
             shard_log_dir=getattr(args, "shard_log_dir", None),
             baseline_failures=baseline_failures,
             intolerant_config=intolerant_config,
-            acceptance_repeats=getattr(args, "acceptance_repeats", 3))
+            acceptance_repeats=getattr(args, "acceptance_repeats", 3),
+            test_attribution=bool(getattr(args, "test_attribution", False)),
+            attribution_out=(
+                getattr(args, "test_attribution_out", None)
+                or (f"{args.out}.attribution.json"
+                    if getattr(args, "test_attribution", False) else None)))
     except CanonicalError as e:
         return _emit({"tool": "canonical", "ok": False,
                       "summary": {"error": str(e), "canonical_error": True},
@@ -891,6 +896,14 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--evidence-dir", default=None,
                      help="optional coverage-evidence/2 output dir for "
                           "per-arm bundles")
+    can.add_argument("--test-attribution", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581): attribute probe hits to "
+                          "the GUT test that was running, emitting a "
+                          "test->file mapping artifact; default off, the "
+                          "default path is byte-identical")
+    can.add_argument("--test-attribution-out", default=None,
+                     help="attribution artifact path (default: "
+                          "<--out>.attribution.json)")
     _add_godot_bin_arg(can)
     can.set_defaults(func=cmd_canonical)
 

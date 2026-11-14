@@ -61,6 +61,7 @@ from ..mutation.inject import BinaryConfigError, godot_command, spawn_godot
 from .recipe import verify_recipe
 
 REPORT_VERSION = "canonical-report/1"
+ATTRIBUTION_SCHEMA = "canonical-test-attribution/1"
 CERTIFICATION = {
     "status": "not_certified",
     "reason": "single round; WP5 owns two-round certification",
@@ -156,6 +157,116 @@ func _notification(what: int) -> void:
 \t\t\tif arr[i] == 1:
 \t\t\t\tf.store_line(str(i))
 \t\tf.close()
+"""
+
+# §SPEC-083 试验（默认关闭）：per-test 归属形态的 pre-hook——在既有
+# finalizer 注册之上，用 GUT 的 start_script/start_test/end_test/end_script
+# 信号维护「当前测试身份」：测试下标写入 Engine meta `gqt_cov_cur_test`
+# （-1 = 不在测试窗口内），测试注册表 `gqt_cov_test_registry` 供 finalizer
+# 落盘映射。run_uuid 在注入时以占位符替换（每臂独立）。
+_ATTR_RUN_UUID_PLACEHOLDER = "__GQT_RUN_UUID__"
+_ATTR_PRE_HOOK_GD = """extends "res://addons/gut/hook_script.gd"
+# qa-toolkit canonical per-test attribution hook (experimental, SEE-1581).
+# Registers the drain node (same R5 discipline as the default hook) and
+# maintains the current test identity from GUT's per-test lifecycle signals.
+var _gqt_keys: Array = []
+var _gqt_idx_by_key: Dictionary = {}
+var _gqt_script_path: String = ""
+
+func run():
+\tvar root: Node = (gut.get_tree().root if gut != null
+\t\t\telse Engine.get_main_loop().root)
+\tvar node: Node = load("res://addons/gqt_cov_flusher.gd").new()
+\tnode.name = "GqtCovFlusherNode"
+\troot.add_child(node)
+\troot.move_child(node, 0)
+\tEngine.set_meta("gqt_cov_test_registry", _gqt_keys)
+\tEngine.set_meta("gqt_cov_attr_registry_sink",
+\t\t\t"qa-cov-attr-tests-__GQT_RUN_UUID__-" + str(OS.get_process_id()) + ".txt")
+\tEngine.set_meta("gqt_cov_cur_test", -1)
+\tif gut != null:
+\t\tgut.start_script.connect(_on_start_script)
+\t\tgut.start_test.connect(_on_start_test)
+\t\tgut.end_test.connect(_on_end_test)
+\t\tgut.end_script.connect(_on_end_script)
+
+func _on_start_script(coll_script) -> void:
+\tvar p = coll_script.get_filename_and_inner()
+\t_gqt_script_path = str(p)
+\tEngine.set_meta("gqt_cov_cur_test", -1)
+
+func _on_start_test(test_name) -> void:
+\tvar key: String = _gqt_script_path + "::" + str(test_name)
+\tvar idx: int = _gqt_idx_by_key.get(key, -1)
+\tif idx < 0:
+\t\tidx = _gqt_keys.size()
+\t\t_gqt_keys.append(key)
+\t\t_gqt_idx_by_key[key] = idx
+\tEngine.set_meta("gqt_cov_cur_test", idx)
+
+func _on_end_test() -> void:
+\tEngine.set_meta("gqt_cov_cur_test", -1)
+
+func _on_end_script() -> void:
+\tEngine.set_meta("gqt_cov_cur_test", -1)
+"""
+
+# 归属形态 finalizer：在既有 hits drain 之后，按 attr sink 落盘
+# (test_idx 命中行 + 已归属/无主命中事件计数)，并把测试注册表写入
+# 每进程一个的注册表 sink。所有写入仍是「每文件一次 open + 一次循环」，
+# I/O 与命中事件数无关（§SPEC-046 口径不破）。
+_ATTR_FLUSHER_GD = """extends Node
+# qa-toolkit canonical per-test attribution finalizer (experimental, SEE-1581).
+func _notification(what: int) -> void:
+\tif what != NOTIFICATION_PREDELETE:
+\t\treturn
+\tif Engine.has_meta("gqt_cov_marks"):
+\t\tvar d: Dictionary = Engine.get_meta("gqt_cov_marks")
+\t\tfor sink_name in d.keys():
+\t\t\tvar arr: Array = d[sink_name]
+\t\t\tvar f = FileAccess.open("user://" + sink_name, FileAccess.READ_WRITE)
+\t\t\tif f == null:
+\t\t\t\tf = FileAccess.open("user://" + sink_name, FileAccess.WRITE)
+\t\t\telse:
+\t\t\t\tf.seek_end()
+\t\t\tif f == null:
+\t\t\t\tpush_error("gqt coverage probe sink open failed: user://" + sink_name)
+\t\t\t\tcontinue
+\t\t\tfor i in arr.size():
+\t\t\t\tif arr[i] == 1:
+\t\t\t\t\tf.store_line(str(i))
+\t\t\tf.close()
+\tif Engine.has_meta("gqt_cov_attr"):
+\t\tvar a: Dictionary = Engine.get_meta("gqt_cov_attr")
+\t\tfor attr_sink in a.keys():
+\t\t\tvar h: Array = a[attr_sink]
+\t\t\tvar af = FileAccess.open("user://" + attr_sink, FileAccess.READ_WRITE)
+\t\t\tif af == null:
+\t\t\t\taf = FileAccess.open("user://" + attr_sink, FileAccess.WRITE)
+\t\t\telse:
+\t\t\t\taf.seek_end()
+\t\t\tif af == null:
+\t\t\t\tpush_error("gqt attribution sink open failed: user://" + attr_sink)
+\t\t\t\tcontinue
+\t\t\tvar seen: Array = h[0]
+\t\t\tfor i in seen.size():
+\t\t\t\tif seen[i] == 1:
+\t\t\t\t\taf.store_line("T " + str(i))
+\t\t\taf.store_line("A " + str(h[1][0]))
+\t\t\taf.store_line("U " + str(h[1][1]))
+\t\t\taf.close()
+\tif Engine.has_meta("gqt_cov_test_registry") and Engine.has_meta("gqt_cov_attr_registry_sink"):
+\t\tvar keys: Array = Engine.get_meta("gqt_cov_test_registry")
+\t\tvar rsink: String = Engine.get_meta("gqt_cov_attr_registry_sink")
+\t\tvar rf = FileAccess.open("user://" + rsink, FileAccess.READ_WRITE)
+\t\tif rf == null:
+\t\t\trf = FileAccess.open("user://" + rsink, FileAccess.WRITE)
+\t\telse:
+\t\t\trf.seek_end()
+\t\tif rf != null:
+\t\t\tfor i in keys.size():
+\t\t\t\trf.store_line("R " + str(i) + "\\t" + str(keys[i]))
+\t\t\trf.close()
 """
 
 
@@ -634,6 +745,153 @@ def _read_hits_merged(root: Path, run_uuid: str, rel: str,
     return hits, sum(1 for pid in ids if pid in valid)
 
 
+def _attr_pid(sink_file: str, run_uuid: str) -> int | None:
+    """attr/registry sink 文件名 → 进程 PID（`...-<uuid>-<pid>-<key8>.txt`
+    与 `...-<uuid>-<pid>.txt` 两形态）。解析失败返回 None（不猜）。"""
+    stem = sink_file.rsplit(".", 1)[0]
+    idx = stem.find(run_uuid)
+    if idx < 0:
+        return None
+    tail = stem[idx + len(run_uuid):].strip("-")
+    head = tail.split("-", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _read_attr_merged(root: Path, run_uuid: str, rel: str,
+                      xdg_homes: list[str], consume: bool = True
+                      ) -> dict[int, dict]:
+    """§SPEC-083：读回 per-file 归属 sink（`qa-coverage-attr-<uuid>-<pid>-
+    <key8>.txt`）。返回 {pid: {"seen": set[test_idx], "attributed": int,
+    "unattributed": int}}——pid 用于与测试注册表 join（每进程独立注册表）。"""
+    key8 = file_key8(rel)
+    name = f"qa-coverage-attr-{run_uuid}-*-{key8}.txt"
+    proj = _project_name(root)
+    out: dict[int, dict] = {}
+    for xdg in xdg_homes:
+        d = _shard_user_dir(xdg, proj)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob(name)):
+            pid = _attr_pid(f.name, run_uuid)
+            if pid is None:
+                continue
+            rec = out.setdefault(
+                pid, {"seen": set(), "attributed": 0, "unattributed": 0})
+            try:
+                text = f.read_text(encoding="utf-8")
+            finally:
+                if consume:
+                    f.unlink(missing_ok=True)
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("T "):
+                    try:
+                        rec["seen"].add(int(line[2:]))
+                    except ValueError:
+                        continue
+                elif line.startswith("A "):
+                    try:
+                        rec["attributed"] += int(line[2:])
+                    except ValueError:
+                        continue
+                elif line.startswith("U "):
+                    try:
+                        rec["unattributed"] += int(line[2:])
+                    except ValueError:
+                        continue
+    return out
+
+
+def _read_test_registry(root: Path, run_uuid: str, xdg_homes: list[str],
+                        consume: bool = True) -> dict[int, dict[int, str]]:
+    """§SPEC-083：读回每进程测试注册表 `qa-cov-attr-tests-<uuid>-<pid>.txt`
+    （行格式 `R <idx>\\t<identity>`）→ {pid: {idx: identity}}。"""
+    name = f"qa-cov-attr-tests-{run_uuid}-*.txt"
+    proj = _project_name(root)
+    out: dict[int, dict[int, str]] = {}
+    for xdg in xdg_homes:
+        d = _shard_user_dir(xdg, proj)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob(name)):
+            pid = _attr_pid(f.name, run_uuid)
+            if pid is None:
+                continue
+            table = out.setdefault(pid, {})
+            try:
+                text = f.read_text(encoding="utf-8")
+            finally:
+                if consume:
+                    f.unlink(missing_ok=True)
+            for line in text.splitlines():
+                line = line.strip()
+                if not line.startswith("R "):
+                    continue
+                body = line[2:]
+                if "\t" not in body:
+                    continue
+                idx_s, identity = body.split("\t", 1)
+                try:
+                    table[int(idx_s)] = identity
+                except ValueError:
+                    continue
+    return out
+
+
+def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
+                          registries: dict[int, dict[int, str]]) -> dict:
+    """§SPEC-083：per-file 归属证据 → test→file / file→tests 映射。
+
+    归属证据按 (file, pid) 记录；pid 对应一个 GUT 进程的测试注册表。
+    只统计见到的命中：`attributed`/`unattributed` 是命中事件数（含无主
+    窗口：before_all/after_all、async 跨测试边界等），`rate` 为无主占比。
+    注册表缺失的 test_idx 不静默丢弃——单列 unmapped 披露。"""
+    test_to_files: dict[str, set[str]] = {}
+    file_to_tests: dict[str, set[str]] = {}
+    unmapped: list[dict] = []
+    attributed = 0
+    unattributed = 0
+    files_with_unattributed = 0
+    for rel, per_pid in sorted(attr_by_rel.items()):
+        file_tests: set[str] = set()
+        file_unattributed = 0
+        for pid, rec in sorted(per_pid.items()):
+            attributed += rec["attributed"]
+            unattributed += rec["unattributed"]
+            file_unattributed += rec["unattributed"]
+            table = registries.get(pid, {})
+            for idx in sorted(rec["seen"]):
+                identity = table.get(idx)
+                if identity is None:
+                    unmapped.append({"file": rel, "pid": pid, "test_index": idx})
+                    continue
+                file_tests.add(identity)
+                test_to_files.setdefault(identity, set()).add(rel)
+        if file_unattributed:
+            files_with_unattributed += 1
+        if file_tests:
+            file_to_tests[rel] = sorted(file_tests)
+    total_events = attributed + unattributed
+    return {
+        "arm": arm,
+        "tests": len(test_to_files),
+        "files": len(file_to_tests),
+        "pairs": sum(len(v) for v in test_to_files.values()),
+        "attributed_hit_events": attributed,
+        "unattributed_hit_events": unattributed,
+        "unattributed_rate": (round(unattributed / total_events, 6)
+                              if total_events else None),
+        "files_with_unattributed": files_with_unattributed,
+        "unmapped_test_indices": unmapped[:200],
+        "unmapped_count": len(unmapped),
+        "test_to_files": {k: sorted(v) for k, v in sorted(test_to_files.items())},
+        "file_to_tests": file_to_tests,
+    }
+
+
 def _inject_toolchain(root: Path, recipe: dict) -> dict:
     """PR-A L1 预留的编排器职责：测量时注入真实 toolchain 版本并重算
     recipe_hash（注入路径下版本变化即 recipe 变化）。加载态先 verify
@@ -681,7 +939,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                   stability_baseline: str | None = None,
                   baseline_failures: "set[tuple[str, str]] | None" = None,
                   intolerant_config: dict | None = None,
-                  acceptance_repeats: int = 3) -> dict:
+                  acceptance_repeats: int = 3,
+                  test_attribution: bool = False,
+                  attribution_out: str | None = None) -> dict:
     """canonical 双源批式编排，产出 canonical-report/1。
 
     baseline_failures（§SPEC-060a/064b）：既有（未插桩）运行的失败
@@ -801,8 +1061,11 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     cache_hits = 0
     cache_misses = 0
     # §SPEC-059a：报告 algo 与实际缓存键同源（flags/4-pid / blocks/6）
-    algo_used = (prepcache.PROBE_ALGO_VERSION if block_compress
+    base_algo = (prepcache.PROBE_ALGO_VERSION if block_compress
                  else "flags/4-pid")
+    # §SPEC-083：归属形态插桩产物不同 → 缓存键必须分形，默认关闭路径
+    # algo 不变（既有条目继续命中，零漂移）
+    algo_used = f"{base_algo}-attr" if test_attribution else base_algo
     for path_str in target_files:
         p = Path(path_str)
         if not p.is_file():
@@ -841,10 +1104,12 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                         f"-{file_key8(rel)}.txt")
             if block_compress:
                 inst0, probe_lines, block_map = _instrument_blocks(
-                    src, tpl_sink, runtime_sink=True)
+                    src, tpl_sink, runtime_sink=True,
+                    attribution=test_attribution)
             else:
                 inst0, probe_lines = _instrument(
-                    src, tpl_sink, flags=True, runtime_sink=True)
+                    src, tpl_sink, flags=True, runtime_sink=True,
+                    attribution=test_attribution)
                 block_map = {}
             if probe_lines:
                 # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug →
@@ -1004,8 +1269,15 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         try:
             for abs_path, inst in instrumented_files.items():
                 Path(abs_path).write_text(inst, encoding="utf-8")
-            for relpath, text in ((_FLUSHER_RELPATH, _FLUSHER_GD),
-                                  (_PRE_HOOK_RELPATH, _PRE_HOOK_GD)):
+            if test_attribution:
+                flusher_gd = _ATTR_FLUSHER_GD
+                pre_hook_gd = _ATTR_PRE_HOOK_GD.replace(
+                    _ATTR_RUN_UUID_PLACEHOLDER, str(run_uuid))
+            else:
+                flusher_gd = _FLUSHER_GD
+                pre_hook_gd = _PRE_HOOK_GD
+            for relpath, text in ((_FLUSHER_RELPATH, flusher_gd),
+                                  (_PRE_HOOK_RELPATH, pre_hook_gd)):
                 abs_p = root / relpath
                 abs_p.parent.mkdir(parents=True, exist_ok=True)
                 abs_p.write_text(text, encoding="utf-8")
@@ -1112,6 +1384,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
 
         bundles: dict[str, dict] = {}
         convergence = None
+        attribution = None
         try:
             if acceptance is not None and reps > 1:
                 # §SPEC-062C：逐轮行集并集收敛轮数（rep 间独立进程，
@@ -1160,6 +1433,14 @@ def run_canonical(project_root: str | Path, target_files: list[str],
                     update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
                                       status="bundle_written")
                 clear_sink(None, str(root), sink)
+            if test_attribution:
+                # §SPEC-083：归属证据与测试注册表必须在 xdg 清理前读回
+                attr_by_rel = {
+                    rel: _read_attr_merged(root, run_uuid, rel, xdg_homes)
+                    for rel in sink_by_rel}
+                registries = _read_test_registry(root, run_uuid, xdg_homes)
+                attribution = build_attribution_map(
+                    name, attr_by_rel, registries)
         finally:
             for xdg in xdg_homes:
                 shutil.rmtree(xdg, ignore_errors=True)
@@ -1202,6 +1483,7 @@ def run_canonical(project_root: str | Path, target_files: list[str],
             # §SPEC-062C：验收臂 N 次重复与收敛披露（gut_full 恒单轮）
             "repeats": reps,
             "convergence": convergence,
+            "attribution": attribution,
             "bundles": len(bundles), "bundles_data": bundles,
             "reconciliation": reconciliation,
             "shards": len(plans),
@@ -1307,12 +1589,56 @@ def run_canonical(project_root: str | Path, target_files: list[str],
     perf = _performance(root, probe_keys, timeout_s)
     perf["gated_core_s"] = gated_core_s
     perf["command_total_s"] = round(time.monotonic() - t_command, 3)
-    return {
+    attribution_report = None
+    if test_attribution:
+        arms_attr = {arm["arm"]: arm.get("attribution")
+                     for arm in (arm_a, arm_b)
+                     if arm.get("attribution") is not None}
+        artifact = {
+            "schema_version": ATTRIBUTION_SCHEMA,
+            "report_recipe_hash": recipe_hash,
+            "project_root": str(root),
+            "identity": "res://script::test_name",
+            "arms": arms_attr,
+            "notes": [
+                "only hits inside a GUT test window (start_test..end_test) "
+                "are attributed; script-scope (before_all/after_all) and "
+                "async callbacks after the test boundary are counted as "
+                "unattributed hit events, not silently assigned",
+                "this is a snapshot of one run bound to recipe_hash; code/"
+                "test changes make it stale — rebuild periodically",
+                "diagnostic evidence only — certification stays full-face "
+                "(not_certified, exploratory)",
+            ],
+        }
+        artifact_path = None
+        if attribution_out:
+            out_p = Path(attribution_out)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.write_text(
+                json.dumps(artifact, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            artifact_path = str(out_p)
+        attribution_report = {
+            "schema_version": ATTRIBUTION_SCHEMA,
+            "enabled": True,
+            "artifact": artifact_path,
+            "identity": "res://script::test_name",
+            "arms": {
+                name: {k: amap.get(k) for k in (
+                    "tests", "files", "pairs", "attributed_hit_events",
+                    "unattributed_hit_events", "unattributed_rate",
+                    "files_with_unattributed", "unmapped_count")}
+                for name, amap in arms_attr.items()},
+            "notes": artifact["notes"],
+        }
+    report = {
         "report_version": REPORT_VERSION,
         "project_root": str(root),
         "recipe_hash": recipe_hash,
         "arms": [
-            {k: v for k, v in arm.items() if k != "bundles_data"}
+            {k: v for k, v in arm.items()
+             if k not in ("bundles_data", "attribution")}
             for arm in (arm_a, arm_b)
         ],
         "unions": unions,
@@ -1427,6 +1753,9 @@ def run_canonical(project_root: str | Path, target_files: list[str],
         "dynamic_cache": False,
         "ok": union_valid,
     }
+    if attribution_report is not None:
+        report["test_attribution"] = attribution_report
+    return report
 
 
 _FAIL_LANES = ("timeout", "run_error", "vacuous", "no_probe_fired",

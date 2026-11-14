@@ -390,7 +390,8 @@ def _attr_var_name(sink_name: str) -> str:
 
 def _probe_calls(src: str, line_to_id: dict[int, int],
                  flags: bool = False, sink_name: str = "",
-                 attribution: bool = False) -> list[str]:
+                 attribution: bool = False,
+                 attr_probe_ids: "frozenset[int] | None" = None) -> list[str]:
     """每个可执行语句前插一行探针调用（整数 probe_id）。
 
     flags 形态（§SPEC-046）：语句前只做内存 flag 标记（预置尺寸静态 Array
@@ -399,14 +400,16 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
     risk 路径字节不变。
 
     attribution=True（§SPEC-083 试验，默认关闭）：在 flag 标记之外追加
-    「当前上下文身份」归属写——Engine meta `gqt_cov_ctx` 单整数编码三态：
-    0 = 无上下文（无主），正数 = 测试下标+1，负数 = -(脚本下标+1)。
-    per-file 归属标记为 [seen_test, seen_script, counts]：前两者按下标置位
-    记录 test→file / script→file 关系，counts[0..2] 分别累计测试级/脚本级/
-    无主命中事件数。变量名带 probe_id 后缀——同一函数内多条探针不得重复
-    声明（GDScript "already declared in this scope"）。"""
+    「当前上下文身份」归属写——Engine meta `gqt_cov_slot`（钩子维护的
+    上下文槽位，0 = 无主）。两种粒度：
+    - attr_probe_ids=None：逐命中归属（hit 级，[seen_test, seen_script,
+      unattr, counts6] 结构，ctx 正负编码测试/脚本车道）；
+    - attr_probe_ids=函数入口 probe 集合（方向②）：只有这些位点带归属块
+      （fn 级，[seen, cnt, fctx, unattr, phase4] 结构，槽位统一正数编码，
+      fctx 记 (probe, slot)→1 的函数级归属），行覆盖 flag 照旧全量。"""
     out = []
     attr = _attr_var_name(sink_name)
+    fn_mode = attr_probe_ids is not None
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
         if idx in line_to_id:
             indent = re.match(r"^(\s*)", line_text).group(1)
@@ -415,45 +418,63 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
                 out.append(
                     f"{indent}{_flag_var_name(sink_name)}"
                     f"[{pid}] = 1\n")
-                if attribution:
-                    out.append(
-                        f"{indent}var {_PROBE_PREFIX}t{pid} = "
-                        f"Engine.get_meta(\"gqt_cov_ctx\", 0)\n"
-                        f"{indent}if {_PROBE_PREFIX}t{pid} > 0:\n"
-                        f"{indent}\tvar {_PROBE_PREFIX}s{pid} = {attr}[0]\n"
-                        f"{indent}\tif {_PROBE_PREFIX}t{pid} > "
-                        f"{_PROBE_PREFIX}s{pid}.size():\n"
-                        f"{indent}\t\t{_PROBE_PREFIX}s{pid}.resize("
-                        f"{_PROBE_PREFIX}t{pid})\n"
-                        f"{indent}\t{_PROBE_PREFIX}s{pid}"
-                        f"[{_PROBE_PREFIX}t{pid} - 1] = 1\n"
-                        # 显式赋值而非 `+=`：被测仓存在「断言源码无 +=」的
-                        # 源文本测试（KOL test_see1116），复合赋值会被误判
-                        f"{indent}\t{attr}[3][0] = {attr}[3][0] + 1\n"
-                        f"{indent}elif {_PROBE_PREFIX}t{pid} < 0:\n"
-                        f"{indent}\tvar {_PROBE_PREFIX}c{pid} = {attr}[1]\n"
-                        f"{indent}\tif -{_PROBE_PREFIX}t{pid} > "
-                        f"{_PROBE_PREFIX}c{pid}.size():\n"
-                        f"{indent}\t\t{_PROBE_PREFIX}c{pid}.resize("
-                        f"-{_PROBE_PREFIX}t{pid})\n"
-                        f"{indent}\t{_PROBE_PREFIX}c{pid}"
-                        f"[-{_PROBE_PREFIX}t{pid} - 1] = 1\n"
-                        f"{indent}\t{attr}[3][1] = {attr}[3][1] + 1\n"
-                        f"{indent}else:\n"
-                        # 方向③：无主命中记 probe 热点与阶段桶
-                        # （0 bootstrap / 1 script_gap / 2 shutdown / 3 other）
-                        f"{indent}\t{attr}[2][{pid}] = "
-                        f"{attr}[2].get({pid}, 0) + 1\n"
-                        f"{indent}\tvar {_PROBE_PREFIX}p{pid} = "
-                        f"Engine.get_meta(\"gqt_cov_phase\", 0)\n"
-                        f"{indent}\tif {_PROBE_PREFIX}p{pid} >= 0 "
-                        f"and {_PROBE_PREFIX}p{pid} <= 3:\n"
-                        f"{indent}\t\t{attr}[3][{_PROBE_PREFIX}p{pid} + 2]"
-                        f" = {attr}[3][{_PROBE_PREFIX}p{pid} + 2] + 1\n")
+                if attribution and (fn_mode is False
+                                    or pid in attr_probe_ids):
+                    out.append(_attr_probe_block_text(
+                        attr, pid, fn_mode, indent))
             else:
                 out.append(f"{indent}{_PROBE_PREFIX}{pid}()\n")
         out.append(line_text)
     return out
+
+
+def _attr_probe_block_text(attr: str, pid: int, fn_mode: bool,
+                           indent: str) -> str:
+    """归属探针块（方向②）：fn_mode=True 生成函数入口级块——Engine meta
+    `gqt_cov_slot` 统一正数编码上下文槽位（0 = 无主），热路径只有一次
+    meta 读 + 一次比较 + 两次数组写；fn_mode=False 保留 hit 级三车道块
+    （上轮形态，供单测对照）。计数用显式赋值而非 `+=`：被测仓存在
+    「断言源码无 +=」的源文本测试（KOL test_see1116）。"""
+    t = f"{_PROBE_PREFIX}t{pid}"
+    if not fn_mode:
+        return (
+            f"{indent}var {t} = Engine.get_meta(\"gqt_cov_ctx\", 0)\n"
+            f"{indent}if {t} > 0:\n"
+            f"{indent}\tvar {_PROBE_PREFIX}s{pid} = {attr}[0]\n"
+            f"{indent}\tif {t} > {_PROBE_PREFIX}s{pid}.size():\n"
+            f"{indent}\t\t{_PROBE_PREFIX}s{pid}.resize({t})\n"
+            f"{indent}\t{_PROBE_PREFIX}s{pid}[{t} - 1] = 1\n"
+            f"{indent}\t{attr}[3][0] = {attr}[3][0] + 1\n"
+            f"{indent}elif {t} < 0:\n"
+            f"{indent}\tvar {_PROBE_PREFIX}c{pid} = {attr}[1]\n"
+            f"{indent}\tif -{t} > {_PROBE_PREFIX}c{pid}.size():\n"
+            f"{indent}\t\t{_PROBE_PREFIX}c{pid}.resize(-{t})\n"
+            f"{indent}\t{_PROBE_PREFIX}c{pid}[-{t} - 1] = 1\n"
+            f"{indent}\t{attr}[3][1] = {attr}[3][1] + 1\n"
+            f"{indent}else:\n"
+            # 方向③：无主命中记 probe 热点与阶段桶
+            # （0 bootstrap / 1 script_gap / 2 shutdown / 3 other）
+            f"{indent}\t{attr}[2][{pid}] = {attr}[2].get({pid}, 0) + 1\n"
+            f"{indent}\tvar {_PROBE_PREFIX}p{pid} = "
+            f"Engine.get_meta(\"gqt_cov_phase\", 0)\n"
+            f"{indent}\tif {_PROBE_PREFIX}p{pid} >= 0 "
+            f"and {_PROBE_PREFIX}p{pid} <= 3:\n"
+            f"{indent}\t\t{attr}[3][{_PROBE_PREFIX}p{pid} + 2]"
+            f" = {attr}[3][{_PROBE_PREFIX}p{pid} + 2] + 1\n")
+    p = f"{_PROBE_PREFIX}p{pid}"
+    return (
+        f"{indent}var {t} = Engine.get_meta(\"gqt_cov_slot\", 0)\n"
+        f"{indent}if {t} > 0:\n"
+        f"{indent}\t{attr}[0][{t} - 1] = 1\n"
+        f"{indent}\t{attr}[1][{t} - 1] = {attr}[1][{t} - 1] + 1\n"
+        f"{indent}\tvar {_PROBE_PREFIX}k{pid} = {attr}[2].get_or_add({pid}, {{}})\n"
+        f"{indent}\t{_PROBE_PREFIX}k{pid}[{t} - 1] = 1\n"
+        f"{indent}else:\n"
+        # 无主分支（方向③口径不变）：probe 热点 + 阶段桶
+        f"{indent}\t{attr}[3][{pid}] = {attr}[3].get({pid}, 0) + 1\n"
+        f"{indent}\tvar {p} = Engine.get_meta(\"gqt_cov_phase\", 0)\n"
+        f"{indent}\tif {p} >= 0 and {p} <= 3:\n"
+        f"{indent}\t\t{attr}[4][{p}] = {attr}[4][{p}] + 1\n")
 
 
 def _flag_var_suffix(sink_name: str) -> str:
@@ -472,7 +493,8 @@ def _flag_var_name(sink_name: str) -> str:
 def _flag_probe_block(sink_name: str, count: int,
                       runtime_sink: bool = False,
                       attribution: bool = False,
-                      causal: bool = False) -> str:
+                      causal: bool = False,
+                      fn_mode: bool = False) -> str:
     """flag 标记注册块：per-file 预置尺寸静态 Array（变量名带文件 key8
     去继承冲突），经 Engine meta 注册（Godot 4.6 实证：脚本 reload 重跑
     不发生但 static Array 身份保留——跨 reload 合并由共享引用自然成立）。
@@ -484,10 +506,12 @@ def _flag_probe_block(sink_name: str, count: int,
     读取侧按 run_uuid+key8 模式合并）。
 
     attribution=True（§SPEC-083 试验，默认关闭）：追加归属注册块——
-    `[seen_test, seen_script, unattr_counts(字典), counts6]` 结构经 Engine
-    meta `gqt_cov_attr` 按 attr sink 名登记，finalizer 收尾时按 attr sink
-    落盘；counts6 = [test, script, bootstrap, script_gap, shutdown, other]
-    （方向③具名车道）。默认路径不生成任何新代码。"""
+    hit 级（fn_mode=False）`[seen_test, seen_script, unattr_counts(字典),
+    counts6]`；fn 级（fn_mode=True，方向②）`[seen, cnt, fctx, unattr_counts,
+    phase4]`，seen/cnt 由注册函数按 `gqt_cov_slot_max` 预置尺寸（钩子在
+    新槽位注册时同步扩容并零填充）。结构经 Engine meta `gqt_cov_attr`
+    按 attr sink 名登记，finalizer 收尾时按 attr sink 落盘。默认路径不
+    生成任何新代码。"""
     var = _flag_var_name(sink_name)
     key8 = _flag_var_suffix(sink_name)
     reg = f"{_PROBE_PREFIX}reg_{key8}"
@@ -516,6 +540,19 @@ def _flag_probe_block(sink_name: str, count: int,
                         f"\"-{key8}.txt\"")
         else:
             attr_ref = f"\"{attr_name}\""
+        if fn_mode:
+            holder = ("[[], [], {}, {}, [0, 0, 0, 0]]")
+            sizing = (
+                f"\tvar n: int = Engine.get_meta(\"gqt_cov_slot_max\", 0)\n"
+                f"\th[0].resize(n)\n"
+                f"\tvar i: int = 0\n"
+                f"\twhile i < n:\n"
+                f"\t\th[0][i] = 0\n"
+                f"\t\th[1][i] = 0\n"
+                f"\t\ti += 1\n")
+        else:
+            holder = "[[], [], {}, [0, 0, 0, 0, 0, 0]]"
+            sizing = ""
         attr_decl += (
             f"static var {attr}: Array = {areg}()\n"
             f"\n"
@@ -524,9 +561,10 @@ def _flag_probe_block(sink_name: str, count: int,
             f" if Engine.has_meta(\"gqt_cov_attr\") else {{}}\n"
             f"\tvar h: Array = d.get({attr_ref}, [])\n"
             f"\tif h.is_empty():\n"
-            f"\t\th = [[], [], {{}}, [0, 0, 0, 0, 0, 0]]\n"
+            f"\t\th = {holder}\n"
             f"\t\td[{attr_ref}] = h\n"
             f"\t\tEngine.set_meta(\"gqt_cov_attr\", d)\n"
+            f"{sizing}"
             f"\treturn h\n"
         )
     return (
@@ -629,10 +667,14 @@ def _blocks_from_execs(execs, src: str) -> dict[int, list[int]]:
 def _instrument_blocks(src: str, sink_name: str,
                        runtime_sink: bool = False,
                        attribution: bool = False,
-                       causal: bool = False
+                       causal: bool = False,
+                       attr_probe_ids: "frozenset[int] | None" = None
                        ) -> tuple[str, list[int], dict[int, list[int]]]:
     """§SPEC-055 块压缩插桩：仅块入口行插 flag 探针；返回
-    (插桩源码, 块入口行清单, 块入口→块内全部起始行映射)。"""
+    (插桩源码, 块入口行清单, 块入口→块内全部起始行映射)。
+
+    attribution=True 时 attr_probe_ids 指定携带归属块的 probe 集合
+    （方向②函数入口级）；None = 全部 probe 携带（hit 级）。"""
     execs = list(_collect_executable_lines(src))
     bmap = _blocks_from_execs(execs, src)
     starts = sorted(bmap)
@@ -640,9 +682,10 @@ def _instrument_blocks(src: str, sink_name: str,
         return src, [], {}
     line_to_id = {ln: i for i, ln in enumerate(starts)}
     fb = "".join(_probe_calls(src, line_to_id, True, sink_name,
-                              attribution))
+                              attribution, attr_probe_ids))
     return (fb + _flag_probe_block(sink_name, len(starts), runtime_sink,
-                                   attribution, causal),
+                                   attribution, causal,
+                                   fn_mode=attr_probe_ids is not None),
             starts, bmap)
 
 

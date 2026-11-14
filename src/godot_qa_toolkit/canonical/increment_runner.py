@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from .orchestrator import (
     _ATTR_PRE_HOOK_GD,
     _ATTR_RUN_UUID_PLACEHOLDER,
     _FLUSHER_RELPATH,
-    _PRE_HOOK_GD,
     _PRE_HOOK_RELPATH,
     _function_entry_probes,
     _rewrite_call_sites,
@@ -25,7 +23,7 @@ from .orchestrator import (
 
 
 def _algo_for(causal: bool) -> str:
-    from .orchestrator import ATTRIBUTION_ALGO_TAG, _algo_used
+    from .orchestrator import _algo_used
     return _algo_used(prepcache.PROBE_ALGO_VERSION, True, causal)
 
 

@@ -268,6 +268,19 @@ def _project_single_file(envelope: dict, files: list[str],
                            or summary.get("mutants") or 0))
 
 
+def _zero_ref_terminal(file: str, total: int,
+                       selection_meta: dict) -> dict | None:
+    """SEE-1581：仅当新鲜映射明确判零测试（zero_ref）才短路。
+
+    None 不再是零引用判据——无新鲜映射时返回 None（调用方按全脸继续）。"""
+    if total <= 0 or not selection_meta.get("zero_ref"):
+        return None
+    from .testscan import disclose_zero_ref, zero_ref_short_circuit_result
+    disclose_zero_ref(file)
+    return {"tool": "mutation", "ok": True, "jobs": 1,
+            "results": [zero_ref_short_circuit_result(file)]}
+
+
 def _single_file_serial_gate(files: list[str], project_root: str, *,
                              budget: int, timeout_s: int,
                              tests_glob: str | None, jobs: int,
@@ -305,15 +318,9 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
         derived, selection_meta = _auto_scan_tests_glob_meta(
             files[0], project_root)
         if derived is None:
-            # SEE-1581：None 不再是零引用判据——仅当新鲜映射明确说
-            # "无测试"（zero_ref）才短路；否则 = 无新鲜映射 → 全脸继续
-            if total > 0 and selection_meta.get("zero_ref"):
-                from .testscan import (disclose_zero_ref,
-                                       zero_ref_short_circuit_result)
-                disclose_zero_ref(files[0])
-                return {"tool": "mutation", "ok": True, "jobs": 1,
-                        "results": [zero_ref_short_circuit_result(
-                            files[0])]}, tests_glob, {}
+            terminal = _zero_ref_terminal(files[0], total, selection_meta)
+            if terminal is not None:
+                return terminal, tests_glob, {}
         else:
             tests_glob = derived
     # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
@@ -729,6 +736,37 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     return chunks, settled, v2ctx
 
 
+def _warn_site_scale(f: str, raw_total: int,
+                     mutation_warning: int | None) -> str | None:
+    """§SPEC-1420-01：位点数超告警线 → 父层发一次告警，返回提示文本。
+
+    按截断前全量位点数判定（budget 截断不掩盖规模问题）；未超线返回 None。"""
+    if mutation_warning is None or raw_total <= mutation_warning:
+        return None
+    print(f"mutation-warning: {raw_total} mutation sites exceed "
+          f"--mutation-warning {mutation_warning} in {f} — consider "
+          f"splitting this file", file=sys.stderr)
+    return (f"{raw_total} mutation sites exceed "
+            f"--mutation-warning {mutation_warning} — consider "
+            f"splitting this file")
+
+
+def _ensure_shared_baseline(project_root: str, glob: str | None, jobs: int,
+                            timeout_s: int, baselines: dict) -> dict | None:
+    """SEE-1581：全脸默认面（无新鲜映射）也需要父层共享 baseline 快照。
+
+    否则每文件退单 worker 串行、per-mutant 分片并行丢失（旧默认恒有
+    scoped glob，此入口不存在）。一次全脸 baseline 换取 N 路分片。"""
+    baseline = baselines.get(glob)
+    if baseline is None and glob is None and jobs > 1:
+        baseline = _run_baseline_snapshot(project_root, None, timeout_s)
+        if baseline and baseline.get("rc") == 0:
+            baselines[None] = baseline
+        else:
+            baseline = None
+    return baseline
+
+
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       resume, binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
@@ -751,14 +789,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         return [], None, _settled_error(f, e)
     # §SPEC-1420-01：告警由父层发一次（并发 worker 不重复）——按截断前
     # 全量位点数判定，budget 截断不掩盖规模问题。
-    attention = None
-    if mutation_warning is not None and raw_total > mutation_warning:
-        attention = (f"{raw_total} mutation sites exceed "
-                     f"--mutation-warning {mutation_warning} — consider "
-                     f"splitting this file")
-        print(f"mutation-warning: {raw_total} mutation sites exceed "
-              f"--mutation-warning {mutation_warning} in {f} — consider "
-              f"splitting this file", file=sys.stderr)
+    attention = _warn_site_scale(f, raw_total, mutation_warning)
     selection_meta: dict = auto_selection or {}
     with clock.stage("test_scan"):
         glob, selection_meta = _resolve_auto_glob(tests_glob, f,
@@ -801,16 +832,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             plan, f, project_root, glob, binary_kind, reuse_coverage,
             identity=identity)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
-    baseline = baselines.get(glob)
-    if baseline is None and glob is None and jobs > 1:
-        # SEE-1581：全脸默认面（无新鲜映射）同样需要父层共享 baseline，
-        # 否则每文件退单 worker 串行、per-mutant 分片并行丢失（旧默认恒有
-        # scoped glob，此入口不存在）。一次全脸 baseline 换取 N 路分片。
-        baseline = _run_baseline_snapshot(project_root, None, timeout_s)
-        if baseline and baseline.get("rc") == 0:
-            baselines[None] = baseline
-        else:
-            baseline = None
+    baseline = _ensure_shared_baseline(project_root, glob, jobs, timeout_s,
+                                       baselines)
     if not executed_list:
         # 差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
         # GUT + 1 baseline 锚），报告由 run_mutation 自建。父层已预跑的

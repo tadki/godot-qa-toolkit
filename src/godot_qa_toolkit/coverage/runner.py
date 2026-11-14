@@ -252,6 +252,130 @@ def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
     return [l.line for l in executable_lines]
 
 
+_CAUSAL_METHODS = ("call_deferred", "create_timer")
+
+
+def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
+    """在调用点文本中定位 `<method>(<args>)`：返回 (开括号下标, 闭括号
+    下标, 接收者文本)。接收者为 `self`（裸调用）或点号前的表达式文本；
+    字符串/注释内的同名片段不参与匹配（本函数只处理 AST 已确认的调用点，
+    文本扫描仅用于取实参原文，按括号深度与字符串状态推进）。"""
+    idx = -1
+    pos = 0
+    while True:
+        found = text.find(method, pos)
+        if found < 0:
+            break
+        after = found + len(method)
+        j = after
+        while j < len(text) and text[j] in " \t\r\n":
+            j += 1
+        if j < len(text) and text[j] == "(":
+            idx = found
+        pos = after
+    if idx < 0:
+        return None
+    open_idx = idx + len(method)
+    while open_idx < len(text) and text[open_idx] != "(":
+        open_idx += 1
+    depth = 0
+    quote = ""
+    i = open_idx
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if depth != 0:
+        return None
+    head = text[:idx].rstrip()
+    if head == "":
+        recv = "self"  # 裸调用 = 隐式 self
+    elif head.endswith("."):
+        recv = head[:-1].strip()
+    else:
+        return None
+    if not recv:
+        return None
+    return open_idx, i, recv
+
+
+def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:
+    """§SPEC-083 R2：把插桩文件内的 `call_deferred(...)` / `create_timer(...)`
+    调用点改写为创建点包装（捕获当前上下文 tag，回调触发时按 tag 因果归属）。
+
+    - `recv.call_deferred(a, b)` → `<ctx>.call_deferred_tagged(recv, [a, b])`
+    - `recv.create_timer(a, b)`  → `<ctx>.create_timer_tagged(recv, a, b)`
+    - 裸调用（隐式 self）同样处理。只改 AST 确认的调用点，字符串/注释内
+      文本不受影响；替换不插入换行，行号与探针 manifest 保持对齐。
+    返回 (改写后源码, 改写处数)。"""
+    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
+    starts = [0]
+    for line in src.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+
+    def _off(line: int, column: int) -> int:
+        return starts[line - 1] + (column - 1)
+
+    edits: list[tuple[int, int, str]] = []
+
+    def _visit(node) -> None:
+        data = getattr(node, "data", None)
+        if data in ("standalone_call", "getattr_call"):
+            meta = node.meta
+            start = _off(meta.line, meta.column)
+            end = _off(meta.end_line, meta.end_column)
+            text = src[start:end]
+            for method in _CAUSAL_METHODS:
+                if method not in text:
+                    continue
+                span = _call_arg_span(text, method)
+                if span is None:
+                    continue
+                open_idx, close_idx, recv = span
+                args = text[open_idx + 1:close_idx]
+                ctx = f"__qgta_{key_suffix}"
+                if method == "call_deferred":
+                    if not args.strip():
+                        continue
+                    repl = (f"{ctx}.call_deferred_tagged({recv}, "
+                            f"[{args}])")
+                elif args.strip():
+                    repl = f"{ctx}.create_timer_tagged({recv}, {args})"
+                else:
+                    repl = f"{ctx}.create_timer_tagged({recv})"
+                # 只替换「接收者起点 → 本次调用的右括号」，调用链后缀
+                #（如 `.timeout.connect(...)`）原样保留；嵌套 getattr_call
+                # 会重复命中同一段，按 (start, end) 去重。
+                edits.append((start, start + close_idx + 1, repl))
+                break
+        for child in getattr(node, "children", []):
+            _visit(child)
+
+    _visit(tree)
+    if not edits:
+        return src, 0
+    unique: dict[tuple[int, int], str] = {}
+    for start, end, repl in edits:
+        unique.setdefault((start, end), repl)
+    out = src
+    for (start, end), repl in sorted(unique.items(), key=lambda e: -e[0][0]):
+        out = out[:start] + repl + out[end:]
+    return out, len(unique)
+
+
 def _attr_sink_name(sink_name: str) -> str:
     """命中 sink → 归属 sink 名（同 run_uuid/key8，前缀改 attr）。"""
     hits_prefix = "qa-coverage-hits-"
@@ -275,11 +399,12 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
     risk 路径字节不变。
 
     attribution=True（§SPEC-083 试验，默认关闭）：在 flag 标记之外追加
-    「当前测试身份」归属写——Engine meta `gqt_cov_cur_test`（GUT per-test
-    钩子维护的测试下标，-1 表示不在测试窗口内）。per-file 归属标记为
-    [seen, cnt] 二元结构：seen[test_idx]=1 记录 test→file 关系，cnt[0]/[1]
-    分别累计已归属/无主命中事件数。变量名带 probe_id 后缀——同一函数内
-    多条探针不得重复声明（GDScript "already declared in this scope"）。"""
+    「当前上下文身份」归属写——Engine meta `gqt_cov_ctx` 单整数编码三态：
+    0 = 无上下文（无主），正数 = 测试下标+1，负数 = -(脚本下标+1)。
+    per-file 归属标记为 [seen_test, seen_script, counts]：前两者按下标置位
+    记录 test→file / script→file 关系，counts[0..2] 分别累计测试级/脚本级/
+    无主命中事件数。变量名带 probe_id 后缀——同一函数内多条探针不得重复
+    声明（GDScript "already declared in this scope"）。"""
     out = []
     attr = _attr_var_name(sink_name)
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
@@ -293,20 +418,29 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
                 if attribution:
                     out.append(
                         f"{indent}var {_PROBE_PREFIX}t{pid} = "
-                        f"Engine.get_meta(\"gqt_cov_cur_test\", -1)\n"
-                        f"{indent}if {_PROBE_PREFIX}t{pid} >= 0:\n"
+                        f"Engine.get_meta(\"gqt_cov_ctx\", 0)\n"
+                        f"{indent}if {_PROBE_PREFIX}t{pid} > 0:\n"
                         f"{indent}\tvar {_PROBE_PREFIX}s{pid} = {attr}[0]\n"
-                        f"{indent}\tif {_PROBE_PREFIX}t{pid} >= "
+                        f"{indent}\tif {_PROBE_PREFIX}t{pid} > "
                         f"{_PROBE_PREFIX}s{pid}.size():\n"
                         f"{indent}\t\t{_PROBE_PREFIX}s{pid}.resize("
-                        f"{_PROBE_PREFIX}t{pid} + 1)\n"
+                        f"{_PROBE_PREFIX}t{pid})\n"
                         f"{indent}\t{_PROBE_PREFIX}s{pid}"
-                        f"[{_PROBE_PREFIX}t{pid}] = 1\n"
+                        f"[{_PROBE_PREFIX}t{pid} - 1] = 1\n"
                         # 显式赋值而非 `+=`：被测仓存在「断言源码无 +=」的
                         # 源文本测试（KOL test_see1116），复合赋值会被误判
-                        f"{indent}\t{attr}[1][0] = {attr}[1][0] + 1\n"
+                        f"{indent}\t{attr}[2][0] = {attr}[2][0] + 1\n"
+                        f"{indent}elif {_PROBE_PREFIX}t{pid} < 0:\n"
+                        f"{indent}\tvar {_PROBE_PREFIX}c{pid} = {attr}[1]\n"
+                        f"{indent}\tif -{_PROBE_PREFIX}t{pid} > "
+                        f"{_PROBE_PREFIX}c{pid}.size():\n"
+                        f"{indent}\t\t{_PROBE_PREFIX}c{pid}.resize("
+                        f"-{_PROBE_PREFIX}t{pid})\n"
+                        f"{indent}\t{_PROBE_PREFIX}c{pid}"
+                        f"[-{_PROBE_PREFIX}t{pid} - 1] = 1\n"
+                        f"{indent}\t{attr}[2][1] = {attr}[2][1] + 1\n"
                         f"{indent}else:\n"
-                        f"{indent}\t{attr}[1][1] = {attr}[1][1] + 1\n")
+                        f"{indent}\t{attr}[2][2] = {attr}[2][2] + 1\n")
             else:
                 out.append(f"{indent}{_PROBE_PREFIX}{pid}()\n")
         out.append(line_text)
@@ -328,7 +462,8 @@ def _flag_var_name(sink_name: str) -> str:
 
 def _flag_probe_block(sink_name: str, count: int,
                       runtime_sink: bool = False,
-                      attribution: bool = False) -> str:
+                      attribution: bool = False,
+                      causal: bool = False) -> str:
     """flag 标记注册块：per-file 预置尺寸静态 Array（变量名带文件 key8
     去继承冲突），经 Engine meta 注册（Godot 4.6 实证：脚本 reload 重跑
     不发生但 static Array 身份保留——跨 reload 合并由共享引用自然成立）。
@@ -340,8 +475,9 @@ def _flag_probe_block(sink_name: str, count: int,
     读取侧按 run_uuid+key8 模式合并）。
 
     attribution=True（§SPEC-083 试验，默认关闭）：追加归属注册块——
-    `[seen, cnt]` 结构经 Engine meta `gqt_cov_attr` 按 attr sink 名登记，
-    finalizer 收尾时按 attr sink 落盘。默认路径不生成任何新代码。"""
+    `[seen_test, seen_script, counts]` 结构经 Engine meta `gqt_cov_attr`
+    按 attr sink 名登记，finalizer 收尾时按 attr sink 落盘。默认路径不
+    生成任何新代码。"""
     var = _flag_var_name(sink_name)
     key8 = _flag_var_suffix(sink_name)
     reg = f"{_PROBE_PREFIX}reg_{key8}"
@@ -356,6 +492,10 @@ def _flag_probe_block(sink_name: str, count: int,
         sink_decl = ""
         sink_ref = f"\"{sink_name}\""
     attr_decl = ""
+    if causal:
+        # 创建点包装的上下文脚本（同目录注入，随备份/恢复清理）
+        attr_decl += (f"const __qgta_{key8} = "
+                      f"preload(\"res://addons/gqt_cov_ctx.gd\")\n")
     if attribution:
         attr = _attr_var_name(sink_name)
         areg = f"{_PROBE_PREFIX}areg_{key8}"
@@ -366,7 +506,7 @@ def _flag_probe_block(sink_name: str, count: int,
                         f"\"-{key8}.txt\"")
         else:
             attr_ref = f"\"{attr_name}\""
-        attr_decl = (
+        attr_decl += (
             f"static var {attr}: Array = {areg}()\n"
             f"\n"
             f"static func {areg}() -> Array:\n"
@@ -374,7 +514,7 @@ def _flag_probe_block(sink_name: str, count: int,
             f" if Engine.has_meta(\"gqt_cov_attr\") else {{}}\n"
             f"\tvar h: Array = d.get({attr_ref}, [])\n"
             f"\tif h.is_empty():\n"
-            f"\t\th = [[], [0, 0]]\n"
+            f"\t\th = [[], [], [0, 0, 0]]\n"
             f"\t\td[{attr_ref}] = h\n"
             f"\t\tEngine.set_meta(\"gqt_cov_attr\", d)\n"
             f"\treturn h\n"
@@ -478,7 +618,8 @@ def _blocks_from_execs(execs, src: str) -> dict[int, list[int]]:
 
 def _instrument_blocks(src: str, sink_name: str,
                        runtime_sink: bool = False,
-                       attribution: bool = False
+                       attribution: bool = False,
+                       causal: bool = False
                        ) -> tuple[str, list[int], dict[int, list[int]]]:
     """§SPEC-055 块压缩插桩：仅块入口行插 flag 探针；返回
     (插桩源码, 块入口行清单, 块入口→块内全部起始行映射)。"""
@@ -491,13 +632,14 @@ def _instrument_blocks(src: str, sink_name: str,
     fb = "".join(_probe_calls(src, line_to_id, True, sink_name,
                               attribution))
     return (fb + _flag_probe_block(sink_name, len(starts), runtime_sink,
-                                   attribution),
+                                   attribution, causal),
             starts, bmap)
 
 
 def _instrument(src: str, sink_name: str, flags: bool = False,
                 runtime_sink: bool = False,
-                attribution: bool = False) -> tuple[str, list[int]]:
+                attribution: bool = False,
+                causal: bool = False) -> tuple[str, list[int]]:
     """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
     文件尾追加探针机制。返回 (插桩源码, probe_id→行号 manifest)。
 
@@ -514,7 +656,7 @@ def _instrument(src: str, sink_name: str, flags: bool = False,
                                 attribution))
     if flags:
         return (body + _flag_probe_block(sink_name, len(manifest),
-                                         runtime_sink, attribution),
+                                         runtime_sink, attribution, causal),
                 manifest)
     return body + _probe_func(sink_name, len(manifest)), manifest
 

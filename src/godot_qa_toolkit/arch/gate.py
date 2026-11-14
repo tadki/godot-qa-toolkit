@@ -21,7 +21,7 @@ def run_arch_gate(paths: list[str]) -> dict:
     for v in violations:
         by_rule[v.rule] = by_rule.get(v.rule, 0) + 1
     return {
-        "tool": "arch",
+        "tool": "measure.arch",
         "ok": not failures,
         "summary": {
             "files": len({v.file for v in violations}),

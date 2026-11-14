@@ -2,7 +2,7 @@
 
 Read-only builder: scans the project's `.gutconfig.json` GUT face and
 `acceptance/features` set, folds in harness/toolchain versions, and hashes the
-normalized recipe (canonical-recipe/1). Exclusions REQUIRE a reason — an empty
+normalized recipe (measurement-suite/2). Exclusions REQUIRE a reason — an empty
 reason makes the recipe illegal. PR-A is the builder only: it never runs GUT,
 never instruments, and never claims certified (single round is exploratory;
 WP5 owns two-round certification).

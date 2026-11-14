@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.run import AcceptRunError, replay_check, run_suite
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check, run_suite
 from godot_qa_toolkit.arch.collector import collect_file
-from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
 
 
 # ---------- §SPEC-1426-22 ----------
@@ -89,7 +89,7 @@ def test_reanchor_tampered_manifest_rejected(project: Path, tmp_path: Path) -> N
 def test_tests_executed_zero_guard(project: Path, tmp_path: Path,
                                    monkeypatch) -> None:
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         class R:
@@ -107,7 +107,7 @@ def test_tests_executed_zero_guard(project: Path, tmp_path: Path,
 def test_tests_executed_positive_in_summary(project: Path, tmp_path: Path,
                                             monkeypatch) -> None:
     _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         class R:
@@ -129,7 +129,7 @@ def test_unchanged_violation_detail_in_reason(project: Path, tmp_path: Path,
     f.write_text("Feature: F\n  Scenario: s\n    Given a thing\n", encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
     tn = suite.manifest["attribution"][0]["test_name"]
 
     def fake_run(*a, **k):

@@ -1,4 +1,4 @@
-"""SEE-1426 P2b — accept compile/run 单测（§SPEC-1426-06/07/08/09）。
+"""SEE-1426 P2b — gherkin compile/run 单测（§SPEC-1426-06/07/08/09）。
 
 golden-file（IR/生成产物快照）、三件哈希绑定重放校验（手改 generated/IR →
 run_error）、归因 manifest 中文场景名、冒烟自检连接（harness smoke_check
@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept import OPS_VERSION
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.run import AcceptRunError, replay_check, run_suite
+from godot_qa_toolkit.gherkin import OPS_VERSION
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check, run_suite
 
 FEATURE = """Feature: 生命值扣减
   Scenario Outline: 受到 <dmg> 点伤害
@@ -169,7 +169,7 @@ def test_run_gut_missing_is_run_error(project: Path, tmp_path: Path) -> None:
 def test_run_launch_failure_is_run_error(project: Path, tmp_path: Path,
                                          monkeypatch) -> None:
     suite, _ = _compile(project, tmp_path, write=True)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         class R:
@@ -185,7 +185,7 @@ def test_run_launch_failure_is_run_error(project: Path, tmp_path: Path,
 def test_run_attributed_failures_contract(project: Path, tmp_path: Path,
                                           monkeypatch) -> None:
     suite, _ = _compile(project, tmp_path, write=True)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         class R:
@@ -197,7 +197,7 @@ def test_run_attributed_failures_contract(project: Path, tmp_path: Path,
         return R()
     monkeypatch.setattr(run_mod.subprocess, "run", fake_run)
     result = run_suite(project, suite.feature_key)
-    assert result["tool"] == "accept" and result["ok"] is False
+    assert result["tool"] == "gherkin" and result["ok"] is False
     assert result["summary"]["replay_checked"] is True
     scenarios = {f["scenario"] for f in result["failures"]}
     assert "受到 <dmg> 点伤害" in scenarios, "归因必须对回中文场景名"
@@ -207,7 +207,7 @@ def test_run_attributed_failures_contract(project: Path, tmp_path: Path,
 
 def test_run_ok_contract(project: Path, tmp_path: Path, monkeypatch) -> None:
     suite, _ = _compile(project, tmp_path, write=True)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
         class R:
@@ -230,7 +230,7 @@ def test_cli_accept_compile_contract(project: Path, tmp_path: Path) -> None:
     env = dict(os.environ, PYTHONPATH=str(repo / "src"))
     # dry compile（无 --write）：只出 summary。
     r = subprocess.run(
-        [sys.executable, "-m", "godot_qa_toolkit.cli", "accept", "compile",
+        [sys.executable, "-m", "godot_qa_toolkit.cli","gherkin", "compile",
          str(f), "--project-root", str(project)],
         capture_output=True, text=True, env=env)
     out = json.loads(r.stdout)
@@ -238,7 +238,7 @@ def test_cli_accept_compile_contract(project: Path, tmp_path: Path) -> None:
     assert out["summary"]["wrote"] == []
     # opt-in 写入：wrote 逐文件披露。
     r = subprocess.run(
-        [sys.executable, "-m", "godot_qa_toolkit.cli", "accept", "compile",
+        [sys.executable, "-m", "godot_qa_toolkit.cli","gherkin", "compile",
          str(f), "--project-root", str(project), "--write"],
         capture_output=True, text=True, env=env)
     out = json.loads(r.stdout)

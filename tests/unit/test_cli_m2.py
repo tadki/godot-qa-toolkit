@@ -45,7 +45,7 @@ class TestMutationCli:
 
 class TestCoverageCli:
     def test_missing_file_returns_json_failure(self):
-        rc, out = _run_cli("coverage", "/nonexistent/x.gd", "--project-root", "/tmp")
+        rc, out = _run_cli("measure", "coverage", "/nonexistent/x.gd", "--project-root", "/tmp")
         assert rc == 1
         assert out["ok"] is False
 
@@ -56,10 +56,10 @@ class TestCoverageCli:
         from godot_qa_toolkit.cli import build_parser
 
         parser = build_parser()
-        args = parser.parse_args([
-            "coverage", "x.gd", "--project-root", "/p",
+        args = parser.parse_args(["measure", "coverage", "x.gd", "--project-root", "/p",
             "--min-percent", "75", "--timeout", "90",
         ])
-        assert args.command == "coverage"
+        assert args.command == "measure"
+        assert args.measure_command == "coverage"
         assert args.min_percent == 75
         assert args.timeout == 90

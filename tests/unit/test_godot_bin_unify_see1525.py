@@ -4,7 +4,7 @@
 - §SPEC-001：coverage 启动点（coverage/runner.py 旧 :494 硬编码 "godot"）
   接入 godot_command() 同源解析——env 设定时不被 PATH 首匹配劫持。
 - §SPEC-002：--godot-bin > GQT_GODOT_BIN > PATH 三级优先，mutation /
-  coverage / accept run|mutate 同语义；--path 形态随 detect_binary_kind()
+  coverage / gherkin run|mutate 同语义；--path 形态随 detect_binary_kind()
   同源（win64 /mnt/→wslpath 转换保留，linux 原样不转换）；executor 预热
   同源。
 - §SPEC-006 冻结红线：未设 env 且未传 flag 时，解析结果与 af728f5 同款
@@ -267,10 +267,10 @@ class TestCliGodotBin:
         from godot_qa_toolkit.cli import build_parser
         for argv in (
             ["mutation", "f.gd", "--project-root", "r", "--godot-bin", "/x"],
-            ["coverage", "f.gd", "--project-root", "r", "--godot-bin", "/x"],
-            ["accept", "run", "--project-root", "r", "--key", "k",
+            ["measure", "coverage", "f.gd", "--project-root", "r", "--godot-bin", "/x"],
+            ["gherkin", "run", "--project-root", "r", "--key", "k",
              "--godot-bin", "/x"],
-            ["accept", "mutate", "--project-root", "r", "--key", "k",
+            ["gherkin", "mutate", "--project-root", "r", "--key", "k",
              "--godot-bin", "/x"],
         ):
             args = build_parser().parse_args(argv)
@@ -280,7 +280,7 @@ class TestCliGodotBin:
         from godot_qa_toolkit.cli import build_parser
         with pytest.raises(SystemExit):
             build_parser().parse_args(
-                ["accept", "compile", "f.feature", "--project-root", "r",
+                ["gherkin", "compile", "f.feature", "--project-root", "r",
                  "--godot-bin", "/x"])
 
     def _run_main(self, argv, capsys):
@@ -300,28 +300,28 @@ class TestCliGodotBin:
 
     def test_coverage_invalid_override_contract(self, capsys):
         rc, payload = self._run_main(
-            ["coverage", "f.gd", "--project-root", "r",
+            ["measure", "coverage", "f.gd", "--project-root", "r",
              "--godot-bin", "/no/such"], capsys)
         assert rc == 1
-        assert payload["tool"] == "coverage"
+        assert payload["tool"] == "measure.coverage"
         assert payload["ok"] is False
         assert "--godot-bin" in payload["summary"]["error"]
 
     def test_accept_run_invalid_override_contract(self, capsys):
         rc, payload = self._run_main(
-            ["accept", "run", "--project-root", "r", "--key", "k",
+            ["gherkin", "run", "--project-root", "r", "--key", "k",
              "--godot-bin", "/no/such"], capsys)
         assert rc == 1
-        assert payload["tool"] == "accept"
+        assert payload["tool"] == "gherkin"
         assert payload["ok"] is False
         assert "--godot-bin" in payload["summary"]["error"]
 
     def test_accept_mutate_invalid_override_contract(self, capsys):
         rc, payload = self._run_main(
-            ["accept", "mutate", "--project-root", "r", "--key", "k",
+            ["gherkin", "mutate", "--project-root", "r", "--key", "k",
              "--godot-bin", "/no/such"], capsys)
         assert rc == 1
-        assert payload["tool"] == "accept"
+        assert payload["tool"] == "gherkin"
         assert payload["ok"] is False
         assert "--godot-bin" in payload["summary"]["error"]
 
@@ -334,12 +334,12 @@ class TestCliGodotBin:
 
         def fake_run_coverage(**kwargs):
             captured["env_bin"] = os.environ.get("GQT_GODOT_BIN")
-            return {"tool": "coverage", "ok": True, "summary": {},
+            return {"tool": "measure.coverage", "ok": True, "summary": {},
                     "failures": []}
 
         monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
         rc, payload = self._run_main(
-            ["coverage", str(target), "--project-root", str(tmp_path),
+            ["measure", "coverage", str(target), "--project-root", str(tmp_path),
              "--godot-bin", str(elf)], capsys)
         assert rc == 0
         assert payload["ok"] is True
@@ -347,18 +347,18 @@ class TestCliGodotBin:
 
     def test_accept_run_flag_visible_to_runner(self, tmp_path, capsys,
                                                monkeypatch):
-        from godot_qa_toolkit.accept import run as accept_run
+        from godot_qa_toolkit.gherkin import run as accept_run
         elf = _mk_binary(tmp_path / "bin", "godot_lin")
         captured: dict = {}
 
         def fake_run_suite(root, feature_key, timeout_s=120):
             captured["env_bin"] = os.environ.get("GQT_GODOT_BIN")
-            return {"tool": "accept", "ok": True, "summary": {},
+            return {"tool": "gherkin", "ok": True, "summary": {},
                     "failures": []}
 
         monkeypatch.setattr(accept_run, "run_suite", fake_run_suite)
         rc, payload = self._run_main(
-            ["accept", "run", "--project-root", str(tmp_path), "--key", "k",
+            ["gherkin", "run", "--project-root", str(tmp_path), "--key", "k",
              "--godot-bin", str(elf)], capsys)
         assert rc == 0
         assert captured["env_bin"] == str(elf)
@@ -386,12 +386,12 @@ class TestFreezeUnset:
 
         def fake_run_coverage(**kwargs):
             captured["had_env"] = "GQT_GODOT_BIN" in os.environ
-            return {"tool": "coverage", "ok": True, "summary": {},
+            return {"tool": "measure.coverage", "ok": True, "summary": {},
                     "failures": []}
 
         monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
         monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
-        rc = main(["coverage", str(target), "--project-root", str(tmp_path)])
+        rc = main(["measure", "coverage", str(target), "--project-root", str(tmp_path)])
         assert rc == 0
         assert captured["had_env"] is False
 
@@ -399,7 +399,7 @@ class TestFreezeUnset:
 class TestFixRoundF1F2:
     """修复轮 F-1/F-2（hardener 上报，Leader 复现确认）回归钉子。
 
-    F-1：coverage / accept run|mutate 的显式二进制配置错误（env 或 flag 非法
+    F-1：coverage / gherkin run|mutate 的显式二进制配置错误（env 或 flag 非法
     路径）必须走统一 JSON 错误契约（ok:false + summary.error + failures），且
     先于任何其他校验（GUT runner 缺失不得掩盖二进制配置错误）。
     F-2：命令级覆盖注入后 binary kind 必须重新判定——coverage / accept 不得
@@ -422,9 +422,9 @@ class TestFixRoundF1F2:
         monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
         target = self._mk_target(tmp_path)
         rc, payload = self._run_main(
-            ["coverage", str(target), "--project-root", str(tmp_path)], capsys)
+            ["measure", "coverage", str(target), "--project-root", str(tmp_path)], capsys)
         assert rc == 1
-        assert payload["tool"] == "coverage"
+        assert payload["tool"] == "measure.coverage"
         assert payload["ok"] is False
         assert "GQT_GODOT_BIN" in payload["summary"]["error"]
         assert "GQT_GODOT_BIN" in payload["failures"][0]["reason"]
@@ -433,10 +433,10 @@ class TestFixRoundF1F2:
                                              monkeypatch):
         monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
         rc, payload = self._run_main(
-            ["accept", "run", "--project-root", str(tmp_path), "--key", "k"],
+            ["gherkin", "run", "--project-root", str(tmp_path), "--key", "k"],
             capsys)
         assert rc == 1
-        assert payload["tool"] == "accept"
+        assert payload["tool"] == "gherkin"
         assert payload["ok"] is False
         assert "GQT_GODOT_BIN" in payload["summary"]["error"]
 
@@ -444,10 +444,10 @@ class TestFixRoundF1F2:
                                                 monkeypatch):
         monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
         rc, payload = self._run_main(
-            ["accept", "mutate", "--project-root", str(tmp_path), "--key", "k"],
+            ["gherkin", "mutate", "--project-root", str(tmp_path), "--key", "k"],
             capsys)
         assert rc == 1
-        assert payload["tool"] == "accept"
+        assert payload["tool"] == "gherkin"
         assert payload["ok"] is False
         assert "GQT_GODOT_BIN" in payload["summary"]["error"]
 
@@ -457,7 +457,7 @@ class TestFixRoundF1F2:
         # 掩盖二进制配置错误——二进制契约必须先行。
         monkeypatch.setenv("GQT_GODOT_BIN", "/no/such")
         rc, payload = self._run_main(
-            ["accept", "run", "--project-root", str(tmp_path), "--key", "k"],
+            ["gherkin", "run", "--project-root", str(tmp_path), "--key", "k"],
             capsys)
         assert "GQT_GODOT_BIN" in payload["summary"]["error"]
         assert "GUT runner" not in payload["summary"]["error"]
@@ -483,7 +483,7 @@ class TestFixRoundF1F2:
         assert inject.detect_binary_kind() == "linux"
         from godot_qa_toolkit.cli import _apply_godot_bin_or_contract
         ns = SimpleNamespace(godot_bin=str(exe))
-        assert _apply_godot_bin_or_contract("coverage", ns) is None
+        assert _apply_godot_bin_or_contract("measure.coverage", ns) is None
         # F-2 主断言：无手动 reset，缓存已随覆盖重判
         assert inject.detect_binary_kind() == "win64"
         assert inject.godot_project_path("/mnt/d/proj") == "D:\\proj"
@@ -496,8 +496,7 @@ class TestFixRoundF1F2:
         assert inject.detect_binary_kind() == "linux"
         monkeypatch.setenv("GQT_GODOT_BIN", str(exe))
         from godot_qa_toolkit.cli import _apply_godot_bin_or_contract
-        assert _apply_godot_bin_or_contract(
-            "accept", SimpleNamespace(godot_bin=None)) is None
+        assert _apply_godot_bin_or_contract("gherkin", SimpleNamespace(godot_bin=None)) is None
         assert inject.detect_binary_kind() == "win64"
 
     def test_cli_coverage_flag_switch_repins_kind(self, tmp_path, capsys,
@@ -509,15 +508,15 @@ class TestFixRoundF1F2:
 
         def fake_run_coverage(**kwargs):
             captured["kind"] = inject.detect_binary_kind()
-            return {"tool": "coverage", "ok": True, "summary": {},
+            return {"tool": "measure.coverage", "ok": True, "summary": {},
                     "failures": []}
 
         monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
         rc1, _ = self._run_main(
-            ["coverage", str(target), "--project-root", str(tmp_path),
+            ["measure", "coverage", str(target), "--project-root", str(tmp_path),
              "--godot-bin", str(elf)], capsys)
         rc2, _ = self._run_main(
-            ["coverage", str(target), "--project-root", str(tmp_path),
+            ["measure", "coverage", str(target), "--project-root", str(tmp_path),
              "--godot-bin", str(exe)], capsys)
         assert rc1 == 0 and rc2 == 0
         assert captured["kind"] == "win64"
@@ -535,12 +534,12 @@ class TestFixRoundF1F2:
 
         def fake_run_coverage(**kwargs):
             captured["called"] = True
-            return {"tool": "coverage", "ok": True, "summary": {},
+            return {"tool": "measure.coverage", "ok": True, "summary": {},
                     "failures": []}
 
         monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
         assert inject.detect_binary_kind() == "win64"
         rc, payload = self._run_main(
-            ["coverage", str(target), "--project-root", str(tmp_path)], capsys)
+            ["measure", "coverage", str(target), "--project-root", str(tmp_path)], capsys)
         assert rc == 0
         assert captured["called"] is True

@@ -6,7 +6,7 @@ registry walk's malformed-node branches, the manifest ownership seams
 (unowned probes, unknown spans, paren-depth census), the parity task
 plumbing (collect/serial-fallback/aggregate closure), the snapshot escape
 and identity-candidate rows, and the CLI error/success lanes of
-`gqt parity` / `gqt registry diff` in-process.
+`gqt measure parity` / `gqt measure registry-diff` in-process.
 """
 
 from __future__ import annotations
@@ -379,7 +379,7 @@ def test_parity_paths_end_to_end(tmp_path):
     (root / "plain.gd").write_text(GD_SNIPPET, encoding="utf-8")
     (root / "lamb.gd").write_text(LAMBDA_SNIPPET, encoding="utf-8")
     report = parity_paths([root], project_root=str(root))
-    assert report["tool"] == "parity" and report["ok"] is True
+    assert report["tool"] == "measure.parity" and report["ok"] is True
     assert report["summary"]["func_entries"] == 2
     assert report["summary"]["lambda_entries"] == 1
     assert report["summary"]["closure_ok"] is True
@@ -447,7 +447,7 @@ def test_diff_identity_changed_candidate_and_governance_net():
 
 
 # --------------------------------------------------------------------------
-# CLI lanes: gqt parity / gqt registry diff (§SPEC-017/020 in-process)
+# CLI lanes: gqt measure parity / gqt measure registry-diff (§SPEC-017/020 in-process)
 # --------------------------------------------------------------------------
 
 
@@ -456,11 +456,11 @@ def _parse(*argv: str):
 
 
 def test_cmd_parity_missing_paths_contract(tmp_path, capsys):
-    args = _parse("parity", str(tmp_path / "nope.gd"), "--project-root", str(tmp_path))
-    rc = cli_mod.cmd_parity(args)
+    args = _parse("measure", "parity", str(tmp_path / "nope.gd"), "--project-root", str(tmp_path))
+    rc = cli_mod.cmd_measure_parity(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "parity"
+    assert out["ok"] is False and out["tool"] == "measure.parity"
     assert "paths not found" in out["failures"][0]["reason"]
 
 
@@ -470,13 +470,12 @@ def test_cmd_parity_success_writes_report_and_registry(tmp_path, capsys):
     (root / "solo.gd").write_text(GD_SNIPPET, encoding="utf-8")
     report_path = tmp_path / "parity.json"
     registry_path = tmp_path / "reg.json"
-    args = _parse(
-        "parity", str(root), "--project-root", str(root),
+    args = _parse("measure", "parity", str(root), "--project-root", str(root),
         "--report", str(report_path), "--registry-out", str(registry_path),
     )
-    rc = cli_mod.cmd_parity(args)
+    rc = cli_mod.cmd_measure_parity(args)
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["ok"] is True and out["tool"] == "parity"
+    assert rc == 0 and out["ok"] is True and out["tool"] == "measure.parity"
     assert out["summary"]["closure_ok"] is True
     assert out["summary"]["registry_out"] == str(registry_path)
     snapshot = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -496,24 +495,22 @@ def test_cmd_parity_without_registry_out_skips_snapshot(tmp_path, capsys):
     root.mkdir()
     (root / "solo.gd").write_text(GD_SNIPPET, encoding="utf-8")
     report_path = tmp_path / "parity.json"
-    args = _parse(
-        "parity", str(root), "--project-root", str(root), "--report", str(report_path)
+    args = _parse("measure", "parity", str(root), "--project-root", str(root), "--report", str(report_path)
     )
-    rc = cli_mod.cmd_parity(args)
+    rc = cli_mod.cmd_measure_parity(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["ok"] is True
     assert out["summary"]["registry_out"] is None
 
 
 def test_cmd_registry_fail_loud_on_missing_snapshot(tmp_path, capsys):
-    args = _parse(
-        "registry", "diff",
+    args = _parse("measure", "registry-diff",
         str(tmp_path / "missing.json"), str(tmp_path / "also-missing.json"),
     )
-    rc = cli_mod.cmd_registry(args)
+    rc = cli_mod.cmd_measure_registry_diff(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "registry"
+    assert out["ok"] is False and out["tool"] == "measure.registry-diff"
     assert "snapshot load failed" in out["failures"][0]["reason"]
 
 
@@ -525,12 +522,11 @@ def test_cmd_registry_success_writes_diff(tmp_path, capsys):
     out_path = tmp_path / "diff.json"
     old_path.write_text(json.dumps(old), encoding="utf-8")
     new_path.write_text(json.dumps(new), encoding="utf-8")
-    args = _parse(
-        "registry", "diff", str(old_path), str(new_path), "--out", str(out_path)
+    args = _parse("measure", "registry-diff", str(old_path), str(new_path), "--out", str(out_path)
     )
-    rc = cli_mod.cmd_registry(args)
+    rc = cli_mod.cmd_measure_registry_diff(args)
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["ok"] is True and out["tool"] == "registry"
+    assert rc == 0 and out["ok"] is True and out["tool"] == "measure.registry-diff"
     assert out["diff_version"] == "func-registry-diff/1"
     assert out["failures"] == []
     assert out["summary"]["edited"] == 1

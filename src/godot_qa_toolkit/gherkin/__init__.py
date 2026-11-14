@@ -1,4 +1,4 @@
-"""GQT accept 流水线（SEE-1426 P2b）：.feature → IR → 生成 GUT 测试 → headless 执行。
+"""GQT gherkin 流水线（SEE-1426 P2b；SEE-1583 命名回归 gherkin）：.feature → IR → 生成 GUT 测试 → headless 执行。
 
 架构同构 gqt mutation（决策 rev2 §3.1a）：消费被测项目自带 GUT
 （addons/gut/gut_cmdln.gd 强制前置校验）、一次性 godot --headless 子进程、

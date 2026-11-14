@@ -1,4 +1,4 @@
-"""SEE-1546 WP3 PR-A hardener: canonical recipe builder + cmd_recipe error
+"""SEE-1546 WP3 PR-A hardener: canonical recipe builder + cmd_measure_suite error
 lanes (§SPEC-034). Test-side only; product code untouched."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 
 from godot_qa_toolkit import cli as cli_mod
 from godot_qa_toolkit.cli import build_parser
-from godot_qa_toolkit.canonical.recipe import (
+from godot_qa_toolkit.measurement.recipe import (
     _GUTCONFIG,
     build_recipe,
     load_gutconfig,
@@ -150,7 +150,7 @@ def test_verify_recipe_rejects_hash_mismatch(kol_like):
 
 
 # --------------------------------------------------------------------------
-# cmd_recipe CLI lanes (in-process)
+# cmd_measure_suite CLI lanes (in-process)
 # --------------------------------------------------------------------------
 
 
@@ -160,21 +160,21 @@ def _parse(*argv):
 
 def test_cmd_recipe_rejects_malformed_exclude(kol_like, capsys):
     target = kol_like
-    args = _parse("recipe", "--project-root", str(target),
+    args = _parse("measure", "suite", "--project-root", str(target),
                   "--exclude", "not-three-parts")
-    rc = cli_mod.cmd_recipe(args)
+    rc = cli_mod.cmd_measure_suite(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "recipe"
+    assert out["ok"] is False and out["tool"] == "measure.suite"
     assert "scope:entry:reason" in out["summary"]["error"]
 
 
 def test_cmd_recipe_build_error_is_structural(tmp_path, capsys):
-    args = _parse("recipe", "--project-root", str(tmp_path))
-    rc = cli_mod.cmd_recipe(args)
+    args = _parse("measure", "suite", "--project-root", str(tmp_path))
+    rc = cli_mod.cmd_measure_suite(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "recipe"
+    assert out["ok"] is False and out["tool"] == "measure.suite"
     assert ".gutconfig.json not found" in out["summary"]["error"]
 
 
@@ -182,15 +182,14 @@ def test_cmd_recipe_success_writes_recipe_and_summary(tmp_path, kol_like, capsys
     root = kol_like
     _write_harness(root)
     out_path = tmp_path / "recipe.json"
-    args = _parse(
-        "recipe", "--project-root", str(root),
+    args = _parse("measure", "suite", "--project-root", str(root),
         "--out", str(out_path),
         "--exclude", "gut_dir:tests/old/:retired face",
         "--exclude", "acceptance_feature:feature_2:quarantined",
     )
-    rc = cli_mod.cmd_recipe(args)
+    rc = cli_mod.cmd_measure_suite(args)
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["ok"] is True and out["tool"] == "recipe"
+    assert rc == 0 and out["ok"] is True and out["tool"] == "measure.suite"
     assert out["summary"]["exclusions"] == 2
     assert out["summary"]["gut_dirs"] == 2
     assert out["summary"]["acceptance_features"] == 3
@@ -200,7 +199,7 @@ def test_cmd_recipe_success_writes_recipe_and_summary(tmp_path, kol_like, capsys
     assert recipe["gut_face"]["excluded"][0]["pattern"] == "tests/old/"
     assert recipe["acceptance_face"]["excluded"][0]["key"] == "feature_2"
     # hash roundtrip on the landed file
-    from godot_qa_toolkit.canonical.recipe import recipe_hash, verify_recipe
+    from godot_qa_toolkit.measurement.recipe import recipe_hash, verify_recipe
     assert recipe["recipe_hash"] == recipe_hash(recipe)
     ok, reason = verify_recipe(recipe)
     assert ok is True and reason is None
@@ -211,7 +210,7 @@ def test_cmd_recipe_success_writes_recipe_and_summary(tmp_path, kol_like, capsys
 def test_gutconfig_scan_keys_are_carried_verbatim(kol_like):
     """GC2/GC3: include_subdirs and prefix are live scan keys — the recipe
     must carry the gutconfig's values verbatim (never pinned defaults)."""
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     recipe, error = build_recipe(kol_like, exclusions=[])
     assert error is None
@@ -233,7 +232,7 @@ def test_gutconfig_config_sha256_ties_bytes_to_recipe(kol_like):
     a constant digest would break the byte-level provenance chain."""
     import hashlib
 
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     cfg_path = kol_like / _GUTCONFIG
     expected = hashlib.sha256(cfg_path.read_bytes()).hexdigest()
@@ -244,16 +243,15 @@ def test_gutconfig_config_sha256_ties_bytes_to_recipe(kol_like):
 
 def test_cmd_recipe_rejects_illegal_scope_fail_loud(kol_like, capsys):
     """§SPEC-041 target 1 (CLI-side anchor): an illegal exclusion scope (e.g.
-    `gut_dirs`) passed through cmd_recipe's REAL path must produce ok=false
+    `gut_dirs`) passed through cmd_measure_suite's REAL path must produce ok=false
     with an enumeration hint — never silently accepted into the recipe."""
-    args = _parse(
-        "recipe", "--project-root", str(kol_like),
+    args = _parse("measure", "suite", "--project-root", str(kol_like),
         "--exclude", "gut_dirs:res://tests/x/**:reason",
     )
-    rc = cli_mod.cmd_recipe(args)
+    rc = cli_mod.cmd_measure_suite(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "recipe"
+    assert out["ok"] is False and out["tool"] == "measure.suite"
     assert "illegal exclusion scope" in out["summary"]["error"]
     assert "must be one of" in out["summary"]["error"]
 
@@ -262,12 +260,11 @@ def test_cmd_recipe_legal_scope_still_accepted(kol_like, tmp_path, capsys):
     """§SPEC-041 companion: the legal-scope success path is unaffected by the
     enumeration gate."""
     out_path = tmp_path / "recipe.json"
-    args = _parse(
-        "recipe", "--project-root", str(kol_like),
+    args = _parse("measure", "suite", "--project-root", str(kol_like),
         "--exclude", "gut_dir:tests/old/:retired face",
         "--out", str(out_path),
     )
-    rc = cli_mod.cmd_recipe(args)
+    rc = cli_mod.cmd_measure_suite(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["ok"] is True
     recipe = json.loads(out_path.read_text(encoding="utf-8"))

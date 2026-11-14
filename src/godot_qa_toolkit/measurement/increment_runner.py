@@ -1,4 +1,4 @@
-"""方向①：增量重跑的插桩准备与脚本级执行（被 canonical/increment.py 消费）。"""
+"""方向①：增量重跑的插桩准备与脚本级执行（被 measurement/increment.py 消费）。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _algo_for(causal: bool) -> str:
 def _build_fresh(src: str, rel: str, key8: str, causal: bool,
                  registry: dict) -> tuple[str, list[int], dict]:
     """fresh 构建：先 plain 取块入口清单，再按函数入口 probe 建 attr 模板
-    （与 run_canonical 同序，probe manifest 一致）。"""
+    （与 run_measurement 同序，probe manifest 一致）。"""
     from ..coverage.runner import _instrument_blocks
     tpl_sink = (f"qa-coverage-hits-{prepcache.SINK_UUID_PLACEHOLDER}"
                 f"-{key8}.txt")

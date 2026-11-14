@@ -62,7 +62,7 @@ class TestGate:
     def test_unified_contract_shape(self):
         result = run_gate([str(FIXTURE)])
         assert set(result) >= {"tool", "ok", "summary", "failures"}
-        assert result["tool"] == "complexity"
+        assert result["tool"] == "measure.complexity"
 
 
 class TestComplexityPythonFiles:
@@ -79,7 +79,7 @@ class TestComplexityPythonFiles:
     def test_py_file_parses_not_unparseable(self, tmp_path):
         f = tmp_path / "mod.py"
         f.write_text("def simple(a):\n    return a\n")
-        rc, out = self._run_cli("complexity", str(f))
+        rc, out = self._run_cli("measure", "complexity", str(f))
         assert out["summary"]["unparseable"] == 0, "Python 文件不应恒报 unparseable"
         assert out["summary"]["functions"] == 1
 
@@ -96,13 +96,13 @@ class TestComplexityPythonFiles:
             "                                                        return 1\n"
             "    return 0\n"
         )
-        rc, out = self._run_cli("complexity", "--warn", "5", "--max", "8", str(f))
+        rc, out = self._run_cli("measure", "complexity", "--warn", "5", "--max", "8", str(f))
         assert rc == 1, "超阈值 .py 文件必须命中 violations"
         assert out["summary"]["violations"] >= 1
         assert out["failures"][0]["complexity"] > 8
 
     def test_gd_file_behavior_unchanged(self):
-        rc, out = self._run_cli("complexity", "--warn", "7", "--max", "10",
+        rc, out = self._run_cli("measure", "complexity", "--warn", "7", "--max", "10",
                                 str(REPO / "tests" / "fixtures" / "complex.gd"))
         assert out["summary"]["unparseable"] == 0
         assert out["summary"]["functions"] == 2
@@ -110,13 +110,13 @@ class TestComplexityPythonFiles:
     def test_py_syntax_error_reports_unparseable_not_crash(self, tmp_path):
         f = tmp_path / "broken.py"
         f.write_text("def broken(\n")
-        rc, out = self._run_cli("complexity", str(f))
+        rc, out = self._run_cli("measure", "complexity", str(f))
         assert out["summary"]["unparseable"] == 1
         assert "python ast" in out["failures"][0]["reason"] or "SyntaxError" in out["failures"][0]["reason"]
 
     def test_directory_mixed_gd_and_py_collected(self, tmp_path):
         (tmp_path / "a.gd").write_text("extends Node\nfunc f():\n\tpass\n")
         (tmp_path / "b.py").write_text("def g():\n    pass\n")
-        rc, out = self._run_cli("complexity", str(tmp_path))
+        rc, out = self._run_cli("measure", "complexity", str(tmp_path))
         assert out["summary"]["functions"] >= 2
         assert out["summary"]["unparseable"] == 0

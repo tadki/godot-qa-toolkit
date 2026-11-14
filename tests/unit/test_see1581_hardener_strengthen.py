@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 from attribution_fixtures import write_map
-from godot_qa_toolkit.canonical import increment as inc_mod
-from godot_qa_toolkit.canonical import increment_runner as runner_mod
-from godot_qa_toolkit.canonical import prepcache
-from godot_qa_toolkit.canonical.orchestrator import (
+from godot_qa_toolkit.measurement import increment as inc_mod
+from godot_qa_toolkit.measurement import increment_runner as runner_mod
+from godot_qa_toolkit.measurement import prepcache
+from godot_qa_toolkit.measurement.orchestrator import (
     _accumulate_attr_lines,
     _arms_state,
     _new_attr_rec,
@@ -284,11 +284,11 @@ def _increment_project(tmp_path: Path) -> tuple[Path, dict, list[str], Path]:
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
         "    # types: <hp>:int, <left>:numeric\n    Examples:\n"
         "      | hp | left |\n      | 10 | 7    |\n")
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(root)
     assert error is None, error
     baseline = {
-        "schema_version": "canonical-test-attribution/4",
+        "schema_version": "test-attribution/5",
         "report_recipe_hash": recipe["recipe_hash"],
         "recipe_hash_pristine": recipe["recipe_hash"],
         "arms": {"gut_full": {
@@ -397,7 +397,7 @@ def _gd_project(tmp_path: Path) -> tuple[Path, list[str]]:
     game.mkdir()
     (game / "cell.gd").write_text(
         "extends Node\n\n\nfunc later() -> void:\n\tcall_deferred(\"_noop\")\n")
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(root)
     assert error is None, error
     return root, sorted(str(p) for p in (root / "src_game").glob("*.gd"))
@@ -405,7 +405,7 @@ def _gd_project(tmp_path: Path) -> tuple[Path, list[str]]:
 
 def test_attr_templates_causal_only_rewrites_when_asked(tmp_path):
     root, targets = _gd_project(tmp_path)
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, _ = build_recipe(root)
     plain = runner_mod.prepare_attr_templates(root, targets, recipe, False)
     causal = runner_mod.prepare_attr_templates(root, targets, recipe, True)
@@ -416,7 +416,7 @@ def test_attr_templates_causal_only_rewrites_when_asked(tmp_path):
 
 def test_execute_rerun_causal_gates_ctx_and_preserves_source(tmp_path):
     root, targets = _gd_project(tmp_path)
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, _ = build_recipe(root)
     originals = {p: Path(p).read_text(encoding="utf-8")
                  for p in targets}
@@ -459,7 +459,7 @@ def test_execute_rerun_causal_gates_ctx_and_preserves_source(tmp_path):
 
 def test_execute_rerun_reports_script_failure(tmp_path):
     root, targets = _gd_project(tmp_path)
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, _ = build_recipe(root)
     templates = runner_mod.prepare_attr_templates(root, targets, recipe,
                                                  False)
@@ -481,7 +481,7 @@ def test_execute_rerun_reports_script_failure(tmp_path):
 
 def test_attr_templates_use_prep_cache(tmp_path, monkeypatch):
     root, targets = _gd_project(tmp_path)
-    from godot_qa_toolkit.canonical.recipe import build_recipe
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, _ = build_recipe(root)
     sentinel = {"instrumented_template": "CACHED_TEMPLATE",
                 "probe_lines": [9], "registry": {"entries": []}}

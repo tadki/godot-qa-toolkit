@@ -180,7 +180,7 @@ def test_prune_sinks_survives_stat_errors(tmp_path, monkeypatch):
 
 
 def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out, gut_returns=None):
-    """Drive cmd_coverage in-process with _run_gut_for_coverage mocked so the
+    """Drive cmd_measure_coverage in-process with _run_gut_for_coverage mocked so the
     evidence lifecycle runs without Godot."""
     from godot_qa_toolkit.coverage import runner as runner_mod
     import io
@@ -203,7 +203,7 @@ def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out, gut_returns=
     elif gut_returns == "abort_run_error":
         def abort(*a, **k):
             return {
-                "tool": "coverage", "ok": False,
+                "tool": "measure.coverage", "ok": False,
                 "summary": {"file": str(target), "total_lines": 3,
                             "covered_lines": 0, "coverage_percent": 0.0,
                             "min_percent": 0, "run_error": True, "timeout": False},
@@ -213,8 +213,7 @@ def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out, gut_returns=
     elif gut_returns == "bad_reparse":
         monkeypatch.setattr(runner_mod, "_instrument", lambda src, sink: ("!!!not gd!!!", {}))
 
-    args = build_parser().parse_args([
-        "coverage", str(target), "--project-root", str(proj),
+    args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
         "--min-percent", "0", "--evidence-out", str(evidence_out),
     ])
     buf = io.StringIO()
@@ -274,8 +273,7 @@ def test_evidence_lifecycle_vacuous_file_lands_bundle_without_gut(tmp_path):
     proj.mkdir()
     target = proj / "empty.gd"
     target.write_text(empty, encoding="utf-8")
-    args = build_parser().parse_args([
-        "coverage", str(target), "--project-root", str(proj),
+    args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
         "--min-percent", "0", "--evidence-out", str(ev),
     ])
     import io
@@ -300,8 +298,7 @@ def test_evidence_lifecycle_read_error_is_structural(tmp_path):
     proj.mkdir()
     target = proj / "bad.gd"
     target.write_bytes(b"\xff\xfe\x00 not utf-8")
-    args = build_parser().parse_args([
-        "coverage", str(target), "--project-root", str(proj),
+    args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
         "--min-percent", "0", "--evidence-out", str(ev),
     ])
     import io
@@ -559,8 +556,7 @@ def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch
     monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", lambda *a, **k: None)
     monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
 
-    args = build_parser().parse_args([
-        "coverage", str(target), "--project-root", str(proj),
+    args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
         "--min-percent", "0", "--evidence-out", str(ev),
     ])
     buf = io.StringIO()

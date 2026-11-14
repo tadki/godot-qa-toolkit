@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.run import AcceptRunError, replay_check
-from godot_qa_toolkit.accept.suite import (
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check
+from godot_qa_toolkit.gherkin.suite import (
     SUITES_VERSION,
     SuiteError,
     compile_keys_to_suite,
@@ -373,7 +373,7 @@ def test_default_replay_check_main_dirs_unchanged(project: Path):
 
 
 # ------------------------------------------------------------------
-# CLI 判据（gqt accept compile --keys / run --suite-dir / 探针缺省键）
+# CLI 判据（gqt gherkin compile --keys / run --suite-dir / 探针缺省键）
 # ------------------------------------------------------------------
 
 
@@ -394,8 +394,7 @@ def _run_cli(argv: list[str]) -> tuple[int, dict]:
 def test_cli_compile_keys_creates_private_suite(project: Path):
     rec = None
     _fake_gut("")  # compile 阶段不跑 GUT；占位防误真机
-    code, out = _run_cli([
-        "accept", "compile", "--project-root", str(project),
+    code, out = _run_cli(["gherkin", "compile", "--project-root", str(project),
         "--keys", "demo,demo_x",
     ])
     assert code == 0 and out["ok"] is True
@@ -411,16 +410,14 @@ def test_cli_compile_keys_creates_private_suite(project: Path):
 
 def test_cli_run_suite_dir_happy_and_exit_code(project: Path):
     _fake_gut("")
-    code, out = _run_cli([
-        "accept", "compile", "--project-root", str(project),
+    code, out = _run_cli(["gherkin", "compile", "--project-root", str(project),
         "--keys", "demo",
     ])
     assert code == 0
     d = Path(out["summary"]["suite_dir"])
     rec = compile_keys_to_suite(project, ["demo"], d)
     _fake_gut(_gut_ok_output(rec))
-    code, out = _run_cli([
-        "accept", "run", "--project-root", str(project),
+    code, out = _run_cli(["gherkin", "run", "--project-root", str(project),
         "--suite-dir", str(d),
     ])
     assert code == 0 and out["ok"] is True
@@ -432,8 +429,7 @@ def test_cli_run_suite_dir_happy_and_exit_code(project: Path):
 
 def test_cli_probe_default_key_is_aidomain_integration(project: Path):
     _fake_gut("")
-    code, out = _run_cli([
-        "accept", "run", "--project-root", str(project),
+    code, out = _run_cli(["gherkin", "run", "--project-root", str(project),
         "--acceptance-probe-keys",
     ])
     assert code == 1 and out["ok"] is False  # 该键在 fixture 不存在
@@ -441,6 +437,6 @@ def test_cli_probe_default_key_is_aidomain_integration(project: Path):
 
 
 def test_cli_run_without_key_or_suitdir_errors(project: Path):
-    code, out = _run_cli(["accept", "run", "--project-root", str(project)])
+    code, out = _run_cli(["gherkin", "run", "--project-root", str(project)])
     assert code == 1 and out["ok"] is False
     assert "--key" in out["summary"]["error"]

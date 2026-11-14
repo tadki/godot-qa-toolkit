@@ -35,7 +35,7 @@ def write_map(project_root: Path,
     """target_tests: 目标文件 rel → 触达它的测试身份列表（`脚本名::测试名`）。
 
     空列表 = 干净的"零引用"（映射说无测试 → 零引用短路）。"""
-    from godot_qa_toolkit.canonical.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
     install_recipe(project_root)
     recipe, error = build_recipe(project_root)
     assert error is None, error
@@ -61,7 +61,7 @@ def write_map(project_root: Path,
             tests_face[str(gd.relative_to(project_root))] = hashlib.sha256(
                 gd.read_bytes()).hexdigest()
     doc = {
-        "schema_version": "canonical-test-attribution/4",
+        "schema_version": "test-attribution/5",
         "report_recipe_hash": raw,
         "recipe_hash_pristine": raw,
         "project_root": str(project_root),

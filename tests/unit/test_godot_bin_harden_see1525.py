@@ -373,14 +373,14 @@ class TestCliContractHardening:
 
         def fake_run_coverage(**kwargs):
             captured["env_bin"] = os.environ.get("GQT_GODOT_BIN")
-            return {"tool": "coverage", "ok": True, "summary": {},
+            return {"tool": "measure.coverage", "ok": True, "summary": {},
                     "failures": []}
 
         monkeypatch.setattr(cov_runner, "run_coverage", fake_run_coverage)
         target = tmp_path / "f.gd"
         target.write_text("func a():\n\tpass\n", encoding="utf-8")
         rc, payload = self._run_main(
-            ["coverage", str(target), "--project-root", str(tmp_path),
+            ["measure", "coverage", str(target), "--project-root", str(tmp_path),
              "--godot-bin", str(flag_bin)], capsys)
         assert rc == 0
         assert payload["ok"] is True

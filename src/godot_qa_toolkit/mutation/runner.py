@@ -578,8 +578,8 @@ def _auto_scan_tests_glob_meta(file_path: str,
     elif sel.get("zero_ref"):
         print(f"mutation: runtime mapping says no test touches {file_path}",
               file=sys.stderr)
-    # 全脸回退不额外打 stderr（source/reason 已进 summary.test_selection，
-    # 报告即披露口径；保持既有 stderr 契约面零噪声）
+    # fn/file 不可用即 fail-loud（上方 resolve_selection 已抛），无静默
+    # 回退路径；explicit full 腿的 tests_glob=None 是显式审计语义
     return sel["tests_glob"], meta
 
 

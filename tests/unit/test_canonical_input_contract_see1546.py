@@ -6,7 +6,7 @@ exclusions scope/entry/reason，以及 stability-baseline 的
 file/fid/function_id/covered_line_ids/total/crap_line/provenance
 等全部下游直接消费字段，必须在编排/注入前系统校验；布尔不得当数字，
 NaN/±Infinity 拒绝，total 仅有限整数值或 null，身份串 strip 后非空。
-非法输入 API 统一 CanonicalError、真实 CLI 输出可解析 tool JSON
+非法输入 API 统一 MeasurementError、真实 CLI 输出可解析 tool JSON
 ok=false，不得 traceback 或静默失配；合法输入行为不变。
 """
 
@@ -20,12 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.canonical.orchestrator import (
-    CanonicalError,
+from godot_qa_toolkit.measurement.orchestrator import (
+    MeasurementError,
     _load_baseline_report,
-    run_canonical,
+    run_measurement,
 )
-from godot_qa_toolkit.canonical.recipe import (
+from godot_qa_toolkit.measurement.recipe import (
     RECIPE_VERSION,
     build_recipe,
     recipe_hash,
@@ -250,7 +250,7 @@ def _write_json(path: Path, doc) -> str:
 
 def _baseline_err(tmp_path: Path, doc) -> str:
     path = _write_json(tmp_path / "b.json", doc)
-    with pytest.raises(CanonicalError) as ei:
+    with pytest.raises(MeasurementError) as ei:
         _load_baseline_report(path)
     return str(ei.value)
 
@@ -409,12 +409,12 @@ def _targets(project: Path) -> list[str]:
 def test_api_run_canonical_bad_toolchain_is_domain_error(
         project, tmp_path, toolchain):
     """R20-H1：toolchain 非 dict 原在 `_inject_toolchain`（orchestrator.py:315）
-    崩溃——必须在编排前转 CanonicalError。"""
+    崩溃——必须在编排前转 MeasurementError。"""
     recipe = _full_recipe(project, tmp_path)
     recipe["toolchain"] = toolchain
     recipe["recipe_hash"] = recipe_hash(recipe)
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe)
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe)
 
 
 @pytest.mark.parametrize("gut_face", [None, 7, "x", []])
@@ -428,8 +428,8 @@ def test_api_run_canonical_bad_gut_face_is_domain_error(
     else:
         recipe["gut_face"] = gut_face
     recipe["recipe_hash"] = recipe_hash(recipe)
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe)
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe)
 
 
 @pytest.mark.parametrize("acceptance_face", [None, 7, "x",
@@ -445,8 +445,8 @@ def test_api_run_canonical_bad_acceptance_face_is_domain_error(
     else:
         recipe["acceptance_face"] = acceptance_face
     recipe["recipe_hash"] = recipe_hash(recipe)
-    with pytest.raises(CanonicalError):
-        run_canonical(project, _targets(project), recipe)
+    with pytest.raises(MeasurementError):
+        run_measurement(project, _targets(project), recipe)
 
 
 # ------------------------------------------------------------- 真实 CLI 双路径
@@ -470,7 +470,7 @@ def _cli(recipe_doc, tmp_path: Path, extra_args=(), stdin=None):
     (tmp_path / "home").mkdir(exist_ok=True)
     (tmp_path / "tmp").mkdir(exist_ok=True)
     proc = subprocess.run(
-        [sys.executable, "-m", "godot_qa_toolkit.cli", "canonical",
+        [sys.executable, "-m", "godot_qa_toolkit.cli","measure", "run",
          "/nonexistent-root", "--project-root", "/nonexistent-project",
          "--recipe", str(recipe), "--out", str(tmp_path / "out.json"),
          *extra_args],
@@ -478,7 +478,7 @@ def _cli(recipe_doc, tmp_path: Path, extra_args=(), stdin=None):
     assert proc.returncode == 1
     # stdout 必须整体可解析为 tool JSON（即无 traceback 泄漏）
     payload = json.loads(proc.stdout)
-    assert payload["tool"] == "canonical"
+    assert payload["tool"] == "measure.run"
     assert payload["ok"] is False
     return payload
 
@@ -524,8 +524,7 @@ def _in_process_cli_baseline(project: Path, tmp_path: Path,
     recipe_path.write_text(json.dumps(_legal_recipe()), encoding="utf-8")
     baseline = _write_json(tmp_path / "baseline.json", baseline_doc)
     out_path = tmp_path / "out.json"
-    args = build_parser().parse_args([
-        "canonical", str(project / "src_game"),
+    args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
         "--project-root", str(project),
         "--recipe", str(recipe_path),
         "--stability-baseline", baseline,
@@ -548,9 +547,9 @@ def _in_process_cli_baseline(project: Path, tmp_path: Path,
             os.environ["GQT_GODOT_BIN"] = old_bin
     assert code == 1
     payload = json.loads(buf.getvalue())
-    assert payload["tool"] == "canonical"
+    assert payload["tool"] == "measure.run"
     assert payload["ok"] is False
-    assert payload["summary"]["canonical_error"] is True
+    assert payload["summary"]["measurement_error"] is True
     return payload
 
 

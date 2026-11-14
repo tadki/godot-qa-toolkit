@@ -43,8 +43,7 @@ def test_bundle_shape_top_level_keys():
         gut_ok=True, run_error=False, timeout=False, zero_tests=False,
         vacuous=False,
     )
-    for key in ("evidence_version", "run_uuid", "recovered", "target",
-                "recipe", "probe_manifest", "T", "I", "C", "census_gaps",
+    for key in ("evidence_version", "run_uuid", "recovered", "target", "recipe", "probe_manifest", "T", "I", "C", "census_gaps",
                 "sentinels", "entry_states", "file_state"):
         assert key in bundle
     assert bundle["evidence_version"] == EVIDENCE_VERSION
@@ -187,7 +186,7 @@ def test_stdout_contract_frozen_against_011b87d(tmp_path: Path, monkeypatch):
         "godot_qa_toolkit.coverage.runner.subprocess.run",
         lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
-    argv = ["coverage", str(target), "--project-root", str(proj),
+    argv = ["measure", "coverage", str(target), "--project-root", str(proj),
             "--min-percent", "0"]
     parser = build_parser()
     args = parser.parse_args(argv)

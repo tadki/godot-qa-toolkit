@@ -24,41 +24,46 @@ def _run_cli(*argv: str) -> tuple[int, dict]:
 
 class TestComplexityCli:
     def test_exit_code_zero_on_pass(self):
-        rc, out = _run_cli("complexity", "--warn", "7", "--max", "10", str(FIXTURES / "complex.gd"))
+        rc, out = _run_cli("measure", "complexity", "--warn", "7", "--max", "10", str(FIXTURES / "complex.gd"))
         assert rc == 0
         assert out["ok"] is True
-        assert out["tool"] == "complexity"
+        assert out["tool"] == "measure.complexity"
 
     def test_exit_code_one_on_violation(self):
-        rc, out = _run_cli("complexity", "--max", "3", str(FIXTURES / "complex.gd"))
+        rc, out = _run_cli("measure", "complexity", "--max", "3", str(FIXTURES / "complex.gd"))
         assert rc == 1
         assert out["ok"] is False
 
     def test_json_is_parseable(self):
-        rc, out = _run_cli("complexity", str(FIXTURES / "complex.gd"))
+        rc, out = _run_cli("measure", "complexity", str(FIXTURES / "complex.gd"))
         assert out["summary"]["functions"] == 2
 
 
 class TestGherkinCli:
-    """SEE-1468 M5-b 物理删除收口：gherkin 子命令已自 CLI 移除。"""
+    """SEE-1583：gherkin 作为现役验收管线命令回归（原 accept 迁入）。"""
 
     def _run_gherkin(self, *argv: str) -> tuple[int, str]:
-        # SEE-1468 M5-b 物理删除：gherkin 子命令已移除，argparse 拒绝并 exit 2。
         proc = subprocess.run(
             [sys.executable, "-m", "godot_qa_toolkit.cli", "gherkin", *argv],
             capture_output=True,
             text=True,
             cwd=str(REPO / "src"),
         )
-        return proc.returncode, proc.stderr
+        return proc.returncode, proc.stdout
 
-    def test_gherkin_subcommand_is_physically_removed(self):
-        rc, err = self._run_gherkin(str(FIXTURES / "sample.feature"))
-        assert rc == 2
-        # argparse 的 choices 文案随 Python 小版本变化（带/不带引号）——
-        # 只钉「invalid choice: gherkin」这一稳定核心。
-        assert "invalid choice" in err
-        assert "gherkin" in err
+    def test_gherkin_is_a_live_top_level_command(self):
+        rc, out = self._run_gherkin("--help")
+        assert rc == 0
+        for leaf in ("compile", "run", "mutate"):
+            assert leaf in out
+
+    def test_old_accept_entry_is_rejected(self):
+        proc = subprocess.run(
+            [sys.executable, "-m", "godot_qa_toolkit.cli", "accept", "--help"],
+            capture_output=True, text=True, cwd=str(REPO / "src"),
+        )
+        assert proc.returncode == 2
+        assert "invalid choice" in proc.stderr
 
 
 class TestMutationCliSurface:

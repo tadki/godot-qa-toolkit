@@ -748,7 +748,7 @@ def run_coverage(
     """对单个 .gd 文件算行覆盖（跑 GUT 后统计命中行）并出统一 JSON 契约。
 
     min_percent 阈值 gate（P0' 机器判定：覆盖率≥阈值=ok）。
-    返回 {"tool":"coverage", "ok", "summary", "failures"}；
+    返回 {"tool":"measure.coverage", "ok", "summary", "failures"}；
     ok=True 表示覆盖率达标。`evidence_out`（§SPEC-025/026，可选）开启
     coverage-evidence/2 生命周期：per-run UUID sink + run 记录 + bundle
     落盘即清 sink；不传则 stdout 契约与 011b87d 逐字节一致（零漂移）。
@@ -777,7 +777,7 @@ def run_coverage(
     if read_error is not None:
         # §SPEC-028: single-file reads fail structurally, never crash
         return {
-            "tool": "coverage",
+            "tool": "measure.coverage",
             "ok": False,
             "summary": {
                 "file": str(path),
@@ -968,7 +968,7 @@ def run_coverage(
 def _vacuous_result(file: str, min_percent: float) -> dict:
     """零可执行行：空集覆盖不是满分证据——显式 vacuous 标记。"""
     return {
-        "tool": "coverage",
+        "tool": "measure.coverage",
         "ok": True,
         "summary": {"file": file, "total_lines": 0, "covered_lines": 0,
                     "coverage_percent": 100.0, "min_percent": min_percent,
@@ -981,7 +981,7 @@ def _vacuous_result(file: str, min_percent: float) -> dict:
 def _no_probe_result(file: str, total_lines: int, min_percent: float) -> dict:
     """哨兵中止契约：探针未点火（sink 缺失/空）→ 数据不可信。"""
     return {
-        "tool": "coverage",
+        "tool": "measure.coverage",
         "ok": False,
         "summary": {"file": file, "total_lines": total_lines,
                     "covered_lines": 0, "coverage_percent": 0.0,
@@ -998,7 +998,7 @@ def _no_probe_result(file: str, total_lines: int, min_percent: float) -> dict:
 
 def _reparse_error_result(file: str, total_lines: int, min_percent: float, err) -> dict:
     return {
-        "tool": "coverage",
+        "tool": "measure.coverage",
         "ok": False,
         "summary": {"file": file, "total_lines": total_lines,
                     "covered_lines": 0, "coverage_percent": 0.0,
@@ -1023,7 +1023,7 @@ def _gut_abort_result(path, total_lines: int, min_percent: float,
     if hint:
         err_summary["suggested_action"] = hint
     return {
-        "tool": "coverage",
+        "tool": "measure.coverage",
         "ok": False,
         "summary": err_summary if run_error else {
                    "file": str(path), "total_lines": total_lines,
@@ -1149,7 +1149,7 @@ def _coverage_report(file: str, original_src: str, executable_lines, hits: set[i
 
     summary_extra = timing_meta or explicit_timing_meta()
     return {
-        "tool": "coverage",
+        "tool": "measure.coverage",
         "ok": ok,
         "summary": {
             "file": file,

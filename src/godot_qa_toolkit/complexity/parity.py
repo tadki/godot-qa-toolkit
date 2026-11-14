@@ -313,7 +313,7 @@ def parity_paths(paths: list[Path], project_root: str) -> dict:
         _run_tasks(_collect_tasks(paths, project_root))
     )
     return {
-        "tool": "parity",
+        "tool": "measure.parity",
         "ok": True,
         "report_version": PARITY_VERSION,
         "diagnostic_only": True,

@@ -22,7 +22,7 @@ def bdd_state() -> dict:
 
 @pytest.fixture(autouse=True)
 def _attribution_map_default_off(monkeypatch):
-    """SEE-1581：测试面默认关闭归属映射的自动生成/刷新（只读 + 全脸回退）。
+    """SEE-1581：测试面默认关闭归属映射的自动生成/刷新（映射不可用即 fail-loud）。
 
     需要映射语义的用例显式写映射（attribution_fixtures.write_map），新鲜
     映射仍会被正常消费；auto 生成属于 CLI 生产默认，不在单元测试触发。

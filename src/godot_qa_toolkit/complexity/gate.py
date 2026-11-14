@@ -56,7 +56,7 @@ def run_gate(paths: list[str], config: GateConfig | None = None) -> dict:
     ]
 
     return {
-        "tool": "complexity",
+        "tool": "measure.complexity",
         "ok": not violations and not unparseable,
         "config": {"warn_complexity": cfg.warn_complexity, "max_complexity": cfg.max_complexity},
         "summary": {

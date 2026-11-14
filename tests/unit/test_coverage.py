@@ -93,7 +93,7 @@ class TestRunCoverage:
         self._fake_run_writing_hits(proj, set(), monkeypatch, captured := {})
         result = run_coverage(str(target), str(proj))
         assert set(result) >= {"tool", "ok", "summary", "failures"}
-        assert result["tool"] == "coverage"
+        assert result["tool"] == "measure.coverage"
 
     def test_godot_launch_failure_is_run_error_not_zero_coverage(self, tmp_path, monkeypatch):
         # Revy QA FAIL (same root cause as mutation): a godot "File not found"

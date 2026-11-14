@@ -2,7 +2,7 @@
 change surface (§SPEC-012). Test-side only; product code untouched.
 
 These pin the guard/error lanes the functional scenarios do not reach on a
-healthy run: the CLI error lanes of `cmd_risk`, the report-document key-order
+healthy run: the CLI error lanes of `cmd_measure_risk`, the report-document key-order
 freeze, the ranking sort direction, the coverage-runner `hits_lines` exposure
 contract, and the metadata-less census skip.
 """
@@ -150,7 +150,7 @@ def test_report_ranking_sorts_by_score_descending():
 
 
 # --------------------------------------------------------------------------
-# CLI error/success lanes of cmd_risk (in-process so coverage sees cli.py).
+# CLI error/success lanes of cmd_measure_risk (in-process so coverage sees cli.py).
 # --------------------------------------------------------------------------
 
 
@@ -159,25 +159,24 @@ def _parse(*argv: str):
 
 
 def test_cmd_risk_missing_file_contract(tmp_path, capsys):
-    args = _parse("risk", str(tmp_path / "nope.gd"), "--project-root", str(tmp_path))
-    rc = cli_mod.cmd_risk(args)
+    args = _parse("measure", "risk", str(tmp_path / "nope.gd"), "--project-root", str(tmp_path))
+    rc = cli_mod.cmd_measure_risk(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "risk"
+    assert out["ok"] is False and out["tool"] == "measure.risk"
     assert "target files not found" in out["failures"][0]["reason"]
 
 
 def test_cmd_risk_godot_bin_contract(tmp_path, capsys):
     src = tmp_path / "solo.gd"
     src.write_text(GD_SNIPPET, encoding="utf-8")
-    args = _parse(
-        "risk", str(src), "--project-root", str(tmp_path),
+    args = _parse("measure", "risk", str(src), "--project-root", str(tmp_path),
         "--godot-bin", str(tmp_path / "missing-godot"),
     )
-    rc = cli_mod.cmd_risk(args)
+    rc = cli_mod.cmd_measure_risk(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert out["ok"] is False and out["tool"] == "risk"
+    assert out["ok"] is False and out["tool"] == "measure.risk"
     assert out["summary"]["error"]
 
 
@@ -197,15 +196,14 @@ def test_cmd_risk_skip_measure_writes_report(tmp_path, capsys):
         encoding="utf-8",
     )
     report_path = tmp_path / "shadow-report.json"
-    args = _parse(
-        "risk", str(src), "--project-root", str(tmp_path),
+    args = _parse("measure", "risk", str(src), "--project-root", str(tmp_path),
         "--skip-measure", "--report", str(report_path),
         "--performance-file", str(perf),
     )
-    rc = cli_mod.cmd_risk(args)
+    rc = cli_mod.cmd_measure_risk(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert out["ok"] is True and out["tool"] == "risk"
+    assert out["ok"] is True and out["tool"] == "measure.risk"
     assert out["summary"]["records"] == 1 and out["summary"]["scored"] == 0
     assert out["summary"]["diagnostic_only"] is True
     doc = json.loads(report_path.read_text(encoding="utf-8"))
@@ -221,11 +219,10 @@ def test_cmd_risk_without_performance_file_uses_zero_baseline(tmp_path, capsys):
     src = tmp_path / "solo.gd"
     src.write_text(GD_SNIPPET, encoding="utf-8")
     report_path = tmp_path / "out.json"
-    args = _parse(
-        "risk", str(src), "--project-root", str(tmp_path),
+    args = _parse("measure", "risk", str(src), "--project-root", str(tmp_path),
         "--skip-measure", "--report", str(report_path),
     )
-    rc = cli_mod.cmd_risk(args)
+    rc = cli_mod.cmd_measure_risk(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["ok"] is True
     doc = json.loads(report_path.read_text(encoding="utf-8"))

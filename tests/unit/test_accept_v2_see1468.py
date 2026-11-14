@@ -16,12 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.accept import OPS_VERSION
-from godot_qa_toolkit.accept.compile import compile_feature
-from godot_qa_toolkit.accept.mutate import mutate_case, mutate_ir
-from godot_qa_toolkit.accept.mutate_runner import run_mutate
-from godot_qa_toolkit.accept.run import AcceptRunError, replay_check, run_suite
-from godot_qa_toolkit.accept.parser import GherkinSyntaxError, parse
+from godot_qa_toolkit.gherkin import OPS_VERSION
+from godot_qa_toolkit.gherkin.compile import compile_feature
+from godot_qa_toolkit.gherkin.mutate import mutate_case, mutate_ir
+from godot_qa_toolkit.gherkin.mutate_runner import run_mutate
+from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check, run_suite
+from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
 
 FEATURE = """Feature: F
   Scenario Outline: s
@@ -45,7 +45,7 @@ def _restore_subprocess():
     """fake 直接换全局 subprocess 模块属性——autouse 兜底还原防泄漏
     （test_accept_mutate_see1426 同款纪律；缺它则污染后续 CLI 测试）。"""
     import subprocess as sp
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     orig_run, orig_popen = sp.run, sp.Popen
     yield
     sp.run, sp.Popen = orig_run, orig_popen
@@ -70,7 +70,7 @@ def _compile(project: Path, tmp_path: Path, feature: str = FEATURE,
 
 
 def _fake_gut(output: str, returncode: int = 0) -> None:
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     def fake_run(*a, **k):
         class R:
@@ -247,7 +247,7 @@ def test_not_contains_flips_to_contains() -> None:
 def test_mutated_ir_flip_channel_scoped_and_payload_free() -> None:
     """F1 翻转通道：mutated_not_contains 只落指名 case、载荷逐字段不变
     （变语义不变载荷；通道被剥离 = survived 打回，不静默）。"""
-    from godot_qa_toolkit.accept.mutate_runner import _mutated_ir
+    from godot_qa_toolkit.gherkin.mutate_runner import _mutated_ir
     ir = {"ops_version": OPS_VERSION, "feature": "F", "source_path": "s",
           "cases": [
               {"test_name": "test_a_000_00", "values": {"frag": "x"},
@@ -429,7 +429,7 @@ def test_exempt_baseline_green_then_mutant_rounds(project: Path,
     exempt_name, numeric_name = names[0], names[1]
     # 基线轮与每轮 mutant 全挂 numeric case（kill）——基线轮的输出必须绿
     # 才能进 mutant 轮，所以用可区分的调用序：第一轮绿，后续全挂。
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     calls = {"n": 0}
 
     def fake_run(*a, **k):
@@ -460,7 +460,7 @@ def test_exempt_baseline_red_fails_fast(project: Path, tmp_path: Path) -> None:
     run_error 计入门禁，ok:false。"""
     suite = _compile(project, tmp_path, MIXED_FEATURE, name="mixed")
     names = _manifest_test_names(project, suite.feature_key)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     calls = {"n": 0}
 
     def fake_run(*a, **k):
@@ -537,7 +537,7 @@ class _FakeBaselineWorkerIO:
 
 
 def _arm_worker_baseline(monkeypatch, verdict: dict) -> None:
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     monkeypatch.setattr(
         mr.subprocess, "Popen",
         lambda *a, **k: _FakeBaselineWorkerIO(verdict))
@@ -688,7 +688,7 @@ class _NoisyBaselineWorkerIO(_FakeBaselineWorkerIO):
 
 
 def _arm_worker_baseline_io(monkeypatch, fake) -> None:
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     monkeypatch.setattr(mr.subprocess, "Popen", lambda *a, **k: fake)
 
 
@@ -776,7 +776,7 @@ def test_worker_real_popen_shape_resolves_ir_file_against_root(
     suite = _compile(project, tmp_path)
     (case_name,) = _manifest_test_names(project, suite.feature_key)
     fake = _RealPopenShapeWorkerIO(case_name)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     monkeypatch.setattr(mr.subprocess, "Popen", lambda *a, **k: fake)
     result = run_mutate(project, suite.feature_key, use_worker=True)
     assert result["ok"] is True, "全 kill 判定链不应有 run_error"
@@ -798,7 +798,7 @@ def test_run_failure_reason_carries_fail_test_message(
     """F3'/F3：真机 ANSI 色码形态（含 KOL 本体的 [Failed] 明细行带色码）下
     fail_test 明细接进 reason——解析入口统一剥 ANSI，^ 锚正则不放宽。"""
     suite = _compile(project, tmp_path)
-    from godot_qa_toolkit.accept import run as run_mod
+    from godot_qa_toolkit.gherkin import run as run_mod
     (tn,) = _manifest_test_names(project, suite.feature_key)
 
     def fake_run(*a, **k):
@@ -821,7 +821,7 @@ def test_run_failure_reason_carries_fail_test_message(
 def test_ansi_strip_dual_form_before_never_after_always() -> None:
     """F3' 双形态钉：剥前 ^ 锚正则恒不命中（提取空/计数 0），剥后完整
     命中——证明修复生效于净化入口而非正则放宽。"""
-    from godot_qa_toolkit.accept.run import (_count_executed_tests,
+    from godot_qa_toolkit.gherkin.run import (_count_executed_tests,
                                              _failure_details, _strip_ansi)
     raw = ("\x1b[0m* test_s_000_00\n"
            "\x1b[31m    [Failed]:  \x1b[0mno harness binding for step: x\n")
@@ -842,7 +842,7 @@ def test_mutate_harness_missing_baseline_red_is_run_error(
     不得落 kill 归因恒满足的 hollow all-killed 形态。"""
     suite = _compile(project, tmp_path)  # fixture 无 addons/gqt_accept 接线
     (tn,) = _manifest_test_names(project, suite.feature_key)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     def fake_run(*a, **k):
         class R:
@@ -867,7 +867,7 @@ def test_mutate_baseline_green_runs_mutant_rounds_once(
     """F-C 性能形态：基线轮每 key 恰一次（非每 mutant 一次）——GUT 调用数
     = 1 基线 + mutants 轮数。"""
     suite = _compile(project, tmp_path)
-    import godot_qa_toolkit.accept.mutate_runner as mr
+    import godot_qa_toolkit.gherkin.mutate_runner as mr
     calls = {"n": 0}
 
     def fake_run(*a, **k):

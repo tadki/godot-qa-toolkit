@@ -545,6 +545,7 @@ def _flag_probe_block(sink_name: str, count: int,
             sizing = (
                 f"\tvar n: int = Engine.get_meta(\"gqt_cov_slot_max\", 0)\n"
                 f"\th[0].resize(n)\n"
+                f"\th[1].resize(n)\n"
                 f"\tvar i: int = 0\n"
                 f"\twhile i < n:\n"
                 f"\t\th[0][i] = 0\n"

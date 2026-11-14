@@ -66,7 +66,7 @@ REPORT_VERSION = "canonical-report/1"
 ATTRIBUTION_SCHEMA = "canonical-test-attribution/4"
 # 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
 # 旧模板（缓存键含 algo 但不含探针文本本身）
-ATTRIBUTION_ALGO_TAG = "attr/5"
+ATTRIBUTION_ALGO_TAG = "attr/6"
 # 归属身份的规范形态（映射键），产物与报告同源
 _ATTRIBUTION_IDENTITY = "res://script::test_name"
 # 报告 test_attribution 节从逐臂映射里抽出的汇总键（映射正文留在产物）

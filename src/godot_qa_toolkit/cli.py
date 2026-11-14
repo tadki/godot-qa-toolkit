@@ -658,6 +658,39 @@ def _attribution_args(args: argparse.Namespace
     return enabled, out, causal
 
 
+def cmd_attr_update(args: argparse.Namespace) -> int:
+    import json as _json
+    from pathlib import Path as _P
+
+    from .canonical.increment import IncrementError, run_attribution_increment
+
+    rc = _apply_godot_bin_or_contract("attr-update", args)
+    if rc is not None:
+        return rc
+    try:
+        recipe = _json.loads(_P(args.recipe).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return _emit({"tool": "attr-update", "ok": False,
+                      "summary": {"error": f"recipe load failed: {e}"},
+                      "failures": [{"reason": f"recipe load failed: {e}"}]})
+    roots = [_P(r) for r in args.roots]
+    targets = sorted({str(p) for root in roots
+                      for p in root.rglob("*.gd") if p.is_file()})
+    try:
+        report = run_attribution_increment(
+            args.project_root, targets, recipe, args.baseline,
+            [str(c) for c in args.changed], args.out,
+            timeout_s=args.timeout,
+            attribution_causal=bool(args.attribution_causal),
+            calibration_every=args.calibration_every)
+    except IncrementError as e:
+        return _emit({"tool": "attr-update", "ok": False,
+                      "summary": {"error": str(e), "increment_error": True},
+                      "failures": [{"reason": f"increment_error: {e}"}]})
+    return _emit({"tool": "attr-update", "ok": True,
+                  "summary": report, "failures": []})
+
+
 def cmd_canonical(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -927,6 +960,31 @@ def build_parser() -> argparse.ArgumentParser:
                           "requires --test-attribution")
     _add_godot_bin_arg(can)
     can.set_defaults(func=cmd_canonical)
+
+    inc = sub.add_parser(
+        "attr-update",
+        help="EXPERIMENTAL (SEE-1581 方向①): incremental rebuild of the "
+             "attribution mapping from a baseline artifact")
+    inc.add_argument("roots", nargs="+",
+                     help="target .gd roots — must be the same universe as "
+                          "the baseline artifact")
+    inc.add_argument("--project-root", required=True)
+    inc.add_argument("--recipe", required=True,
+                     help="canonical-recipe/1 JSON (same content as the "
+                          "baseline run)")
+    inc.add_argument("--baseline", required=True,
+                     help="prior attribution artifact "
+                          "(canonical-test-attribution/4)")
+    inc.add_argument("--changed", action="append", default=[],
+                     help="changed/new/removed file path (repeatable)")
+    inc.add_argument("--out", required=True,
+                     help="incremented attribution artifact output path")
+    inc.add_argument("--timeout", type=int, default=180)
+    inc.add_argument("--calibration-every", type=int, default=5,
+                     help="force a full-face rebuild after N increments")
+    inc.add_argument("--attribution-causal", action="store_true")
+    _add_godot_bin_arg(inc)
+    inc.set_defaults(func=cmd_attr_update)
 
     ac = sub.add_parser("accept", help="Gherkin acceptance pipeline (SEE-1426 P2)")
     acsub = ac.add_subparsers(dest="accept_command", required=True)

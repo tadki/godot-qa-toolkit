@@ -2,8 +2,7 @@
 
 # godot-qa-toolkit
 
-**Deterministic QA toolchain for Godot / GDScript projects — machine-decidable
-verdicts under one unified JSON contract.**
+**QA toolchain for Godot / GDScript — one machine-readable JSON verdict per command.**
 
 [![ci-pytest](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml/badge.svg)](https://github.com/tadki/godot-qa-toolkit/actions/workflows/ci-pytest.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -12,38 +11,39 @@ verdicts under one unified JSON contract.**
 
 ---
 
-gqt is an independent CLI (`gqt`) that answers *"does this project pass?"* with
-a verdict a machine can act on — no agent scoring, no heuristics inside tool
-code. It drives the **tested project's own GUT suite** headlessly, emits exactly
-one JSON object per command, and never guesses at your project layout: the
-target project enters only through an explicit `--project-root`.
+`gqt` is an independent CLI that answers *"does this project pass, and where is
+the risk?"* with verdicts a machine can act on. It drives the **tested
+project's own GUT suite** headlessly, emits exactly one JSON object per
+command, and never guesses at your project layout: the target project enters
+only through an explicit `--project-root`.
 
 ## Why gqt
 
-- **One JSON contract, deterministic verdicts.** Every command prints
-  `{"tool", "ok", "summary", "failures"}` on stdout; exit `0` = pass, `1` =
-  fail, `2` = caller error. Unmeasured code is a fail signal, never a silent
-  skip — agents and CI consume verdicts with zero tool-specific glue.
+- **CRAP risk scoring, first class.** Rank functions by Change Risk
+  Anti-Patterns — `CRAP = cc² × (1 − c)³ + cc`, with `c` the raw 0–1 line
+  coverage (never pre-rounded). `score ≥ 30` or `cc ≥ 15` marks a function as
+  high risk; no valid coverage denominator means no score, never a fake one.
+  CRAP is a ranking and governance signal, not a hidden CI gate.
+- **One JSON contract.** Every command prints `{"tool", "ok", "summary",
+  "failures"}` on stdout; exit `0` = pass, `1` = fail, `2` = caller error.
+  Unmeasured code is a fail signal, never a silent skip.
 - **Gherkin acceptance pipeline.** `.feature` files compile to a versioned IR
-  and generated GUT tests, then run and contract-mutate inside your project.
-  A strict Gherkin subset, no steps registry — tests call your project's
-  `testing_api.gd` adapter, and full-matrix mutation proves the assertions
-  actually bite.
+  and generated GUT tests, then run and contract-mutate inside your project —
+  full-matrix mutation proves the assertions actually bite. No steps registry;
+  tests call your project's `testing_api.gd` adapter.
 - **Mutation testing that picks the right tests.** Test selection comes from
-  the runtime truth map (`test-attribution/5`): function-level grouping by
-  default, a bounded file-level fallback, a terminal zero-reference
-  short-circuit, and a loud failure when the map is unusable — the full face
-  only runs under the explicit `--select full` audit switch. Mutants execute
-  in disk shadow slots (your real repo is never written), differential resume
-  re-runs only unproven verdicts, and kills are judged as newly-failing test
-  sets, never by exit codes.
+  the runtime truth map: function-level grouping by default, a bounded
+  file-level fallback, a terminal zero-reference short-circuit, and a loud
+  failure when the map is unusable — the full face only runs under the explicit
+  `--select full` audit switch. Mutants execute in disk shadow slots (your real
+  repo is never written), differential resume re-runs only unproven verdicts,
+  and kills are judged as newly-failing test sets, never by exit codes.
 - **Dual-arm measurement.** `measure suite` / `measure run` build a hashed
-  suite definition and run two coverage arms (full GUT face + acceptance
-  suite) whose line sets are **unioned, never averaged**, into function-level
-  CRAP scoring and the attribution map that powers mutation selection.
-- **Deterministic static guards.** Cyclomatic-complexity thresholds and a
-  Pure Core architecture guard (extends whitelist, no engine API, explicit
-  RNG) turn code structure into pass/fail gates.
+  suite definition and run two coverage arms whose line sets are **unioned,
+  never averaged**, feeding CRAP records and the attribution map that powers
+  mutation selection.
+- **Guards and self-checks.** A Pure Core architecture guard, CC parity,
+  registry snapshot diffs, and `gqt doctor` for editable-install consistency.
 
 ## The CLI
 
@@ -102,11 +102,14 @@ gqt mutation <file> --project-root . --jobs 8
 # Line + branch coverage with a minimum gate
 gqt measure coverage src/save/save_manager.gd --project-root . --min-percent 80
 
-# Static gates
+# Static complexity measurements and architecture guard
 gqt measure complexity src/systems --warn 10 --max 15
 gqt measure arch src/systems
 
-# Dual-arm measurement → CRAP + attribution map
+# CRAP risk ranking for candidate files
+gqt measure risk src/save/save_manager.gd --project-root . --report shadow-report.json
+
+# Dual-arm measurement → CRAP records + attribution map
 gqt measure suite --project-root . --out recipe.json
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json
 ```
@@ -128,12 +131,19 @@ as a verdict fail.
 
 ## Documentation
 
-| Document | What it covers |
-|---|---|
-| [`docs/contract.md`](docs/contract.md) | **Machine contract SSOT**: per-command flags, JSON fields, sentinel shapes, cache/write boundaries, schema versions |
-| [`docs/mutation-architecture.md`](docs/mutation-architecture.md) | Mutation design rationale: disk shadow slots, differential resume, worker channel, freshness proofs |
-| [`docs/templates/`](docs/templates/) | Adoption spec, Gherkin gauntlet script, `testing_api.gd` adapter and probe library templates |
-| [`docs/new-checker.md`](docs/new-checker.md) | How to add a new checker to the toolchain |
+- **[Runbook](docs/runbook/README.md)** — per-face usage guides with typical
+  examples and full command references (gherkin / mutation / measure / CRAP /
+  guards & doctor).
+- **[`docs/contract.md`](docs/contract.md)** — machine contract source of
+  truth: per-command flags, JSON fields, sentinel shapes, cache and write
+  boundaries, schema versions.
+- **[`docs/mutation-architecture.md`](docs/mutation-architecture.md)** —
+  mutation design rationale: disk shadow slots, differential resume, worker
+  channel, freshness proofs.
+- **[`docs/templates/`](docs/templates/)** — adoption spec, Gherkin gauntlet
+  script, `testing_api.gd` adapter and probe library templates.
+- **[`docs/new-checker.md`](docs/new-checker.md)** — how to add a new checker
+  to the toolchain.
 
 Upgrading from v0.2.x? v0.3.0 collapsed the CLI into the four entries above
 with **no compatibility layer** — old top-level commands exit `2`. The rename
@@ -160,8 +170,8 @@ suite's own imports.
 
 ## Design principles
 
-- **Deterministic verdicts** — fully reproducible outcomes; no agent or
-  heuristic scoring inside tool code.
+- **Machine-decidable outcomes** — no agent or heuristic scoring inside tool
+  code; every verdict is reproducible from the inputs.
 - **One JSON contract** — uniform `{tool, ok, summary, failures}` and
   `0`/`1`/`2` exits across the toolchain.
 - **Unmeasured is a fail** — unconvertible code, unscanned targets and silent

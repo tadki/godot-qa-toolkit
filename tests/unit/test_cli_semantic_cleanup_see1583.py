@@ -186,12 +186,25 @@ class TestStaleTextCleanup:
 UNAMBIGUOUS_OLD_WORDS = re.compile(
     r"\b(accept|attr-update|canonical|canonical-diagnose)\b")
 
-# 旧一级调用形态（`gqt <old> ...`）。arch/complexity/coverage/parity/risk
-# 与新 measure 叶子同名，仅在 gqt 前缀调用形态下才无歧义；
-# `gqt measure complexity` 不含 `gqt complexity`，不会误伤。
+# 旧一级调用形态。arch/complexity/coverage/parity/risk 与新 measure 叶子
+# 同名，仅在调用形态前缀下才无歧义；`gqt measure complexity` 不含
+# `gqt complexity` 前缀，不会误伤。覆盖 Revy 登记的四类逃逸向量：
+# literal `gqt <old>`（`\s+` 含多空白/Tab）、`$GQT <old>` shell 变量形态、
+# `python3 -m godot_qa_toolkit.cli <old>` 模块形态、名称大小写变体。
+# 名称段 `(?i:…)` 承载大小写不敏感；尾界 `([^-a-z0-9]|$)` 保持大小写
+# 敏感，近形（`gqt canonicalize` / `gqt coverage-x`）不误伤。
+_OLD_INV_NAMES = ("accept", "canonical", "canonical-diagnose",
+                  "attr-update", "recipe", "registry", "arch", "complexity",
+                  "coverage", "parity", "risk")
+_OLD_INV_PREFIXES = (
+    r"\bgqt\s+",                                    # literal + 多空白/Tab
+    r"\$[Gg][Qq][Tt]\s+",                           # shell 变量形态
+    r"\bpython3?\s+-m\s+godot_qa_toolkit\.cli\s+",  # 模块调用形态
+)
+_OLD_INV_NAME_RE = "(?i:" + "|".join(_OLD_INV_NAMES) + ")"
 OLD_INVOCATION = re.compile(
-    r"gqt (accept|canonical|canonical-diagnose|attr-update|recipe|registry|"
-    r"arch|complexity|coverage|parity|risk)([^-a-z0-9]|$)")
+    "|".join(p + _OLD_INV_NAME_RE + r"([^-a-z0-9]|$)"
+             for p in _OLD_INV_PREFIXES))
 
 
 class TestHelpSurfaceLeak:
@@ -303,12 +316,14 @@ class TestOldCliWordGuard:
 
 
 class TestOldInvocationFormGuard:
-    """SEE-1583 §SPEC-002：src 内不得出现 literal 旧一级调用形态。
+    """SEE-1583 §SPEC-002：src 内不得出现旧一级调用形态（四种形态）。
 
     判据形态为 `gqt <old-top-level>`（accept/arch/attr-update/canonical/
-    canonical-diagnose/complexity/coverage/parity/recipe/registry/risk）。
-    新命令路径 `gqt measure <leaf>` / `gqt mutation` / `gqt gherkin …`
-    不含 `gqt <old>` 前缀，天然不会误伤。
+    canonical-diagnose/complexity/coverage/parity/recipe/registry/risk），
+    并覆盖 Revy 登记的四类逃逸向量：多空白/Tab 分隔、`$GQT <old>` 变量
+    形态、`python3 -m godot_qa_toolkit.cli <old>` 模块形态、名称大小写
+    变体。新命令路径 `gqt measure <leaf>` / `gqt mutation` /
+    `gqt gherkin …` 及其模块/变量形态不含 `gqt <old>` 前缀，不会误伤。
     """
 
     def test_src_has_no_old_invocation_forms(self):
@@ -319,21 +334,25 @@ class TestOldInvocationFormGuard:
                     bad.append(f"{path.relative_to(SRC)}:{lineno}: "
                                f"{line.strip()[:100]}")
         assert not bad, (
-            "literal old top-level invocation (gqt <old>) in src:\n"
-            + "\n".join(bad[:20]))
+            "old top-level invocation form (gqt/$GQT/python -m cli <old>) "
+            "in src:\n" + "\n".join(bad[:20]))
 
     def test_guard_replay_catches_old_invocations(self):
-        # 旧串回放（含 LOW-1 修复前原文）：必须判红。
+        # 旧串回放（含 LOW-1 修复前原文与四类逃逸形态）：必须判红。
         old_samples = (
             'push_error("gqt coverage probe sink open failed: user://" '
             "+ sink_name)",
             "raise RuntimeError('gqt complexity gate failed')",
             "log('gqt canonical report written')",
             "cmd = 'gqt accept compile foo.feature'",
+            "# probe: $GQT coverage check",
+            "# probe: python3 -m godot_qa_toolkit.cli recipe d.json",
+            "# probe: gqt   complexity src/",
+            "# probe: gqt Canonical report written",
         )
         for sample in old_samples:
             assert OLD_INVOCATION.search(sample), sample
-        # 新命令路径与保留形态不得误伤。
+        # 新命令路径与保留形态不得误伤（含对应变量/模块形态与近形）。
         for sample in (
             'push_error("gqt measure coverage probe sink open failed: '
             'user://" + sink_name)',
@@ -341,5 +360,10 @@ class TestOldInvocationFormGuard:
             "gqt mutation file.gd",
             "gqt gherkin compile foo.feature",
             "gqt doctor",
+            "# probe: $GQT measure coverage check",
+            "# probe: python3 -m godot_qa_toolkit.cli measure run "
+            "--project-root p",
+            "# probe: gqt   mutation file.gd",
+            "# probe: gqt Canonicalize src/",
         ):
             assert not OLD_INVOCATION.search(sample), sample

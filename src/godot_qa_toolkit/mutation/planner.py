@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from .coverlink import load_instrumentable_lines, load_reusable_coverage
+from .coverlink import resolve_coverage_for_prefilter
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .identity import certificate_valid
 from .reporting import _dry_run_result, _mutant_record
@@ -50,12 +50,15 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                     budget, tests_glob, binary_kind, resume2_store,
                     mutate_all, retry_ids, select_ids, select_lines,
                     reuse_coverage, attention, mutant_slice, original_src,
-                    identity: dict | None = None, clock=None):
+                    identity: dict | None = None, clock=None,
+                    tests_scripts: "list[str] | None" = None):
     """执行面规划（P1 差分 / P3 寻址 / P2 覆盖过滤三模式互斥落定）。
 
     返回 (prior_entries, reused, untouched, disclosures, executed_list,
     uncovered_records)。worker 注入路径（retry_ids）不自建 plan、不写
     manifest（父层单点写）；卡尺寻址（select_*）强制新执行绕过差分。
+    tests_scripts = 本次 tests_glob 承载的测试脚本集（SEE-1587 投影回退
+    需要；None = 不可得则投影层下沉不过滤）。
     """
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
         project_root, str(path), tests_glob, binary_kind=binary_kind,
@@ -72,23 +75,39 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                         scope_hashes, budget, tests_glob, binary_kind,
                         mutate_all, reuse_coverage, mutant_slice,
                         original_src, disclosures, identity=identity,
-                        clock=clock)
+                        clock=clock, tests_scripts=tests_scripts)
 
 
 def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
-    """§SPEC-1420-11（D7 卡尺）：显式寻址 = 公平的重跑通道——不查缓存。"""
+    """§SPEC-1420-11（D7 卡尺）：显式寻址 = 公平的重跑通道——不查缓存。
+
+    SEE-1587：`--lines` 与请求行求交并披露 `requested / hit /
+    skipped_no_site`（请求行中无变异位点的显式列出）；全部无位点才显式
+    失败。`--mutation` 单 id 契约不变（无命中 = 显式错误）。"""
     if select_ids is not None:
         wanted = set(select_ids)
         executed_list = [m for m in mutants if m.stable_id in wanted]
         missing = wanted - {m.stable_id for m in executed_list}
+        if missing:
+            raise ValueError(
+                "selection matched no mutation sites (stale id after source "
+                f"change, or out-of-range line?): {sorted(missing)[:5]}")
     else:
-        lines = set(select_lines)
+        lines = {int(l) for l in (select_lines or [])}
         executed_list = [m for m in mutants if m.line in lines]
-        missing = lines - {m.line for m in executed_list}
-    if missing:
-        raise ValueError(
-            "selection matched no mutation sites (stale id after source "
-            f"change, or out-of-range line?): {sorted(missing)[:5]}")
+        hit = sorted({m.line for m in executed_list})
+        disclosures["lines_selection"] = {
+            "requested": sorted(lines),
+            "requested_count": len(lines),
+            "hit": hit,
+            "hit_count": len(hit),
+            "skipped_no_site": sorted(lines - set(hit)),
+        }
+        if not executed_list:
+            raise ValueError(
+                "selection matched no mutation sites on the requested lines "
+                f"(no-site lines: {sorted(lines)[:10]}"
+                f"{'…' if len(lines) > 10 else ''})")
     prior_entries = store2.load_entries()  # streak 连续性（仅读）
     disclosures["executed"] = len(executed_list)
     disclosures["selected"] = True
@@ -110,7 +129,8 @@ def _plan_worker(mutants, retry_ids, disclosures):
 def _plan_serial(store2, path, project_root, mutants, header_hash,
                  scope_hashes, budget, tests_glob, binary_kind, mutate_all,
                  reuse_coverage, mutant_slice, original_src, disclosures,
-                 identity: dict | None = None, clock=None):
+                 identity: dict | None = None, clock=None,
+                 tests_scripts: "list[str] | None" = None):
     """串行自规划：D4 差分矩阵（killed 证书门）→ P2 覆盖前置过滤 →
     D6 budget-on-retry。"""
     store2.disclose_v1_superseded()
@@ -126,12 +146,15 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
     with clock.stage("prefilter"):
         uncovered_mutants, retry_pool = _apply_coverage_prefilter(
             plan, path, project_root, tests_glob, binary_kind,
-            reuse_coverage, disclosures, identity=identity)
+            reuse_coverage, disclosures, identity=identity,
+            tests_scripts=tests_scripts)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     reused = plan.reused
     if disclosures.get("coverage_prefilter") not in ("store_miss", "instrumentable_face_missing") \
             and reuse_coverage:
+        src = disclosures.get("coverage_prefilter")
         disclosures["coverage_prefilter"] = {
+            "source": src if isinstance(src, str) else None,
             "uncovered": len(uncovered_mutants),
             "covered_executed": len(executed_list),
         }
@@ -158,33 +181,29 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
 
 def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
                               binary_kind, reuse_coverage, disclosures,
-                              identity: dict | None = None):
-    """§SPEC-1420-12（L3/D7 P2）+ SEE-1550 L1：coverage 前置过滤（budget 之前）
-    ——预算只花在 covered 位点上；uncovered 全部显式标记。
+                              identity: dict | None = None,
+                              tests_scripts: "list[str] | None" = None):
+    """§SPEC-1420-12（L3/D7 P2）+ SEE-1550 L1 + SEE-1587：coverage 前置
+    过滤（budget 之前）——预算只花在 covered 位点上；uncovered 显式标记。
 
-    默认自动启用（reuse_coverage=True）：store fresh ∧ 身份包全匹配才生效，
-    任一漂移（含旧 schema 无 identity）禁用并披露——宁多跑不假阴性。
-    返回 (uncovered, retry_pool)。D3 修复：过滤锚 = covered ∧ instrumentable
-    ——落在不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的位
-    点**留在执行面**（Revy 实机 item.gd 11/60 假阴性实证）；可插桩集读不到
-    （旧 schema/缺失）= 不过滤（宁多跑不假阴性）。
+    数据源统一经 coverlink.resolve_coverage_for_prefilter：手动 /1 store →
+    同轮投影 /2 store → 行级主真值现场投影（scripts = 本次 tests_glob 承载
+    的测试脚本集）——三层全失才回退不过滤，绝不假过滤。source 进
+    disclosures["coverage_prefilter"] 披露。
+    D3 锚：不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的
+    位点**留在执行面**；可插桩集读不到 = 不过滤（宁多跑不假阴性）。
     """
     if not reuse_coverage:
         return [], plan.executed
-    cov_lines, cov_reason = load_reusable_coverage(
-        project_root, str(path), tests_glob, binary_kind, identity=identity)
-    if cov_lines is None:
+    cov_lines, inst_lines, cov_reason, source = resolve_coverage_for_prefilter(
+        project_root, str(path), tests_glob, scripts=tests_scripts,
+        binary_kind=binary_kind, identity=identity)
+    if cov_lines is None or inst_lines is None:
         print(f"mutation: coverage store miss ({cov_reason}) — "
               f"running unfiltered", file=sys.stderr)
-        disclosures["coverage_prefilter"] = "store_miss"
+        disclosures["coverage_prefilter"] = source or "store_miss"
         return [], plan.executed
-    inst_lines, inst_reason = load_instrumentable_lines(
-        project_root, str(path), tests_glob, binary_kind, identity=identity)
-    if inst_lines is None:
-        print(f"mutation: instrumentable face unavailable ({inst_reason}) — "
-              f"running unfiltered", file=sys.stderr)
-        disclosures["coverage_prefilter"] = "instrumentable_face_missing"
-        return [], plan.executed
+    disclosures["coverage_prefilter"] = source
     uncovered = [m for m in plan.executed
                  if m.line not in cov_lines and m.line in inst_lines]
     pool = [m for m in plan.executed

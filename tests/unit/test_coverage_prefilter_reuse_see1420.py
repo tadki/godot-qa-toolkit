@@ -103,7 +103,8 @@ class TestCoveragePrefilter:
         assert all(f["line"] == 5 for f in uncovered)
         # covered 位点照常执行
         assert r["summary"]["coverage_prefilter"] == {
-            "uncovered": 3, "covered_executed": 3}
+            "source": "coverage_store", "uncovered": 3,
+            "covered_executed": 3}
         assert r["summary"]["killed"] == 3
 
     def test_uncovered_not_in_ok_gate(self, tmp_path, monkeypatch):
@@ -174,8 +175,9 @@ class TestCoveragePrefilter:
                                  reuse_coverage=True)
         s = r["summary"]
         # one 的 5 位点 uncovered 显式标记；two 的 3 位点 covered，budget=2 截断
-        assert s["coverage_prefilter"] == {"uncovered": 5,
-                                           "covered_executed": 2}
+        assert s["coverage_prefilter"] == {
+            "source": "coverage_store", "uncovered": 5,
+            "covered_executed": 2}
         assert s["executed"] == 2
         uncovered = [f for f in r["failures"] if f["verdict"] == "uncovered"]
         assert len(uncovered) == 5

@@ -307,12 +307,13 @@ def _run_mutation_core(file_path: str,
 
     clock = StageClock()
     selection_meta: dict = {}
-    if tests_glob is None:
-        # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
-        # （CLI 默认 fn）——不可用映射 fail-loud，无静默全脸路径。
-        with clock.stage("test_scan"):
-            tests_glob, selection_meta = _auto_scan_tests_glob_meta(
-                str(path), project_root, select_mode=select_mode)
+    # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
+    # （SEE-1587 默认 line）——不可用映射 fail-loud，无静默全脸路径。
+    # SEE-1587：显式 --tests 也经同一守门函数，披露「未使用行级选面」。
+    with clock.stage("test_scan"):
+        tests_glob, selection_meta = _resolve_auto_glob(
+            tests_glob, str(path), project_root, selection_meta,
+            select_mode=select_mode)
     scoped = tests_glob is not None
 
     original_src = path.read_text(encoding="utf-8")
@@ -339,6 +340,36 @@ def _run_mutation_core(file_path: str,
         original_src, str(path), raw_mutants)
     total_sites = len(mutants)
     attention = _attention_note(mutation_warning, total_sites, str(path))
+
+    # SEE-1587：卡尺行级测试面——`--mutation`/`--lines` 默认（line 模式）消费
+    # 选中位点所在行的测试集合并集物化为单一 glob（不再回落文件/函数整面
+    # 包）；无映射测试的选中位点照常执行（公平重跑通道）并披露
+    # no_mapped_tests。显式 --tests 用户接管测试面时不参与。
+    if (select_ids or select_lines) and str(select_mode).lower() == "line" \
+            and selection_meta.get("source") != "explicit_tests":
+        caliper_lines = _caliper_lines(mutants, select_ids, select_lines)
+        if caliper_lines:
+            from .truth_select import resolve_line_group_selection
+            file_sel = {"source": "runtime_mapping", "zero_ref": False,
+                        "tests": selection_meta.get("tests") or [],
+                        "tests_glob": tests_glob,
+                        "mapping": selection_meta.get("mapping")}
+            sel = resolve_line_group_selection(
+                project_root, str(path), caliper_lines,
+                file_selection=file_sel)
+            selection_meta = {
+                **selection_meta,
+                "source": sel.get("source"),
+                "reason": ("caliper_line_mapping"
+                           if sel.get("source") == "line_mapping"
+                           else "caliper_line_has_no_mapped_tests"),
+                "tests": sel.get("tests") or [],
+                "lines": sel.get("lines") or sorted(caliper_lines),
+                "no_mapped_tests": sel.get("no_mapped_tests") or [],
+            }
+            if sel.get("tests_glob"):
+                tests_glob = sel["tests_glob"]
+    scoped = tests_glob is not None
 
     if dry_run:
         estimate = dry_run_estimate(
@@ -368,7 +399,8 @@ def _run_mutation_core(file_path: str,
             path, project_root, mutants, header_hash, scope_hashes, budget,
             tests_glob, binary_kind, resume2_store, mutate_all, retry_ids,
             select_ids, select_lines, reuse_coverage, attention,
-            mutant_slice, original_src, identity=identity, clock=clock)
+            mutant_slice, original_src, identity=identity, clock=clock,
+            tests_scripts=selection_meta.get("tests") or None)
 
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
@@ -391,6 +423,19 @@ def _run_mutation_core(file_path: str,
         total_sites, progress=progress, identity=identity,
         targeted_only=bool(select_ids or select_lines),
         worker_channel=worker_channel, clock=clock)
+
+
+def _caliper_lines(mutants: list, select_ids: "list[str] | None",
+                   select_lines: "list[int] | set[int] | None") -> set[int]:
+    """卡尺选中位点的实际行集合（--mutation id 先解析到行；--lines 求交）。
+
+    未命中任何位点的请求（stale id / 越界行）不在此处失败——交由
+    planner._plan_selection 的显式错误契约统一收口（单一失败出处）。"""
+    if select_ids:
+        wanted = set(select_ids)
+        return {m.line for m in mutants if m.stable_id in wanted}
+    lines = {int(l) for l in (select_lines or [])}
+    return {m.line for m in mutants if m.line in lines}
 
 
 def _rebuild_reused_records(reused: dict, mutants: list,
@@ -552,10 +597,20 @@ def _resolve_auto_glob(tests_glob: str | None, file_path: str,
     """显式 `--tests` 直过（选测未发生，披露 meta 原样保留）；否则自动选测。
 
     §SPEC-613 判据唯一出处的守门形态：并行规划/串行门共用，禁止按 CLI
-    参数推断选测是否发生。select_mode: fn/file（严格真值选面，不可用即
-    fail-loud）| full（显式审计全脸）。
-    """
+    参数推断选测是否发生。select_mode: line/fn/file（严格真值选面，不可用
+    即 fail-loud）| full（显式审计全脸）。
+
+    SEE-1587：显式 `--tests` 表示用户接管测试面——在 line/fn 模式下必须
+    披露「未使用行级选面」（source=explicit_tests），不得静默。"""
     if tests_glob:
+        if not selection_meta.get("source") \
+                and str(select_mode).lower() in ("line", "fn"):
+            selection_meta = {
+                "source": "explicit_tests",
+                "reason": "explicit --tests overrides line-level selection",
+                "tests": [], "zero_ref": False, "mapping": None,
+                "ambiguous_names": [],
+            }
         return tests_glob, selection_meta
     return _auto_scan_tests_glob_meta(file_path, project_root,
                                       select_mode=select_mode)

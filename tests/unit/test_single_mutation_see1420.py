@@ -152,4 +152,5 @@ class TestCliWiring:
         assert args.mutation == "x.gd#add#1"
         args2 = build_parser().parse_args(
             ["mutation", "x.gd", "--project-root", "p", "--lines", "3"])
-        assert args2.lines == 3
+        # SEE-1587：--lines 接受单行/区间/多段规格（解析在 dispatch 早段）
+        assert args2.lines == "3"

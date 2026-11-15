@@ -588,6 +588,133 @@ def function_tests(project_root: str, doc: dict, rel: str,
     return sorted(set(scripts)), ambiguous
 
 
+# ---------------------------------------------------------------- 行级选面
+# SEE-1587 §SPEC-004：默认 mutation 选面语义——行事实反查 line→tests，
+# 同签名行集合共享一个选择目录 glob；无映射测试的行默认标 uncovered、
+# 卡尺显式披露 no_mapped_tests 后执行（公平重跑通道，不静默丢弃）。
+
+
+def parse_lines_spec(spec: str) -> list[int]:
+    """`--lines` 规格解析：单行 / 连续区间 / 多段区间（逗号分隔）。
+
+    `"42"` / `"10-20"` / `"10-20,30,35-40"` → 去重升序行号列表。
+    非法形态（非整数 / 倒序区间 / 非正行号 / 空规格）→ ValueError
+    （CLI 按参数错误契约转 ok=false，不与"无位点"混淆）。"""
+    lines: set[int] = set()
+    for seg in str(spec).split(","):
+        seg = seg.strip()
+        if not seg:
+            raise ValueError(f"invalid --lines segment (empty): {spec!r}")
+        if "-" in seg:
+            lo_s, _, hi_s = seg.partition("-")
+            lo, hi = int(lo_s), int(hi_s)
+            if lo <= 0 or hi < lo:
+                raise ValueError(
+                    f"invalid --lines range {seg!r} (need 1<=lo<=hi)")
+            lines.update(range(lo, hi + 1))
+        else:
+            n = int(seg)
+            if n <= 0:
+                raise ValueError(f"invalid --lines value {seg!r} (need >=1)")
+            lines.add(n)
+    if not lines:
+        raise ValueError(f"empty --lines spec: {spec!r}")
+    return sorted(lines)
+
+
+def _line_script_sets(doc: dict, rel: str,
+                      lines: set[int]) -> dict[int, set[str]]:
+    """行 → 触达它的测试脚本 basename 集合。
+
+    test 车道（line_to_tests）∪ script 车道（script_to_lines，before_all
+    等脚本级执行同样是该脚本的测试面）。行不在任何行事实 = 空集 =
+    no_mapped_tests。身份两侧统一 basename（注册表身份是全路径）。"""
+    arm = (doc.get("arms") or {}).get("gut_full") or {}
+    out: dict[int, set[str]] = {}
+    for ln_s, idents in (arm.get("line_to_tests") or {}).get(rel,
+                                                            {}).items():
+        ln = int(ln_s)
+        if ln not in lines:
+            continue
+        out.setdefault(ln, set()).update(
+            Path(i.split("::", 1)[0]).name for i in idents)
+    for script, rel_map in (arm.get("script_to_lines") or {}).items():
+        for ln in (rel_map or {}).get(rel, []) or []:
+            if int(ln) in lines:
+                out.setdefault(int(ln), set()).add(Path(script).name)
+    return out
+
+
+def resolve_line_group_selection(project_root: str | Path, target_file: str,
+                                 lines: "list[int] | set[int]",
+                                 file_selection: dict | None = None,
+                                 map_path_override: str | None = None,
+                                 strict: bool = True) -> dict:
+    """行集合 → 测试脚本并集 → 单一选择目录 glob（行级选面唯一入口）。
+
+    返回 dict：source ∈ {line_mapping, no_mapped_tests, file-level 透传}；
+    `no_mapped_tests` = 请求行中无任何映射测试的行（默认路径消费侧标
+    uncovered；卡尺消费侧披露后执行）。文件级不可用时：strict →
+    MutationSelectionError（fail-loud），非 strict 透传 file_sel。"""
+    root = str(Path(project_root).resolve())
+    want = {int(l) for l in lines}
+    file_sel = file_selection or resolve_selection(
+        root, target_file, map_path_override, strict=strict)
+    if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
+        return file_sel
+    path = (file_sel.get("mapping") or {}).get("path")
+    try:
+        doc = load_map(path) if path else load_map(map_path(root,
+                                                            map_path_override))
+        rel = _file_rel(root, target_file)
+    except (SelectionError, ValueError) as e:
+        raise MutationSelectionError("line_selection_load_failed",
+                                     str(e)) from e
+    per_line = _line_script_sets(doc, rel, want)
+    names: set[str] = set()
+    for scripts in per_line.values():
+        names |= scripts
+    no_mapped = sorted(ln for ln in want if not per_line.get(ln))
+    by_name = _test_scripts_by_name(root)
+    scripts: list[str] = []
+    ambiguous: list[str] = []
+    for name in sorted(names):
+        paths = by_name.get(name)
+        if not paths:
+            continue
+        if len(paths) > 1:
+            ambiguous.append(name)
+        scripts.extend(paths)
+    if ambiguous:
+        raise MutationSelectionError("ambiguous_test_names",
+                                     str(sorted(ambiguous)[:5]))
+    base = {"no_mapped_tests": no_mapped, "lines": sorted(want),
+            "mapping": file_sel.get("mapping"), "zero_ref": False,
+            "ambiguous_names": []}
+    if not scripts:
+        return {**base, "source": "no_mapped_tests",
+                "reason": "line_has_no_mapped_tests", "tests": [],
+                "tests_glob": None}
+    try:
+        sel_dir = materialize_selection(root, scripts)
+    except OSError as e:
+        raise MutationSelectionError("selection_materialize_failed",
+                                     str(e)) from e
+    return {**base, "source": "line_mapping", "reason": "line_mapping_fresh",
+            "tests": scripts, "tests_glob": sel_dir}
+
+
+def resolve_line_selection(project_root: str | Path, target_file: str,
+                           line: int,
+                           file_selection: dict | None = None,
+                           map_path_override: str | None = None,
+                           strict: bool = True) -> dict:
+    """单行行级选面（resolve_line_group_selection 的单行入口）。"""
+    return resolve_line_group_selection(
+        project_root, target_file, {int(line)}, file_selection,
+        map_path_override, strict)
+
+
 def resolve_function_selection(project_root: str | Path, target_file: str,
                                fid: str,
                                file_selection: dict | None = None,

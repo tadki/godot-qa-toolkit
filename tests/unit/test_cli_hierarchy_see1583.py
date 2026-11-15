@@ -232,9 +232,13 @@ class TestSpec003OutputContract:
 
 
 class TestSpec004See1581Flags:
-    def test_mutation_select_default_fn_and_choices(self):
+    def test_mutation_select_default_line_and_choices(self):
+        # SEE-1587：行级是默认主语义（fn/file 退为显式校准/回退视图）
         args = _parser().parse_args(
             ["mutation", "f.gd", "--project-root", "p"])
+        assert args.select_mode == "line"
+        args = _parser().parse_args(
+            ["mutation", "f.gd", "--project-root", "p", "--select", "fn"])
         assert args.select_mode == "fn"
 
     def test_mutation_select_choices_preserved(self):
@@ -259,7 +263,9 @@ class TestSpec004See1581Flags:
              "--mutation-warning", "40", "--timeout-factor", "1.5",
              "--mutate-all", "--no-reuse-coverage", "--worker-channel"])
         assert args.mutation == "f.gd#x#1"
-        assert args.lines == 7
+        # SEE-1587：--lines 接受单行/区间/多段规格（字符串形态，解析在
+        # dispatch 早段完成）
+        assert args.lines == "7"
         assert args.mutation_warning == 40
         assert args.timeout_factor == 1.5
         assert args.mutate_all is True

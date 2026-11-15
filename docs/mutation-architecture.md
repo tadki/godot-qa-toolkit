@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | L1 | 单文件靶向 + `--scan` + 大文件警告熔断 | 先算清要跑多少，别盲跑 | **部分采纳**：拒绝单文件靶向（多文件 + worker 池是 gqt 既有优势）；`--dry-run` 升级为差分计数预估；新增 `--mutation-warning`（默认 50，截断前全量计数）+ 截断 N/M 强制披露 | 警告熔断的语义保留；靶向的机制与 gqt 域优势冲突 |
 | L2 | 函数级 SHA-256 差分 + 快照持久化 | 没变的东西不重跑 | **采纳（核心）**：scope 级哈希差分 + per-file manifest + 差分跳过规则 + survived 永不缓存信任 | 语义完全同构；哈希粒度按 GDScript 结构重定义（见 §2） |
-| L3 | 覆盖率前置过滤 + `--reuse-coverage` | 没被测试覆盖的 mutant 不用跑 | **采纳**：复用 `gqt coverage` 自家行级事实（不引 LCOV 外部格式），provenance 校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 数据面自有；"外部格式互操作"机制被拒绝 |
+| L3 | 覆盖率前置过滤 + `--reuse-coverage` | 没被测试覆盖的 mutant 不用跑 | **采纳**：复用 `gqt measure coverage` 自家行级事实（不引 LCOV 外部格式），provenance 校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 数据面自有；"外部格式互操作"机制被拒绝 |
 | L4 | 沙盒目录克隆 + 多进程 worker 池 | 隔离变异副作用 + 并行执行 | **SEE-1420 拒绝沙盒（内存注入）；SEE-1550 反转为 per-worker 隔离磁盘影子槽**（hardlink COW，无硬链接 FS 退真拷贝；`.godot` 整树实拷贝） | take_over_path 内存注入存在可达性缺口：启动前完成的 autoload / preload / 组合根装配继续持有旧 Script（KOL 23 autoload 实证，假 survived）；hardlink COW 把拷贝税压到被改写文件本身，槽归还断言保留「中断无残骸」性质 |
 | L5 | baseline 动态超时熔断 | 超时判定要随基线耗时自适应 | **采纳（小改）**：自适应上限 = `max(timeout, baseline×F+1)`，`--timeout-factor` 默认 2.0 只放大不收紧；**拒绝 UB 默认 10**（JVM 抖动所迫，gqt 域无此噪声） | 倍数是环境参数不是语义 |
 | L6 | Babashka 快启动 / no-mutate / 常驻热 worker | 削启动税 + 跳过不可变区域 | **no-mutate 采纳**（`# gqt: no-mutate` 函数级 + 行级）；**Babashka 不适用**（gqt 是 Python 常驻 CLI，无冷启动问题）；**常驻热 worker 拒绝本轮降 backlog**（Godot 引擎级状态泄漏风险，重启条件量化见定案 §五） | 快启动语义在 gqt 域不存在；热 worker 的假 verdict 代价不对称 |
@@ -57,7 +57,7 @@
 - 落盘 `<root>/.qa-cache/gqt-mutation-resume-v2/<file-key>/`：manifest.json（per-file 索引层：schema/header hash/含位点 scope hash 表，收尾方单点写）+ `<stable-id>.json`（per-mutant 条目：verdict + 全签名五元组 + scope_hash + timeout_streak）。
 - tmp + `os.replace` 原子写；各 worker 各写各 id，无跨 worker 竞态；损坏/身份不符条目 = 拒收重跑，绝不脏合并。
 - timeout_streak：复用位点重判仍 timeout → +1；streak ≥ 2 → 独立 verdict `timeout_pinned`（永不并入 killed、不计 ok 门禁、持续可见）；任一后续 run 非超时 → 解除清零。毒 run 守卫：单 run timeout ≥50% 且 ≥5 条 → 本窗口 streak 挂起并披露。
-- `coverlink.py`：`gqt coverage` 成功 run 的行级事实（含 `instrumentable_lines` 可插桩集 + provenance）落盘 `<root>/.qa-cache/gqt-coverage/<key>.json`，供 `--reuse-coverage` 前置过滤；provenance 不符 = 缓存作废，宁多跑不假阴性。
+- `coverlink.py`：`gqt measure coverage` 成功 run 的行级事实（含 `instrumentable_lines` 可插桩集 + provenance）落盘 `<root>/.qa-cache/gqt-coverage/<key>.json`，供 `--reuse-coverage` 前置过滤；provenance 不符 = 缓存作废，宁多跑不假阴性。
 
 ## 3. 优化思想提炼（抽象层）
 

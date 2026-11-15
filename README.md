@@ -31,7 +31,7 @@ stdout JSON to distinguish failure shapes:
 |---|---|---|
 | `0` | verdict pass (`ok=true`) | JSON |
 | `1` | verdict fail (`ok=false`): target failed, unmeasured, or aborted run | JSON |
-| `2` | **caller error**: bad arguments / steps module failed to load | none (stderr only) |
+| `2` | **caller error**: bad arguments (argparse) / `doctor` install mismatch | none (stderr only) |
 
 The authoritative input/output contract (per-subcommand field lists, sentinel
 shapes, incremental-contract classification) is
@@ -42,14 +42,36 @@ source of truth.
 
 | Tool | Command | Status |
 |---|---|---|
-| **Arch guard** | `gqt arch <paths...>` — Pure Core architecture guard | shipped |
-| **Accept pipeline** | `gqt accept compile <feature> --project-root <root> [--write]` / `gqt accept run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
-| **Complexity gate** | `gqt complexity <paths...> [--warn 10] [--max 15]` | shipped |
-| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--dry-run] [--jobs N] [--no-reuse-coverage] [--worker-channel] [--godot-bin <path>]` | shipped |
-| **Coverage runner** | `gqt coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S] [--godot-bin <path>]` | shipped |
+| **Gherkin acceptance pipeline** | `gqt gherkin compile <feature> --project-root <root> [--write]` / `gqt gherkin run [<alt-project-root>] --project-root <root> --key <feature-key>` — Gherkin → IR → generated GUT tests → headless run; the optional positional is an alternative project root (one containing `addons/gut/`), not an artifacts dir | shipped |
+| **Mutation runner** | `gqt mutation <file.gd...> --project-root <root> [--budget 50] [--timeout S] [--tests <res://glob>] [--select {fn,file,full}] [--dry-run] [--jobs N] [--no-reuse-coverage] [--worker-channel] [--godot-bin <path>]` | shipped |
+| **Measurement suite** | `gqt measure suite <roots...> --project-root <root> [--out recipe.json]` — read-only suite definition (`measurement-suite/2`) | shipped |
+| **Dual-arm measurement** | `gqt measure run <roots...> --project-root <root> --recipe <recipe.json> --out <report.json>` (`measurement-report/2`; `--test-attribution` produces the `test-attribution/5` map) | shipped |
+| **Attribution map update** | `gqt measure map-update <roots...> --project-root <root> --recipe <recipe.json> --baseline <map.json> --out <map.json>` — incremental rebuild | shipped |
+| **Coverage runner** | `gqt measure coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout S] [--godot-bin <path>]` | shipped |
+| **Complexity gate** | `gqt measure complexity <paths...> [--warn 10] [--max 15]` | shipped |
+| **Arch guard** | `gqt measure arch <paths...>` — Pure Core architecture guard | shipped |
+| **Diagnostic lanes** | `gqt measure diagnose` / `parity` / `registry-diff` / `risk` — diagnostic-only, never CI gates | shipped |
+| **Doctor** | `gqt doctor` — editable-install self-check | shipped |
 | **Godot determinism** | logic/scheduling here; deterministic commands register into the godot-mcp runtime addon | planned |
 
-`mutation` and `coverage` share three mandatory preconditions:
+Since `v0.3.0` (SEE-1583) the CLI has exactly **four top-level entries** —
+`gherkin` / `mutation` / `measure` / `doctor`. The former top-level commands
+(`accept`, `arch`, `attr-update`, `canonical`, `canonical-diagnose`,
+`complexity`, `coverage`, `parity`, `recipe`, `registry diff`, `risk`) are
+**gone with no compatibility layer**: no aliases, no argv rewriting, no
+deprecation warnings — calling one exits `2` with argparse's invalid-choice
+error. Rename map: `accept` → `gherkin`, `canonical` → `measure run`,
+`canonical-diagnose` → `measure diagnose`, `recipe` → `measure suite`,
+`attr-update` → `measure map-update`, `registry diff` → `measure
+registry-diff`; `mutation` / `doctor` keep their names, `complexity` /
+`coverage` / `arch` / `parity` / `risk` moved under `measure`. Machine
+identities moved with them: stdout `tool` values are now `gherkin`,
+`mutation` and `measure.<leaf>`, and the versioned artifacts renamed to
+`measurement-suite/2` (was `canonical-recipe/1`), `measurement-report/2`
+(was `canonical-report/1`) and `test-attribution/5` — pre-existing
+artifacts of the old schemas are invalidated in one shot.
+
+`gqt mutation` and `gqt measure coverage` share three mandatory preconditions:
 
 - `--project-root` must point at a Godot project root containing
   `addons/gut/gut_cmdln.gd` — the tools consume the **tested project's own
@@ -66,12 +88,20 @@ source of truth.
   `--project-root` (absolute paths pass through unchanged), so target
   resolution never depends on the caller's CWD (SEE-1576).
 
-Without `--tests`, the affected-test subset is auto-derived by
-**direct-reference strength**: depth-1 consumers are weighted by identity
-token + target function-name hit counts (closure-only evidence carries zero
-weight), and closure-only selections are disclosed as weak in
-`summary.test_selection` with a `--tests` override suggestion (SEE-1576
-R-7). Explicit `--tests` bypasses the derivation entirely.
+Without `--tests`, the affected-test subset comes from the **runtime truth
+map** (SEE-1581, default `--select fn`): mutants are grouped by enclosing
+function and each group runs the test set the `test-attribution/5` mapping
+attributes to that function; a function missing from the mapping falls back
+to that file's bounded test set (disclosed as `file_fallback`); a fresh
+mapping with zero touching tests is a **terminal zero-ref short-circuit**
+(`summary.zero_ref_short_circuit=true`, nothing silently runs the full
+suite); an unusable mapping (missing / stale / ambiguous) **fails loud**
+(`MutationSelectionError`, exit 1) — the full face is reachable only via the
+explicit `--select full` audit switch. The map is auto-managed at
+`.qa-cache/attribution-map.json` (auto-generated / incrementally refreshed
+by default; `--no-attribution-auto` disables that, `--attribution-map`
+passes an explicit read-only artifact). Explicit `--tests` bypasses the
+mapping entirely.
 
 > **Two-library split:** the godot-mcp control plane (launcher / proxy / shim /
 > port arbitration) belongs to the **godot-mcp runtime library**. This repo is
@@ -89,16 +119,16 @@ gqt doctor                  # verify your install + toolchain wiring
 Then pick a tool:
 
 ```bash
-# 1. Gherkin acceptance pipeline（承接退役 gherkin runner 的场景判定）
-gqt accept compile acceptance/foo.feature --project-root . --write
-gqt accept run    --project-root . --key foo
-gqt accept mutate --project-root . --key foo
+# 1. Gherkin acceptance pipeline
+gqt gherkin compile acceptance/foo.feature --project-root . --write
+gqt gherkin run    --project-root . --key foo
+gqt gherkin mutate --project-root . --key foo
 
 # 2. Gate cyclomatic complexity
-gqt complexity src/systems --warn 8 --max 12
+gqt measure complexity src/systems --warn 8 --max 12
 
 # 3. Pure-core arch guard
-gqt arch src/systems --warn 8 --max 12
+gqt measure arch src/systems --warn 8 --max 12
 
 # 4. Mutation-test two scenes in one process, 8 workers
 gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . --jobs 8
@@ -106,24 +136,23 @@ gqt mutation scenes/ui/a.gd scenes/ui/b.gd --project-root . --jobs 8
 
 ---
 
-`gqt accept` accepts a strict Gherkin subset (`Feature`/`Background`/
-`Scenario`/`Scenario Outline`/tags/steps). The standalone `gherkin` command
-and the `godot_qa_toolkit.gherkin` module were **physically retired in
-SEE-1468 M5-b**: the parser was promoted to `accept/parser.py` and judgement
-moved into `gqt accept` (see the Accept pipeline below). The old steps
-registry (`gherkin.runner.Registry`) and the `--steps` / per-scenario
-`--timeout` flags no longer exist — generated tests are driven by the
-target project's `testing_api.gd` adapter instead.
+`gqt gherkin` accepts a strict Gherkin subset (`Feature`/`Background`/
+`Scenario`/`Scenario Outline`/tags/steps). The old standalone Python steps
+runner (`gherkin.runner.Registry`, `--steps` / per-scenario `--timeout`
+flags) stays **physically retired** (removed in SEE-1468 M5-b, not
+resurrected by the rename) — generated tests are driven by the target
+project's `testing_api.gd` adapter instead. SEE-1583 renamed the pipeline
+back to its domain name: `gqt accept …` is now `gqt gherkin …`.
 
-## Accept pipeline
+## Gherkin acceptance pipeline
 
-`gqt accept` turns a `.feature` into a versioned IR plus data-driven GUT
+`gqt gherkin` turns a `.feature` into a versioned IR plus data-driven GUT
 tests, then runs and contract-mutates them inside the target project:
 
 ```bash
-gqt accept compile acceptance/foo.feature --project-root . --write
-gqt accept run    --project-root . --key foo
-gqt accept mutate --project-root . --key foo
+gqt gherkin compile acceptance/foo.feature --project-root . --write
+gqt gherkin run    --project-root . --key foo
+gqt gherkin mutate --project-root . --key foo
 ```
 
 **Wiring prerequisite (one-time, per project).** `run` and `mutate` drive the
@@ -135,7 +164,7 @@ adapter maps the four-step combo (`smoke_check`, `init_case`, `run_step`,
 `query_state`) plus `check_expectations` onto the project's real testing API
 — detection, inference and tag-based routing are deliberately absent. Without
 this file every generated test fails explicitly with
-`accept harness unavailable`: run goes red, nothing is skipped silently.
+`acceptance harness unavailable`: run goes red, nothing is skipped silently.
 
 `compile` needs no wiring (it only writes `acceptance/ir` and
 `acceptance/generated`), so a project can adopt the pipeline incrementally.
@@ -152,7 +181,7 @@ keywords) are reported as structural failures — unmeasured code is a fail
 signal, never a silent skip.
 
 ```bash
-gqt complexity src/systems autoload/vendor.gd --warn 10 --max 15
+gqt measure complexity src/systems autoload/vendor.gd --warn 10 --max 15
 ```
 
 Semantics: `cc > max` → failure; `warn < cc <= max` → warning (reported, not
@@ -196,9 +225,20 @@ contract):
 - Per-mutant timeout auto-adapts to `baseline wall-clock × F` (default 2.0,
   override with `--timeout-factor`; only widened, never tightened; visible as
   `summary.adaptive_timeout_s`).
-- `--tests <res://glob>` scopes GUT to an affected-test directory;
-  `--dry-run` only counts mutation sites (and estimates the differential
-  retry face) without running GUT.
+- `--tests <res://glob>` scopes GUT to an affected-test directory (bypasses
+  the attribution selection entirely); `--dry-run` only counts mutation
+  sites (and estimates the differential retry face) without running GUT.
+- **Test selection is truth-mapped, not guessed (SEE-1581)**: default
+  `--select fn` groups mutants by enclosing function and runs the
+  `test-attribution/5` mapping's test set per group; `--select file` keeps
+  the per-file set (legacy/calibration); `--select full` is the only path to
+  the full face (explicit audit; bypasses attribution). A missing mapping
+  entry falls back to the file's bounded set (`file_fallback` disclosed); an
+  unusable mapping fails loud instead of silently widening the face
+  (`--attribution-map` for an explicit artifact, `--no-attribution-auto` to
+  stop auto generation/incremental refresh). Reports disclose
+  `selection_mode`, `selection_groups`, `test_selection` and
+  `summary.attribution`.
 - `ok = survived == 0 AND timeout == 0 AND run_errors == 0 AND suspect == 0`
   (`suspect` = cannot prove the mutant was killed — gated same as survived).
 - **Mechanism disclosures (SEE-1550, additive only)**: `summary` carries
@@ -236,7 +276,8 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
 - `--mutation-warning N` (default 50) warns on pre-truncation site count;
   sites > budget always disclose `total_sites/executed`.
 - The coverage prefilter is **on by default** (SEE-1550 L1): sites are
-  pre-filtered by the last `gqt coverage` run for the file (own-JSON store,
+  pre-filtered by the last `gqt measure coverage` run for the file
+  (own-JSON store,
   provenance- and identity-checked — any drift disables the prefilter with
   a stderr disclosure). Uncovered sites are marked verdict `uncovered`
   (explicit, not in the ok gate, never executed, do not consume budget).
@@ -253,21 +294,18 @@ report discloses `retry_total / executed / untouched_ranges / diff_skipped`.
 ### Planning fast paths (SEE-1571, default-on)
 
 - **Zero-reference targets short-circuit instead of falling back to the full
-  suite.** When `--tests` is omitted and the derived test glob has **zero**
-  references for a target that has executable mutation sites, gqt records an
-  intentional non-execution result instead of running every GUT test: the file
-  reports `ok=true` with zero verdict counts, `jobs=0`,
-  `summary.zero_ref_short_circuit=true`, an explanatory `note`, and a matching
-  stderr line. This is a disclosed quality trade-off — potential kills are
-  intentionally not executed because no test references the target. Explicit
-  `--tests`, `--dry-run`, zero-site targets and collection errors never take
-  this short-circuit. In a multi-file run the record stays in `results`; no
-  input file disappears silently.
-- **Planning reuses one in-process gdself index.** Auto-scan planning builds
-  the forward index once per resolved project root and reuses it read-only for
-  every target in the same gqt process. The cache is process-local only (zero
-  persistence), so a new process always sees current files; planning output is
-  identical to rebuilding the index per file.
+  suite.** When `--tests` is omitted and the runtime truth mapping says
+  **zero** tests touch a target that has executable mutation sites, gqt
+  records an intentional non-execution result instead of running every GUT
+  test: the file reports `ok=true` with zero verdict counts, `jobs=0`,
+  `summary.zero_ref_short_circuit=true`, an explanatory `note`, and a
+  matching stderr line. This is a disclosed quality trade-off — potential
+  kills are intentionally not executed because no test references the target.
+  Explicit `--tests`, `--dry-run`, zero-site targets and collection errors
+  never take this short-circuit. In a multi-file run the record stays in
+  `results`; no input file disappears silently. (The pre-SEE-1581 static
+  reference scan that used to derive this from a gdself index is retired from
+  the main path — the mapping is the single authority.)
 - **Small targets may auto-select serial execution from measured priors.** At
   the completion of a single-file run, gqt normalizes `stage_timings` into
   `.qa-cache/gqt-mutation-cost-priors.json` (`prewarm_s`, `baseline_s`,
@@ -498,7 +536,8 @@ always forces serial.
   freshness proof: always run `godot --headless --import` instead of accepting
   a proof-backed skip.
 - `GQT_GODOT_BIN` — global default Godot binary for every subcommand that
-  launches godot (`mutation` / `coverage` / `accept run|mutate`); each of
+  launches godot (`mutation` / `measure coverage` / `gherkin run|mutate`);
+  each of
   them also takes a per-command `--godot-bin <path>` override (priority:
   flag > env > PATH, SEE-1525). An invalid explicit path fails loudly with
   the unified JSON error contract instead of silently falling back.
@@ -546,12 +585,12 @@ always forces serial.
   ignored (re-run, never dirty-merged). A corrupt or unreadable store
   degrades honestly to "no history". `--dry-run` stays zero-IO.
 
-Auto-scan note: when a mutation target is referenced by
-exactly one test file, the scanner now scopes to that file (GUT `-gselect`)
-instead of its directory — same conservative direction (narrower can only
-over-report survivors, never fake kills), cheaper per round. The underlying
-gdself forward index is built once per gqt process and reused read-only for all
-targets in that process; it is never persisted.
+Auto-scan note: selection directories are materialized under
+`.qa-cache/gqt-attr-select/` as same-named `extends` wrapper scripts (one per
+selected test script, GUT collects via inheritance), so `tests_glob` stays a
+single `res://` directory and downstream resume/coverage/worker wiring is
+unchanged. The directory is content-addressed and idempotent (reused when the
+same script set is selected again).
 
 </details>
 
@@ -564,7 +603,7 @@ pass, and the hit sink read back from `user://qa-coverage-hits-<pid>.txt`
 (run-unique, `user://` first with project-root fallback).
 
 ```bash
-gqt coverage src/save/save_manager.gd --project-root /path/to/project \
+gqt measure coverage src/save/save_manager.gd --project-root /path/to/project \
     --min-percent 80
 ```
 
@@ -597,13 +636,15 @@ pytest
 The toolkit has no PyPI channel; consumers pin it by **git tag**:
 
 ```bash
-pip install "git+https://github.com/tadki/godot-qa-toolkit.git@v0.1.0"
+pip install "git+https://github.com/tadki/godot-qa-toolkit.git@v0.3.0"
 ```
 
 - `pyproject.toml` `version` is the single source of truth and **must equal the
-  tag** with a `v` prefix (currently `version = "0.1.0"` ↔ tag `v0.1.0`).
-- Versioning is semantic: bug-fix batch → patch (`v0.1.1`), backward-compatible
-  contract addition → minor (`v0.2.0`), breaking CLI/contract change → major.
+  tag** with a `v` prefix (currently `version = "0.3.0"` ↔ tag `v0.3.0`).
+- Versioning is semantic with a 0.x caveat: below `1.0` a **minor** bump may
+  carry breaking CLI/contract changes (`v0.2.0` and `v0.3.0` both did —
+  `v0.3.0` is the SEE-1583 command-tree rename with no compatibility layer);
+  patch stays bug-fix only. From `1.0` on, breaking changes require a major.
 - A tag is cut on the merged commit of the release batch (never on an
   unmerged branch tip), and consumers bump their install line to the new tag in
   the same change that needs the new behavior.
@@ -622,7 +663,7 @@ against the current tree and reports mismatches with a repair hint; re-run
 
 When several worktrees live on the same machine and share one Python
 site-packages, a `pip install -e .` from an older checkout leaves an
-`__editable__.godot_qa_toolkit-0.1.0.pth` egg-link that points at that old
+`__editable__.godot_qa_toolkit-0.3.0.pth` egg-link that points at that old
 tree. pytest then resolves `import godot_qa_toolkit` against the stale source
 and can fail spuriously even though the current tree is fine.
 

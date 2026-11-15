@@ -1,6 +1,6 @@
 # testing_api.gd 接口模板（SEE-1426 P4，决策 rev1 §3.4；SEE-1468 /2 扩展）
 
-> 复制到被测项目 `res://addons/gqt_accept/harness.gd`。这是 `gqt accept
+> 复制到被测项目 `res://addons/gqt_accept/harness.gd`。这是 `gqt gherkin
 > compile` 生成测试消费的**唯一约定接口**——gqt 不嗅探、不发现、不推断
 > 接口实现；轨道映射由人按本模板接线。
 >

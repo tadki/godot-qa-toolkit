@@ -50,7 +50,7 @@ GQT_REPO_ROOT=~/tools/godot-qa-toolkit \
 | `gitlink_forward_enabled` | `true`（有 submodule，三道 gate 适用） | **`false`**（GQT 无 `.gitmodules`；代码保留，无 submodule 时所有 gitlink 路径自动短路） |
 | 启动接线 | `.dev/launch/kingoflikes-start.sh` + `.dev/systemd/kingoflikes-start-all.service` | `.dev/launch/godot-qa-toolkit-start.sh` + `.dev/systemd/godot-qa-toolkit-start.service` |
 | 告警 issue | KOL 同步告警 inbox（KOL 仓配置内独立 issue） | `01a137aa-65c1-7c0b-a726-10e40d7c2a7a`（SEE-1406 自身，**独立收件**不与 KOL 混流） |
-| 复杂度门 | 无（KOL 侧无此工具） | `gqt complexity .dev/repo-sync --warn 10 --max 15` 纳入本仓质量门 |
+| 复杂度门 | 无（KOL 侧无此工具） | `gqt measure complexity .dev/repo-sync --warn 10 --max 15` 纳入本仓质量门 |
 | 测试树 | `.dev/tests`（与游戏测试混居） | `.dev/tests`（本仓仅 repo-sync unit + integration） |
 
 ## 测试

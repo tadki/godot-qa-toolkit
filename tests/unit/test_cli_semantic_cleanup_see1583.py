@@ -300,3 +300,46 @@ class TestOldCliWordGuard:
         for sample in samples:
             assert OLD_CLI_WORD.search(sample), sample
             assert not OLD_CLI_WORD_ALLOW.search(sample), sample
+
+
+class TestOldInvocationFormGuard:
+    """SEE-1583 §SPEC-002：src 内不得出现 literal 旧一级调用形态。
+
+    判据形态为 `gqt <old-top-level>`（accept/arch/attr-update/canonical/
+    canonical-diagnose/complexity/coverage/parity/recipe/registry/risk）。
+    新命令路径 `gqt measure <leaf>` / `gqt mutation` / `gqt gherkin …`
+    不含 `gqt <old>` 前缀，天然不会误伤。
+    """
+
+    def test_src_has_no_old_invocation_forms(self):
+        bad = []
+        for path, text in _py_texts(SRC):
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if OLD_INVOCATION.search(line):
+                    bad.append(f"{path.relative_to(SRC)}:{lineno}: "
+                               f"{line.strip()[:100]}")
+        assert not bad, (
+            "literal old top-level invocation (gqt <old>) in src:\n"
+            + "\n".join(bad[:20]))
+
+    def test_guard_replay_catches_old_invocations(self):
+        # 旧串回放（含 LOW-1 修复前原文）：必须判红。
+        old_samples = (
+            'push_error("gqt coverage probe sink open failed: user://" '
+            "+ sink_name)",
+            "raise RuntimeError('gqt complexity gate failed')",
+            "log('gqt canonical report written')",
+            "cmd = 'gqt accept compile foo.feature'",
+        )
+        for sample in old_samples:
+            assert OLD_INVOCATION.search(sample), sample
+        # 新命令路径与保留形态不得误伤。
+        for sample in (
+            'push_error("gqt measure coverage probe sink open failed: '
+            'user://" + sink_name)',
+            "gqt measure complexity src/",
+            "gqt mutation file.gd",
+            "gqt gherkin compile foo.feature",
+            "gqt doctor",
+        ):
+            assert not OLD_INVOCATION.search(sample), sample

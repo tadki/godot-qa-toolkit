@@ -165,7 +165,7 @@ func _notification(what: int) -> void:
 \t\telse:
 \t\t\tf.seek_end()
 \t\tif f == null:
-\t\t\tpush_error("gqt coverage probe sink open failed: user://" + sink_name)
+\t\t\tpush_error("gqt measure coverage probe sink open failed: user://" + sink_name)
 \t\t\tcontinue
 \t\tfor i in arr.size():
 \t\t\tif arr[i] == 1:
@@ -333,7 +333,7 @@ func _notification(what: int) -> void:
 \t\t\telse:
 \t\t\t\tf.seek_end()
 \t\t\tif f == null:
-\t\t\t\tpush_error("gqt coverage probe sink open failed: user://" + sink_name)
+\t\t\t\tpush_error("gqt measure coverage probe sink open failed: user://" + sink_name)
 \t\t\t\tcontinue
 \t\t\tfor i in arr.size():
 \t\t\t\tif arr[i] == 1:

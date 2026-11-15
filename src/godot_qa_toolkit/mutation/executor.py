@@ -569,7 +569,8 @@ def _chunk_worker(payload: dict) -> dict:
             progress=payload.get("progress"),
             identity=identity,
             worker_channel=payload.get("worker_channel"),
-            select_mode=select_mode)
+            select_mode=select_mode,
+            selection_meta=payload.get("selection_meta"))
     return run_mutation(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -581,6 +582,7 @@ def _chunk_worker(payload: dict) -> dict:
         identity=identity,
         worker_channel=payload.get("worker_channel"),
         select_mode=select_mode,
+        selection_meta=payload.get("selection_meta"),
     )
 
 
@@ -590,8 +592,26 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
     agg["jobs"] += 1
     agg["ok"] = agg["ok"] and bool(cr.get("ok", True))
     for k in passthrough_keys:
-        if k in s:
+        if k in s and k != "coverage_prefilter":
             agg[k] = s[k]
+    # SEE-1587：prefilter 披露跨分片合并——dict 计数求和、source 取首个
+    # 非空；字符串态（store_miss 等）最后写入者为准。
+    pf = s.get("coverage_prefilter")
+    if pf is not None:
+        cur = agg.get("coverage_prefilter")
+        if isinstance(pf, dict):
+            if isinstance(cur, dict):
+                agg["coverage_prefilter"] = {
+                    "source": cur.get("source") or pf.get("source"),
+                    "uncovered": (cur.get("uncovered") or 0)
+                                 + (pf.get("uncovered") or 0),
+                    "covered_executed": (cur.get("covered_executed") or 0)
+                                        + (pf.get("covered_executed") or 0),
+                }
+            else:
+                agg["coverage_prefilter"] = pf
+        elif not isinstance(cur, dict):
+            agg["coverage_prefilter"] = pf
     for k in ("mutants", "killed", "survived", "suspect",
               "timeout", "run_errors", "invalid_mutants", "resumed",
               "timeout_pinned"):
@@ -635,6 +655,9 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
         "run_error", "error", "inject_scheme", "slot_mode", "exec_scheme",
         # SEE-1581：真值选面披露随分片结果透出（只增不改）
         "test_selection",
+        # SEE-1587 §SPEC-006：prefilter 来源披露随分片透出（计数经
+        # _accumulate_chunk 专用合并求和，source 取首个非空）
+        "coverage_prefilter",
     )
     per_file: dict[str, dict] = {}
     resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
@@ -1115,7 +1138,12 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
             "attention": attention, "mutate_all": mutate_all,
             "retry_ids": [m.stable_id for m in mutants],
             "baseline": baseline,
-            "selection_meta": selection_meta, "selection_mode": "line",
+            # SEE-1587：worker 侧 prefilter 投影需要该 glob 实际承载的测试
+            # 脚本集（组内签名），不用文件级并集冒充组面。
+            "selection_meta": {**selection_meta, "tests": scripts,
+                               "source": "runtime_mapping",
+                               "reason": "line_mapping_fresh"},
+            "selection_mode": "line",
             "progress": {"run_id": run_id,
                          "worker": f"line:{len(meta)}",
                          "total": len(executed_list)},
@@ -1428,6 +1456,7 @@ def _inject_one(r: dict, ctx: dict) -> None:
     # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures
     # 显式标记（计数与覆盖执行面在 summary.coverage_prefilter 披露）。
     uncovered = ctx.get("uncovered") or []
+    pf_source = ctx.get("coverage_prefilter_source")
     if uncovered:
         reasons = ctx.get("uncovered_reasons") or {}
         for m in uncovered:
@@ -1438,9 +1467,16 @@ def _inject_one(r: dict, ctx: dict) -> None:
                    f"prefilter; site never executed)", src=ctx["src"]))
         pf = {"uncovered": len(uncovered),
               "covered_executed": len(ctx["executed"])}
-        if ctx.get("coverage_prefilter_source"):
-            pf["source"] = ctx["coverage_prefilter_source"]
+        if pf_source:
+            pf["source"] = pf_source
         s["coverage_prefilter"] = pf
+    elif isinstance(pf_source, str) and pf_source in (
+            "coverage_store", "projection_store", "projection_live"):
+        # SEE-1587：prefilter 成功生效（零 uncovered）也必须披露来源——
+        # 「默认路径不再常态 store miss」的证据面；miss 态不在此新增键。
+        s["coverage_prefilter"] = {
+            "source": pf_source, "uncovered": 0,
+            "covered_executed": len(ctx["executed"])}
     if plan.diff_active or plan.mutate_all:
         # §SPEC-1420-07（D6）+ O3 键集对齐：差分在场与 --mutate-all 两径披露
         # 同一键集（--mutate-all 全量面也可见：executed == retry_total、

@@ -52,9 +52,14 @@ GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
   escapes (`escape_dir / lambda_kind / moved_into_inner_class`) are counted
   separately and **never counted into governance net benefit** — the machine
   gate is `governance_net.countable_added == added - scope_escape`.
-- doctor: one JSON on **stderr** (`{"status":"ok"|"mismatch", …}`; on mismatch
-  it includes `editable_location` / `toolkit_root` / `gitlink_head` /
-  `fix_hint`); exit `0` = consistent, `2` = install mismatch (no stdout JSON).
+- doctor: one JSON on **stderr** with a `status` of `ok` (editable install
+  resolves to the current toolkit tree), `mismatch` (editable install points
+  elsewhere; includes `editable_location` / `toolkit_root` / `gitlink_head` /
+  `fix_hint`), `not_installed` (a toolkit tree is present but no editable
+  install exists; includes `fix_hint`), or `skipped` (nothing comparable — no
+  editable install and no toolkit tree resolved, or cwd outside a toolkit
+  tree / standalone usage). Exit `0` for `ok` / `skipped`, `2` for
+  `mismatch` / `not_installed`; stdout stays empty.
 
 ## Failure semantics
 
@@ -117,6 +122,8 @@ No other options; rules v1 = `core/extends-whitelist` / `no-engine-api` /
 `gqt doctor` (no arguments)
 
 Self-checks the "editable install vs current worktree gitlink" consistency.
-The self-check JSON goes to **stderr** and stdout stays empty; exit `0` =
-consistent, `2` = install mismatch (with a `fix_hint`). The `GQT_TOOLKIT_ROOT`
-environment variable selects the checkout to compare against.
+The self-check JSON goes to **stderr** and stdout stays empty. `status` is one
+of `ok` / `mismatch` / `not_installed` / `skipped` (see Output & exit codes);
+exit `0` = ok or skipped, `2` = mismatch or not_installed (with a `fix_hint`).
+The `GQT_TOOLKIT_ROOT` environment variable selects the checkout to compare
+against.

@@ -38,10 +38,10 @@ only through an explicit `--project-root`.
   `--select full` audit switch. Mutants execute in disk shadow slots (your real
   repo is never written), differential resume re-runs only unproven verdicts,
   and kills are judged as newly-failing test sets, never by exit codes.
-- **Dual-arm measurement.** `measure suite` / `measure run` build a hashed
-  suite definition and run two coverage arms whose line sets are **unioned,
-  never averaged**, feeding CRAP records and the attribution map that powers
-  mutation selection.
+- **Dual-arm measurement.** `measure suite` builds the hashed suite
+  definition; `measure run` executes the two coverage arms (full GUT face +
+  acceptance suite) whose line sets are **unioned, never averaged**, feeding
+  CRAP records and the attribution map that powers mutation selection.
 - **Guards and self-checks.** A Pure Core architecture guard, CC parity,
   registry snapshot diffs, and `gqt doctor` for editable-install consistency.
 
@@ -65,12 +65,14 @@ Install from a release tag (no PyPI channel):
 
 ```bash
 pip install "git+https://github.com/tadki/godot-qa-toolkit.git@v0.3.0"
-gqt doctor    # verify the editable install points at the tree you expect
+gqt --help     # sanity-check: exactly four top-level entries
 ```
 
 For a development checkout: `bash scripts/install.sh` pins the system `gqt`
-to the current tree — re-run it after every checkout switch, and `gqt doctor`
-will tell you when you forgot.
+to the current tree as an editable install — re-run it after every checkout
+switch. In that editable setup, `gqt doctor` verifies the install still
+points at the tree you expect (a standalone install with no toolkit tree in
+sight is skipped gracefully, not reported as an error).
 
 **Prerequisites for the GUT-driven commands** (`mutation`, `measure coverage`,
 `measure run`, `gherkin run|mutate`):
@@ -99,7 +101,7 @@ gqt mutation src/save/save_manager.gd --project-root . --budget 50
 # Single file across a worker pool (default pool = max(2, cpu//2))
 gqt mutation <file> --project-root . --jobs 8
 
-# Line + branch coverage with a minimum gate
+# Line coverage with a minimum gate (branch coverage is observational)
 gqt measure coverage src/save/save_manager.gd --project-root . --min-percent 80
 
 # Static complexity measurements and architecture guard

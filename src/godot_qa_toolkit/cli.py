@@ -1050,9 +1050,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "full-face audit; bypasses attribution)")
     m.add_argument("--attribution-map", default=None,
                    help="SEE-1581: measurement attribution artifact "
-                        "(test-attribution/5) used as the runtime "
-                        "truth for test selection; default: auto-managed "
-                        ".qa-cache/attribution-map.json")
+                        "(test-attribution/6, line-primary) used as the "
+                        "runtime truth for test selection; default: "
+                        "auto-managed .qa-cache/attribution-map.json")
     m.add_argument("--no-attribution-auto", dest="attribution_auto",
                    action="store_false",
                    help="disable automatic generation/incremental refresh of "
@@ -1232,7 +1232,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "baseline run)")
     inc.add_argument("--baseline", required=True,
                      help="prior attribution artifact "
-                          "(test-attribution/5)")
+                          "(test-attribution/6, line-primary)")
     inc.add_argument("--changed", action="append", default=[],
                      help="changed/new/removed file path (repeatable)")
     inc.add_argument("--out", required=True,

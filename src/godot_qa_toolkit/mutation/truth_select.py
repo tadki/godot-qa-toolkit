@@ -2,8 +2,8 @@
 
 合同（Owner 2026-11-14 拍板 + ④ 实测数据）：
 
-- **映射来源**：measurement 归属产物（`test-attribution/5`），路径经
-  `--attribution-map` 或环境变量 `GQT_ATTRIBUTION_MAP` 给出；
+- **映射来源**：measurement 归属产物（`test-attribution/6`，行级主真值），
+  路径经 `--attribution-map` 或环境变量 `GQT_ATTRIBUTION_MAP` 给出；
 - **新鲜判据**：产物 `report_recipe_hash` 与本树现值一致（含 toolchain 注入
   口径；按 project_root 记忆化）+ **目标文件 sha256 与产物 `file_sha256`
   绑定一致**；任一不满足 → 视为过期，自动增量/重建一次后重判，仍不可用

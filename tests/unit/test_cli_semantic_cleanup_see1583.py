@@ -232,26 +232,42 @@ class TestGeneratedHeaders:
                 "`gqt accept compile`")
 
 
-# §SPEC-002 旧 CLI 单词守护（SEE-1583 Final Review 扩面）：
-# src 内任何独立单词 accept / canonical 必须命中以下合法类别——变更说明、
-# 机器身份/缓存目录、版本化标识、通道身份、英文规范形术语；其余一律判红
-# （旧命令名残留）。`acceptance` 因无词边界不受本守护影响（域术语合法）。
+# §SPEC-002 旧 CLI 单词守护（SEE-1583 Final Review 扩面；增量 hardener
+# 收紧为 token 级判定）：src 内任何独立单词 accept / canonical 必须命中
+# 以下合法类别——变更说明、机器身份/缓存目录、版本化标识、通道身份、
+# 英文规范形术语；其余一律判红（旧命令名残留）。`acceptance` 因无词边界
+# 不受本守护影响（域术语合法）。
+# 豁免按「保留片段 span 覆盖该出现点」判定：同一行内保留 token 旁另出现
+# 的裸旧词不再被整行允许逃逸（Revy LOW 闭合）。
 OLD_CLI_WORD = re.compile(r"\b(accept|canonical)\b")
-OLD_CLI_WORD_ALLOW = re.compile(
-    r"formerly `accept`"              # cli.py 变更说明（保留清单）
-    r"|原 accept"                     # 同左（中文注释）
-    r"|see1468-accept/2"              # IR ops 版本串
-    r"|gqt-accept-worker"             # 缓存目录（保留清单）
-    r"|gqt-canonical-prep"            # 缓存目录（保留清单）
-    r"|canonical-prep/2"              # 缓存 schema 版本串（保留清单）
-    r"|gqt-canonical-backups"         # per-uid 私有备份根（机器身份）
-    r"|canonical-union/"              # 版本化标识
-    r"|canonical-diagnostic/"         # 版本化标识
-    r"|canonical_recipe_hash"         # 机器面参数名
-    r"|canonical_union"               # 机器面值串
-    r"|canonical cold"                # coverlink 通道身份（保留清单）
-    r"|cold/canonical"                # 同上
-    r"|canonical: Given/When/Then")   # 英文规范形语义（parser 注释）
+OLD_CLI_WORD_ALLOW_PARTS = (
+    r"formerly `accept`",             # cli.py 变更说明（保留清单）
+    r"原 accept",                     # 同左（中文注释）
+    r"see1468-accept/2",              # IR ops 版本串
+    r"gqt-accept-worker",             # 缓存目录（保留清单）
+    r"gqt-canonical-prep",            # 缓存目录（保留清单）
+    r"canonical-prep/2",              # 缓存 schema 版本串（保留清单）
+    r"gqt-canonical-backups",         # per-uid 私有备份根（机器身份）
+    r"canonical-union/",              # 版本化标识
+    r"canonical-diagnostic/",         # 版本化标识
+    r"canonical_recipe_hash",         # 机器面参数名
+    r"canonical_union",               # 机器面值串
+    r"canonical cold",                # coverlink 通道身份（保留清单）
+    r"cold/canonical",                # 同上
+    r"canonical: Given/When/Then",    # 英文规范形语义（parser 注释）
+)
+OLD_CLI_WORD_ALLOW = re.compile("|".join(OLD_CLI_WORD_ALLOW_PARTS))
+
+
+def _old_cli_word_allowed(line: str, start: int, end: int) -> bool:
+    return any(s.start() <= start and end <= s.end()
+               for part in OLD_CLI_WORD_ALLOW_PARTS
+               for s in re.finditer(part, line))
+
+
+def _unallowed_old_cli_words(line: str) -> list[str]:
+    return [m.group(0) for m in OLD_CLI_WORD.finditer(line)
+            if not _old_cli_word_allowed(line, m.start(), m.end())]
 
 
 class TestOldCliWordGuard:
@@ -261,10 +277,9 @@ class TestOldCliWordGuard:
         bad = []
         for path, text in _py_texts(SRC):
             for lineno, line in enumerate(text.splitlines(), 1):
-                if OLD_CLI_WORD.search(line) and \
-                        not OLD_CLI_WORD_ALLOW.search(line):
-                    bad.append(f"{path.relative_to(SRC)}:{lineno}: "
-                               f"{line.strip()[:100]}")
+                for word in _unallowed_old_cli_words(line):
+                    bad.append(f"{path.relative_to(SRC)}:{lineno} "
+                               f"[{word}]: {line.strip()[:100]}")
         assert not bad, (
             "old CLI word (accept/canonical) outside allowlist:\n"
             + "\n".join(bad[:20]))

@@ -37,6 +37,9 @@ from .orchestrator import (
     ATTRIBUTION_SCHEMA,
     _derive_views_from_line_facts,
     _fid_by_line_from_registry,
+    _line_facts_views,
+    _line_pair_counts,
+    _probe_surface_lines,
     _inject_toolchain,
     _read_attr_merged,
     _read_registries,
@@ -225,11 +228,8 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
     file_to_tests = derived["file_to_tests"]
     file_to_scripts = derived["file_to_scripts"]
     line_to_tests = derived["line_to_tests"]
-    line_pairs = sum(len(lines)
-                     for d in test_to_lines.values() for lines in d.values())
-    script_line_pairs = sum(len(lines)
-                            for d in script_to_lines.values()
-                            for lines in d.values())
+    line_pairs, script_line_pairs = _line_pair_counts(test_to_lines,
+                                                      script_to_lines)
     return {
         "tests": len(test_to_files),
         "scripts": len(script_to_files),
@@ -251,14 +251,7 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                           for k, v in sorted(file_to_tests.items())},
         "file_to_scripts": {k: sorted(v)
                             for k, v in sorted(file_to_scripts.items())},
-        "test_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
-                          for k, v in sorted(test_to_lines.items())},
-        "script_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
-                            for k, v in sorted(script_to_lines.items())},
-        "line_to_tests": {rel: {str(ln): sorted(ids)
-                                for ln, ids in sorted(by_line.items())}
-                          for rel, by_line in
-                          sorted(line_to_tests.items())},
+        **_line_facts_views(test_to_lines, script_to_lines, line_to_tests),
     }
 
 
@@ -475,10 +468,7 @@ def _merged_instrumentable_lines(root: Path, baseline: dict,
         src = p.read_text(encoding="utf-8")
         _tpl, probe_lines, block_map = _instrument_blocks(
             src, "gqt-surface-computation.txt", runtime_sink=False)
-        lines: set[int] = set()
-        for start in probe_lines:
-            lines.update(block_map.get(start) or [start])
-        surface[rel] = sorted(lines)
+        surface[rel] = _probe_surface_lines(probe_lines, block_map)
     return surface
 
 

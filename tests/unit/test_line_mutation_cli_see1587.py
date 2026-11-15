@@ -591,3 +591,49 @@ def test_prefilter_projection_handles_res_identity(tmp_path):
         scripts=["res://tests/unit/test_a.gd"])
     assert source == "projection_live" and reason is None
     assert cov == {4, 7}
+
+
+def test_merge_results_passes_coverage_prefilter_through():
+    """编排合并必须透出 prefilter 来源（§SPEC-006 证据面）：dict 计数跨分片
+    求和、source 取首个非空；字符串 miss 态保持最后写入者。"""
+    from godot_qa_toolkit.mutation.executor import _merge_results
+    chunks = [{"file": "a.gd", "total_sites": 4, "attention": None},
+              {"file": "a.gd", "total_sites": 4, "attention": None}]
+    results = [
+        {"ok": True, "summary": {"coverage_prefilter": {
+            "source": "projection_live", "uncovered": 1,
+            "covered_executed": 2}, "mutants": 2},
+         "failures": []},
+        {"ok": True, "summary": {"coverage_prefilter": {
+            "source": "projection_store", "uncovered": 2,
+            "covered_executed": 1}, "mutants": 1},
+         "failures": []},
+    ]
+    merged = _merge_results(chunks, results, jobs=2)
+    pf = merged["results"][0]["summary"]["coverage_prefilter"]
+    assert pf == {"source": "projection_live", "uncovered": 3,
+                  "covered_executed": 3}
+
+
+def test_line_group_chunk_carries_group_test_set(tmp_path):
+    """行级分组 chunk 携带组内测试集（worker prefilter 投影按组面，不用
+    文件级并集冒充）。"""
+    proj, target = _project(tmp_path)
+    map_path = _line_map(proj, target)
+    mutants = _mutants_for(target)
+    from godot_qa_toolkit.mutation.executor import _line_group_chunks
+    selection_meta = {"source": "runtime_mapping",
+                      "tests": ["res://tests/unit/test_a.gd",
+                                "res://tests/unit/test_b.gd"],
+                      "mapping": {"path": map_path}}
+    chunks, groups, _nm = _line_group_chunks(
+        str(target), str(proj), "res://tests/", "linux", mutants,
+        selection_meta, None, False, 2.0, 60, 50, False, None,
+        run_id="r1", identity=None, worker_channel=None, total_sites=9)
+    assert chunks
+    for ch, g in zip(chunks, groups):
+        # 组面脚本 ⊆ 文件级并集，且与签名一致
+        assert sorted(Path(t).name for t in
+                      ch["selection_meta"]["tests"]) == g["signature"]
+        assert ch["selection_meta"]["source"] == "runtime_mapping"
+        assert ch["selection_mode"] == "line"

@@ -208,6 +208,7 @@ def run_mutation(    file_path: str,
     identity: dict | None = None,
     worker_channel: bool | None = None,
     select_mode: str = "full",
+    selection_meta: dict | None = None,
 ) -> dict:
     """单文件 mutation 入口（§SPEC-202 单位级测量面挂载点）。
 
@@ -227,7 +228,7 @@ def run_mutation(    file_path: str,
         resume2_store=resume2_store, select_ids=select_ids,
         select_lines=select_lines, reuse_coverage=reuse_coverage,
         progress=progress, identity=identity, worker_channel=worker_channel,
-        select_mode=select_mode)
+        select_mode=select_mode, selection_meta=selection_meta)
     s = result.get("summary") if isinstance(result, dict) else None
     if isinstance(s, dict) and "stage_timings" in s:
         s["stage_timings"]["total"] = round(time.monotonic() - t0, 3)
@@ -258,6 +259,7 @@ def _run_mutation_core(file_path: str,
     identity: dict | None = None,
     worker_channel: bool | None = None,
     select_mode: str = "full",
+    selection_meta: dict | None = None,
 ) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。
 
@@ -306,7 +308,7 @@ def _run_mutation_core(file_path: str,
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
 
     clock = StageClock()
-    selection_meta: dict = {}
+    selection_meta = dict(selection_meta or {})
     # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
     # （SEE-1587 默认 line）——不可用映射 fail-loud，无静默全脸路径。
     # SEE-1587：显式 --tests 也经同一守门函数，披露「未使用行级选面」。

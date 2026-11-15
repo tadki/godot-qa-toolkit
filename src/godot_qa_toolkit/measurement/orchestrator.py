@@ -1057,18 +1057,25 @@ def _derive_views_from_line_facts(
                     fids.add(fid)
         return fids
 
-    test_to_functions = {i: sorted(_fns(d)) for i, d in test_to_lines.items()
-                         if _fns(d)}
-    script_to_functions = {i: sorted(_fns(d))
-                           for i, d in script_to_lines.items() if _fns(d)}
-    file_to_tests: dict[str, set[str]] = {}
-    for ident, rels in test_to_files.items():
-        for rel in rels:
-            file_to_tests.setdefault(rel, set()).add(ident)
-    file_to_scripts: dict[str, set[str]] = {}
-    for ident, rels in script_to_files.items():
-        for rel in rels:
-            file_to_scripts.setdefault(rel, set()).add(ident)
+    def _fns_view(by_ident: dict) -> dict:
+        out: dict = {}
+        for ident, by_rel in by_ident.items():
+            fids = _fns(by_rel)
+            if fids:
+                out[ident] = sorted(fids)
+        return out
+
+    def _invert_files(by_ident_files: dict) -> dict:
+        out: dict = {}
+        for ident, rels in by_ident_files.items():
+            for rel in rels:
+                out.setdefault(rel, set()).add(ident)
+        return out
+
+    test_to_functions = _fns_view(test_to_lines)
+    script_to_functions = _fns_view(script_to_lines)
+    file_to_tests = _invert_files(test_to_files)
+    file_to_scripts = _invert_files(script_to_files)
     line_to_tests: dict[str, dict[int, set[str]]] = {}
     for ident, by_rel in test_to_lines.items():
         for rel, lines in by_rel.items():
@@ -1084,6 +1091,40 @@ def _derive_views_from_line_facts(
         "file_to_scripts": file_to_scripts,
         "line_to_tests": line_to_tests,
     }
+
+
+def _line_pair_counts(test_to_lines: dict,
+                      script_to_lines: dict) -> "tuple[int, int]":
+    """(line_pairs, script_line_pairs) 行事实计数——全量产物与增量合并
+    共用口径（`_attribution_payload` / increment `_merge_arm` 单源）。"""
+    return (sum(len(lines)
+                for d in test_to_lines.values() for lines in d.values()),
+            sum(len(lines)
+                for d in script_to_lines.values() for lines in d.values()))
+
+
+def _line_facts_views(test_to_lines: dict, script_to_lines: dict,
+                      line_to_tests: dict) -> dict:
+    """行事实产物的共用序列化：身份→{文件→sorted covered lines} 与
+    行→测试反查——全量产物与增量合并单源（键序与排序口径一致）。"""
+    return {
+        "test_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                          for k, v in sorted(test_to_lines.items())},
+        "script_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                            for k, v in sorted(script_to_lines.items())},
+        "line_to_tests": {rel: {str(ln): sorted(ids)
+                                for ln, ids in sorted(by_line.items())}
+                          for rel, by_line in sorted(line_to_tests.items())},
+    }
+
+
+def _probe_surface_lines(probe_lines, block_map) -> list:
+    """块入口 probe_lines 经 block_map 展开为可插桩行全集（sorted）——
+    探针面计算的唯一展开实现。"""
+    lines: set = set()
+    for start in probe_lines:
+        lines.update(block_map.get(start) or [start])
+    return sorted(lines)
 
 
 def _file_unattributed(per_pid: dict) -> tuple[list[int], dict[int, int]]:
@@ -1143,11 +1184,8 @@ def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
     test_events, script_events, unattributed_events = events
     test_to_files = derived["test_to_files"]
     script_to_files = derived["script_to_files"]
-    line_pairs = sum(len(lines)
-                     for d in test_to_lines.values() for lines in d.values())
-    script_line_pairs = sum(len(lines)
-                            for d in script_to_lines.values()
-                            for lines in d.values())
+    line_pairs, script_line_pairs = _line_pair_counts(test_to_lines,
+                                                      script_to_lines)
     return {
         "arm": arm,
         "tests": len(test_to_files),
@@ -1197,15 +1235,9 @@ def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
         "file_to_scripts": {k: sorted(v) for k, v in
                             sorted(derived["file_to_scripts"].items())},
         # 行级主真值（line-primary）：身份 → {文件 → sorted covered lines}
-        "test_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
-                          for k, v in sorted(test_to_lines.items())},
-        "script_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
-                            for k, v in sorted(script_to_lines.items())},
-        # 行→测试反查（消费面：变异位点所在行的测试集合）
-        "line_to_tests": {rel: {str(ln): sorted(ids)
-                                for ln, ids in sorted(by_line.items())}
-                          for rel, by_line in
-                          sorted(derived["line_to_tests"].items())},
+        # 与行→测试反查（消费面：变异位点所在行的测试集合）
+        **_line_facts_views(test_to_lines, script_to_lines,
+                            derived["line_to_tests"]),
     }
 
 
@@ -1355,12 +1387,8 @@ def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
     展开为全部块内语句起始行。Coverage Store 投影的合法跳过锚来源。"""
     out: dict[str, list[int]] = {}
     for rel, item in (prepared or {}).items():
-        probe_lines = item.get("probe_lines") or []
-        block_map = item.get("block_map") or {}
-        lines: set[int] = set()
-        for start in probe_lines:
-            lines.update(block_map.get(start) or [start])
-        out[rel] = sorted(lines)
+        out[rel] = _probe_surface_lines(item.get("probe_lines") or [],
+                                        item.get("block_map") or {})
     return out
 
 

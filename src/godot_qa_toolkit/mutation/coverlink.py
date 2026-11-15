@@ -247,6 +247,45 @@ def _projection_binding(doc: dict, rel: str) -> dict | None:
     return binding
 
 
+def _projection_map_reject(
+        root: Path, doc: dict, rel: str,
+        current_recipe_pristine: "str | None",
+        tests_face: "dict | None") -> "str | None":
+    """行事实投影的前置校验链（写侧，逐项顺序与原因文案保持稳定）：
+    map schema / 臂有效性 / 目标文件 sha / recipe pristine / 测试面摘要 /
+    探针面。任一失配返回拒绝原因——消费侧回退不过滤；通过返回 None。"""
+    from ..measurement.orchestrator import ATTRIBUTION_SCHEMA
+    from .truth_select import arms_valid
+
+    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
+        return (f"attribution map schema "
+                f"{doc.get('schema_version')!r} != "
+                f"{ATTRIBUTION_SCHEMA!r}")
+    if not arms_valid(doc.get("arms_state") or {}):
+        return "attribution map arms invalid"
+    try:
+        file_sha = hashlib.sha256(
+            (root / rel).read_bytes()).hexdigest()
+    except OSError as e:
+        return f"cannot read target file: {e}"
+    if (doc.get("file_sha256") or {}).get(rel) != file_sha:
+        return ("attribution map file binding stale "
+                "(target changed since measurement)")
+    if not current_recipe_pristine:
+        return "current recipe hash unavailable"
+    if doc.get("recipe_hash_pristine") != current_recipe_pristine:
+        return "attribution map recipe drift"
+    face_now = tests_face if tests_face is not None else current_tests_face(
+        str(root))
+    if tests_face_digest(doc.get("tests_face") or {}) != tests_face_digest(
+            face_now):
+        return "tests face drift since measurement"
+    instrumentable = (doc.get("instrumentable_lines") or {}).get(rel)
+    if not isinstance(instrumentable, list) or not instrumentable:
+        return "attribution map lacks instrumentable surface for file"
+    return None
+
+
 def project_coverage_from_map(
         project_root: str, doc: dict, target_file: str,
         scripts: "list[str] | set[str]", tests_glob: str,
@@ -264,37 +303,13 @@ def project_coverage_from_map(
     任一前置不满足 → (None, 原因)——消费侧一律回退不过滤（宁多跑不假
     过滤）：map schema 非 test-attribution/6、臂无效、目标文件 sha 失配、
     recipe pristine 失配、测试面漂移、探针面缺失。"""
-    from ..measurement.orchestrator import ATTRIBUTION_SCHEMA
-    from .truth_select import arms_valid
-
     root = Path(project_root).resolve()
-    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
-        return None, (f"attribution map schema "
-                      f"{doc.get('schema_version')!r} != "
-                      f"{ATTRIBUTION_SCHEMA!r}")
-    if not arms_valid(doc.get("arms_state") or {}):
-        return None, "attribution map arms invalid"
     rel = project_relative(str(root), str(Path(target_file).resolve()))
-    try:
-        file_sha = hashlib.sha256(
-            (root / rel).read_bytes()).hexdigest()
-    except OSError as e:
-        return None, f"cannot read target file: {e}"
-    if (doc.get("file_sha256") or {}).get(rel) != file_sha:
-        return None, ("attribution map file binding stale "
-                      "(target changed since measurement)")
-    if not current_recipe_pristine:
-        return None, "current recipe hash unavailable"
-    if doc.get("recipe_hash_pristine") != current_recipe_pristine:
-        return None, "attribution map recipe drift"
-    face_now = tests_face if tests_face is not None else current_tests_face(
-        str(root))
-    if tests_face_digest(doc.get("tests_face") or {}) != tests_face_digest(
-            face_now):
-        return None, "tests face drift since measurement"
+    reason = _projection_map_reject(root, doc, rel, current_recipe_pristine,
+                                    tests_face)
+    if reason is not None:
+        return None, reason
     instrumentable = (doc.get("instrumentable_lines") or {}).get(rel)
-    if not isinstance(instrumentable, list) or not instrumentable:
-        return None, "attribution map lacks instrumentable surface for file"
     arm = (doc.get("arms") or {}).get("gut_full") or {}
     # 身份归一：运行时注册表身份是 `res://tests/x.gd::test` / `res://tests/x.gd`
     # 全路径，选择目录承载的是脚本 res:// 路径——两侧统一取 basename 比较
@@ -327,6 +342,61 @@ def project_coverage_from_map(
     return covered, None
 
 
+def _projection_cache_basic_reject(
+        raw: dict, project_root: str, file_path: str, tests_glob: str,
+        kind: str, identity: "dict | None") -> "str | None":
+    """投影缓存条目的基础 provenance 校验（schema 分流 / rel / glob /
+    kind / 身份包 / 源码 sha1）。失配返回显式原因；通过返回 None。"""
+    if raw.get("schema") == SCHEMA_COVERAGE:
+        return ("coverage cache is a manual measurement entry "
+                "(see1420-coverage/1), not a projection")
+    if raw.get("schema") != SCHEMA_COVERAGE_PROJECTION:
+        return "coverage cache schema mismatch"
+    if raw.get("rel") != project_relative(project_root, file_path):
+        return "coverage cache path mismatch"
+    if raw.get("tests_glob") != tests_glob:
+        return "coverage cache tests_glob mismatch (exact-match rule)"
+    if raw.get("binary_kind") != kind:
+        return "coverage cache binary kind mismatch"
+    if identity is not None and raw.get("identity") != coverage_identity(
+            identity):
+        return ("coverage cache identity drift (fresh + identity-pack "
+                "match required — store invalidated)")
+    try:
+        source_sha1 = hashlib.sha1(
+            Path(file_path).read_bytes()).hexdigest()
+    except OSError as e:
+        return f"cannot read target file: {e}"
+    if raw.get("source_sha1") != source_sha1:
+        return "coverage cache stale (source changed since measurement)"
+    return None
+
+
+def _projection_binding_reject(
+        binding: dict, file_path: str,
+        current_recipe_pristine: "str | None",
+        tests_face: "dict | None", project_root: str) -> "str | None":
+    """投影绑定包校验（目标文件 sha / recipe pristine / 测试面摘要）。
+    失配返回显式原因；通过返回 None。"""
+    try:
+        file_sha = hashlib.sha256(
+            Path(file_path).read_bytes()).hexdigest()
+    except OSError as e:
+        return f"cannot read target file: {e}"
+    if binding.get("map_file_sha256") != file_sha:
+        return "projection binding stale (target changed since map)"
+    if not current_recipe_pristine:
+        return "current recipe hash unavailable"
+    if binding.get("map_recipe_pristine") != current_recipe_pristine:
+        return "projection binding stale (recipe drift)"
+    root = Path(project_root).resolve()
+    face_now = tests_face if tests_face is not None else current_tests_face(
+        str(root))
+    if binding.get("map_tests_face_sha") != tests_face_digest(face_now):
+        return "projection binding stale (tests face drift)"
+    return None
+
+
 def _load_projection_raw(
         project_root: str, file_path: str, tests_glob: str,
         binary_kind=None, identity: dict | None = None, *,
@@ -349,48 +419,19 @@ def _load_projection_raw(
         return None, "no projected coverage for this (file, tests_glob)"
     if not isinstance(raw, dict):
         return None, "coverage cache malformed"
-    if raw.get("schema") == SCHEMA_COVERAGE:
-        return None, ("coverage cache is a manual measurement entry "
-                      "(see1420-coverage/1), not a projection")
-    if raw.get("schema") != SCHEMA_COVERAGE_PROJECTION:
-        return None, "coverage cache schema mismatch"
-    if raw.get("rel") != project_relative(project_root, file_path):
-        return None, "coverage cache path mismatch"
-    if raw.get("tests_glob") != tests_glob:
-        return None, "coverage cache tests_glob mismatch (exact-match rule)"
-    if raw.get("binary_kind") != kind:
-        return None, "coverage cache binary kind mismatch"
-    if identity is not None and raw.get("identity") != coverage_identity(
-            identity):
-        return None, ("coverage cache identity drift (fresh + identity-pack "
-                      "match required — store invalidated)")
-    try:
-        source_sha1 = hashlib.sha1(
-            Path(file_path).read_bytes()).hexdigest()
-    except OSError as e:
-        return None, f"cannot read target file: {e}"
-    if raw.get("source_sha1") != source_sha1:
-        return None, "coverage cache stale (source changed since measurement)"
+    reason = _projection_cache_basic_reject(raw, project_root, file_path,
+                                            tests_glob, kind, identity)
+    if reason is not None:
+        return None, reason
     binding = raw.get("projection")
     if not isinstance(binding, dict) \
             or binding.get("source") != PROJECTION_SOURCE:
         return None, "coverage cache lacks projection binding"
-    try:
-        file_sha = hashlib.sha256(
-            Path(file_path).read_bytes()).hexdigest()
-    except OSError as e:
-        return None, f"cannot read target file: {e}"
-    if binding.get("map_file_sha256") != file_sha:
-        return None, "projection binding stale (target changed since map)"
-    if not current_recipe_pristine:
-        return None, "current recipe hash unavailable"
-    if binding.get("map_recipe_pristine") != current_recipe_pristine:
-        return None, "projection binding stale (recipe drift)"
-    root = Path(project_root).resolve()
-    face_now = tests_face if tests_face is not None else current_tests_face(
-        str(root))
-    if binding.get("map_tests_face_sha") != tests_face_digest(face_now):
-        return None, "projection binding stale (tests face drift)"
+    reason = _projection_binding_reject(binding, file_path,
+                                        current_recipe_pristine, tests_face,
+                                        project_root)
+    if reason is not None:
+        return None, reason
     return raw, None
 
 
@@ -410,6 +451,61 @@ def load_projected_coverage(
     if not isinstance(lines, list):
         return None, "coverage cache malformed (covered_lines missing)"
     return ({int(l) for l in lines if isinstance(l, (int, float))}, None)
+
+
+def _prefilter_projection_store(
+        project_root: str, file_path: str, tests_glob: str,
+        binary_kind, identity: "dict | None",
+        pristine: str) -> "tuple[set[int] | None, set[int] | None, str | None]":
+    """prefilter 解析链第 2 层：see1420-coverage/2 同轮投影缓存条目
+    （绑定包全匹配才可用）。返回 (covered, instrumentable, 失败原因)。"""
+    proj_cov, proj_reason = load_projected_coverage(
+        project_root, file_path, tests_glob, binary_kind, identity,
+        current_recipe_pristine=pristine)
+    if proj_cov is not None:
+        raw, _ = _load_projection_raw(
+            project_root, file_path, tests_glob, binary_kind, identity,
+            current_recipe_pristine=pristine)
+        proj_inst = ({int(l)
+                      for l in (raw or {}).get("instrumentable_lines") or []}
+                     if raw else None)
+        if proj_inst:
+            return proj_cov, proj_inst, None
+        return None, None, "instrumentable face unavailable"
+    return None, None, proj_reason
+
+
+def _prefilter_live_projection(
+        project_root: str, file_path: str, tests_glob: str,
+        scripts: "list[str] | set[str] | None", binary_kind,
+        identity: "dict | None",
+        pristine: str) -> "tuple[set[int] | None, set[int] | None, str | None]":
+    """prefilter 解析链第 3 层：新鲜行级主真值映射现场投影（scripts =
+    本次 tests_glob 承载的测试脚本集；零第二次插桩/零 GUT），落盘为 /2
+    条目供后续复用。返回 (covered, instrumentable, 失败原因)。"""
+    from . import truth_select as _truth
+
+    map_path = _truth.map_path(str(Path(project_root).resolve()))
+    if not map_path:
+        return None, None, "no attribution map for live projection"
+    if not scripts:
+        return None, None, "selection scripts unknown for live projection"
+    try:
+        doc = _truth.load_map(map_path)
+    except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
+        return None, None, f"attribution map unusable: {e}"
+    doc_cov, doc_reason = project_coverage_from_map(
+        project_root, doc, file_path, scripts, tests_glob,
+        binary_kind=binary_kind, identity=identity,
+        current_recipe_pristine=pristine)
+    if doc_cov is None:
+        return None, None, doc_reason
+    rel = project_relative(str(Path(project_root).resolve()),
+                           str(Path(file_path).resolve()))
+    doc_inst = doc.get("instrumentable_lines", {}).get(rel)
+    if isinstance(doc_inst, list) and doc_inst:
+        return doc_cov, {int(l) for l in doc_inst}, None
+    return None, None, "map lacks instrumentable surface"
 
 
 def resolve_coverage_for_prefilter(
@@ -451,47 +547,19 @@ def resolve_coverage_for_prefilter(
     from . import truth_select as _truth
 
     pristine = _truth._fresh_recipe_hash(str(Path(project_root).resolve()))
-    proj_cov, proj_reason = load_projected_coverage(
-        project_root, file_path, tests_glob, binary_kind, identity,
-        current_recipe_pristine=pristine)
+    proj_cov, proj_inst, proj_why = _prefilter_projection_store(
+        project_root, file_path, tests_glob, binary_kind, identity, pristine)
     if proj_cov is not None:
-        raw, _ = _load_projection_raw(
-            project_root, file_path, tests_glob, binary_kind, identity,
-            current_recipe_pristine=pristine)
-        proj_inst = ({int(l)
-                      for l in (raw or {}).get("instrumentable_lines") or []}
-                     if raw else None)
-        if proj_inst:
-            return proj_cov, proj_inst, None, "projection_store"
-        reasons.append("projection store: instrumentable face unavailable")
-    elif proj_reason:
-        reasons.append(f"projection store: {proj_reason}")
-    map_path = _truth.map_path(str(Path(project_root).resolve()))
-    doc_reason = None
-    if not map_path:
-        doc_reason = "no attribution map for live projection"
-    elif not scripts:
-        doc_reason = "selection scripts unknown for live projection"
-    else:
-        try:
-            doc = _truth.load_map(map_path)
-        except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
-            doc_reason = f"attribution map unusable: {e}"
-        else:
-            doc_cov, doc_reason = project_coverage_from_map(
-                project_root, doc, file_path, scripts, tests_glob,
-                binary_kind=binary_kind, identity=identity,
-                current_recipe_pristine=pristine)
-            if doc_cov is not None:
-                rel = project_relative(str(Path(project_root).resolve()),
-                                       str(Path(file_path).resolve()))
-                doc_inst = doc.get("instrumentable_lines", {}).get(rel)
-                if isinstance(doc_inst, list) and doc_inst:
-                    return (doc_cov, {int(l) for l in doc_inst}, None,
-                            "projection_live")
-                doc_reason = "map lacks instrumentable surface"
-    if doc_reason:
-        reasons.append(f"live projection: {doc_reason}")
+        return proj_cov, proj_inst, None, "projection_store"
+    if proj_why:
+        reasons.append(f"projection store: {proj_why}")
+    live_cov, live_inst, live_why = _prefilter_live_projection(
+        project_root, file_path, tests_glob, scripts, binary_kind, identity,
+        pristine)
+    if live_cov is not None:
+        return live_cov, live_inst, None, "projection_live"
+    if live_why:
+        reasons.append(f"live projection: {live_why}")
     saw_cov = cov is not None or proj_cov is not None
     state = "instrumentable_face_missing" if saw_cov else "store_miss"
     return None, None, "; ".join(reasons) or "coverage unavailable", state

@@ -963,7 +963,6 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             if not chunks:
                 # 全部位点落在无映射行：零 chunk 也必须留文件痕迹（报告
                 # 完备性——任何输入文件都不得从报告中消失）。
-                from .reporting import _mutant_record
                 return [], None, _settled_all_uncovered(
                     f, [_mutant_record(
                         m, "uncovered",
@@ -1064,7 +1063,6 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
     uncovered 口径返回记录（不执行、不进 ok 门禁），并随 selection_groups
     披露。返回 (chunks, group_meta, uncovered_records)。"""
     from . import truth_select
-    from .reporting import _mutant_record
 
     mapping_path = (selection_meta.get("mapping") or {}).get("path")
     rel = _res_path_of(f, project_root).removeprefix("res://")
@@ -1091,15 +1089,8 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
     meta: list[dict] = []
     for names, mutants in sorted(groups.items(),
                                  key=lambda kv: (len(kv[0]), sorted(kv[0]))):
-        scripts: list[str] = []
-        ambiguous: list[str] = []
-        for name in names:
-            paths = by_name.get(name)
-            if not paths:
-                continue
-            if len(paths) > 1:
-                ambiguous.append(name)
-            scripts.extend(paths)
+        scripts, ambiguous = truth_select._resolve_script_paths(by_name,
+                                                                names)
         if ambiguous:
             raise truth_select.MutationSelectionError(
                 "ambiguous_test_names", str(sorted(ambiguous)[:5]))

@@ -645,6 +645,26 @@ def _line_script_sets(doc: dict, rel: str,
     return out
 
 
+def _resolve_script_paths(by_name: dict,
+                          names) -> "tuple[list[str], list[str]]":
+    """basename → tests 树路径解析（缺失名跳过、多路径记歧义）。
+
+    返回 (scripts, ambiguous)，歧义由调用方 fail-loud。行级选面的两个
+    消费点（resolve_line_group_selection / executor._line_group_chunks）
+    单源共用；scripts 顺序为 sorted(names)，materialize_selection 内部
+    再排序，物化产物与传入顺序无关。"""
+    scripts: list[str] = []
+    ambiguous: list[str] = []
+    for name in sorted(names):
+        paths = by_name.get(name)
+        if not paths:
+            continue
+        if len(paths) > 1:
+            ambiguous.append(name)
+        scripts.extend(paths)
+    return scripts, ambiguous
+
+
 def resolve_line_group_selection(project_root: str | Path, target_file: str,
                                  lines: "list[int] | set[int]",
                                  file_selection: dict | None = None,
@@ -676,15 +696,7 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
         names |= scripts
     no_mapped = sorted(ln for ln in want if not per_line.get(ln))
     by_name = _test_scripts_by_name(root)
-    scripts: list[str] = []
-    ambiguous: list[str] = []
-    for name in sorted(names):
-        paths = by_name.get(name)
-        if not paths:
-            continue
-        if len(paths) > 1:
-            ambiguous.append(name)
-        scripts.extend(paths)
+    scripts, ambiguous = _resolve_script_paths(by_name, names)
     if ambiguous:
         raise MutationSelectionError("ambiguous_test_names",
                                      str(sorted(ambiguous)[:5]))

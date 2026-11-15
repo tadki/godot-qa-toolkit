@@ -29,7 +29,9 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-SCHEMA_VERSION = "test-attribution/5"
+# SEE-1587：行级主真值 schema。旧 /5 产物在 load_map / validate_refresh
+# 处 fail-loud（schema 不符即拒），无兼容别名。
+SCHEMA_VERSION = "test-attribution/6"
 ENV_MAP = "GQT_ATTRIBUTION_MAP"
 ENV_MODE = "GQT_ATTRIBUTION_MAP_MODE"   # "auto"（默认）| "off"
 SELECT_ROOT = ".gqt-attr-select"   # 根级点目录：影子树会携带（.qa-cache 被排除）

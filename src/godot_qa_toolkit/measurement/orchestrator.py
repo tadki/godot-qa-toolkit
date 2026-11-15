@@ -63,15 +63,22 @@ from ..mutation.inject import BinaryConfigError, godot_command, spawn_godot
 from .recipe import verify_recipe
 
 REPORT_VERSION = "measurement-report/2"
-ATTRIBUTION_SCHEMA = "test-attribution/5"
+# SEE-1587：行级主真值 schema——行事实（per-test covered line sets）是唯一
+# 主数据，file/function 视图退为派生投影；旧 /5 产物 fail-loud 拒绝（无
+# 兼容别名，消费方 load 即报 schema 不符）。
+ATTRIBUTION_SCHEMA = "test-attribution/6"
 # 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
-# 旧模板（缓存键含 algo 但不含探针文本本身）
-ATTRIBUTION_ALGO_TAG = "attr/6"
+# 旧模板（缓存键含 algo 但不含探针文本本身）。SEE-1587：归属粒度进 algo
+# 键——全量与增量必须共用同一粒度键，fn 级旧条目（attr/6）与新 hit 级
+# 条目（attr-line/1）绝不互相命中（SEE-1585 原型教训：同一键下两种形态
+# 静默共存会让行集退化为函数入口行）。
+ATTRIBUTION_ALGO_TAG = "attr-line/1"
 # 归属身份的规范形态（映射键），产物与报告同源
 _ATTRIBUTION_IDENTITY = "res://script::test_name"
 # 报告 test_attribution 节从逐臂映射里抽出的汇总键（映射正文留在产物）
 _ATTRIBUTION_SUMMARY_KEYS = (
     "tests", "scripts", "files", "pairs", "script_pairs", "function_pairs",
+    "line_pairs", "script_line_pairs",
     "attributed_hit_events", "script_hit_events", "unattributed_hit_events",
     "lanes", "unattributed_phases", "unattributed_hotspots",
     "attributed_rate", "script_rate", "unattributed_rate",
@@ -1031,29 +1038,52 @@ def _file_lane_slots(rel: str, per_pid: dict, test_tables: dict,
     return file_tests, file_scripts, test_events, script_events, unmapped
 
 
-def _file_function_edges(per_pid: dict, test_tables: dict,
-                         script_tables: dict,
-                         fid_by_probe: dict) -> tuple:
-    """单文件函数级边：`fn <probe> <slot>` 对按槽位身份归入 test/script
-    函数集（probe 解析不出 fid 的跳过）。"""
-    test_fns: dict[str, set[str]] = {}
-    script_fns: dict[str, set[str]] = {}
-    for pid, rec in sorted(per_pid.items()):
-        ttable = test_tables.get(pid, {})
-        stable = script_tables.get(pid, {})
-        for probe_id, slots in sorted(rec["fn"].items()):
-            fid = fid_by_probe.get(probe_id)
-            if fid is None:
-                continue
-            for slot_idx in sorted(slots):
-                tident = ttable.get(slot_idx)
-                if tident is not None:
-                    test_fns.setdefault(tident, set()).add(fid)
-                    continue
-                sident = stable.get(slot_idx)
-                if sident is not None:
-                    script_fns.setdefault(sident, set()).add(fid)
-    return test_fns, script_fns
+def _derive_views_from_line_facts(
+        test_to_lines: dict, script_to_lines: dict,
+        fid_by_line_by_rel: "dict[str, dict[int, str]] | None") -> dict:
+    """file/function 视图派生（SEE-1587 唯一口径）：行事实 + 源码 registry
+    → 全部 file/function 边与 line→tests 反查。全量与增量共用（视图永不
+    独立测量，只从行事实投影）。"""
+    test_to_files = {i: sorted(d) for i, d in test_to_lines.items()}
+    script_to_files = {i: sorted(d) for i, d in script_to_lines.items()}
+
+    def _fns(by_rel: dict) -> set[str]:
+        fids: set[str] = set()
+        for rel, lines in by_rel.items():
+            fmap = (fid_by_line_by_rel or {}).get(rel) or {}
+            for ln in lines:
+                fid = fmap.get(ln)
+                if fid is not None:
+                    fids.add(fid)
+        return fids
+
+    test_to_functions = {i: sorted(_fns(d)) for i, d in test_to_lines.items()
+                         if _fns(d)}
+    script_to_functions = {i: sorted(_fns(d))
+                           for i, d in script_to_lines.items() if _fns(d)}
+    file_to_tests: dict[str, set[str]] = {}
+    for ident, rels in test_to_files.items():
+        for rel in rels:
+            file_to_tests.setdefault(rel, set()).add(ident)
+    file_to_scripts: dict[str, set[str]] = {}
+    for ident, rels in script_to_files.items():
+        for rel in rels:
+            file_to_scripts.setdefault(rel, set()).add(ident)
+    line_to_tests: dict[str, dict[int, set[str]]] = {}
+    for ident, by_rel in test_to_lines.items():
+        for rel, lines in by_rel.items():
+            slot = line_to_tests.setdefault(rel, {})
+            for ln in lines:
+                slot.setdefault(ln, set()).add(ident)
+    return {
+        "test_to_files": test_to_files,
+        "script_to_files": script_to_files,
+        "test_to_functions": test_to_functions,
+        "script_to_functions": script_to_functions,
+        "file_to_tests": file_to_tests,
+        "file_to_scripts": file_to_scripts,
+        "line_to_tests": line_to_tests,
+    }
 
 
 def _file_unattributed(per_pid: dict) -> tuple[list[int], dict[int, int]]:
@@ -1101,24 +1131,34 @@ def _hotspot_report(hotspot_counts: dict, probe_lines_by_rel,
     return [entry for _n, _rel, entry in merged[:max(0, limit)]]
 
 
-def _attribution_payload(arm: str, test_to_files: dict, script_to_files: dict,
-                         test_to_functions: dict, script_to_functions: dict,
-                         file_to_tests: dict, file_to_scripts: dict,
-                         unmapped: list, events: tuple, lane_total: int,
-                         phase_lane: dict, hotspots: list,
+def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
+                         derived: dict, unmapped: list, events: tuple,
+                         lane_total: int, phase_lane: dict, hotspots: list,
                          files_with_unattributed: int) -> dict:
-    """臂级映射产物（test-attribution/5 的 arms 条目）。
+    """臂级映射产物（test-attribution/6 的 arms 条目）。
 
-    键序与口径保持稳定：`attributed_*` 兼容旧口径 = 测试级车道。"""
+    行事实为主真值：`test_to_lines` / `script_to_lines` 保存 per 身份
+    per 文件的 covered line sets；`line_to_tests` 为行→测试反查；
+    file/function 视图由 `_derive_views_from_line_facts` 派生。"""
     test_events, script_events, unattributed_events = events
+    test_to_files = derived["test_to_files"]
+    script_to_files = derived["script_to_files"]
+    line_pairs = sum(len(lines)
+                     for d in test_to_lines.values() for lines in d.values())
+    script_line_pairs = sum(len(lines)
+                            for d in script_to_lines.values()
+                            for lines in d.values())
     return {
         "arm": arm,
         "tests": len(test_to_files),
         "scripts": len(script_to_files),
-        "files": len(file_to_tests),
+        "files": len(derived["file_to_tests"]),
         "pairs": sum(len(v) for v in test_to_files.values()),
         "script_pairs": sum(len(v) for v in script_to_files.values()),
-        "function_pairs": sum(len(v) for v in test_to_functions.values()),
+        "function_pairs": sum(len(v) for v in
+                              derived["test_to_functions"].values()),
+        "line_pairs": line_pairs,
+        "script_line_pairs": script_line_pairs,
         # 兼容上轮口径：attributed = 测试级车道
         "attributed_hit_events": test_events,
         "script_hit_events": script_events,
@@ -1144,39 +1184,50 @@ def _attribution_payload(arm: str, test_to_files: dict, script_to_files: dict,
         # 组合注册表下单一天窗：未知槽位只在 unmapped 单列一次（不按车道猜）
         "unmapped_script_indices": [],
         "unmapped_script_count": 0,
-        "test_to_files": {k: sorted(v) for k, v in sorted(test_to_files.items())},
+        "test_to_files": {k: sorted(v)
+                          for k, v in sorted(test_to_files.items())},
         "script_to_files": {k: sorted(v)
                             for k, v in sorted(script_to_files.items())},
-        "test_to_functions": {k: sorted(v)
-                              for k, v in sorted(test_to_functions.items())},
-        "script_to_functions": {k: sorted(v)
-                                for k, v in sorted(script_to_functions.items())},
-        "file_to_tests": file_to_tests,
-        "file_to_scripts": file_to_scripts,
+        "test_to_functions": {k: sorted(v) for k, v in
+                              sorted(derived["test_to_functions"].items())},
+        "script_to_functions": {k: sorted(v) for k, v in
+                                sorted(derived["script_to_functions"].items())},
+        "file_to_tests": {k: sorted(v) for k, v in
+                          sorted(derived["file_to_tests"].items())},
+        "file_to_scripts": {k: sorted(v) for k, v in
+                            sorted(derived["file_to_scripts"].items())},
+        # 行级主真值（line-primary）：身份 → {文件 → sorted covered lines}
+        "test_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                          for k, v in sorted(test_to_lines.items())},
+        "script_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                            for k, v in sorted(script_to_lines.items())},
+        # 行→测试反查（消费面：变异位点所在行的测试集合）
+        "line_to_tests": {rel: {str(ln): sorted(ids)
+                                for ln, ids in sorted(by_line.items())}
+                          for rel, by_line in
+                          sorted(derived["line_to_tests"].items())},
     }
 
 
 def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
                           registries: tuple[dict, dict],
                           probe_lines_by_rel: "dict[str, list[int]] | None" = None,
+                          block_map_by_rel: "dict[str, dict] | None" = None,
                           fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
-                          fid_by_probe_by_rel: "dict[str, dict[int, str]] | None" = None,
                           hotspot_limit: int = 20) -> dict:
-    """§SPEC-083（方向② fn 级）：per-file 归属证据 → 三条车道 + 映射。
+    """SEE-1587（line-primary）：per-file 归属证据 → 行事实 + 三条车道。
 
     归属证据按 (file, pid) 记录；pid 对应一个 GUT 进程的组合注册表
-    （test/script 身份共用槽位空间，kind 由注册表行给出）。车道：
-    test（start_test..end_test 窗口内）/ script（窗口外的脚本级上下文，
-    R1）/ unattributed（方向③四阶段桶）。车道事件取自 per-slot cnt；
-    函数级映射取自 `fn <probe> <slot>` 对（fid 由函数入口 probe 映射解析），
-    文件级映射取自 seen 位图。无主热点同方向③（probe→行→函数）。"""
+    （test/script 身份共用槽位空间，kind 由注册表行给出）。行事实取自
+    `fn <probe> <slot>` 对（hit 级插桩下覆盖整个探针面）：probe →
+    probe_lines → block_map 展开为 covered line set，slot 按注册表解析
+    身份与车道。file/function 视图由行事实 + 源码 registry 派生，不再是
+    独立测量的主真值。车道事件统计取自 per-slot cnt（hit 级下计数为
+    全探针命中事件，量级与 fn 级不可比——披露口径见 notes）。无主热点
+    同方向③（probe→行→函数）。"""
     test_tables, script_tables = registries
-    test_to_files: dict[str, set[str]] = {}
-    script_to_files: dict[str, set[str]] = {}
-    test_to_functions: dict[str, set[str]] = {}
-    script_to_functions: dict[str, set[str]] = {}
-    file_to_tests: dict[str, set[str]] = {}
-    file_to_scripts: dict[str, set[str]] = {}
+    test_to_lines: dict[str, dict[str, set[int]]] = {}
+    script_to_lines: dict[str, dict[str, set[int]]] = {}
     unmapped: list[dict] = []
     test_events = 0
     script_events = 0
@@ -1184,26 +1235,31 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
     files_with_unattributed = 0
     hotspot_counts: dict[str, dict[int, int]] = {}
     for rel, per_pid in sorted(attr_by_rel.items()):
-        file_tests, file_scripts, te, se, um = _file_lane_slots(
+        _ft, _fs, te, se, um = _file_lane_slots(
             rel, per_pid, test_tables, script_tables)
         test_events += te
         script_events += se
         unmapped.extend(um)
-        for ident in file_tests:
-            test_to_files.setdefault(ident, set()).add(rel)
-        for ident in file_scripts:
-            script_to_files.setdefault(ident, set()).add(rel)
-        if file_tests:
-            file_to_tests[rel] = sorted(file_tests)
-        if file_scripts:
-            file_to_scripts[rel] = sorted(file_scripts)
-        fn_tests, fn_scripts = _file_function_edges(
-            per_pid, test_tables, script_tables,
-            (fid_by_probe_by_rel or {}).get(rel) or {})
-        for ident, fids in fn_tests.items():
-            test_to_functions.setdefault(ident, set()).update(fids)
-        for ident, fids in fn_scripts.items():
-            script_to_functions.setdefault(ident, set()).update(fids)
+        probe_lines = (probe_lines_by_rel or {}).get(rel) or []
+        block_map = (block_map_by_rel or {}).get(rel) or {}
+        for pid, rec in sorted(per_pid.items()):
+            ttable = test_tables.get(pid, {})
+            stable = script_tables.get(pid, {})
+            for probe_id, slots in sorted(rec["fn"].items()):
+                if not 0 <= probe_id < len(probe_lines):
+                    continue     # 探针 manifest 不认识的 probe：不猜，跳过
+                start = probe_lines[probe_id]
+                lines = block_map.get(start) or [start]
+                for slot_idx in sorted(slots):
+                    tident = ttable.get(slot_idx)
+                    if tident is not None:
+                        test_to_lines.setdefault(tident, {}).setdefault(
+                            rel, set()).update(lines)
+                        continue
+                    sident = stable.get(slot_idx)
+                    if sident is not None:
+                        script_to_lines.setdefault(sident, {}).setdefault(
+                            rel, set()).update(lines)
         phases, counts = _file_unattributed(per_pid)
         for i, v in enumerate(phases):
             phases_total[i] += v
@@ -1218,11 +1274,24 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
     phase_lane = _phase_lane_report(phases_total, lane_total)
     hotspots = _hotspot_report(hotspot_counts, probe_lines_by_rel,
                                fid_by_line_by_rel, hotspot_limit)
+    derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
+                                            fid_by_line_by_rel)
     return _attribution_payload(
-        arm, test_to_files, script_to_files, test_to_functions,
-        script_to_functions, file_to_tests, file_to_scripts, unmapped,
+        arm, test_to_lines, script_to_lines, derived, unmapped,
         (test_events, script_events, unattributed_events), lane_total,
         phase_lane, hotspots, files_with_unattributed)
+
+
+def _fid_by_line_from_registry(registry: dict) -> dict[int, str]:
+    """函数行区间 → fid（首个声明占据该行的函数胜出，与热点口径一致）。"""
+    fid_by_line: dict[int, str] = {}
+    for entry in (registry or {}).get("entries") or []:
+        start = entry.get("start_line")
+        end = entry.get("end_line")
+        if isinstance(start, int) and isinstance(end, int):
+            for line in range(start, end + 1):
+                fid_by_line.setdefault(line, entry["fid"])
+    return fid_by_line
 
 
 def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
@@ -1230,7 +1299,7 @@ def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
                          prepared: "dict[str, dict] | None" = None) -> dict | None:
     """§SPEC-083：xdg 清理前读回归属证据与注册表，聚合成臂级映射；
     开关关闭时不读任何 sink、返回 None。prepared 提供探针 manifest、
-    func-registry 与函数入口 probe 映射（方向②）。"""
+    func-registry 与块映射（行事实展开与派生视图的输入）。"""
     if not enabled:
         return None
     attr_by_rel = {
@@ -1238,25 +1307,17 @@ def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
         for rel in sink_by_rel}
     registries = _read_registries(root, run_uuid, xdg_homes)
     probe_lines_by_rel: dict[str, list[int]] = {}
+    block_map_by_rel: dict[str, dict] = {}
     fid_by_line_by_rel: dict[str, dict[int, str]] = {}
-    fid_by_probe_by_rel: dict[str, dict[int, str]] = {}
     for rel, item in (prepared or {}).items():
         probe_lines_by_rel[rel] = list(item.get("probe_lines") or [])
-        fid_by_line: dict[int, str] = {}
-        for entry in (item.get("registry") or {}).get("entries") or []:
-            start = entry.get("start_line")
-            end = entry.get("end_line")
-            if isinstance(start, int) and isinstance(end, int):
-                for line in range(start, end + 1):
-                    fid_by_line.setdefault(line, entry["fid"])
-        fid_by_line_by_rel[rel] = fid_by_line
-        by_probe = item.get("attr_fid_by_probe")
-        if by_probe:
-            fid_by_probe_by_rel[rel] = dict(by_probe)
+        block_map_by_rel[rel] = dict(item.get("block_map") or {})
+        fid_by_line_by_rel[rel] = _fid_by_line_from_registry(
+            item.get("registry") or {})
     return build_attribution_map(arm, attr_by_rel, registries,
                                  probe_lines_by_rel=probe_lines_by_rel,
-                                 fid_by_line_by_rel=fid_by_line_by_rel,
-                                 fid_by_probe_by_rel=fid_by_probe_by_rel)
+                                 block_map_by_rel=block_map_by_rel,
+                                 fid_by_line_by_rel=fid_by_line_by_rel)
 
 
 def _tests_face_map(root: Path) -> dict[str, str]:
@@ -1289,14 +1350,31 @@ def _arms_state(arms: tuple[dict, ...]) -> dict:
     return out
 
 
+def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
+    """每目标文件的探针面（可插桩行全集）：块入口 probe_lines 经 block_map
+    展开为全部块内语句起始行。Coverage Store 投影的合法跳过锚来源。"""
+    out: dict[str, list[int]] = {}
+    for rel, item in (prepared or {}).items():
+        probe_lines = item.get("probe_lines") or []
+        block_map = item.get("block_map") or {}
+        lines: set[int] = set()
+        for start in probe_lines:
+            lines.update(block_map.get(start) or [start])
+        out[rel] = sorted(lines)
+    return out
+
+
 def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
                           project_root: Path, causal_meta: dict,
                           file_sha256: "dict[str, str] | None",
                           target_files: "list[str] | None",
                           tests_face: "dict[str, str] | None",
                           arms: tuple[dict, ...], arms_attr: dict,
-                          notes: list[str]) -> dict:
-    """归属产物正文：三车道映射 + 臂有效性 + 新鲜绑定（recipe/文件/测试面）。"""
+                          notes: list[str],
+                          instrumentable_lines: "dict[str, list[int]] | None" = None
+                          ) -> dict:
+    """归属产物正文：行级主真值 + 派生视图 + 臂有效性 + 新鲜绑定
+    （recipe/文件/测试面）+ 探针面（可插桩行全集）。"""
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe_hash,
@@ -1312,6 +1390,9 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         # 测试面内容绑定：测试脚本内容变化同样使映射过期（recipe 不含
         # 测试内容；覆盖边却依赖它）
         "tests_face": dict(tests_face or {}),
+        # SEE-1587：每文件可插桩行全集（行级主真值的测量宇宙；Coverage
+        # Store 投影的 instrumentable 锚直接取自此处）
+        "instrumentable_lines": dict(instrumentable_lines or {}),
         "arms": arms_attr,
         "arms_state": _arms_state(arms),
         "notes": notes,
@@ -1326,7 +1407,8 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          file_sha256: "dict[str, str] | None" = None,
                          target_files: "list[str] | None" = None,
                          recipe_pristine_hash: str | None = None,
-                         tests_face: "dict[str, str] | None" = None) -> dict:
+                         tests_face: "dict[str, str] | None" = None,
+                         prepared: "dict[str, dict] | None" = None) -> dict:
     """§SPEC-083：measurement 报告的 test_attribution 节（归属产物在
     attribution_out 非空时落盘，与报告共用同一 notes 列表）。
 
@@ -1340,10 +1422,14 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
         "unattributed is subdivided into named phase buckets (方向③): "
         "bootstrap = before the first start_script, script_gap = between "
         "scripts, shutdown = after GUT end_run, other = defensive fallback",
-        "方向②: attribution probes fire only at function entries (line "
-        "coverage flags stay per-block); lane event counts are therefore "
-        "function-entry events, and the acceptance arm runs the plain "
-        "template (attribution off by design, no attribution data)",
+        "SEE-1587 line-primary: every block-entry probe carries the "
+        "attribution block (hit-level edges over the full probe surface); "
+        "per-test/per-script covered line sets are the primary truth "
+        "(test_to_lines / script_to_lines / line_to_tests), and file/"
+        "function views are derived projections from line facts plus the "
+        "source registry; lane event counts are all-probe events (not "
+        "comparable to the old fn-entry counts), and the acceptance arm "
+        "runs the plain template (attribution off by design)",
         "every hit event is counted in exactly one lane/phase; rates use the "
         "three-lane sum as denominator — no hit is silently assigned",
         "unattributed_hotspots rank probe sites by unattributed hit events "
@@ -1372,7 +1458,8 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                  if arm.get("attribution") is not None}
     artifact = _attribution_artifact(
         recipe_hash, recipe_pristine_hash, project_root, causal_meta,
-        file_sha256, target_files, tests_face, arms, arms_attr, notes)
+        file_sha256, target_files, tests_face, arms, arms_attr, notes,
+        instrumentable_lines=_instrumentable_lines_from_prepared(prepared))
     artifact_path = None
     if attribution_out:
         out_p = Path(attribution_out)
@@ -1395,36 +1482,13 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
     }}
 
 
-def _function_entry_probes(registry: dict,
-                           probe_lines: list[int]) -> tuple[set[int], dict[int, str]]:
-    """方向②：函数入口 probe 集——每个 instrumentable 函数取其行区间内
-    最小的块入口 probe（函数首语句必然被执行，函数级归属以此为锚）。
-    返回 (probe 集合, probe→fid)。内部类体不在探针面内（既有剪枝口径），
-    自然不参与。"""
-    line_to_probe = {ln: i for i, ln in enumerate(probe_lines)}
-    ids: set[int] = set()
-    fid_by_probe: dict[int, str] = {}
-    for entry in (registry or {}).get("entries") or []:
-        if not entry.get("instrumentable"):
-            continue
-        start, end = entry.get("start_line"), entry.get("end_line")
-        if not isinstance(start, int) or not isinstance(end, int):
-            continue
-        candidates = [i for ln, i in line_to_probe.items()
-                      if start <= ln <= end]
-        if not candidates:
-            continue
-        probe_id = min(candidates)
-        ids.add(probe_id)
-        fid_by_probe[probe_id] = entry["fid"]
-    return ids, fid_by_probe
-
-
 def _algo_used(base_algo: str, test_attribution: bool,
                causal: bool = False) -> str:
     """§SPEC-083：归属形态插桩产物不同 → 缓存键必须分形；默认关闭路径
-    algo 原样返回（既有缓存条目继续命中，零漂移）。R2 的创建点包装再
-    分一层（同一归属开关下模板不同，不得互相复用）。"""
+    algo 原样返回（既有缓存条目继续命中，零漂移）。SEE-1587：归属粒度
+    编码进 algo 键（attr-line/1 = hit 级探针面）——fn 级旧条目（attr/6）
+    与 hit 级新条目键不同，绝不互相命中；R2 的创建点包装再分一层
+    （同一归属开关下模板不同，不得互相复用）。"""
     if not test_attribution:
         return base_algo
     suffix = f"{ATTRIBUTION_ALGO_TAG}-causal" if causal else ATTRIBUTION_ALGO_TAG
@@ -1531,13 +1595,16 @@ def _instrument_pair(rel: str, src: str, registry: dict,
         if attribution_causal:
             # §SPEC-083 R2：创建点包装（行号不变，manifest 不受影响）
             inst_src, _sites = _rewrite_call_sites(src, file_key8(rel))
-        attr_probe_ids, _attr_fids = _function_entry_probes(
-            registry, probe_lines)
         if block_compress:
+            # SEE-1587 hit 级：全部块入口 probe 携带 fn 级归属块——
+            # (probe, slot) 边覆盖整个探针面，行事实由此展开（fn 级数据
+            # 布局与 finalizer 不变；这是 SEE-1585 原型实测形态，
+            # attr_probe_ids=None 的旧 hit 级块布局产品 finalizer 不支持）。
+            attr_probe_ids = frozenset(range(len(probe_lines)))
             template_attr = _instrument_blocks(
                 inst_src, tpl_sink, runtime_sink=True,
                 attribution=True, causal=attribution_causal,
-                attr_probe_ids=frozenset(attr_probe_ids))[0]
+                attr_probe_ids=attr_probe_ids)[0]
         else:
             template_attr = _instrument(
                 inst_src, tpl_sink, flags=True, runtime_sink=True,
@@ -1645,16 +1712,12 @@ def _prepare_target_file(root: Path, rel: str, src: str, abs_path: str,
             out["unmeasured"] = {"file": rel, "reason": write_error}
     if attribution_causal:
         out["causal_site"] = _causal_site_entry(rel, template_attr)
-    attr_probe_ids, attr_fid_by_probe = _function_entry_probes(
-        registry, probe_lines)
     out["prepared"] = {
         "abs": abs_path, "src": src,
         "registry": registry, "probe_manifest": probe_manifest,
         "template": template, "template_attr": template_attr,
         "probe_lines": probe_lines,
         "block_map": block_map,
-        "attr_probe_ids": attr_probe_ids,
-        "attr_fid_by_probe": attr_fid_by_probe,
     }
     return out
 
@@ -2346,7 +2409,8 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         file_sha256=_file_sha,
         target_files=sorted(prepared.keys()),
         recipe_pristine_hash=pristine_recipe_hash,
-        tests_face=_tests_face_map(root))
+        tests_face=_tests_face_map(root),
+        prepared=prepared)
     report = {
         "report_version": REPORT_VERSION,
         "project_root": str(root),

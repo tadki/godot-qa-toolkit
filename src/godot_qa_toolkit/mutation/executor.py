@@ -24,7 +24,7 @@ from . import cost_priors, shadow
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
-from .coverlink import load_instrumentable_lines, load_reusable_coverage
+from .coverlink import resolve_coverage_for_prefilter
 from .identity import certificate_valid, disclose_superseded, identity_pack
 from .baseline import (_BASELINE_FAILURE_REASONS, _baseline_key,
                        _run_baseline_snapshot)
@@ -330,10 +330,10 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                 return terminal, tests_glob, {}
         else:
             tests_glob = derived
-    # 第六批：fn 级分组需要 per-group glob，必须走编排分片路径（不做
-    # 单文件串行快路径）；显式 --tests / full 审计模式维持原语义。
-    if (select_mode or "fn").lower() == "fn" and tests_glob is not None \
-            and not dry_run:
+    # SEE-1587：行级（默认）/fn 分组需要 per-group glob，必须走编排分片
+    # 路径（不做单文件串行快路径）；显式 --tests / full 审计模式维持原语义。
+    if str(select_mode or "line").lower() in ("line", "fn") \
+            and tests_glob is not None and not dry_run:
         return None, tests_glob, selection_meta
     # E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
     # （退串行判定前置纪律不回退）。total > jobs 才需仲裁（≤ jobs 本就
@@ -519,6 +519,26 @@ def _settled_no_sites(file: str, scoped: bool) -> dict:
                     "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
                     "scoped": bool(scoped)},
         "failures": [],
+    }
+
+
+def _settled_all_uncovered(file: str, records: list[dict],
+                           total_sites: int) -> dict:
+    """SEE-1587：全部位点落在无映射测试行 → 定终态（零执行、uncovered 全
+    披露、不进 ok 门禁）——零 chunk 也不得让文件从报告中消失。"""
+    return {
+        "tool": "mutation",
+        "ok": True,
+        "summary": {
+            "file": file, "mutants": 0, "jobs": 0,
+            "killed": 0, "survived": 0, "timeout": 0, "run_errors": 0,
+            "suspect": 0, "invalid_mutants": 0, "kill_rate": 0.0,
+            "scoped": True, "total_sites": total_sites,
+            "uncovered": len(records),
+            "note": ("all mutation sites fall on lines without mapped tests "
+                     "(line-level selection; uncovered, not executed)"),
+        },
+        "failures": records,
     }
 
 
@@ -855,10 +875,13 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                      entries, mutate_all=mutate_all,
                      cert_validator=lambda kb: certificate_valid(kb,
                                                                  project_root))
+    prefilter_disclosures: dict = {}
     with clock.stage("prefilter"):
         uncovered_mutants, retry_pool = _apply_coverage_prefilter(
             plan, f, project_root, glob, binary_kind, reuse_coverage,
-            identity=identity)
+            identity=identity,
+            tests_scripts=selection_meta.get("tests") or None,
+            disclosures=prefilter_disclosures)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     baseline = _ensure_shared_baseline(project_root, glob, jobs, timeout_s,
                                        baselines)
@@ -913,11 +936,41 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         "store2": store2, "src": src, "mutants": mutants,
         "uncovered": uncovered_mutants, "test_selection": selection_meta,
         "selection_mode": select_mode,
+        "coverage_prefilter_source": prefilter_disclosures.get(
+            "coverage_prefilter"),
     }
-    if select_mode == "fn" and glob is not None \
+    if select_mode in ("line", "fn") and glob is not None \
             and selection_meta.get("source") == "runtime_mapping":
-        # 第六批：变异体按所在函数分组，每组只跑映射 fn→tests（基线仍用
-        # 文件级并集面——既有失败集是超集，killed 判定语义不变）
+        # SEE-1587：行级（默认）按实际位点的 frozenset(line→tests) 签名分组，
+        # 同签名共享一个 glob；fn 为显式校准视图（按包围函数分组）。基线
+        # 仍用文件级并集面——既有失败集是超集，killed 判定语义不变。
+        if select_mode == "line":
+            chunks, groups, no_mapped = _line_group_chunks(
+                f, project_root, glob, binary_kind, executed_list,
+                selection_meta, baseline, resume, timeout_factor, timeout_s,
+                budget, mutate_all, attention, run_id=run_id,
+                identity=identity, worker_channel=worker_channel,
+                total_sites=raw_total)
+            # 无映射测试行的位点：默认路径按 uncovered 口径标记（不执行、
+            # 不进 ok 门禁），与 prefilter uncovered 记录同一形态合并；
+            # 原因按来源区分（行级无映射 ≠ prefilter 未覆盖）。
+            ctx["uncovered"] = list(ctx.get("uncovered") or []) + no_mapped
+            ctx.setdefault("uncovered_reasons", {}).update({
+                m.stable_id: (f"line {m.line} has no mapped tests "
+                              f"(line-level selection; site not executed)")
+                for m in no_mapped})
+            ctx["selection_groups"] = groups
+            if not chunks:
+                # 全部位点落在无映射行：零 chunk 也必须留文件痕迹（报告
+                # 完备性——任何输入文件都不得从报告中消失）。
+                from .reporting import _mutant_record
+                return [], None, _settled_all_uncovered(
+                    f, [_mutant_record(
+                        m, "uncovered",
+                        f"line {m.line} has no mapped tests (line-level "
+                        f"selection; site not executed)", src=src)
+                        for m in no_mapped], raw_total)
+            return chunks, ctx, None
         chunks, groups = _fn_group_chunks(
             f, project_root, glob, binary_kind, executed_list, src,
             baseline, resume, timeout_factor, timeout_s, budget, mutate_all,
@@ -998,6 +1051,88 @@ def _fn_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
     return chunks, meta
 
 
+def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
+                       selection_meta, baseline, resume, timeout_factor,
+                       timeout_s, budget, mutate_all, attention, *, run_id,
+                       identity, worker_channel, total_sites):
+    """SEE-1587 行级分组：按位点所在行的测试集签名 `frozenset(line→tests)`
+    分组，同签名共享一个物化选择目录 glob（禁止一行一组 / 任意多行组合
+    机械拆分——组数 = 不同测试集合数，不是行数/位点数）。
+
+    行→测试集来自新鲜映射的行事实（test 车道 line_to_tests ∪ 脚本车道
+    script_to_lines）；无映射测试的行上，位点**不静默丢弃**——按默认路径
+    uncovered 口径返回记录（不执行、不进 ok 门禁），并随 selection_groups
+    披露。返回 (chunks, group_meta, uncovered_records)。"""
+    from . import truth_select
+    from .reporting import _mutant_record
+
+    mapping_path = (selection_meta.get("mapping") or {}).get("path")
+    rel = _res_path_of(f, project_root).removeprefix("res://")
+    try:
+        doc = truth_select.load_map(
+            mapping_path) if mapping_path else truth_select.load_map(
+                truth_select.map_path(str(Path(project_root).resolve())))
+    except Exception as e:  # noqa: BLE001 — 不可用即 fail-loud（不静默回退）
+        raise truth_select.MutationSelectionError(
+            "line_selection_map_unusable", str(e)) from e
+    by_line = truth_select._line_script_sets(
+        doc, rel, {getattr(m, "line", -1) for m in executed_list})
+    by_name = truth_select._test_scripts_by_name(
+        str(Path(project_root).resolve()))
+    groups: dict[frozenset, list] = {}
+    no_mapped: list = []          # Mutant 对象（与 prefilter uncovered 同形态）
+    for m in executed_list:
+        names = frozenset(by_line.get(getattr(m, "line", -1)) or ())
+        if not names:
+            no_mapped.append(m)
+            continue
+        groups.setdefault(names, []).append(m)
+    chunks: list[dict] = []
+    meta: list[dict] = []
+    for names, mutants in sorted(groups.items(),
+                                 key=lambda kv: (len(kv[0]), sorted(kv[0]))):
+        scripts: list[str] = []
+        ambiguous: list[str] = []
+        for name in names:
+            paths = by_name.get(name)
+            if not paths:
+                continue
+            if len(paths) > 1:
+                ambiguous.append(name)
+            scripts.extend(paths)
+        if ambiguous:
+            raise truth_select.MutationSelectionError(
+                "ambiguous_test_names", str(sorted(ambiguous)[:5]))
+        if not scripts:
+            # 行事实指向的脚本不在 tests 树（删除/改名漂移）：不猜，按
+            # uncovered 口径披露（与无映射行同形态）
+            no_mapped.extend(mutants)
+            continue
+        try:
+            group_glob = truth_select.materialize_selection(
+                str(Path(project_root).resolve()), scripts)
+        except OSError as e:
+            raise truth_select.MutationSelectionError(
+                "selection_materialize_failed", str(e)) from e
+        meta.append({"signature": sorted(names), "tests": len(scripts),
+                     "mutants": len(mutants)})
+        chunks.append({
+            "file": f, "project_root": project_root, "budget": budget,
+            "timeout_s": timeout_s, "tests_glob": group_glob,
+            "resume": resume, "binary_kind": binary_kind,
+            "timeout_factor": timeout_factor, "total_sites": total_sites,
+            "attention": attention, "mutate_all": mutate_all,
+            "retry_ids": [m.stable_id for m in mutants],
+            "baseline": baseline,
+            "selection_meta": selection_meta, "selection_mode": "line",
+            "progress": {"run_id": run_id,
+                         "worker": f"line:{len(meta)}",
+                         "total": len(executed_list)},
+            "identity": identity, "worker_channel": worker_channel,
+        })
+    return chunks, meta, no_mapped
+
+
 def _attach_chunk_selection(results: list[dict], chunks: list[dict]) -> None:
     """串行回退/无 ctx 的 chunk 也要带选面披露（观测面不因降级而丢失）。"""
     from .testscan import selection_disclosure
@@ -1025,29 +1160,30 @@ def _warn_serial_fallback(file: str, reason: str | None) -> None:
 
 
 def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
-                              reuse_coverage, identity=None):
-    """§SPEC-1420-12（P2）+ SEE-1550 L1：coverage 前置过滤先于 budget（预算只
-    花在 covered 位点）；uncovered 全部显式标记（父层合并时注入报告）。
+                              reuse_coverage, identity=None,
+                              tests_scripts=None, disclosures=None):
+    """§SPEC-1420-12（P2）+ SEE-1550 L1 + SEE-1587：coverage 前置过滤先于
+    budget（预算只花在 covered 位点）；uncovered 全部显式标记（父层合并时
+    注入报告）。
 
-    store fresh ∧ 身份包全匹配才生效，任一漂移禁用并披露。
+    数据源统一经 coverlink.resolve_coverage_for_prefilter（手动 /1 store →
+    同轮投影 /2 store → 行级主真值现场投影），三层全失才回退不过滤。
     D3 修复：过滤锚 = covered ∧ instrumentable——不可插桩行上的位点留在
     执行面（与 planner._apply_coverage_prefilter 同语义）；可插桩集不可得
     = 不过滤（宁多跑不假阴性）。"""
     if not reuse_coverage:
         return [], plan.executed
-    cov, cov_reason = load_reusable_coverage(project_root, f, glob,
-                                             binary_kind, identity=identity)
-    if cov is None:
+    cov, inst, cov_reason, source = resolve_coverage_for_prefilter(
+        project_root, f, glob, scripts=tests_scripts,
+        binary_kind=binary_kind, identity=identity)
+    if cov is None or inst is None:
         print(f"mutation: coverage store miss ({cov_reason}) for {f} "
               f"— running unfiltered", file=sys.stderr)
+        if disclosures is not None:
+            disclosures["coverage_prefilter"] = source or "store_miss"
         return [], plan.executed
-    inst, inst_reason = load_instrumentable_lines(project_root, f, glob,
-                                                  binary_kind,
-                                                  identity=identity)
-    if inst is None:
-        print(f"mutation: instrumentable face unavailable ({inst_reason}) "
-              f"for {f} — running unfiltered", file=sys.stderr)
-        return [], plan.executed
+    if disclosures is not None:
+        disclosures["coverage_prefilter"] = source
     uncovered = [m for m in plan.executed
                  if m.line not in cov and m.line in inst]
     # D3 锚统一（SEE-1420 qa 复验 FAIL 实证）：执行面 = covered ∨ 不可插桩
@@ -1302,13 +1438,18 @@ def _inject_one(r: dict, ctx: dict) -> None:
     # 显式标记（计数与覆盖执行面在 summary.coverage_prefilter 披露）。
     uncovered = ctx.get("uncovered") or []
     if uncovered:
+        reasons = ctx.get("uncovered_reasons") or {}
         for m in uncovered:
             r["failures"].append(_mutant_record(
                 m, "uncovered",
-                f"line {m.line} not covered by tests (reused coverage "
-                f"prefilter; site never executed)", src=ctx["src"]))
-        s["coverage_prefilter"] = {"uncovered": len(uncovered),
-                                   "covered_executed": len(ctx["executed"])}
+                reasons.get(m.stable_id)
+                or f"line {m.line} not covered by tests (reused coverage "
+                   f"prefilter; site never executed)", src=ctx["src"]))
+        pf = {"uncovered": len(uncovered),
+              "covered_executed": len(ctx["executed"])}
+        if ctx.get("coverage_prefilter_source"):
+            pf["source"] = ctx["coverage_prefilter_source"]
+        s["coverage_prefilter"] = pf
     if plan.diff_active or plan.mutate_all:
         # §SPEC-1420-07（D6）+ O3 键集对齐：差分在场与 --mutate-all 两径披露
         # 同一键集（--mutate-all 全量面也可见：executed == retry_total、

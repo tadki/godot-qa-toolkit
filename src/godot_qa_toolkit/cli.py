@@ -387,14 +387,17 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
             "failures": [{"reason": "--mutation/--lines require exactly one "
                                     "target file"}],
         }
+    # SEE-1587：--lines 规格在此早解析（非法规格 = 参数错误契约，先于任何
+    # GUT/预热）；解析结果随串行/编排路径下发。
+    _ = _parsed_select_lines(args)
     # SEE-1413：--jobs 缺省时单文件同样走并发切片路径（默认并行）；显式
     # --jobs 1 在 executor 内强制串行。串行快路径仅留给显式串行请求。
     multi_concurrency = (len(files) > 1 or args.jobs is None or args.jobs > 1)
     if selecting:
         multi_concurrency = False
-    # 第六批：fn 级分组需要每文件多 chunk（per-group glob）——除非显式
-    # --tests/--jobs 1 的卡尺语义，一律走编排路径。
-    if getattr(args, "select_mode", "full") == "fn" and not selecting \
+    # SEE-1587：行级（默认）/fn 分组需要每文件多 chunk（per-group glob）——
+    # 除非显式 --tests/--jobs 1 的卡尺语义，一律走编排路径。
+    if getattr(args, "select_mode", "line") in ("line", "fn") and not selecting \
             and not args.tests:
         multi_concurrency = True
     if not multi_concurrency:
@@ -418,13 +421,24 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         mutate_all=args.mutate_all,
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
-        select_mode=getattr(args, "select_mode", "full"))
+        select_mode=getattr(args, "select_mode", "line"))
     if len(files) == 1 and args.jobs is None:
         # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
         envelope = result
         result = envelope["results"][0]
         result["summary"].setdefault("jobs", envelope["jobs"])
     return result
+
+
+def _parsed_select_lines(args: argparse.Namespace) -> list[int] | None:
+    """`--lines` 规格 → 去重升序行号列表（None = 未指定）。
+
+    非法规格抛 ValueError（cmd_mutation 转参数错误契约 ok=false）。"""
+    raw = getattr(args, "lines", None)
+    if raw is None:
+        return None
+    from .mutation.truth_select import parse_lines_spec
+    return parse_lines_spec(raw)
 
 
 def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
@@ -452,13 +466,12 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         mutate_all=args.mutate_all,
         select_ids=([args.mutation] if getattr(args, "mutation", None)
                     else None),
-        select_lines=([args.lines] if getattr(args, "lines", None)
-                      else None),
+        select_lines=_parsed_select_lines(args),
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
-        # §SPEC-012：串行/卡尺与编排路径同源遵守 --select（默认 fn），
-        # 不可静默退化全脸（HIGH-1 修复点）。
-        select_mode=getattr(args, "select_mode", "full"),
+        # §SPEC-012：串行/卡尺与编排路径同源遵守 --select（SEE-1587 默认
+        # line），不可静默退化全脸（HIGH-1 修复点）。
+        select_mode=getattr(args, "select_mode", "line"),
     )
     result["summary"].setdefault("jobs", 1)
     return result
@@ -1042,11 +1055,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
                         "re-runs them — every run persists verdicts, resume just "
                         "turns on the skip")
-    m.add_argument("--select", dest="select_mode", default="fn",
-                   choices=["fn", "file", "full"],
-                   help="SEE-1581 test-selection granularity: fn (default, "
-                        "mutants grouped by enclosing function), file "
-                        "(per-file set, legacy/calibration), full (explicit "
+    m.add_argument("--select", dest="select_mode", default="line",
+                   choices=["line", "fn", "file", "full"],
+                   help="SEE-1587 test-selection granularity: line (default, "
+                        "mutants grouped by their line's test-set signature; "
+                        "line facts are the primary truth), fn (explicit "
+                        "calibration/fallback view, grouped by enclosing "
+                        "function), file (explicit calibration/fallback "
+                        "view, per-file set), full (the only explicit "
                         "full-face audit; bypasses attribution)")
     m.add_argument("--attribution-map", default=None,
                    help="SEE-1581: measurement attribution artifact "
@@ -1078,9 +1094,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "P3 caliper) — forces fresh execution of that one "
                         "site (1 baseline + 1 mutant), bypassing diff reuse; "
                         "single-file only")
-    m.add_argument("--lines", type=int, default=None, metavar="N",
-                   help="rerun all mutation sites on source line N (SEE-1420 "
-                        "P3); single-file only")
+    m.add_argument("--lines", type=str, default=None, metavar="SPEC",
+                   help="caliper rerun of all mutation sites on the requested "
+                        "source lines (SEE-1587): single line '42', range "
+                        "'10-20', or multi-segment '10-20,30,35-40'; "
+                        "intersected with actual mutation sites "
+                        "(requested/hit/skipped_no_site disclosed; no site at "
+                        "all fails loud); the selected sites run under the "
+                        "union of their lines' test sets (discloses "
+                        "no_mapped_tests); single-file only")
     m.add_argument("--reuse-coverage", action="store_true",
                    help="prefilter mutation sites by line coverage from the "
                         "last `gqt measure coverage` run for this file "

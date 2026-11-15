@@ -174,6 +174,8 @@ def then_summary_keys(bdd_state: dict) -> None:
         "disk_delta_bytes",
         # SEE-1581 第六批：选面模式披露（只加不改）
         "selection_mode",
+        # SEE-1587 §SPEC-004：显式 --tests 披露「未使用行级选面」（只加不改）
+        "test_selection",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

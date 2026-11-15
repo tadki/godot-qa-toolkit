@@ -116,8 +116,9 @@ def test_worker_route_prefilter_hits_cold_coverage(tmp_path, monkeypatch,
         f"(D-2 drift regression): {err[-400:]}")
     # SRC 位点：line2 ×3（covered → 执行）、line5 ×3（instrumentable ∧
     # uncovered → 显式跳过）。
-    assert s.get("coverage_prefilter") == {"uncovered": 3,
-                                           "covered_executed": 3}
+    assert s.get("coverage_prefilter") == {
+        "source": "coverage_store", "uncovered": 3,
+        "covered_executed": 3}
     uncovered = [f for f in r["failures"] if f.get("verdict") == "uncovered"]
     assert len(uncovered) == 3 and all(f["line"] == 5 for f in uncovered)
     assert s["mutants"] == 3 and s["killed"] == 3

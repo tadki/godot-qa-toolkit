@@ -296,16 +296,22 @@ def project_coverage_from_map(
     if not isinstance(instrumentable, list) or not instrumentable:
         return None, "attribution map lacks instrumentable surface for file"
     arm = (doc.get("arms") or {}).get("gut_full") or {}
-    script_names = {Path(s).name for s in scripts}
+    # 身份归一：运行时注册表身份是 `res://tests/x.gd::test` / `res://tests/x.gd`
+    # 全路径，选择目录承载的是脚本 res:// 路径——两侧统一取 basename 比较
+    # （按全路径与裸名互比会让并集静默为空 = 全量假 uncovered）。
+    def _base(name: str) -> str:
+        return Path(str(name).split("::", 1)[0]).name
+
+    script_names = {_base(s) for s in scripts}
     covered: set[int] = set()
     for ident, by_rel in (arm.get("test_to_lines") or {}).items():
-        if ident.split("::", 1)[0] not in script_names:
+        if _base(ident) not in script_names:
             continue
         covered.update(int(l) for l in (by_rel.get(rel) or ()))
-    for script in script_names:
-        covered.update(int(l)
-                       for l in ((arm.get("script_to_lines") or {})
-                                 .get(script, {}) or {}).get(rel, ()) or ())
+    for script, by_rel in (arm.get("script_to_lines") or {}).items():
+        if _base(script) not in script_names:
+            continue
+        covered.update(int(l) for l in ((by_rel or {}).get(rel) or ()))
     inst_set = {int(l) for l in instrumentable}
     covered &= inst_set
     binding = _projection_binding(doc, rel)
@@ -321,13 +327,13 @@ def project_coverage_from_map(
     return covered, None
 
 
-def load_projected_coverage(
+def _load_projection_raw(
         project_root: str, file_path: str, tests_glob: str,
         binary_kind=None, identity: dict | None = None, *,
         current_recipe_pristine: str | None = None,
         tests_face: dict | None = None,
-        ) -> tuple[set[int] | None, str | None]:
-    """读回投影条目（see1420-coverage/2 专属；SEE-1587 消费面入口）。
+        ) -> tuple[dict | None, str | None]:
+    """投影条目读取 + 全量 provenance 校验（load 侧唯一实现）。
 
     - /1（手动 measure coverage 条目）→ (None, 原因)——投影消费面不用
       手动条目，两态互不冒充；
@@ -385,7 +391,107 @@ def load_projected_coverage(
         str(root))
     if binding.get("map_tests_face_sha") != tests_face_digest(face_now):
         return None, "projection binding stale (tests face drift)"
+    return raw, None
+
+
+def load_projected_coverage(
+        project_root: str, file_path: str, tests_glob: str,
+        binary_kind=None, identity: dict | None = None, *,
+        current_recipe_pristine: str | None = None,
+        tests_face: dict | None = None,
+        ) -> tuple[set[int] | None, str | None]:
+    """读回投影条目的 covered 行集（校验见 _load_projection_raw）。"""
+    raw, reason = _load_projection_raw(
+        project_root, file_path, tests_glob, binary_kind, identity,
+        current_recipe_pristine=current_recipe_pristine, tests_face=tests_face)
+    if raw is None:
+        return None, reason
     lines = raw.get("covered_lines")
     if not isinstance(lines, list):
         return None, "coverage cache malformed (covered_lines missing)"
     return ({int(l) for l in lines if isinstance(l, (int, float))}, None)
+
+
+def resolve_coverage_for_prefilter(
+        project_root: str, file_path: str, tests_glob: str | None,
+        scripts: "list[str] | set[str] | None" = None,
+        binary_kind=None, identity: dict | None = None,
+        ) -> tuple[set[int] | None, set[int] | None, str | None, str | None]:
+    """mutation prefilter 统一解析链（SEE-1587 消费面单一出处）。
+
+    返回 (covered, instrumentable, reason, source)：
+    1. `coverage_store`——`gqt measure coverage` 手动 /1 条目（用户显式面
+       优先，既有语义不变）；
+    2. `projection_store`——`see1420-coverage/2` 同轮投影缓存（绑定包全
+       匹配才可用）；
+    3. `projection_live`——新鲜行级主真值映射现场投影（scripts = 本次
+       tests_glob 承载的测试脚本集；零第二次插桩/零 GUT），落盘为 /2 条目
+       供后续复用。
+
+    任一层失败都继续下沉，全部失败原因**逐层保留**（reason 聚合，身份漂移
+    /绑定漂移不因下沉而不可见）；全部不可用 → (None, None, 原因,
+    state)——state ∈ {store_miss, instrumentable_face_missing}，调用方回退
+    不过滤（宁多跑不假过滤）。"""
+    if tests_glob is None:
+        return None, None, "no tests_glob (full-face audit)", "store_miss"
+    reasons: list[str] = []
+    cov, cov_reason = load_reusable_coverage(
+        project_root, file_path, tests_glob, binary_kind, identity=identity)
+    inst = None
+    if cov is not None:
+        inst, _inst_reason = load_instrumentable_lines(
+            project_root, file_path, tests_glob, binary_kind,
+            identity=identity)
+        if inst is not None:
+            return cov, inst, None, "coverage_store"
+        reasons.append(f"store: instrumentable face unavailable "
+                       f"({_inst_reason})")
+    elif cov_reason:
+        reasons.append(f"store: {cov_reason}")
+    from . import truth_select as _truth
+
+    pristine = _truth._fresh_recipe_hash(str(Path(project_root).resolve()))
+    proj_cov, proj_reason = load_projected_coverage(
+        project_root, file_path, tests_glob, binary_kind, identity,
+        current_recipe_pristine=pristine)
+    if proj_cov is not None:
+        raw, _ = _load_projection_raw(
+            project_root, file_path, tests_glob, binary_kind, identity,
+            current_recipe_pristine=pristine)
+        proj_inst = ({int(l)
+                      for l in (raw or {}).get("instrumentable_lines") or []}
+                     if raw else None)
+        if proj_inst:
+            return proj_cov, proj_inst, None, "projection_store"
+        reasons.append("projection store: instrumentable face unavailable")
+    elif proj_reason:
+        reasons.append(f"projection store: {proj_reason}")
+    map_path = _truth.map_path(str(Path(project_root).resolve()))
+    doc_reason = None
+    if not map_path:
+        doc_reason = "no attribution map for live projection"
+    elif not scripts:
+        doc_reason = "selection scripts unknown for live projection"
+    else:
+        try:
+            doc = _truth.load_map(map_path)
+        except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
+            doc_reason = f"attribution map unusable: {e}"
+        else:
+            doc_cov, doc_reason = project_coverage_from_map(
+                project_root, doc, file_path, scripts, tests_glob,
+                binary_kind=binary_kind, identity=identity,
+                current_recipe_pristine=pristine)
+            if doc_cov is not None:
+                rel = project_relative(str(Path(project_root).resolve()),
+                                       str(Path(file_path).resolve()))
+                doc_inst = doc.get("instrumentable_lines", {}).get(rel)
+                if isinstance(doc_inst, list) and doc_inst:
+                    return (doc_cov, {int(l) for l in doc_inst}, None,
+                            "projection_live")
+                doc_reason = "map lacks instrumentable surface"
+    if doc_reason:
+        reasons.append(f"live projection: {doc_reason}")
+    saw_cov = cov is not None or proj_cov is not None
+    state = "instrumentable_face_missing" if saw_cov else "store_miss"
+    return None, None, "; ".join(reasons) or "coverage unavailable", state

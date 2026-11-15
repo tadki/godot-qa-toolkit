@@ -1,4 +1,10 @@
-"""方向①：增量重跑的插桩准备与脚本级执行（被 measurement/increment.py 消费）。"""
+"""方向①：增量重跑的插桩准备与脚本级执行（被 measurement/increment.py 消费）。
+
+SEE-1587：attr 模板构建单源——fresh 路径复用 orchestrator._instrument_pair，
+不再保留独立构建器（SEE-1585 原型教训：两条构建代码在 algo 键不变时会让
+全量/增量产出不同归属形态的模板静默共存）；prepcache 命中路径必须连带
+block_map 读回，否则行事实退化为块首行。
+"""
 
 from __future__ import annotations
 
@@ -16,8 +22,7 @@ from .orchestrator import (
     _ATTR_RUN_UUID_PLACEHOLDER,
     _FLUSHER_RELPATH,
     _PRE_HOOK_RELPATH,
-    _function_entry_probes,
-    _rewrite_call_sites,
+    _instrument_pair,
     _run_one_gut,
 )
 
@@ -27,33 +32,17 @@ def _algo_for(causal: bool) -> str:
     return _algo_used(prepcache.PROBE_ALGO_VERSION, True, causal)
 
 
-def _build_fresh(src: str, rel: str, key8: str, causal: bool,
-                 registry: dict) -> tuple[str, list[int], dict]:
-    """fresh 构建：先 plain 取块入口清单，再按函数入口 probe 建 attr 模板
-    （与 run_measurement 同序，probe manifest 一致）。"""
-    from ..coverage.runner import _instrument_blocks
-    tpl_sink = (f"qa-coverage-hits-{prepcache.SINK_UUID_PLACEHOLDER}"
-                f"-{key8}.txt")
-    _, probe_lines, block_map = _instrument_blocks(
-        src, tpl_sink, runtime_sink=True)
-    inst_src = src
-    if causal:
-        inst_src, _ = _rewrite_call_sites(src, key8)
-    ids, _fids = _function_entry_probes(registry, probe_lines)
-    template, _pl2, _bm2 = _instrument_blocks(
-        inst_src, tpl_sink, runtime_sink=True, attribution=True,
-        causal=causal, attr_probe_ids=frozenset(ids))
-    return template, probe_lines, block_map
-
-
 def prepare_attr_templates(root: Path, target_files: list[str],
                            recipe: dict, causal: bool) -> dict:
     """每目标文件准备 attr 模板（prep 缓存优先，未命中现建）；返回
-    {rel: {abs, src, template(占位符形态), probe_lines, attr_probe_ids,
-    attr_fid_by_probe, key8, registry}}。"""
-    from ..coverage.runner import _instrument_blocks
+    {rel: {abs, src, template(占位符形态), probe_lines, block_map, key8,
+    registry}}。
+
+    模板构建单源：fresh 路径与全量 run_measurement 共用
+    orchestrator._instrument_pair（含生成期 re-parse 预检），归属粒度由
+    algo 键编码（SEE-1585 教训）；缓存命中必须连带 block_map 读回——
+    行事实按块展开，丢 block_map 会让行集退化为块首行（静默失真）。"""
     from ..registry.functions import build_file_registry
-    from gdtoolkit.parser import parser as gd_parser
 
     algo = _algo_for(causal)
     out: dict[str, dict] = {}
@@ -71,23 +60,28 @@ def prepare_attr_templates(root: Path, target_files: list[str],
         if entry is not None:
             template = entry["instrumented_template"]
             probe_lines = list(entry.get("probe_lines", []))
+            block_map = dict(entry.get("block_map") or {})
             registry = entry["registry"]
         else:
             registry = build_file_registry(src, file_label=rel)
-            template, probe_lines, _bm = _build_fresh(src, rel, key8,
-                                                      causal, registry)
-            if probe_lines:
-                try:
-                    gd_parser.parse(template)
-                except Exception as e:  # noqa: BLE001 — 插桩器 bug 拒跑
-                    raise ValueError(
-                        f"increment attr template failed to parse for "
-                        f"{rel}: {e}") from e
-        ids, fids = _function_entry_probes(registry, probe_lines)
+            built = _instrument_pair(rel, src, registry,
+                                     block_compress=True,
+                                     test_attribution=True,
+                                     attribution_causal=causal)
+            if "parse_error" in built:
+                raise ValueError(
+                    f"increment attr template failed to parse for "
+                    f"{rel}: {built['parse_error']}")
+            template = built["template_attr"]
+            probe_lines = built["probe_lines"]
+            block_map = built["block_map"]
+            if template is None:
+                raise ValueError(
+                    f"increment attr template missing for {rel}")
         out[rel] = {
             "abs": str(p.resolve()), "src": src, "template": template,
-            "probe_lines": probe_lines, "attr_probe_ids": frozenset(ids),
-            "attr_fid_by_probe": fids, "key8": key8, "registry": registry,
+            "probe_lines": probe_lines, "block_map": block_map,
+            "key8": key8, "registry": registry,
         }
     return out
 

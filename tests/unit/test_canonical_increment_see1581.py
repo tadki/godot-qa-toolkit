@@ -49,9 +49,11 @@ def _restore_subprocess():
 
 
 def _baseline_arm() -> dict:
+    # SEE-1587 line-primary：行事实是主真值；file/function 视图为派生投影。
+    # 行→fid 映射：cell 5 → work；node 4 → ready_hook。
     return {
         "tests": 2, "scripts": 1, "files": 2, "pairs": 3,
-        "function_pairs": 2,
+        "function_pairs": 2, "line_pairs": 3,
         "test_to_files": {
             "test_a.gd::test_one": ["src_game/cell.gd"],
             "test_b.gd::test_two": ["src_game/cell.gd", "src_game/node.gd"],
@@ -68,15 +70,34 @@ def _baseline_arm() -> dict:
             "src_game/node.gd": ["test_b.gd::test_two"],
         },
         "file_to_scripts": {"src_game/cell.gd": ["test_a.gd"]},
+        "test_to_lines": {
+            "test_a.gd::test_one": {"src_game/cell.gd": [5]},
+            "test_b.gd::test_two": {"src_game/cell.gd": [5],
+                                    "src_game/node.gd": [4]},
+        },
+        "script_to_lines": {"test_a.gd": {"src_game/cell.gd": [5]}},
+        "line_to_tests": {
+            "src_game/cell.gd": {"5": ["test_a.gd::test_one",
+                                       "test_b.gd::test_two"]},
+            "src_game/node.gd": {"4": ["test_b.gd::test_two"]},
+        },
     }
+
+
+_BASELINE_FID_BY_LINE = {
+    "src_game/cell.gd": {5: "src_game/cell.gd::work"},
+    "src_game/node.gd": {4: "src_game/node.gd::ready_hook"},
+}
 
 
 def _baseline_doc() -> dict:
     return {
-        "schema_version": "test-attribution/5",
+        "schema_version": "test-attribution/6",
         "report_recipe_hash": "h1",
         "arms": {"gut_full": _baseline_arm()},
         "identity": "res://script::test_name",
+        "instrumentable_lines": {"src_game/cell.gd": [4, 5, 6],
+                                 "src_game/node.gd": [4]},
     }
 
 
@@ -119,16 +140,15 @@ def test_invalidation_combines_fn_edges_and_static_candidates(tmp_path: Path):
 def test_merge_arm_replaces_by_script_and_drops():
     from godot_qa_toolkit.measurement.increment import _merge_arm
     fresh = {
-        "test_to_files": {"test_a.gd::test_one": ["src_game/cell.gd",
-                                                  "src_game/node.gd"]},
-        "test_to_functions": {"test_a.gd::test_one":
-                              ["src_game/cell.gd::work"]},
-        "script_to_files": {"test_a.gd": ["src_game/cell.gd",
-                                          "src_game/node.gd"]},
-        "script_to_functions": {"test_a.gd": ["src_game/cell.gd::work"]},
+        # 行事实：test_a 重跑后覆盖 cell 与 node 两个文件
+        "test_to_lines": {"test_a.gd::test_one": {
+            "src_game/cell.gd": [5], "src_game/node.gd": [4]}},
+        "script_to_lines": {"test_a.gd": {
+            "src_game/cell.gd": [5], "src_game/node.gd": [4]}},
     }
-    merged = _merge_arm(_baseline_arm(), fresh, dropped={"test_b.gd"})
-    # 重跑脚本整体替换（test_a 新增 node.gd 边），被删脚本边消失
+    merged = _merge_arm(_baseline_arm(), fresh, dropped={"test_b.gd"},
+                        fid_by_line_by_rel=_BASELINE_FID_BY_LINE)
+    # file 视图从合并后行事实派生：test_a 新增 node.gd 边，被删脚本边消失
     assert merged["test_to_files"]["test_a.gd::test_one"] == [
         "src_game/cell.gd", "src_game/node.gd"]
     assert "test_b.gd::test_two" not in merged["test_to_files"]
@@ -138,6 +158,16 @@ def test_merge_arm_replaces_by_script_and_drops():
     assert merged["file_to_tests"]["src_game/cell.gd"] == [
         "test_a.gd::test_one"]
     assert merged["tests"] == 1 and merged["scripts"] == 1
+    # 行事实合并：重跑身份整体替换、删除身份消失、反查一致
+    assert merged["test_to_lines"]["test_a.gd::test_one"] == {
+        "src_game/cell.gd": [5], "src_game/node.gd": [4]}
+    assert "test_b.gd::test_two" not in merged["test_to_lines"]
+    assert merged["line_to_tests"]["src_game/cell.gd"] == {
+        "5": ["test_a.gd::test_one"]}
+    assert merged["line_pairs"] == 2
+    # function 视图从行事实 + fid 行映射派生（覆盖新触及的 node.gd）
+    assert sorted(merged["test_to_functions"]["test_a.gd::test_one"]) == [
+        "src_game/cell.gd::work", "src_game/node.gd::ready_hook"]
 
 
 def test_diff_artifacts_counts_edges():

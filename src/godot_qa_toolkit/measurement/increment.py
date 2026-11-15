@@ -1,21 +1,24 @@
-"""SEE-1581 方向① — attribution 映射增量重建（探索轮）。
+"""SEE-1581 方向① — attribution 映射增量重建（探索轮；SEE-1587 行级化）。
 
 按变更分类计算失效面并重跑最小测试集，产出带 provenance 的增量映射
 产物（schema 与全量归属产物同形，另附 `increment` 块）：
 
-- 只改测试脚本 → 重跑该脚本、整体替换其全部边（test→file / test→function
-  / 脚本级）；
-- 改生产文件 → 失效面 = 触达该文件的测试（fn 边反查）∪ 静态索引直连
-  消费者（gdself depth==1），重跑候选脚本并整体替换其边；
+- 只改测试脚本 → 重跑该脚本、整体替换其全部行事实（test→lines /
+  script→lines）与派生边；
+- 改生产文件 → 失效面 = 触达该文件的测试（行事实反查）∪ 静态索引直连
+  消费者（gdself depth==1），重跑候选脚本并整体替换其行事实；
 - 新增生产文件 / recipe_hash 失配 / 校准到期 / 重跑面过大 → 回退全脸
   （内部转调 run_measurement，provenance.mode 标注原因）；
 - 删除测试脚本 → 仅删边不重跑；改名 = 旧脚本删边 + 新脚本重跑。
 
+SEE-1587：行事实是主真值——file/function 视图与 line→tests 反查从合并后
+行事实单源重算（`_derive_views_from_line_facts`），不独立拼接。
+
 如实边界：车道事件计数（hit_events/rates/phases/hotspots）不做增量合并，
 增量产物标记 `event_counts_stale: true`（结构统计 tests/files/pairs/
-function_pairs 由合并后的边精确重算）。行为耦合超出圈定面、单脚本运行与
-全脸运行的状态差异，都会体现为增量 vs 全量的边差分——差异逐边披露，
-不用不一致的数据冒充新鲜（`diff_artifacts` 是差分的唯一出处）。
+function_pairs/line_pairs 由合并后的行事实精确重算）。行为耦合超出圈定面、
+单脚本运行与全脸运行的状态差异，都会体现为增量 vs 全量的边差分——差异
+逐边披露，不用不一致的数据冒充新鲜（`diff_artifacts` 是差分的唯一出处）。
 """
 
 from __future__ import annotations
@@ -32,6 +35,8 @@ from .increment_runner import (
 )
 from .orchestrator import (
     ATTRIBUTION_SCHEMA,
+    _derive_views_from_line_facts,
+    _fid_by_line_from_registry,
     _inject_toolchain,
     _read_attr_merged,
     _read_registries,
@@ -43,6 +48,7 @@ from .orchestrator import (
 DEFAULT_RERUN_FULL_FACE_RATIO = 0.5
 _FWD_KEYS = ("test_to_files", "test_to_functions",
              "script_to_files", "script_to_functions")
+_LINE_KEYS = ("test_to_lines", "script_to_lines")
 
 
 class IncrementError(Exception):
@@ -186,8 +192,13 @@ def compute_invalidation(root: Path, baseline: dict,
             "explicit_rerun": explicit_rerun}
 
 
-def _merge_arm(arm: dict, fresh: dict, dropped: set[str]) -> dict:
-    """按脚本名替换/删边合并一张臂级映射；结构性统计精确重算。"""
+def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
+               fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None
+               ) -> dict:
+    """按脚本名替换/删边合并一张臂级映射；行事实同语义合并（重跑脚本
+    整体替换、删除脚本删边、其余身份原样保留），file/function 视图与
+    line→tests 反查从合并后行事实单源重算（SEE-1587：视图永不独立拼接）。
+    结构性统计精确重算。"""
     replace_names = {_script_name_of(i) for i in
                      (fresh.get("test_to_files") or {})}
     replace_names |= set(fresh.get("script_to_files") or {})
@@ -197,18 +208,28 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str]) -> dict:
         for identity, value in (arm.get(key) or {}).items():
             if name_of(identity) in dropped or name_of(identity) in replace_names:
                 continue
-            base[identity] = list(value)
+            base[identity] = value
         for identity, value in (fresh.get(key) or {}).items():
-            base[identity] = list(value)
+            base[identity] = value
         return base
 
-    test_to_functions = _merged("test_to_functions",
-                                lambda i: i.split("::", 1)[0])
-    test_to_files = _merged("test_to_files", lambda i: i.split("::", 1)[0])
-    script_to_files = _merged("script_to_files", lambda i: i)
-    script_to_functions = _merged("script_to_functions", lambda i: i)
-    file_to_tests = _invert(test_to_files)
-    file_to_scripts = _invert(script_to_files)
+    test_to_lines = _merged("test_to_lines", lambda i: i.split("::", 1)[0])
+    script_to_lines = _merged("script_to_lines", lambda i: i)
+    # file/function 边不再独立合并：从合并后行事实派生（行事实是主真值）。
+    derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
+                                            fid_by_line_by_rel)
+    test_to_files = derived["test_to_files"]
+    script_to_files = derived["script_to_files"]
+    test_to_functions = derived["test_to_functions"]
+    script_to_functions = derived["script_to_functions"]
+    file_to_tests = derived["file_to_tests"]
+    file_to_scripts = derived["file_to_scripts"]
+    line_to_tests = derived["line_to_tests"]
+    line_pairs = sum(len(lines)
+                     for d in test_to_lines.values() for lines in d.values())
+    script_line_pairs = sum(len(lines)
+                            for d in script_to_lines.values()
+                            for lines in d.values())
     return {
         "tests": len(test_to_files),
         "scripts": len(script_to_files),
@@ -216,6 +237,8 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str]) -> dict:
         "pairs": sum(len(v) for v in test_to_files.values()),
         "script_pairs": sum(len(v) for v in script_to_files.values()),
         "function_pairs": sum(len(v) for v in test_to_functions.values()),
+        "line_pairs": line_pairs,
+        "script_line_pairs": script_line_pairs,
         "test_to_files": {k: sorted(v)
                           for k, v in sorted(test_to_files.items())},
         "test_to_functions": {k: sorted(v)
@@ -228,6 +251,14 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str]) -> dict:
                           for k, v in sorted(file_to_tests.items())},
         "file_to_scripts": {k: sorted(v)
                             for k, v in sorted(file_to_scripts.items())},
+        "test_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                          for k, v in sorted(test_to_lines.items())},
+        "script_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                            for k, v in sorted(script_to_lines.items())},
+        "line_to_tests": {rel: {str(ln): sorted(ids)
+                                for ln, ids in sorted(by_line.items())}
+                          for rel, by_line in
+                          sorted(line_to_tests.items())},
     }
 
 
@@ -281,10 +312,10 @@ def run_attribution_increment(project_root: str | Path,
         return _fallback_full_face(root, target_files, raw_recipe, out_path,
                                    classes, reason, attribution_causal,
                                    timeout_s, t0)
-    arm_exec_s, fresh, executions = _run_increment_arm(
+    arm_exec_s, fresh, executions, fid_by_line_by_rel = _run_increment_arm(
         root, target_files, recipe, rerun, timeout_s, attribution_causal)
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,
-                        invalidation["dropped"])
+                        invalidation["dropped"], fid_by_line_by_rel)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
@@ -327,9 +358,11 @@ def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
 
 def _run_increment_arm(root: Path, target_files: list[str], recipe: dict,
                        rerun: set[str], timeout_s: int,
-                       causal: bool) -> tuple[float, dict, list[dict]]:
+                       causal: bool) -> tuple[float, dict, list[dict],
+                                              dict[str, dict[int, str]]]:
     """在插桩副本上只跑 rerun 脚本，读回归属证据并聚合成臂级映射。
-    返回 (读回+聚合秒数, forward 边集, 逐脚本执行结果)。"""
+    返回 (读回+聚合秒数, fresh 边/行事实集, 逐脚本执行结果, fid_by_line_by_rel)
+    ——fid 行映射覆盖全部目标文件（模板面），供合并侧派生视图单源重算。"""
     templates = prepare_attr_templates(root, target_files, recipe, causal)
     gut_dirs = list(recipe["gut_face"].get("dirs") or [])
     run_uuid = make_run_uuid()
@@ -341,21 +374,26 @@ def _run_increment_arm(root: Path, target_files: list[str], recipe: dict,
         rel: _read_attr_merged(root, run_uuid, rel, xdg_homes)
         for rel in templates}
     registries = _read_registries(root, run_uuid, xdg_homes)
+    fid_by_line_by_rel = {rel: _fid_by_line_from_registry(it["registry"])
+                          for rel, it in templates.items()}
     arm_map = build_attribution_map(
         "increment", attr_by_rel, registries,
         probe_lines_by_rel={rel: it["probe_lines"]
                             for rel, it in templates.items()},
-        fid_by_probe_by_rel={rel: it["attr_fid_by_probe"]
-                             for rel, it in templates.items()})
+        block_map_by_rel={rel: it["block_map"]
+                          for rel, it in templates.items()},
+        fid_by_line_by_rel=fid_by_line_by_rel)
     for xdg in xdg_homes:
         shutil.rmtree(xdg, ignore_errors=True)
-    return round(time.monotonic() - t0, 3), _group_fresh_edges(arm_map), results
+    return (round(time.monotonic() - t0, 3), _group_fresh_edges(arm_map),
+            results, fid_by_line_by_rel)
 
 
 def _group_fresh_edges(inc_arm: dict) -> dict:
     out = {}
-    for key in _FWD_KEYS:
-        out[key] = {k: list(v)
+    for key in _FWD_KEYS + _LINE_KEYS:
+        out[key] = {k: {r: list(ls) for r, ls in v.items()}
+                    if key in _LINE_KEYS else list(v)
                     for k, v in (inc_arm.get(key) or {}).items()}
     return out
 
@@ -376,6 +414,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "target_files": list(baseline.get("target_files")
                              or sorted((baseline.get("file_sha256") or {}))),
         "tests_face": _merged_tests_face(root, baseline, classes),
+        "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
+                                                             classes),
         "arms": {"gut_full": merged},
         "arms_state": dict(baseline.get("arms_state") or {}),
         "notes": list(baseline.get("notes") or []),
@@ -421,6 +461,27 @@ def _merged_file_sha(root: Path, baseline: dict,
     return shas
 
 
+def _merged_instrumentable_lines(root: Path, baseline: dict,
+                                 classes: dict) -> dict:
+    """探针面（可插桩行全集）继承 + 变更生产文件按当前源码重算——
+    与模板构建同源（_instrument_blocks），行级主真值的测量宇宙随之更新。"""
+    surface = dict(baseline.get("instrumentable_lines") or {})
+    from ..coverage.runner import _instrument_blocks
+    for rel in classes.get("prod_changed", []) + classes.get("prod_new", []):
+        p = Path(root) / rel
+        if not p.is_file():
+            surface.pop(rel, None)
+            continue
+        src = p.read_text(encoding="utf-8")
+        _tpl, probe_lines, block_map = _instrument_blocks(
+            src, "gqt-surface-computation.txt", runtime_sink=False)
+        lines: set[int] = set()
+        for start in probe_lines:
+            lines.update(block_map.get(start) or [start])
+        surface[rel] = sorted(lines)
+    return surface
+
+
 def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
                         out_path: str | Path, classes: dict, reason: str,
                         causal: bool, timeout_s: int, t0: float) -> dict:
@@ -451,25 +512,40 @@ def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
 
 
 def diff_artifacts(a_doc: dict, b_doc: dict) -> dict:
-    """两张归属产物的逐边差分（test 车道 file 级与 function 级、脚本级）。
+    """两张归属产物的逐边差分（file/function 边 + 行事实三元组）。
 
     返回每张边的 {added_count, removed_count, added_edges(截断 200),
-    removed_edges(截断 200)}——added = 仅 b 有，removed = 仅 a 有。"""
+    removed_edges(截断 200)}——added = 仅 b 有，removed = 仅 a 有。
+    行事实边按 (identity, rel, line) 三元组粒度差分。"""
     def edges(doc: dict, key: str) -> dict[str, set[str]]:
         arm = (doc.get("arms") or {}).get("gut_full") or {}
         return {k: set(v) for k, v in (arm.get(key) or {}).items()}
 
-    out = {}
-    for key in _FWD_KEYS:
-        a, b = edges(a_doc, key), edges(b_doc, key)
+    def line_edges(doc: dict, key: str) -> dict[str, set[str]]:
+        arm = (doc.get("arms") or {}).get("gut_full") or {}
+        out: dict[str, set[str]] = {}
+        for identity, by_rel in (arm.get(key) or {}).items():
+            for rel, lines in by_rel.items():
+                edge = f"{identity} -> {rel}"
+                out.setdefault(edge, set()).update(
+                    str(ln) for ln in lines)
+        return out
+
+    def _diff(a: dict, b: dict) -> dict:
         added = sorted(f"{k} -> {x}" for k, v in b.items()
                        for x in v - a.get(k, set()))
         removed = sorted(f"{k} -> {x}" for k, v in a.items()
                          for x in v - b.get(k, set()))
-        out[key] = {
+        return {
             "added_count": len(added), "removed_count": len(removed),
             "added_edges": added[:200], "removed_edges": removed[:200],
         }
+
+    out = {}
+    for key in _FWD_KEYS:
+        out[key] = _diff(edges(a_doc, key), edges(b_doc, key))
+    for key in _LINE_KEYS:
+        out[key] = _diff(line_edges(a_doc, key), line_edges(b_doc, key))
     return out
 
 

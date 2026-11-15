@@ -3,7 +3,8 @@
 判据覆盖：
 - 归属形态探针/注册块的生成（默认关闭字节不变、开启后 per-id 变量唯一）；
 - GUT per-test 生命周期钩子与 finalizer 的归属排空接线；
-- test→file / file→tests 映射聚合与无主命中披露；
+- 行级主真值映射聚合（SEE-1587：行事实为主，file/function 派生）与无主
+  命中披露；
 - 默认关闭路径报告零新增键（既有输出形状不变）。
 """
 
@@ -23,7 +24,6 @@ from godot_qa_toolkit.measurement.orchestrator import (
     _ATTR_FLUSHER_GD,
     _PRE_HOOK_GD,
     _FLUSHER_GD,
-    _function_entry_probes,
     build_attribution_map,
     run_measurement,
 )
@@ -213,22 +213,6 @@ def test_causal_instrumentation_declares_ctx_preload():
     gdtoolkit_parser.parser.parse(causal)
 
 
-def test_function_entry_probes_pick_min_probe_per_function():
-    registry = {"entries": [
-        {"fid": "src/x.gd::a", "instrumentable": True,
-         "start_line": 2, "end_line": 4},
-        {"fid": "src/x.gd::b", "instrumentable": True,
-         "start_line": 6, "end_line": 9},
-        {"fid": "src/x.gd::inner", "instrumentable": False,
-         "start_line": 11, "end_line": 12},
-    ]}
-    ids, fid_by_probe = _function_entry_probes(registry, [2, 5, 6, 8])
-    assert ids == {0, 2}
-    assert fid_by_probe[0] == "src/x.gd::a"   # 行 2（区间内最小 probe）
-    assert fid_by_probe[2] == "src/x.gd::b"   # 行 6
-    assert len(fid_by_probe) == 2
-
-
 # ---------------------------------------------------------------- 映射聚合
 
 
@@ -239,12 +223,15 @@ def _rec(seen, cnt, fn, unattr_counts, phases):
             "phases": list(phases)}
 
 
-def test_build_attribution_map_joins_registry_and_splits_lanes():
-    # 组合注册表：槽位 0/1 = 测试，槽位 2 = 脚本（同一索引空间，方向②）
+def test_build_attribution_map_line_facts_primary_and_derived_views():
+    # SEE-1587 line-primary：行事实取自 fn (probe, slot) 对按块展开；
+    # file/function 视图由行事实 + fid 行映射派生。
+    # probe_lines[i] 是 probe i 的块首行：probe 2 → 行 6，probe 4 → 行 8。
+    # 组合注册表：槽位 0/1 = 测试，槽位 2 = 脚本（同一索引空间）
     attr_by_rel = {
         "src_game/cell.gd": {101: _rec(
             {0, 1, 2}, {0: 20, 1: 5, 2: 6},
-            {7: {0}, 8: {1, 2}}, {2: 3, 3: 1}, [3, 1, 0, 0])},
+            {2: {0}, 4: {1, 2}}, {2: 3, 3: 1}, [3, 1, 0, 0])},
         "src_game/node.gd": {101: _rec({1}, {1: 5}, {}, {}, [0, 0, 0, 0])},
     }
     registries = (
@@ -255,28 +242,50 @@ def test_build_attribution_map_joins_registry_and_splits_lanes():
     m = build_attribution_map(
         "gut_full", attr_by_rel, registries,
         probe_lines_by_rel={"src_game/cell.gd": [4, 5, 6, 7, 8]},
+        block_map_by_rel={"src_game/cell.gd": {4: [4], 5: [5, 6], 7: [7],
+                                               8: [8]}},
         fid_by_line_by_rel={"src_game/cell.gd": {4: "src_game/cell.gd::work",
                                                  5: "src_game/cell.gd::work",
                                                  6: "src_game/cell.gd::x",
                                                  7: "src_game/cell.gd::y",
-                                                 8: "src_game/cell.gd::z"}},
-        fid_by_probe_by_rel={"src_game/cell.gd": {7: "src_game/cell.gd::y",
-                                                  8: "src_game/cell.gd::z"}})
+                                                 8: "src_game/cell.gd::z"}})
     assert m["arm"] == "gut_full"
+    # 行事实（主真值）：probe 2 → 行 6（无块映射回退块首行）；probe 4 → 块 [8]
+    assert m["test_to_lines"] == {
+        "res://tests/unit/test_a.gd::test_one": {"src_game/cell.gd": [6]},
+        "res://tests/unit/test_b.gd::test_two": {"src_game/cell.gd": [8]},
+    }
+    assert m["script_to_lines"] == {
+        "res://tests/integration/test_c.gd": {"src_game/cell.gd": [8]}}
+    # 行→测试反查
+    assert m["line_to_tests"]["src_game/cell.gd"] == {
+        "6": ["res://tests/unit/test_a.gd::test_one"],
+        "8": ["res://tests/unit/test_b.gd::test_two"],
+    }
+    assert m["line_pairs"] == 2 and m["script_line_pairs"] == 1
+    # 派生 file 视图 = 行事实文件的投影（node.gd 无行事实 → 不出现）
     assert m["tests"] == 2 and m["scripts"] == 1
-    assert m["files"] == 2
-    assert m["pairs"] == 3 and m["script_pairs"] == 1
-    # 函数级映射（方向②）：fn 对解析 fid——probe 7 槽位 0 = test_a → y；
-    # probe 8 槽位 1 = test_b → z；probe 8 槽位 2 = 脚本槽 → z
+    assert m["files"] == 1
+    assert m["pairs"] == 2 and m["script_pairs"] == 1
+    assert m["test_to_files"] == {
+        "res://tests/unit/test_a.gd::test_one": ["src_game/cell.gd"],
+        "res://tests/unit/test_b.gd::test_two": ["src_game/cell.gd"],
+    }
+    assert m["script_to_files"] == {
+        "res://tests/integration/test_c.gd": ["src_game/cell.gd"]}
+    assert m["file_to_tests"]["src_game/cell.gd"] == [
+        "res://tests/unit/test_a.gd::test_one",
+        "res://tests/unit/test_b.gd::test_two"]
+    # 派生 function 视图 = 行事实经 fid 行映射投影
     assert m["function_pairs"] == 2
     assert m["test_to_functions"]["res://tests/unit/test_a.gd::test_one"] == [
-        "src_game/cell.gd::y"]
+        "src_game/cell.gd::x"]
     assert m["test_to_functions"]["res://tests/unit/test_b.gd::test_two"] == [
         "src_game/cell.gd::z"]
     assert m["script_to_functions"]["res://tests/integration/test_c.gd"] == [
         "src_game/cell.gd::z"]
-    # 三车道（事件取 cnt 按槽位 kind 归类）：测试级 30（cell 20+5、node 5）/
-    # 脚本级 6 / 无主 4
+    # 三车道事件统计（取 cnt 按槽位 kind 归类，与行事实独立）：
+    # 测试级 30（cell 20+5、node 5）/ 脚本级 6 / 无主 4
     assert m["attributed_hit_events"] == 30
     assert m["script_hit_events"] == 6
     assert m["unattributed_hit_events"] == 4
@@ -297,16 +306,25 @@ def test_build_attribution_map_joins_registry_and_splits_lanes():
     assert hs[0]["file"] == "src_game/cell.gd"
     assert hs[0]["line"] == 6 and hs[0]["function_id"] == "src_game/cell.gd::x"
     assert m["files_with_unattributed"] == 1
-    assert m["test_to_files"] == {
-        "res://tests/unit/test_a.gd::test_one": ["src_game/cell.gd"],
-        "res://tests/unit/test_b.gd::test_two": [
-            "src_game/cell.gd", "src_game/node.gd"],
-    }
-    assert m["script_to_files"] == {
-        "res://tests/integration/test_c.gd": ["src_game/cell.gd"]}
-    assert m["file_to_tests"]["src_game/node.gd"] == [
-        "res://tests/unit/test_b.gd::test_two"]
     assert m["unmapped_count"] == 0 and m["unmapped_script_count"] == 0
+
+
+def test_build_attribution_map_block_expansion_via_block_map():
+    # 行事实按块展开：probe 命中块首行 → 块内全部语句起始行
+    attr_by_rel = {
+        "src_game/cell.gd": {5: _rec({0}, {0: 3}, {0: {0}}, {}, [0, 0, 0, 0])},
+    }
+    registries = ({5: {0: "res://tests/unit/test_a.gd::test_one"}}, {})
+    m = build_attribution_map(
+        "gut_full", attr_by_rel, registries,
+        probe_lines_by_rel={"src_game/cell.gd": [4]},
+        block_map_by_rel={"src_game/cell.gd": {4: [4, 5, 6]}},
+        fid_by_line_by_rel={"src_game/cell.gd": {4: "f", 5: "f", 6: "g"}})
+    assert m["test_to_lines"]["res://tests/unit/test_a.gd::test_one"][
+        "src_game/cell.gd"] == [4, 5, 6]
+    # 派生函数视图覆盖行事实触及的全部函数
+    assert sorted(m["test_to_functions"][
+        "res://tests/unit/test_a.gd::test_one"]) == ["f", "g"]
 
 
 def test_build_attribution_map_unmapped_is_disclosed_not_guessed():
@@ -406,7 +424,8 @@ class FakeGodot:
                     src):
                 uuid, key8 = m.group(1), m.group(2)
                 (dest / f"qa-coverage-attr-{uuid}-99999-{key8}.txt").write_text(
-                    "test 0\ntest 1\ncnt 0 10\nfn 0 0\nunattr 0 2\nph 2 0 0 0\n",
+                    "test 0\ntest 1\ncnt 0 10\nfn 0 0\nfn 1 1\n"
+                    "unattr 0 2\nph 2 0 0 0\n",
                     encoding="utf-8")
         hook_text = self.pre_hook_texts[-1]
         m = re.search(r"qa-cov-attr-tests-([0-9a-f-]{8,36})-", hook_text)
@@ -478,9 +497,25 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     mapping = artifact["arms"]["gut_full"]["test_to_files"]
     assert mapping["res://tests/unit/test_game.gd::test_ok"] == [
         "src_game/cell.gd", "src_game/node.gd"]
-    # 函数级映射（方向②）：fn 对经函数入口 probe 解析出 fid
+    # 行级主真值：per-test covered line sets 与 line→tests 反查都在产物里，
+    # 且覆盖行落在各自探针面内（块展开后）
+    line_facts = artifact["arms"]["gut_full"]["test_to_lines"][
+        "res://tests/unit/test_game.gd::test_ok"]
+    assert line_facts["src_game/cell.gd"]
+    assert line_facts["src_game/node.gd"]
+    cell_lines = set(line_facts["src_game/cell.gd"])
+    assert cell_lines <= set(artifact["instrumentable_lines"][
+        "src_game/cell.gd"])
+    reverse = artifact["arms"]["gut_full"]["line_to_tests"]
+    for rel in ("src_game/cell.gd", "src_game/node.gd"):
+        hit_lines = set(line_facts[rel])
+        rev_lines = {int(k) for k, v in reverse[rel].items() if v}
+        assert hit_lines <= rev_lines
+    # 派生函数视图仍可从行事实解析出 fid
     fn_mapping = artifact["arms"]["gut_full"]["test_to_functions"]
     assert fn_mapping["res://tests/unit/test_game.gd::test_ok"]
+    # 探针面（可插桩行全集）随产物落盘
+    assert artifact["instrumentable_lines"]["src_game/cell.gd"]
     # 归属钩子确实注入（含 run_uuid 替换，无占位符残留）
     assert any("start_test.connect" in t for t in fake.pre_hook_texts)
     assert all("__GQT_RUN_UUID__" not in t for t in fake.pre_hook_texts)

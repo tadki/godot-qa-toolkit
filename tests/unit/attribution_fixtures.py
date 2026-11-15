@@ -34,7 +34,9 @@ def write_map(project_root: Path,
               target_tests: dict[str, list[str]]) -> str:
     """target_tests: 目标文件 rel → 触达它的测试身份列表（`脚本名::测试名`）。
 
-    空列表 = 干净的"零引用"（映射说无测试 → 零引用短路）。"""
+    空列表 = 干净的"零引用"（映射说无测试 → 零引用短路）。
+    SEE-1587：/6 形态——行事实为主真值（每个 (identity, rel) 边合成一行
+    事实 [2]），file/function 视图按派生口径随行事实一致。"""
     from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
     install_recipe(project_root)
     recipe, error = build_recipe(project_root)
@@ -45,15 +47,26 @@ def write_map(project_root: Path,
            "tests": 0, "scripts": 0, "files": 0, "pairs": 0,
            "function_pairs": 0, "test_to_functions": {},
            "script_to_functions": {}, "file_to_tests": {},
-           "file_to_scripts": {}}
+           "file_to_scripts": {}, "line_pairs": 0, "script_line_pairs": 0,
+           "test_to_lines": {}, "script_to_lines": {}, "line_to_tests": {}}
     shas: dict[str, str] = {}
+    instrumentable: dict[str, list[int]] = {}
     for rel, idents in target_tests.items():
         p = Path(project_root) / rel
         if p.is_file():
             shas[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        instrumentable[rel] = [2, 3]
         for ident in idents:
             arm["test_to_files"].setdefault(ident, []).append(rel)
             arm["file_to_tests"].setdefault(rel, []).append(ident)
+            arm["test_to_lines"].setdefault(ident, {})[rel] = [2]
+            arm["line_to_tests"].setdefault(rel, {})["2"] = sorted(
+                set(arm["line_to_tests"].setdefault(rel, {}).get("2", []))
+                | {ident})
+            arm["line_pairs"] += 1
+    arm["tests"] = len(arm["test_to_files"])
+    arm["files"] = len(arm["file_to_tests"])
+    arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     tests_face = {}
     tests_root = Path(project_root) / "tests"
     if tests_root.is_dir():
@@ -61,7 +74,7 @@ def write_map(project_root: Path,
             tests_face[str(gd.relative_to(project_root))] = hashlib.sha256(
                 gd.read_bytes()).hexdigest()
     doc = {
-        "schema_version": "test-attribution/5",
+        "schema_version": "test-attribution/6",
         "report_recipe_hash": raw,
         "recipe_hash_pristine": raw,
         "project_root": str(project_root),
@@ -70,6 +83,7 @@ def write_map(project_root: Path,
         "file_sha256": shas,
         "target_files": sorted(shas),
         "tests_face": tests_face,
+        "instrumentable_lines": instrumentable,
         "arms": {"gut_full": arm},
         "arms_state": {"gut_full": {"state": "valid",
                                     "invalid_reason": None,

@@ -288,7 +288,7 @@ def _increment_project(tmp_path: Path) -> tuple[Path, dict, list[str], Path]:
     recipe, error = build_recipe(root)
     assert error is None, error
     baseline = {
-        "schema_version": "test-attribution/5",
+        "schema_version": "test-attribution/6",
         "report_recipe_hash": recipe["recipe_hash"],
         "recipe_hash_pristine": recipe["recipe_hash"],
         "arms": {"gut_full": {
@@ -297,9 +297,13 @@ def _increment_project(tmp_path: Path) -> tuple[Path, dict, list[str], Path]:
             "script_to_files": {}, "script_to_functions": {},
             "file_to_tests": {"src_game/node.gd": ["test_known.gd::t"]},
             "file_to_scripts": {},
+            "test_to_lines": {"test_known.gd::t": {"src_game/node.gd": [2]}},
+            "script_to_lines": {},
+            "line_to_tests": {"src_game/node.gd": {"2": ["test_known.gd::t"]}},
         }},
         "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
                                     "pairs": 1}},
+        "instrumentable_lines": {"src_game/node.gd": [2]},
         "increment": {"increments_since_full": 3},
     }
     base_path = tmp_path / "base.json"
@@ -313,9 +317,11 @@ def _fake_arm(monkeypatch):
     monkeypatch.setattr(
         inc_mod, "_run_increment_arm",
         lambda root, targets, recipe, rerun, timeout_s, causal:
-        (0.01, {"test_to_files": {"test_known.gd::t": ["src_game/node.gd"]},
-                "test_to_functions": {}, "script_to_files": {},
-                "script_to_functions": {}}, []))
+        (0.01,
+         {"test_to_lines": {"test_known.gd::t": {"src_game/node.gd": [2]}},
+          "script_to_lines": {}},
+         [],
+         {"src_game/node.gd": {2: "src_game/node.gd::x"}}))
 
 
 def test_increment_artifact_advances_calibration_counter(tmp_path,
@@ -501,10 +507,17 @@ def _rec(seen, cnt, fn=None, unattr=None, phases=(0, 0, 0, 0)):
 
 
 def test_test_lane_wins_over_conflicting_script_slot():
-    attr = {"x.gd": {1: _rec({0}, {0: 5})}}
+    # 槽位 0 同时出现在两张注册表：行事实只归 test 车道（test 优先，
+    # 不按车道猜测重复归属）
+    attr = {"x.gd": {1: _rec({0}, {0: 5}, fn={0: {0}})}}
     m = build_attribution_map(
         "gut_full", attr,
-        ({1: {0: "res://tests/a.gd::t"}}, {1: {0: "res://tests/b.gd"}}))
+        ({1: {0: "res://tests/a.gd::t"}}, {1: {0: "res://tests/b.gd"}}),
+        probe_lines_by_rel={"x.gd": [3]},
+        block_map_by_rel={"x.gd": {3: [3, 4]}},
+        fid_by_line_by_rel={"x.gd": {}})
+    assert m["test_to_lines"] == {"res://tests/a.gd::t": {"x.gd": [3, 4]}}
+    assert m["script_to_lines"] == {}
     assert m["test_to_files"] == {"res://tests/a.gd::t": ["x.gd"]}
     assert m["script_to_files"] == {}
 
@@ -524,12 +537,26 @@ def test_empty_lanes_rate_is_none_not_zero():
 
 
 def test_fn_edge_without_resolved_fid_is_not_guessed():
-    attr = {"x.gd": {1: _rec({0}, {0: 2}, fn={99: {0}})}}
+    # 行事实覆盖的行在 fid 行映射中无归属：函数视图不猜（行事实仍在）
+    attr = {"x.gd": {1: _rec({0}, {0: 2}, fn={0: {0}})}}
     m = build_attribution_map(
         "gut_full", attr,
         ({1: {0: "res://tests/a.gd::t"}}, {1: {}}),
-        fid_by_probe_by_rel={"x.gd": {}})
+        probe_lines_by_rel={"x.gd": [3]},
+        block_map_by_rel={"x.gd": {3: [3]}},
+        fid_by_line_by_rel={"x.gd": {}})
+    assert m["test_to_lines"] == {"res://tests/a.gd::t": {"x.gd": [3]}}
     assert m["test_to_functions"] == {}
+    # probe 越界同样不猜：探针 manifest 外的 fn 对丢弃
+    attr2 = {"x.gd": {1: _rec({0}, {0: 2}, fn={99: {0}})}}
+    m2 = build_attribution_map(
+        "gut_full", attr2,
+        ({1: {0: "res://tests/a.gd::t"}}, {1: {}}),
+        probe_lines_by_rel={"x.gd": [3]},
+        block_map_by_rel={"x.gd": {3: [3]}},
+        fid_by_line_by_rel={"x.gd": {3: "x.gd::f"}})
+    assert m2["test_to_lines"] == {}
+    assert m2["test_to_functions"] == {}
 
 
 def test_arms_state_pairs_count_reflects_edges():

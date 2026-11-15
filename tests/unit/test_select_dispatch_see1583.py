@@ -28,7 +28,7 @@ from attribution_fixtures import install_recipe
 
 GD_TARGET = "func add(a, b):\n\treturn a + b\n"
 OLD_SCHEMA = "canonical-test-attribution/4"
-NEW_SCHEMA = "test-attribution/5"
+NEW_SCHEMA = "test-attribution/6"
 
 
 def _project(tmp_path: Path) -> tuple[Path, Path]:

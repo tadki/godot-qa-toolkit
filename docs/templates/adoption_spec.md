@@ -1,6 +1,6 @@
 # adoption_spec 采纳规范（SEE-1426 P4，决策 rev1 §3.4/§3.5）
 
-> 被测项目接入 `gqt arch` / `gqt accept` 门禁的人接线说明。核心纪律：
+> 被测项目接入 `gqt measure arch` / `gqt gherkin` 门禁的人接线说明。核心纪律：
 > **gqt 零嗅探零发现**——工具不探测 testing_api 在场、不读 tag 判轨道、
 > 不发现项目结构；一切轨道映射由人按本规范显式接线。
 
@@ -8,7 +8,7 @@
 
 | 被测项目形态 | 接入轨道 | 必做接线 |
 |---|---|---|
-| 已有 Pure Core（`src/core/`） | arch + accept 全量 | `gqt arch src/core` 进 CI；harness 按模板接 testing_api |
+| 已有 Pure Core（`src/core/`） | arch + gherkin 全量 | `gqt measure arch src/core` 进 CI；harness 按模板接 testing_api |
 | 场景树耦合项目 | accept 分步 | 先建 harness（薄适配层），core 边界按 pure_core_skeleton.md 逐步迁移 |
 | 仅想跑验收 | accept only | compile + run + mutate；arch 跳过（gauntlet 模板已条件化） |
 
@@ -35,15 +35,15 @@
    .feature 缺失/漂移"；攻击者连源文件带三件产物整体替换的场景在 v1
    无 stamp 语义下不可分辨（stamp/attest 为 v2 预登记项）。
 3. **gauntlet 互斥锁罩硬序**：单命令游离调用（不经 gauntlet 直接跑
-   `gqt accept run`）不在锁罩内——与 gauntlet 并行时可能出现生成物
+   `gqt gherkin run`）不在锁罩内——与 gauntlet 并行时可能出现生成物
    竞争，调用方自律（详见决策 rev1 §3.5 Archi 攻-5 TOCTOU 修补边界）。
 4. **--worker 硬纪律依赖 harness**：`reset()` 未真实释放实例时，探针
    断言面只能覆盖 harness 自己可见的状态复位；跨实例泄漏归被测项目侧。
 
 ## 4. 验收清单（接入完成判据）
 
-- [ ] `gqt arch <core-dir>` exit 0（Pure Core 边界干净）
-- [ ] `gqt accept compile <feature> --write` 三件产物在库
-- [ ] `gqt accept run` 全绿且 `summary.tests_executed > 0`
-- [ ] `gqt accept mutate` 全 kill（survived = 断言面不全，先补测试）
+- [ ] `gqt measure arch <core-dir>` exit 0（Pure Core 边界干净）
+- [ ] `gqt gherkin compile <feature> --write` 三件产物在库
+- [ ] `gqt gherkin run` 全绿且 `summary.tests_executed > 0`
+- [ ] `gqt gherkin mutate` 全 kill（survived = 断言面不全，先补测试）
 - [ ] `accept_gauntlet.sh` 在 CI 绿；并行双会话第二条等待锁

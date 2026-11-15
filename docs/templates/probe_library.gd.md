@@ -8,8 +8,8 @@
 
 ## arch 边界（明写，定案 §2 原文）
 
-**harness 与探针库（`addons/gqt_accept/`）不在 `gqt arch` 扫描路径内**：
-arch 守卫的扫描集由调用方显式传 paths（`gqt arch <paths...>`，通常是业务
+**harness 与探针库（`addons/gqt_accept/`）不在 `gqt measure arch` 扫描路径内**：
+arch 守卫的扫描集由调用方显式传 paths（`gqt measure arch <paths...>`，通常是业务
 core/ 目录），addons/ 不在其中。因此 harness/探针库可以自由使用
 Node/SceneTree/get_tree 等引擎 API——它们是**观测与驱动面**，不是被判定
 的业务逻辑。**业务逻辑要进 Pure Core 判定必须拆为独立 RefCounted/

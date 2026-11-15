@@ -30,20 +30,20 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[gauntlet] 1/4 compile (clean-then-generate, opt-in write)"
-eval "$GQT accept compile \"$FEATURE\" --project-root \"$PROJECT_ROOT\" --write" \
+eval "$GQT gherkin compile \"$FEATURE\" --project-root \"$PROJECT_ROOT\" --write" \
   || { echo "[gauntlet] FAIL at compile"; exit 1; }
 
 echo "[gauntlet] 2/4 smoke + run (replay-check enforced)"
-eval "$GQT accept run \"$PROJECT_ROOT\" --project-root \"$PROJECT_ROOT\" --key \"$KEY\"" \
+eval "$GQT gherkin run \"$PROJECT_ROOT\" --project-root \"$PROJECT_ROOT\" --key \"$KEY\"" \
   || { echo "[gauntlet] FAIL at run"; exit 1; }
 
 echo "[gauntlet] 3/4 mutate (full matrix, survived = reject)"
-eval "$GQT accept mutate \"$PROJECT_ROOT\" --project-root \"$PROJECT_ROOT\" --key \"$KEY\"" \
+eval "$GQT gherkin mutate \"$PROJECT_ROOT\" --project-root \"$PROJECT_ROOT\" --key \"$KEY\"" \
   || { echo "[gauntlet] FAIL at mutate"; exit 1; }
 
 echo "[gauntlet] 4/4 arch guard over src/core (Pure Core boundary)"
 if [ -d "$PROJECT_ROOT/src/core" ]; then
-  eval "$GQT arch \"$PROJECT_ROOT/src/core\"" \
+  eval "$GQT measure arch \"$PROJECT_ROOT/src/core\"" \
     || { echo "[gauntlet] FAIL at arch"; exit 1; }
 else
   echo "[gauntlet] (no src/core — arch step skipped, see adoption_spec.md)"

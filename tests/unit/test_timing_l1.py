@@ -75,7 +75,10 @@ def test_env_invalid_values_fall_back(monkeypatch):
 
 
 def test_suggested_action_names_the_flag():
-    assert suggested_action(600) == "rerun with --timeout 600"
+    # SEE-1589 A-H1：低于预算上限仍指向可执行的 --timeout 600；
+    # 已达上限不得回显同一 timeout（改由 test_see1589_full_face.py 钉死）。
+    assert suggested_action(60) == "rerun with --timeout 600"
+    assert "--select" in suggested_action(600)
 
 
 # ---- §SPEC-L1-02: store 键 / TTL / git_rev -----------------------------------

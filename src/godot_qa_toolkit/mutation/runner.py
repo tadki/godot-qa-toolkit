@@ -79,7 +79,7 @@ from .progress import make_reporter
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
 from ..timing import (BUDGET_CAP_S, explicit_timing_meta, project_relative,
-                      resolve_budget, suggested_action)
+                      resolve_budget, suggested_action, suggested_action_kind)
 
 
 # GUT 执行域判定原语在 gutrun.py（SEE-1420 <800 行纪律拆分）；re-export
@@ -232,6 +232,11 @@ def run_mutation(    file_path: str,
         progress=progress, identity=identity, worker_channel=worker_channel,
         select_mode=select_mode, selection_meta=selection_meta)
     s = result.get("summary") if isinstance(result, dict) else None
+    if isinstance(s, dict):
+        # SEE-1589 A：有效选面唯一判别点（串行/卡尺/显式 --tests 同源）。
+        from .testscan import resolve_selection_mode
+        s.setdefault("selection_mode", resolve_selection_mode(
+            select_mode, selection_meta or {}, select_ids, select_lines))
     if isinstance(s, dict) and "stage_timings" in s:
         wall_s = time.monotonic() - t0
         s["stage_timings"]["total"] = round(wall_s, 3)
@@ -394,7 +399,8 @@ def _run_mutation_core(file_path: str,
         return estimate
 
     if not mutants:
-        return _no_sites_result(str(path), scoped)
+        return _no_sites_result(str(path), scoped,
+                                zero_ref=bool(selection_meta.get("zero_ref")))
 
     # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行 retry_ids；
     # 显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分复用。
@@ -704,7 +710,8 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             f"baseline GUT timed out after {timeout_s}s — mutation data untrustworthy",
             f"baseline GUT timed out after {timeout_s}s (project's baseline run exceeds "
             f"the timeout — raise --timeout or check why tests are this slow)",
-            hint=suggested_action(BUDGET_CAP_S),
+            hint=suggested_action(timeout_s),
+            action_kind=suggested_action_kind(timeout_s),
         )
     except _BaselineLaunchFailure as e:
         return _run_error_result(

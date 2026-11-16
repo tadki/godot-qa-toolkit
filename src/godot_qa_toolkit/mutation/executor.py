@@ -294,10 +294,16 @@ def _zero_ref_terminal(file: str, total: int,
     仅 `--select full` 显式审计面才以 None 继续。"""
     if total <= 0 or not selection_meta.get("zero_ref"):
         return None
-    from .testscan import disclose_zero_ref, zero_ref_short_circuit_result
+    from .testscan import disclose_zero_ref, selection_disclosure, \
+        zero_ref_short_circuit_result
     disclose_zero_ref(file)
-    return {"tool": "mutation", "ok": True, "jobs": 1,
-            "results": [zero_ref_short_circuit_result(file)]}
+    result = zero_ref_short_circuit_result(file)
+    # 双披露与常规轮同源：`summary.zero_ref_short_circuit` 之外，
+    # `test_selection.zero_ref` 及来源继续在场（L2 键名一致性）。
+    result["summary"].update(selection_disclosure(selection_meta))
+    result["summary"]["selection_mode"] = selection_meta.get(
+        "selection_mode") or "line"
+    return {"tool": "mutation", "ok": True, "jobs": 1, "results": [result]}
 
 
 def _single_file_serial_gate(files: list[str], project_root: str, *,
@@ -364,7 +370,10 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                          timeout_factor=timeout_factor,
                          mutate_all=mutate_all,
                          worker_channel=worker_channel,
-                         select_mode=select_mode)
+                         select_mode=select_mode,
+                         # 与门内扫描同源：避免二次扫描并把 zero_ref 语义
+                         # 在改用例路径上丢失（SEE-1589 A-L2 实测）。
+                         selection_meta=selection_meta)
         r["summary"].setdefault("jobs", 1)
         from .testscan import selection_disclosure
         r["summary"].update(selection_disclosure(selection_meta))
@@ -675,6 +684,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
         "coverage_prefilter",
         # SEE-1589 B §SPEC-002/008：三项机制具名 reason 与阶段对账随分片透出
         "worker_channel", "farm", "stage_reconciliation",
+        # SEE-1589 A：选面/并发披露随分片透出（_inject_one 再按组数修正）
+        "selection_mode", "selection_groups", "jobs_limit_reason",
     )
     per_file: dict[str, dict] = {}
     resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)
@@ -975,7 +986,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         "header_hash": header_hash, "scope_hashes": scope_hashes,
         "store2": store2, "src": src, "mutants": mutants,
         "uncovered": uncovered_mutants, "test_selection": selection_meta,
-        "selection_mode": select_mode,
+        "selection_mode": select_mode, "requested_jobs": jobs,
         "coverage_prefilter_source": prefilter_disclosures.get(
             "coverage_prefilter"),
     }
@@ -1465,9 +1476,16 @@ def _inject_one(r: dict, ctx: dict) -> None:
     from .testscan import selection_disclosure
     s.update(selection_disclosure(ctx["test_selection"]))
     if ctx.get("selection_mode"):
-        s["selection_mode"] = ctx["selection_mode"]
-    if ctx.get("selection_groups"):
-        s["selection_groups"] = list(ctx["selection_groups"])
+        from .testscan import concurrency_disclosure, resolve_selection_mode
+        s["selection_mode"] = resolve_selection_mode(
+            ctx["selection_mode"], ctx.get("test_selection"))
+        groups = len(ctx.get("selection_groups") or []) or None
+        cap = concurrency_disclosure(ctx["selection_mode"], groups,
+                                     ctx.get("requested_jobs"))
+        if cap:
+            s.update(cap)
+        elif ctx.get("selection_groups"):
+            s["selection_groups"] = list(ctx["selection_groups"])
     if plan.reused:
         _inject_reused(r, ctx)
     # §SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures

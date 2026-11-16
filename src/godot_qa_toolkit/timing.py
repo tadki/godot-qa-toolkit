@@ -91,8 +91,25 @@ def explicit_timing_meta() -> dict:
     return {"timing_source": "explicit", "samples_n": 0, "baseline_p90": None}
 
 
+def suggested_action_kind(timeout_s: int) -> str:
+    """补救动作类型：raise_timeout（未到上限）/ narrow_face（已到上限）。"""
+    return "raise_timeout" if int(timeout_s) < BUDGET_CAP_S else "narrow_face"
+
+
 def suggested_action(timeout_s: int) -> str:
-    return f"rerun with --timeout {timeout_s}"
+    """baseline 超时后的可执行补救指令（禁止自相矛盾）。
+
+    SEE-1589 A-H1：旧实现恒回显 `rerun with --timeout 600`——当用户已经
+    用 600 仍超时，该建议不可执行。到达/超过预算上限时改为窄面处置：
+    `--select full` 是整套 GUT 审计，真实规模项目不可能在预算内完成。
+    """
+    if suggested_action_kind(timeout_s) == "raise_timeout":
+        return f"rerun with --timeout {BUDGET_CAP_S}"
+    return ("full-face baseline exceeded the {0}s budget cap: --select full "
+            "runs the project's whole GUT suite, which does not fit this "
+            "budget on real-scale projects; rerun with --select line|fn "
+            "(default line) or a caliper face (--lines/--mutation), or "
+            "reduce the project's .gutconfig.json dirs".format(int(timeout_s)))
 
 
 def project_relative(project_root: str, file_path: str) -> str:

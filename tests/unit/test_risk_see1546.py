@@ -828,6 +828,7 @@ def test_recipe_cli_res_scheme_exclude_survives_colons(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(recipe_mod, "build_recipe", spy_build)
     argv = ["measure", "suite", "--project-root", str(tmp_path),
+            "--out", str(tmp_path / "recipe.json"),
             "--exclude", "gut_dir:res://tests/unit/quarantine/**:known flaky"]
     args = cli_mod.build_parser().parse_args(argv)
     cli_mod.cmd_measure_suite(args)

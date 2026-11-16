@@ -37,6 +37,8 @@ from . import shadow
 from .shadow import SlotProvisionError
 
 POOL_SCHEMA = "see1550-pool/1"
+# 与 truth_select.SELECT_ROOT 同源（此处常量避免循环导入）。
+_SELECT_ROOT = ".gqt-attr-select"
 WARNED_NO_FCNTL = False
 
 
@@ -235,7 +237,9 @@ def _targeted_three_way(project_root: str, slot: MutationSlot, rec: dict
     ok = True
     root = Path(project_root)
     targets = rec.get("targets") or {}
-    for rel in slot.targets:
+    # QA D2：只校验本次目标会漏掉「上一次 run 被 SIGKILL 的另一个目标」
+    # 残留 mutant——把池记录里出现过的目标一并纳入三向校验，歧义即整槽重建。
+    for rel in sorted(set(slot.targets) | set(targets)):
         repo_stat = shadow.stat_record(root / rel)
         if repo_stat is None:
             # 仓目标被删（W 矩阵「删除」格）→ 歧义 → 整槽重建
@@ -314,6 +318,7 @@ def _farm_after_rebuild(slot: MutationSlot, project_root: str,
 
 def acquire_slot(project_root: str, kind: str, targets: list[str],
                  wiring_hash: str, targeted_only: bool = False,
+                 required_globs: list[str] | None = None,
                  ) -> MutationSlot:
     """获取影子槽：linux/win64 统一走 warm 池（复用 + 分层新鲜度同步）。
 
@@ -326,7 +331,8 @@ def acquire_slot(project_root: str, kind: str, targets: list[str],
         slot.farm["reason_detail"] = "pool_lock_unavailable"
         return slot
     return _acquire_warm(project_root, targets, wiring_hash,
-                         targeted_only, kind=kind)
+                         targeted_only, kind=kind,
+                         required_globs=required_globs)
 
 
 def _acquire_fresh(project_root: str, kind: str, targets: list[str],
@@ -375,8 +381,65 @@ def _acquire_fresh(project_root: str, kind: str, targets: list[str],
     return slot
 
 
+def _missing_required(project_root: str, slot_root: str,
+                      required_globs: list[str] | None) -> list[str]:
+    """仅校验「项目侧存在的测试目录」在槽内也存在。
+
+    项目侧本身不存在的 glob（调用方传入的伪目录/单测替身）不是槽脏，
+    交由 GUT 自身报错；此处若强求会把合法单测判成 slot 制备失败。
+    """
+    missing = []
+    for glob in required_globs or []:
+        if not isinstance(glob, str) or not glob.startswith("res://"):
+            continue
+        rel = glob[len("res://"):].rstrip("/")
+        if not rel:
+            continue
+        if not (Path(project_root) / rel).is_dir():
+            continue
+        if not (Path(slot_root) / rel).is_dir():
+            missing.append(glob)
+    return missing
+
+
+def _sync_generated_dirs(project_root: str, slot: MutationSlot,
+                         required_globs: list[str] | None) -> dict:
+    """把 gqt 自生成的选择目录同步进 warm 槽（QA D2 根因修复）。
+
+    行级/卡尺面每次按脚本集哈希在**项目根**物化 `.gqt-attr-select/<id>/`；
+    fresh 槽复制时携带当时目录，warm 复用槽只有旧 id。若新 run 的
+    `-gtest=res://.gqt-attr-select/<new>/` 在槽内不存在，GUT 收集 0 测试，
+    尾部无 test-run 标记 → 每个 mutant 假 run_error。
+    这里按项目侧目录集补齐/清理，并在必需 glob 仍缺失时要求整槽重建。
+    """
+    synced = pruned = 0
+    proj_sel = Path(project_root) / _SELECT_ROOT
+    slot_sel = Path(slot.root) / _SELECT_ROOT
+    if proj_sel.is_dir():
+        slot_sel.mkdir(parents=True, exist_ok=True)
+        project_ids = {d.name for d in proj_sel.iterdir() if d.is_dir()}
+        for d in proj_sel.iterdir():
+            if not d.is_dir():
+                continue
+            dst = slot_sel / d.name
+            if dst.is_dir():
+                continue
+            shutil.copytree(d, dst)
+            synced += 1
+        for d in slot_sel.iterdir():
+            if d.is_dir() and d.name not in project_ids:
+                shutil.rmtree(d, ignore_errors=True)
+                pruned += 1
+    missing = _missing_required(project_root, slot.root, required_globs)
+    if missing:
+        return {"status": "rebuild", "reason": "generated_dirs_missing",
+                "missing": missing, "synced": synced, "pruned": pruned}
+    return {"status": "ok", "synced": synced, "pruned": pruned}
+
+
 def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
-                  targeted_only: bool, kind: str = "win64") -> MutationSlot:
+                  targeted_only: bool, kind: str = "win64",
+                  required_globs: list[str] | None = None) -> MutationSlot:
     with _PoolLock(project_root):
         pool = _load_pool(project_root)
         now = time.time()
@@ -416,6 +479,35 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
                                     "freshness_ambiguity")
                 return slot
             _sync_repo_delta(project_root, slot, rec)
+            gen = _sync_generated_dirs(project_root, slot, required_globs)
+            if gen["status"] == "rebuild":
+                slot.freshness.append(
+                    f"generated_dirs:missing({','.join(gen['missing'])})")
+                _rebuild_locked(project_root, pool, slot, rec,
+                                wiring_hash, now)
+                slot.freshness.insert(0, "warm:reused")
+                _farm_after_rebuild(slot, project_root,
+                                    "generated_dirs_missing")
+                still = _missing_required(project_root, slot.root, required_globs)
+                if still:
+                    rec["in_use"] = False
+                    _save_pool(project_root, pool)
+                    if slot._slot_lock_fd is not None:
+                        try:
+                            if fcntl is not None:
+                                fcntl.flock(slot._slot_lock_fd, fcntl.LOCK_UN)
+                        finally:
+                            os.close(slot._slot_lock_fd)
+                            slot._slot_lock_fd = None
+                    raise SlotProvisionError(
+                        "warm slot generated selection dirs unavailable "
+                        f"after rebuild: {still} (project_root="
+                        f"{project_root})")
+                return slot
+            if gen["synced"] or gen["pruned"]:
+                slot.freshness.append(
+                    f"generated_dirs:synced({gen['synced']},"
+                    f"pruned={gen['pruned']})")
             rec["last_used_at"] = now
             rec["wiring_hash"] = wiring_hash
             rec["sentinel"] = shadow.godot_sentinel(project_root)
@@ -435,6 +527,8 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
                 slot.freshness.insert(0, "warm:reused")
                 _set_farm(slot, "reused", "warm_reused",
                           proof_binding="bound", proof_reason=reason,
+                          generated_dirs={"synced": gen["synced"],
+                                          "pruned": gen["pruned"]},
                           validation=list(slot.freshness))
             return slot
         # 无可复用槽 → 新建（id 含 uuid：同秒同 PID 的并发 acquire 不得碰撞）

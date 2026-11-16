@@ -53,6 +53,9 @@ def _run(args: list[str], *, env: dict, timeout: int = 300) -> dict:
                 "stderr_tail": (e.stderr or "")[-400:] if isinstance(
                     e.stderr, str) else []}
     wall = round(time.monotonic() - t0, 3)
+    if os.environ.get("GQT_E2E_TRACE"):
+        print(f"[e2e] {wall:7.1f}s rc={proc.returncode} "
+              f"{' '.join(args[:6])}", file=sys.stderr, flush=True)
     try:
         doc = json.loads(proc.stdout)
         parse_error = None
@@ -94,6 +97,31 @@ class Checks:
     @property
     def ok(self) -> bool:
         return all(i["status"] == "PASS" for i in self.items)
+
+
+def _prune_vendored_js(kol: Path) -> dict:
+    """删副本内的 vendored JS 依赖树（仅副本；KOL 源仓零改动）。
+
+    `addons/*/server/node_modules` 与 Godot mutation 无关，却让测量 shadow
+    每分片复制 ~160MB、prewarm 摘要整树哈希，fresh 副本 E2E 会超过判据
+    超时。删除事实进报告（environment_normalization），便于复核。
+    """
+    pruned = bytes_freed = 0
+    for root, dirs, _files in os.walk(kol, topdown=True):
+        for name in list(dirs):
+            if name != "node_modules":
+                continue
+            path = Path(root) / name
+            for r, _d, fs in os.walk(path):
+                for f in fs:
+                    try:
+                        bytes_freed += (Path(r) / f).stat().st_size
+                    except OSError:
+                        pass
+            shutil.rmtree(path, ignore_errors=True)
+            dirs.remove(name)
+            pruned += 1
+    return {"node_modules_pruned": pruned, "bytes_freed": bytes_freed}
 
 
 def _normalize_symlinks(kol: Path) -> dict:
@@ -259,6 +287,8 @@ def main(argv=None) -> int:
         return 2
     godot = args.godot_bin or None
     env = _env(godot, None)
+    js_prune = _prune_vendored_js(kol)
+    symlinks = _normalize_symlinks(kol)
 
     map_path, measure = _ensure_map(kol, args.target, godot, checks)
     measure_summary = _summary(measure.get("doc"))
@@ -283,7 +313,6 @@ def main(argv=None) -> int:
 
     facts = _map_facts(map_path, args.target)
     env_map = _env(godot, map_path)
-    symlinks = _normalize_symlinks(kol)
 
     def mutate(cid: str, extra: list[str], *, must_ok: bool | None,
                timeout: int = 300) -> dict:
@@ -297,10 +326,15 @@ def main(argv=None) -> int:
         res["judged"] = judged
         return res
 
+    # 先做一次 file 面运行：既作为 M4 判据，也完成引擎/槽/prewarm 冷启动
+    # 预热，避免 H1 首轮冷制备把 60s 预算的失败判据拖成假超时（QA D1）。
+    file_run = mutate("file", ["--select", "file", "--budget", str(args.budget),
+                               "--mutate-all"], must_ok=None)
+
     # ---- A-H1：真实 full-face 60s 超时 + 上限处文案自洽 ----------------
     full = mutate("h1", ["--select", "full", "--jobs", "1",
                          "--timeout", "60", "--budget", "1"],
-                  must_ok=False, timeout=150)
+                  must_ok=False, timeout=300)
     action = full["summary"].get("suggested_action") or ""
     h1_ok = (full["judged"] and full["summary"].get("run_error") is True
              and full["summary"].get("suggested_action_kind")
@@ -337,10 +371,14 @@ def main(argv=None) -> int:
 
     # ---- A-M4/L1/L5：selection_mode 全档 ------------------------------
     stable, site_line = _manifest_facts(kol, args.target)
+    checks.add("A-M4-select-file",
+               file_run["judged"]
+               and file_run["summary"].get("selection_mode") == "file",
+               "selection_mode=file (warm-up run)",
+               {"run": {"cmd": file_run["cmd"], "rc": file_run["rc"],
+                        "wall_s": file_run["wall_s"]},
+                "selection_mode": file_run["summary"].get("selection_mode")})
     modes = [
-        ("A-M4-select-file",
-         ["--select", "file", "--budget", str(args.budget), "--mutate-all"],
-         "file"),
         ("A-L1-explicit-tests",
          ["--tests", (facts["test_dirs"][0] if facts["test_dirs"] else ""),
           "--budget", str(args.budget), "--mutate-all"],
@@ -439,6 +477,7 @@ def main(argv=None) -> int:
                   "--worker-channel", "--budget", str(args.budget),
                   "--mutate-all"], env=eligible_env)
         es = _summary(e["doc"])
+        e["summary"] = es
         eb = es.get("worker_channel") or {}
         checks.add("B-worker-effective-or-named",
                    e["parse_error"] is None
@@ -456,7 +495,7 @@ def main(argv=None) -> int:
                    "no worker-eligible target in map scope", {})
 
     # ---- B：farm / prewarm / stage_reconciliation ---------------------
-    observed = [full, jobs1, grouped, wc]
+    observed = [file_run, full, jobs1, grouped, wc]
     farms = [r["summary"].get("farm") for r in observed
              if isinstance(r["summary"].get("farm"), dict)]
     prewarms = [r["summary"].get("prewarm") for r in observed
@@ -479,9 +518,24 @@ def main(argv=None) -> int:
                ("prewarm fresh_skip observed after symlink normalization"
                 if fresh else "prewarm fresh_skip NOT observed"),
                {"fresh_skip_observed": bool(fresh),
-                "symlink_normalization": symlinks,
+                "environment_normalization": {**symlinks, **js_prune},
                 "blockers": named_block[-2:],
                 "prewarms": prewarms[-3:]})
+    # QA D2：连续多模式/多目标串跑后，warm 复用不得产生假 run_error。
+    reuse_runs = [r for r in observed + ([e] if eligible else [])
+                  if (r["summary"].get("mutants") or 0) > 0]
+    false_errors = [
+        {"cmd": r["cmd"], "run_errors": r["summary"].get("run_errors"),
+         "farm": (r["summary"].get("farm") or {}).get("decision")}
+        for r in reuse_runs if (r["summary"].get("run_errors") or 0) > 0]
+    reused_seen = any(
+        ((r["summary"].get("farm") or {}).get("decision") == "reused")
+        for r in reuse_runs)
+    checks.add("B-warm-reuse-no-false-run-error",
+               bool(reuse_runs) and not false_errors and reused_seen,
+               "no false run_error across warm-reused modes/targets",
+               {"runs": len(reuse_runs), "false_errors": false_errors,
+                "warm_reuse_observed": reused_seen})
     recons = [(r["summary"].get("stage_reconciliation") or {})
               for r in observed]
     recon_ok = any(
@@ -498,7 +552,7 @@ def main(argv=None) -> int:
 
     report = {"ok": checks.ok, "kol_root": str(kol),
               "target": args.target, "map": map_path,
-              "environment_normalization": symlinks,
+              "environment_normalization": {**symlinks, **js_prune},
               "checks": checks.items}
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:

@@ -11,30 +11,35 @@ gap).
 
 - `<root>/addons/gut/gut_cmdln.gd` exists; a resolvable Godot binary
   (`--godot-bin` > `GQT_GODOT_BIN` > PATH).
-- With `--tests` omitted, selection uses the runtime truth map
-  (`test-attribution/5`): by default it is auto-managed at
-  `.qa-cache/attribution-map.json` (generated / incrementally refreshed once
-  when missing). You can instead pass an explicit read-only artifact with
-  `--attribution-map`, or build one with `gqt measure map-update`.
+- With `--tests` omitted, selection uses the line-primary runtime truth map
+  (`test-attribution/6`): per-test/per-script covered line sets are the primary
+  facts; file/function views are derived from them. By default the map is
+  auto-managed at `.qa-cache/attribution-map.json` and regenerated or
+  incrementally refreshed when missing or stale. You can instead pass an
+  explicit read-only artifact with `--attribution-map`, or build one with
+  `gqt measure map-update`; an explicit schema mismatch fails loud without an
+  automatic rebuild.
 
 ## Typical examples
 
 ```bash
-# Default: function-level truth-map selection + differential resume +
+# Default: line-level truth-map selection + differential resume +
 # coverage prefilter (all automatic)
 gqt mutation src/save/save_manager.gd --project-root . --budget 50
 
-# Selection granularity: fn (default) / file (per-file set) /
+# Selection: line (default) / fn and file (explicit calibration/fallback) /
 # full (explicit full-face audit, bypasses the mapping)
-gqt mutation src/save/save_manager.gd --project-root . --select file
+gqt mutation src/save/save_manager.gd --project-root . --select fn
 
-# Explicit test subset (bypasses the mapping entirely)
+# Explicit test subset (user takes over; disclosed as explicit_tests)
 gqt mutation src/save/save_manager.gd --project-root . --tests res://tests/save/
 
-# Count sites only; single-site rerun (bypasses diff reuse and the prefilter)
+# Count sites only; caliper reruns bypass diff reuse and the prefilter.
+# --lines accepts one line, a range, or comma-separated segments.
 gqt mutation src/save/save_manager.gd --project-root . --dry-run
-gqt mutation src/save/save_manager.gd --project-root . --mutation "save_manager#func:save#2"
-gqt mutation src/save/save_manager.gd --project-root . --lines 42
+gqt mutation src/save/save_manager.gd --project-root . \
+  --mutation "src/save/save_manager.gd#func:save#2"
+gqt mutation src/save/save_manager.gd --project-root . --lines 10-20,30,35-40
 
 # Parallelism (default jobs = max(2, cpu//2)); force serial with --jobs 1
 gqt mutation <file> --project-root . --jobs 8
@@ -47,19 +52,34 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 
 ## Selection semantics
 
-- `fn` (default): mutants are grouped by enclosing function and each group runs
-  the mapping's test set; a function missing from the mapping falls back to the
-  file's bounded set (`file_fallback` disclosed); when the file level itself is
-  unusable the run **fails loud** — no automatic full-face fallback.
-- Freshness: the mapping's `report_recipe_hash` must match the current tree and
-  the target file's sha256 must match the mapping's binding. In auto mode a
-  stale or missing map is regenerated once, then re-judged; if still unusable,
-  execution is refused.
+- `line` (default): each mutant is associated with the tests that executed its
+  source line. Sites whose `frozenset(line→tests)` signatures match share one
+  materialized test glob and one baseline; grouping is by distinct test set, not
+  mechanically by line. Sites with no mapped tests are disclosed as `uncovered`
+  and do not execute on this default path.
+- `fn` / `file`: explicit calibration and fallback views, not parallel primary
+  semantics. `fn` groups by enclosing function and discloses a bounded file
+  fallback when the function is absent; `file` uses the file's derived test set.
+- Calipers: `--lines` intersects requested lines with actual sites and reports
+  `requested / hit / skipped_no_site`; an entirely site-less request fails loud.
+  `--lines` and `--mutation` use the union of the selected lines' test sets.
+  A selected site with no mapped tests still executes and discloses
+  `no_mapped_tests`, preserving the fair rerun channel.
+- Freshness: the map must match the current recipe, target-file sha256 and test
+  face, and contain execution-integrity evidence. Zero tests or no probe
+  evidence is not a valid empty map. In auto mode a missing, stale, or old-schema
+  map is regenerated or incrementally refreshed once, then re-judged; an
+  explicit `--attribution-map` remains read-only and fails loud on mismatch.
+- Explicit `--tests`: the caller takes over test selection; the report uses
+  `test_selection.source=explicit_tests` to disclose that line-level selection
+  was not used.
 - Zero references: a fresh mapping that says no test touches the target is a
   terminal short-circuit (`summary.zero_ref_short_circuit=true`, zero
   execution, `ok=true` disclosure) — not a full-suite fallback.
 - `full`: the only explicit audit face (`tests_glob=None`); use only when you
   deliberately want the whole suite.
+- `--jobs 1`: the explicit serial path still uses a file-level union glob. It is
+  a correct superset, but less converged than line-signature grouping.
 
 ## Output & exit codes
 
@@ -70,8 +90,11 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   kill_rate, budget, jobs, suspect, invalid_mutants, adaptive_timeout_s}`.
 - Diff / prefilter / selection keys: `retry_total`, `executed`,
   `untouched_ranges`, `diff_skipped`, `total_sites`, `attention`,
-  `coverage_prefilter`, `selection_mode`, `selection_groups`, `test_selection`,
-  `attribution`, `zero_ref_short_circuit`.
+  `coverage_prefilter`, `lines_selection`, `selection_mode`, `selection_groups`,
+  `test_selection`, `attribution`, `zero_ref_short_circuit`.
+  `coverage_prefilter.source` distinguishes `coverage_store` (manual
+  `see1420-coverage/1`), `projection_store` (persisted `see1420-coverage/2`),
+  and `projection_live` (fresh line facts projected on demand).
 - `failures` lists only non-killed records (each with an `id`), verdicts in
   survived / timeout / run_error / suspect / invalid_mutant / timeout_pinned /
   uncovered. Verdict and kind are open enums.
@@ -97,13 +120,23 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 - The real repo is never written: mutants land only in disk shadow slots
   (fresh ext4 farm per run on Linux, a persistent warm pool on win64); a
   four-level beacon proves the engine actually executed the mutant.
+- Coverage prefilter resolves in order: manual `/1` store → persisted `/2`
+  projection → live projection from the fresh `/6` map. The projection uses the
+  scripts carried by the actual `tests_glob`; it adds no second instrumentation
+  or GUT run. Source, test-face, recipe, schema, binary or identity drift
+  invalidates the affected layer and is disclosed; if all layers are unusable,
+  execution continues unfiltered rather than producing false coverage.
 - Differential resume is on by default: unchanged scopes with
   killed/suspect/invalid verdicts are reused; survived/timeout/run_error sites
-  always re-run (red line); `--mutate-all` forces full execution.
+  always re-run (red line); `--mutate-all` forces full execution. The
+  content-addressed line-group glob participates in the resume key, so upgraded
+  or changed groups naturally miss old entries and rerun once; no stale verdict
+  is reused across different test sets.
 - `# gqt: no-mutate` filters sites (on or directly above a top-level `func` =
   function-level, anywhere else = line-level).
-- Single-site reruns (`--mutation` / `--lines`) bypass diff reuse and the
-  prefilter — the fair spot-check channel against false negatives.
+- Caliper reruns (`--mutation` / `--lines`) bypass diff reuse and the prefilter
+  — the fair spot-check channel against false negatives. They still use the
+  selected lines' runtime test sets unless `--tests` explicitly takes over.
 
 ## Command reference (aligned with v0.3.0 `--help`)
 
@@ -116,18 +149,18 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--budget <n>` | 50 | Max mutants; with diff reuse present, counted on the post-diff retry set (order-preserving truncation) |
 | `--timeout <s>` | 60 | Single GUT wall-clock limit |
 | `--dry-run` | off | List mutation sites without running GUT; emits a diff estimate when a manifest exists |
-| `--tests <res://glob>` | omitted = truth-map selection | Explicit test subset that bypasses the mapping entirely; omitted = runtime truth-map selection (zero-ref terminal, unusable map fails loud) |
-| `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces serial; sites ≤ jobs falls back to serial automatically |
-| `--resume` | off | Skip mutants whose verdicts are already in the resume store; fingerprint drift re-runs them |
-| `--select {fn,file,full}` | `fn` | Selection granularity: fn (group by enclosing function), file (per-file set, legacy/calibration), full (explicit full-face audit, bypasses attribution) |
-| `--attribution-map <path>` | auto-managed `.qa-cache/attribution-map.json` | Explicit `test-attribution/5` artifact; read-only pass-through, schema mismatch fails loud without rebuild |
+| `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping and discloses `explicit_tests` |
+| `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically |
+| `--resume` | off | Legacy disclosure flag; differential reuse is automatic whenever a v2 manifest exists |
+| `--select {line,fn,file,full}` | `line` | line = test-set signature groups; fn/file = explicit calibration/fallback views; full = explicit full-face audit |
+| `--attribution-map <path>` | auto-managed `.qa-cache/attribution-map.json` | Explicit `test-attribution/6` line-primary artifact; read-only pass-through, schema mismatch fails loud without rebuild |
 | `--no-attribution-auto` | off | Disable automatic map generation/incremental refresh; with no usable map the run fails loud |
 | `--mutation-warning <n>` | 50 | Warn on stderr + `summary.attention` when the pre-truncation site count exceeds N |
 | `--timeout-factor <f>` | 2.0 | Adaptive per-mutant timeout = `max(timeout, baseline×f+1)`; only widened, never tightened |
 | `--mutate-all` | off | Force full execution (the only escape from diff reuse) |
-| `--mutation <file>#<scope_id>#<n>` | omitted | Single-site rerun (single file): 1 baseline + 1 mutant, bypasses diff reuse |
-| `--lines <n>` | omitted | Single-site rerun by source line number (single file) |
+| `--mutation <file>#<scope_id>#<n>` | omitted | Single-site caliper (single file): fresh execution using that site's line-level tests; bypasses diff reuse and prefilter |
+| `--lines <spec>` | omitted | Single line `42`, range `10-20`, or multi-segment `10-20,30,35-40`; intersects actual sites, discloses no-site lines, and uses the selected lines' test union |
 | `--reuse-coverage` | same as default | Compatibility flag: the coverage prefilter is on by default; this flag is a no-op synonym |
-| `--no-reuse-coverage` | off | Explicitly disable the coverage prefilter (effective only with a fresh store and a fully matching identity pack; drift disables it with a disclosure) |
+| `--no-reuse-coverage` | off | Explicitly disable the coverage prefilter, including store and live-projection layers |
 | `--worker-channel` | on by routing | Force the resident worker; static routing sends autoload/GUT-domain/scene-held targets cold; `GQT_MUTATION_WORKER=0` opts out everywhere |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override; priority flag > env > PATH |

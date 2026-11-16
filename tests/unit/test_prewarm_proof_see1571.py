@@ -123,6 +123,7 @@ class TestCalibrationAndFreshSkip:
         r = pp.prewarm_with_proof(str(proj))
         assert r["decision"] == "fresh_skip"
         assert r["import_calls"] == 0
+        assert r["reason"] == "proof_fresh"
         err = capsys.readouterr().err
         assert "fresh_skip" in err
         assert r["proof_id"] in err                     # proof_id 披露

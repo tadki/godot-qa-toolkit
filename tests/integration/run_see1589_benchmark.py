@@ -129,7 +129,10 @@ def run_one(kol: Path, target: str, budget: int, worker: bool,
             map_path: str | None, godot_bin: str | None,
             timeout_s: int = 900, jobs: int | None = None) -> dict:
     cmd = [sys.executable, "-m", "godot_qa_toolkit.cli", "mutation", target,
-           "--project-root", str(kol), "--budget", str(budget)]
+           "--project-root", str(kol), "--budget", str(budget),
+           # 两臂都强制全量执行：默认 v2 差分会把历史 killed 位点复用掉，
+           # A/B 会退化成「执行 vs 差分」而非「冷 vs worker」。
+           "--mutate-all"]
     if jobs is not None:
         cmd += ["--jobs", str(jobs)]
     if worker:

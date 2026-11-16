@@ -173,6 +173,10 @@ def _metrics(run: dict) -> dict:
     groups = summary.get("selection_groups")
     return {
         "ok": bool(payload.get("ok")),
+        # SEE-1587 D4：选择阶段拒跑（selection_error）与通用 error 记录，
+        # 供 gate 判定「无 selection_error」门。
+        "selection_error": bool(summary.get("selection_error")),
+        "error": summary.get("error"),
         "mutants": summary.get("mutants"),
         "killed": summary.get("killed"),
         "survived": summary.get("survived"),
@@ -273,29 +277,30 @@ def _ensure_map_faces(env, kol: Path, faces: list[str], map_path: Path,
             covered = set()
     uncovered = [f for f in faces
                  if not any(rel.startswith(f + "/") for rel in covered)]
-    if not uncovered:
-        return
-    if analyze_only:
+    if uncovered and analyze_only:
         raise SystemExit(
             f"attribution map does not cover faces {uncovered} — run the "
             "benchmark without --analyze-only to prepare it")
-    recipe = work / "bench-recipe.json"
     cli = [sys.executable, "-m", "godot_qa_toolkit.cli"]
-    if not recipe.is_file():
+    recipe = work / "bench-recipe.json"
+    if uncovered and not recipe.is_file():
         rec = _run(cli + ["measure", "suite", "--project-root", str(kol),
                           "--out", str(recipe)], env, kol)
         _atomic_write(work / "prepare-suite.json", rec)
         if rec["rc"] != 0:
             raise SystemExit(f"measure suite failed rc={rec['rc']}")
-    dirs = [str(kol / face) for face in faces]
-    rec = _run(cli + ["measure", "run", *dirs, "--project-root", str(kol),
-                      "--recipe", str(recipe),
-                      "--out", str(work / "bench-measure-report.json"),
-                      "--test-attribution",
-                      "--test-attribution-out", str(map_path),
-                      "--acceptance-repeats", "1", "--timeout", "300"],
-               env, work)
-    _atomic_write(work / "prepare-measure.json", rec)
+    rec = None
+    if uncovered:
+        dirs = [str(kol / face) for face in faces]
+        rec = _run(cli + ["measure", "run", *dirs,
+                          "--project-root", str(kol),
+                          "--recipe", str(recipe),
+                          "--out", str(work / "bench-measure-report.json"),
+                          "--test-attribution",
+                          "--test-attribution-out", str(map_path),
+                          "--acceptance-repeats", "1", "--timeout", "300"],
+                   env, work)
+        _atomic_write(work / "prepare-measure.json", rec)
     # 孤立副本 acceptance 臂 run_error 属已知边界；gut_full 有效性由映射
     # arms_state 与行事实量决定，此处不把 rc 当失败（如实记录）。
     doc = json.loads(map_path.read_text(encoding="utf-8")) \
@@ -309,13 +314,18 @@ def _ensure_map_faces(env, kol: Path, faces: list[str], map_path: Path,
     if still:
         raise SystemExit(
             f"attribution map still lacks faces {still} after measure run "
-            f"(rc={rec['rc']}) — refusing to benchmark without a usable map")
+            f"(rc={(rec or {}).get('rc')}) — refusing to benchmark without "
+            "a usable map")
+    # SEE-1587 D4（QA 回归）：执行完整性门**每次运行都执行**（含面已覆盖
+    # 的早退路径与 --analyze-only）——零 pair/零探针的完整面映射同样必须
+    # fail-loud（此前门只在补面分支，全失败轮次可判绿）。
     from godot_qa_toolkit.mutation.truth_select import arms_valid
     if not arms_valid(doc.get("arms_state") or {}):
         raise SystemExit(
             "attribution map failed the execution-integrity gate "
-            f"(arms_state={doc.get('arms_state')}); measure rc={rec['rc']} — "
-            "refusing to benchmark on a zero-test/empty measurement")
+            f"(arms_state={doc.get('arms_state')}); measure rc="
+            f"{(rec or {}).get('rc')} — refusing to benchmark on a "
+            "zero-test/empty measurement")
 
 
 def _required_runs(plan: dict, aa: int, rounds: int) -> list[tuple]:
@@ -474,6 +484,29 @@ def _analyze(plan: dict, work: Path, aa: int, rounds: int) -> dict:
             and combined_ratio > 1.0 + combined_band:
         perf_nb.append({"face": "combined", "ratio": combined_ratio,
                         "threshold": round(1.0 + combined_band, 6)})
+    # SEE-1587 D4（QA 回归）：轮次成败/对账覆盖门——每面每臂 compared>0
+    # 且没有任何 selection_error 轮次；不要求 rc==0（合法 survivor 轮也
+    # 会 rc=1）。全部轮次失败（选择阶段即拒跑、零 verdict 对账）必须红。
+    gate_compared: list[dict] = []
+    gate_selection: list[dict] = []
+    for face, d in faces_out.items():
+        for arm in ARMS:
+            if arm == "S3":
+                # S3 是参照 oracle：其 verdict 由 S0/S1/S2 的 compared 覆盖；
+                # 自身 without-oracle compared 恒为 0，不参与该门。
+                continue
+            recs = arm_details.get(arm) or []
+            compared = (d["verdict_reconciliation"].get(arm) or {}).get(
+                "compared", 0)
+            if compared <= 0:
+                gate_compared.append({"face": face, "arm": arm,
+                                      "compared": compared,
+                                      "rounds": len(recs)})
+            sel_errs = [rec.get("round") for rec in recs
+                        if (rec.get("metrics") or {}).get("selection_error")]
+            if sel_errs:
+                gate_selection.append({"face": face, "arm": arm,
+                                       "rounds": sel_errs})
     perf_basis = ("owner ruling 2026-11-16 (verbatim: 按1你的推荐执行，判pass): "
                   "per-face and combined S2/S0 <= 1 + that face's A/A noise "
                   "band (aa_noise.spread_pct/100, existing protocol); "
@@ -488,7 +521,11 @@ def _analyze(plan: dict, work: Path, aa: int, rounds: int) -> dict:
                      "perf_gate_basis": perf_basis,
                      "noise_bands": bands,
                      "combined_noise_band": round(combined_band, 6),
-                     "passed": not gate_mismatch and not perf_nb}}
+                     "compared_gate_failures": gate_compared,
+                     "selection_error_runs": gate_selection,
+                     "passed": (not gate_mismatch and not perf_nb
+                                and not gate_compared
+                                and not gate_selection)}}
 
 
 def main() -> int:
@@ -577,13 +614,16 @@ def main() -> int:
     if pending:
         _atomic_write(Path(args.out), {
             "spec": "SEE-1587 §SPEC-007", "status": "pending",
+            "ok": False,          # D4：未判定不得绿
             "completed_runs": len(required) - pending,
             "required_runs": len(required), "plan": plan})
-        print(json.dumps({"status": "pending",
+        print(json.dumps({"status": "pending", "ok": False,
                           "completed": len(required) - pending,
                           "required": len(required),
                           "out": args.out}, ensure_ascii=False))
-        return 0
+        # SEE-1587 D4：未跑完的判据不得以 0 退出（中断/待续是"未判定"，
+        # 不是通过；续跑完成后才给终判）。
+        return 1
     report = {"spec": "SEE-1587 §SPEC-007", "status": "complete",
               "budget_per_file": args.budget,
               "mutant_timeout_s": {"S0": args.mutant_timeout,

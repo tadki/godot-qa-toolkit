@@ -77,6 +77,10 @@ def _invalidate_existing_map(map_path: Path) -> str | None:
     measure 不写新映射，旧映射让 E2E 仍绿）。无旧映射 → None。"""
     pre = _file_sha256(map_path)
     if map_path.is_file():
+        # 仅保留本次取证副本：先清掉历史 *.stale-*（QA LOW 观察——反复
+        # 运行会在副本 .qa-cache/ 累积取证文件；保留最新一份即可复原）。
+        for old in map_path.parent.glob(map_path.name + ".stale-*"):
+            old.unlink(missing_ok=True)
         bak = map_path.with_name(
             map_path.name + f".stale-{os.getpid()}")
         try:

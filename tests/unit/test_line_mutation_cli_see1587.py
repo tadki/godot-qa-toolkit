@@ -579,6 +579,30 @@ def test_all_no_mapped_sites_settle_uncovered_result(tmp_path, monkeypatch):
     assert settled["summary"]["file"] == str(target)
 
 
+def test_plan_file_chunks_records_requested_jobs(tmp_path):
+    """SEE-1589 M5 硬化：并行规划 ctx 必须携带 requested_jobs，供 _inject_one
+    在签名组数 < 请求并发时披露 jobs_limit_reason=selection_groups。"""
+    proj, target = _project(tmp_path)
+    doc = _map_doc(proj, target, {
+        4: ["test_a.gd::t1"],
+        7: ["test_a.gd::t1"],
+        10: ["test_b.gd::t2"],
+    })
+    map_path = _write_map(proj, doc)
+    from godot_qa_toolkit.mutation import executor as ex
+    chunks, ctx, settled = ex._plan_file_chunks(
+        str(target), str(proj), 50, 60, "res://tests/", 16, False, "linux",
+        50, 2.0, False, False,
+        {"res://tests/": {"rc": 0, "tail": "", "elapsed": 0.1}},
+        auto_selection={
+            "source": "runtime_mapping",
+            "tests": ["res://tests/unit/test_a.gd"],
+            "mapping": {"path": map_path}}, select_mode="line")
+    assert ctx is not None, "有可执行位点时规划 ctx 不得为空"
+    assert ctx.get("requested_jobs") == 16, \
+        "并行规划 ctx 必须记录 requested_jobs（并发上限披露依据）"
+
+
 def test_prefilter_projection_handles_res_identity(tmp_path):
     """端到端回归：映射行事实身份为全路径（res://）时投影并集仍非空——
     修复前按裸名比对会静默产出空 covered（全量假 uncovered）。"""

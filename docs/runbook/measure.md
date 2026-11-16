@@ -64,13 +64,22 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - run: `measurement-report/2`, with `crap` records (see crap.md) and the
   two-arm coverage union; `certification.status="not_certified"`,
   `evidence_level="exploratory"`, `diagnostic_only=true`.
+- run exit semantics: `summary` adds `certification` (`certified` /
+  `uncertified` / `unusable`), `union_certified`, `attribution_usable`,
+  `exit_semantics` (`certified` / `artifacts_usable_union_uncertified` /
+  `failed`) and `attribution_map` when an attribution artifact exists. A union
+  that cannot be certified while the attribution map is fresh this run and its
+  arms carry execution evidence exits **0** with `certification=uncertified` —
+  do not discard the usable artifact. Without a usable map (stale map files do
+  not count) it still exits 1 with `reason="union invalid or arms invalid"`.
 - map-update: a `test-attribution/6` artifact; changed production files replace
   their related line facts, changed tests replace the whole test identity, and
   file/function/reverse views are recomputed from the merged lines.
   `--calibration-every` (default 5) forces a full rebuild after N increments.
-- exit `0` = complete execution; `1` = verdict/validation failure;
-  `2` = argument error. On diagnostic lanes `ok` only means the command
-  completed; lane anomalies are data, not exit codes.
+- exit `0` = complete execution (including `measure run` with a usable
+  attribution map whose union is uncertified); `1` = verdict/validation
+  failure; `2` = argument error. On diagnostic lanes `ok` only means the
+  command completed; lane anomalies are data, not exit codes.
 
 ## Failure semantics
 

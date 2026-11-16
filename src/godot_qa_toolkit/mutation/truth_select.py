@@ -395,14 +395,33 @@ def _sha256(path: Path) -> str | None:
 
 
 def arms_valid(states: dict) -> bool:
-    """产物臂可用性：硬失败（无 bundle / 无命中边）的"空映射"不是真值。
+    """产物臂可用性：必须是**真执行过的测量**，空映射/零测试不是真值。
 
-    KOL 常态：既有失败面使臂 state=run_error，但 bundles>0 且边集非空——
-    这类产物仍是有效测量（失败门控不影响归属观测），必须可用。"""
+    SEE-1587 D3（QA 回归）：`state=="valid"` 不再直接放行——缺导入缓存等
+    工具链失效会让 GUT 零测试退出 0，旧逻辑据此把 `state=valid/pairs=0`
+    的产物当真值（后果：零引用短路输出假绿 `ok:true, mutants:0`）。
+    判定（执行完整性证据优先）：
+    - 无 bundle → False（没有测量产物）；
+    - `probes_fired==0` 且非 vacuous → False（零测试/探针未点火 = 工具链
+      ／接线失效，fail-loud；不得静默当作"空映射"）；
+    - `pairs>0` → True（含 KOL 常态 run_error + 有边：既有失败面不影响
+      归属观测）；
+    - `pairs==0` 但探针确已点火/vacuous → True（**合法空面**：测试确已
+      执行但无归属边/无可执行行）；
+    - 旧产物（无 probes_fired 字段）→ 仅 `pairs>0` 可用，否则 False
+      （无法证明测过 → fail-loud，重生成方向安全）。"""
     gut = (states or {}).get("gut_full") or {}
-    if gut.get("state") == "valid":
-        return True
-    return int(gut.get("bundles") or 0) > 0 and int(gut.get("pairs") or 0) > 0
+    bundles = int(gut.get("bundles") or 0)
+    pairs = int(gut.get("pairs") or 0)
+    if bundles <= 0:
+        return False
+    if pairs > 0:
+        return True      # 有归属边 = 确已执行（含旧产物与 KOL run_error 常态）
+    probes = int(gut.get("probes_fired") or 0)
+    vacuous = bool(gut.get("vacuous"))
+    # 无边场景：仅"探针确已点火"或 vacuous（零可执行行）可视为合法空面；
+    # 零测试/无执行证据（含缺字段旧产物）→ False（fail-loud）
+    return bool(vacuous or probes > 0)
 
 
 def _evaluate(root: str, rel: str, doc: dict) -> dict:

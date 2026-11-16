@@ -1368,16 +1368,36 @@ def _tests_face_map(root: Path) -> dict[str, str]:
 
 
 def _arms_state(arms: tuple[dict, ...]) -> dict:
-    """臂有效性（失效臂的空映射不得被消费方当真值，fail-loud 于消费侧）。"""
+    """臂有效性（失效臂的空映射不得被消费方当真值，fail-loud 于消费侧）。
+
+    SEE-1587 D3（QA 回归）：除 state/bundles/pairs 外落盘**执行完整性
+    证据**——`probes_fired`（本臂全部 bundle 的探针点火总数）与 `vacuous`
+    （全体 bundle 零可执行行）。消费侧据此区分：
+    - 零测试/探针未点火且非 vacuous → 不是有效测量（fail-loud）；
+    - 合法空面（确有测试执行/探针点火，但无归属边）→ 仍可用。
+    缺省字段（旧产物）= 无法证明测过 → 消费侧 fail-loud（不假新鲜）。"""
+    def _sent(bundle: dict) -> dict:
+        # coverage-evidence/2 的哨兵嵌在 sentinels 下；顶层键形态留兜底
+        # （直接调用方/测试可能给扁平 bundle）。
+        return (bundle or {}).get("sentinels") or bundle or {}
+
     out: dict[str, dict] = {}
     for arm in arms:
         attribution = arm.get("attribution") or {}
+        bundles_data = arm.get("bundles_data") or {}
+        sentinels = [_sent(b) for b in bundles_data.values()]
+        probes_fired = sum(int((s or {}).get("probes_fired") or 0)
+                           for s in sentinels)
+        vacuous = bool(sentinels) and all(
+            bool((s or {}).get("vacuous")) for s in sentinels)
         out[arm["arm"]] = {
             "state": arm.get("state"),
             "invalid_reason": arm.get("invalid_reason"),
             "bundles": int(arm.get("bundles") or 0),
             "pairs": sum(len(v) for v in
                          (attribution.get("test_to_files") or {}).values()),
+            "probes_fired": probes_fired,
+            "vacuous": vacuous,
         }
     return out
 

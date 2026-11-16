@@ -352,3 +352,156 @@ def test_d3_arms_state_records_execution_integrity_evidence():
                             "probes_fired": 0, "vacuous": True}}}},))[
         "gut_full"]
     assert vac["vacuous"] is True
+
+
+# ---------------------------------------------------------------- D4：判据门
+
+
+def _plan_one(face: str = "utils") -> dict:
+    return {face: {"target": f"{face}/x.gd", "sites": 10,
+                   "census_files": 1, "census_total_sites": 10,
+                   "lines_spec": "1", "fixture": {}, "aa": 1, "rounds": 1}}
+
+
+def _write_run(bench, work: Path, face: str, arm: str, rnd,
+               *, verdicts: "dict[str, str] | None" = None,
+               wall: float = 100.0, selection_error: bool = False) -> None:
+    verdicts = verdicts or {}
+    rec = {"face": face, "arm": arm, "round": rnd, "status": "done",
+           "rc": 1, "wall_s": wall, "argv": [],
+           "metrics": {
+               "ok": False, "mutants": len(verdicts), "killed": 0,
+               "survived": 0, "suspect": 0, "timeout": 0,
+               "run_errors": 0, "invalid": 0, "jobs": 1, "scoped": True,
+               "selection_mode": "line",
+               "test_selection_source": "runtime_mapping",
+               "tests_count": 3, "groups": 1,
+               "coverage_prefilter": {"source": "projection_store",
+                                      "uncovered": 0, "covered_executed": 1},
+               "lines_selection": None, "baseline_reused": False,
+               "stage_timings": {"baseline": 10.0},
+               "rss_peak_mb": 150.0, "total_sites": 10, "executed": 1,
+               "verdicts": dict(verdicts),
+               "mutant_seconds": [1.0] * len(verdicts),
+               "exec_scheme": None, "inject_scheme": "disk-farm/1",
+               "slot_mode": None,
+               "selection_error": selection_error,
+               "error": "selection_error" if selection_error else None},
+           "stderr_tail": ""}
+    bench._atomic_write(bench._run_path(work, face, arm, rnd), rec)
+
+
+def _fill_face(bench, work: Path, face: str, *, verdicts, walls,
+               selection_error_arm: str | None = None) -> None:
+    _write_run(bench, work, face, "S2", "aa1", verdicts=verdicts,
+               wall=walls["S2"])
+    for arm in bench.ARMS:
+        _write_run(bench, work, face, arm, 1, verdicts=verdicts,
+                   wall=walls[arm],
+                   selection_error=(arm == selection_error_arm))
+
+
+def test_d4_gate_red_when_all_rounds_failed_without_verdicts(tmp_path):
+    """D4 剧本：完整面零 pair 映射 + 全轮失败（无 verdict 对账）→ 必须红。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    _fill_face(bench, work, "utils", verdicts={},
+               walls={"S0": 100.0, "S1": 95.0, "S2": 99.0, "S3": 110.0})
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    assert rep["gate"]["passed"] is False
+    assert rep["gate"]["compared_gate_failures"], rep["gate"]
+    faces = {g["arm"] for g in rep["gate"]["compared_gate_failures"]}
+    # S3 是参照 oracle，不参与 compared 门；被测臂 S0/S1/S2 全须报红
+    assert faces == {"S0", "S1", "S2"}
+
+
+def test_d4_gate_green_when_verdicts_reconciled(tmp_path):
+    """反方向：健康轮次（有 verdict 对账、S2≤S0、无 selection_error）仍绿。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    v = {"utils/x.gd#f#1": "killed"}
+    _fill_face(bench, work, "utils", verdicts=v,
+               walls={"S0": 100.0, "S1": 90.0, "S2": 95.0, "S3": 120.0})
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    assert rep["gate"]["passed"] is True, rep["gate"]
+    assert rep["gate"]["compared_gate_failures"] == []
+
+
+def test_d4_gate_red_on_selection_error_runs(tmp_path):
+    """选择阶段拒跑（selection_error）即便有 verdict 也必须红。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    v = {"utils/x.gd#f#1": "killed"}
+    _fill_face(bench, work, "utils", verdicts=v,
+               walls={"S0": 100.0, "S1": 90.0, "S2": 95.0, "S3": 120.0},
+               selection_error_arm="S1")
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    assert rep["gate"]["passed"] is False
+    assert rep["gate"]["selection_error_runs"] == [
+        {"face": "utils", "arm": "S1", "rounds": [1]}]
+
+
+def test_d4_ensure_map_faces_validates_arms_when_faces_already_covered(
+        tmp_path, monkeypatch):
+    """D4 根因点 1：面已覆盖不得早退跳过执行完整性门。"""
+    bench, kol, work, map_path = _bench_fixture(tmp_path)
+    map_path.write_text(json.dumps(_map_doc(
+        {"utils/a.gd": "x", "systems/b.gd": "y"},
+        _zero_test_arms())), encoding="utf-8")
+
+    def boom(*a, **k):  # pragma: no cover
+        raise AssertionError("measure must not run when faces are covered")
+
+    monkeypatch.setattr(bench, "_run", boom)
+    with pytest.raises(SystemExit) as ei:
+        bench._ensure_map_faces({}, kol, ["utils", "systems"], map_path,
+                                work, False)
+    assert "execution-integrity" in str(ei.value)
+
+
+def test_d4_ensure_map_faces_validates_arms_in_analyze_only(tmp_path):
+    """--analyze-only 同样执行执行完整性门（不是覆盖错误信息）。"""
+    bench, kol, work, map_path = _bench_fixture(tmp_path)
+    map_path.write_text(json.dumps(_map_doc(
+        {"utils/a.gd": "x", "systems/b.gd": "y"},
+        _zero_test_arms())), encoding="utf-8")
+    with pytest.raises(SystemExit) as ei:
+        bench._ensure_map_faces({}, kol, ["utils", "systems"], map_path,
+                                work, True)
+    assert "execution-integrity" in str(ei.value)
+
+
+def test_d4_pending_runs_exit_nonzero(tmp_path, monkeypatch, capsys):
+    """未跑完（pending）不得以 0 退出——"未判定"不是"通过"。"""
+    bench = _load_bench()
+    plan_file = tmp_path / "archived.json"
+    plan_file.write_text(json.dumps(
+        {"plan": _plan_one(), "protocol": {"aa": 1, "rounds": 1}}),
+        encoding="utf-8")
+    out = tmp_path / "o.json"
+    work = tmp_path / "runs"
+    work.mkdir()
+    import sys
+    monkeypatch.setattr(sys, "argv", [
+        "bench", "--kol-root", "/nonexistent", "--targets", "utils",
+        "--rounds", "1", "--aa", "1", "--budget", "1",
+        "--out", str(out), "--work-dir", str(work),
+        "--plan-file", str(plan_file), "--analyze-only"])
+    assert bench.main() == 1
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["status"] == "pending" and doc["ok"] is False
+
+
+def test_d2_stale_forensics_pruned_to_single_copy(tmp_path):
+    """E2E 取证副本不累积：失效旧映射后仅保留最新一份 *.stale-*。"""
+    e2e = _load_e2e()
+    map_path = tmp_path / "attribution-map.json"
+    map_path.write_text('{"cur": 1}', encoding="utf-8")
+    (tmp_path / "attribution-map.json.stale-111").write_text("old1")
+    (tmp_path / "attribution-map.json.stale-222").write_text("old2")
+    e2e._invalidate_existing_map(map_path)
+    stale = list(tmp_path.glob("attribution-map.json.stale-*"))
+    assert len(stale) == 1 and stale[0].read_text() == '{"cur": 1}'

@@ -300,11 +300,22 @@ def _ensure_map_faces(env, kol: Path, faces: list[str], map_path: Path,
     # arms_state 与行事实量决定，此处不把 rc 当失败（如实记录）。
     doc = json.loads(map_path.read_text(encoding="utf-8")) \
         if map_path.is_file() else {}
-    still = rels_needed - set((doc.get("file_sha256") or {}))
+    # D1 修复（QA 证据 line 303）：按 face 目录覆盖判定（任何 rel 以
+    # `<face>/` 开头即视为该面已补），此前误用未定义变量 rels_needed，
+    # 在「映射只覆盖部分 --targets 面」的干净副本上 NameError。
+    covered_rels = set((doc.get("file_sha256") or {}))
+    still = [f for f in faces
+             if not any(r.startswith(f + "/") for r in covered_rels)]
     if still:
         raise SystemExit(
-            f"attribution map still lacks {sorted(still)} after measure run "
+            f"attribution map still lacks faces {still} after measure run "
             f"(rc={rec['rc']}) — refusing to benchmark without a usable map")
+    from godot_qa_toolkit.mutation.truth_select import arms_valid
+    if not arms_valid(doc.get("arms_state") or {}):
+        raise SystemExit(
+            "attribution map failed the execution-integrity gate "
+            f"(arms_state={doc.get('arms_state')}); measure rc={rec['rc']} — "
+            "refusing to benchmark on a zero-test/empty measurement")
 
 
 def _required_runs(plan: dict, aa: int, rounds: int) -> list[tuple]:

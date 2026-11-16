@@ -119,7 +119,11 @@ class TestHigh2DefaultMapRecovery:
     def _write_map(self, path: Path, schema: str, *, with_arms: bool = True):
         doc = {"schema_version": schema,
                "arms": {"gut_full": {}} if with_arms else {},
-               "arms_state": {"gut_full": {"state": "valid"}},
+               "arms_state": {"gut_full": {"state": "valid",
+                                           "invalid_reason": None,
+                                           "bundles": 1, "pairs": 1,
+                                           "probes_fired": 64,
+                                           "vacuous": False}},
                "target_files": ["calc.gd"], "file_sha256": {},
                "report_recipe_hash": "x"}
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +143,11 @@ class TestHigh2DefaultMapRecovery:
             Path(attribution_out).write_text(json.dumps({
                 "schema_version": NEW_SCHEMA,
                 "arms": {"gut_full": {}},
-                "arms_state": {"gut_full": {"state": "valid"}},
+                "arms_state": {"gut_full": {"state": "valid",
+                                            "invalid_reason": None,
+                                            "bundles": 1, "pairs": 1,
+                                            "probes_fired": 64,
+                                            "vacuous": False}},
                 "target_files": ["calc.gd"], "file_sha256": {},
                 "report_recipe_hash": "x"}), encoding="utf-8")
 

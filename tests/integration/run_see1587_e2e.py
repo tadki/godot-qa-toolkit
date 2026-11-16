@@ -17,6 +17,7 @@ projection_store / projection_live），非常态 store miss。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -60,6 +61,46 @@ def _run(argv: list[str], stdin_env: dict, cwd: Path | None = None
 
 def _assert(checks: list[dict], name: str, ok: bool, detail) -> None:
     checks.append({"check": name, "ok": bool(ok), "detail": detail})
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _invalidate_existing_map(map_path: Path) -> str | None:
+    """SEE-1587 D2：测量前失效既有映射——改名留存取证并返回旧内容哈希。
+
+    旧映射绝不留给测量后的检查兜底（QA 复现的假绿通道：坏 recipe 下
+    measure 不写新映射，旧映射让 E2E 仍绿）。无旧映射 → None。"""
+    pre = _file_sha256(map_path)
+    if map_path.is_file():
+        bak = map_path.with_name(
+            map_path.name + f".stale-{os.getpid()}")
+        try:
+            map_path.rename(bak)
+        except OSError:
+            map_path.unlink(missing_ok=True)
+    return pre
+
+
+def _map_renewal_checks(map_path: Path, pre_hash: str | None,
+                        measure_rc: int) -> list[dict]:
+    """测量后：必须产出**新**映射（内容哈希变化才算），否则判据红。
+
+    measure rc 非 0（孤立副本 acceptance 臂 run_error 属已知边界）不单独
+    判负；但「没写出新映射」＝测量未发生，判据必须红（D2）。"""
+    post = _file_sha256(map_path)
+    renewed = post is not None and (pre_hash is None or post != pre_hash)
+    return [{
+        "check": "measure produced a new attribution map (content hash)",
+        "ok": renewed,
+        "detail": {"pre_hash": (pre_hash or "")[:12] or None,
+                   "post_hash": (post or "")[:12] or None,
+                   "measure_rc": measure_rc},
+    }]
 
 
 def main() -> int:
@@ -122,11 +163,13 @@ def main() -> int:
             str(recipe_path))
 
     # 2) 一次测量运行 → line-primary Attribution Map（同轮行事实）
+    #
+    # SEE-1587 D2（QA 回归）：不得假绿——测量前**失效既有映射**（改名留存
+    # 取证），测量后要求「新映射确实产出」（内容哈希变化）且通过执行完整
+    # 性门（truth_select.arms_valid，pairs/probes 双门）；坏 recipe / 未
+    # 写新映射 / 零测试空测量任一发生即判据红。
     map_path = kol / ".qa-cache" / "attribution-map.json"
-    map_backup = None
-    if map_path.is_file():
-        map_backup = map_path.with_suffix(".json.bak")
-        shutil.copy2(map_path, map_backup)
+    map_pre_hash = _invalidate_existing_map(map_path)
     top = target.relative_to(kol).parts[0]
     measure = _run(cli + [
         "measure", "run", str(kol / top), "--project-root", str(kol),
@@ -135,23 +178,22 @@ def main() -> int:
         "--test-attribution", "--test-attribution-out", str(map_path),
         "--acceptance-repeats", "1", "--timeout", "300"], env, cwd=work)
     runs.append(("measure run --test-attribution", measure))
-    # 孤立副本 acceptance 臂 invalid 属已知环境边界（报告 ok=false 可接受，
-    # gut_full 臂有效性才是归属真值门槛）——此处如实记录不掩盖。
-    _assert(checks, "attribution map written", map_path.is_file(),
-            {"path": str(map_path), "measure_rc": measure["rc"]})
+    renewal = _map_renewal_checks(map_path, map_pre_hash, measure["rc"])
+    for c in renewal:
+        _assert(checks, c["check"], c["ok"], c["detail"])
     if not map_path.is_file():
         _write(args.out, checks, runs, t_all)
         return 1
     doc = json.loads(map_path.read_text(encoding="utf-8"))
     rel = str(target.relative_to(kol))
     arms_state = (doc.get("arms_state") or {}).get("gut_full") or {}
-    arms_ok = (arms_state.get("state") == "valid"
-               or (int(arms_state.get("bundles") or 0) > 0
-                   and int(arms_state.get("pairs") or 0) > 0))
+    from godot_qa_toolkit.mutation.truth_select import arms_valid
+    # 执行完整性门：pairs==0 / probes_fired==0（零测试）均不得通过（D2/D3）。
+    _assert(checks, "map gut_full arm valid (executed measurement)",
+            arms_valid(doc.get("arms_state") or {}), arms_state)
     _assert(checks, "map schema == test-attribution/6",
             doc.get("schema_version") == "test-attribution/6",
             doc.get("schema_version"))
-    _assert(checks, "map gut_full arm valid", arms_ok, arms_state)
     _assert(checks, "map binds target file", rel in (doc.get("file_sha256")
                                                      or {}), rel)
     arm = (doc.get("arms") or {}).get("gut_full") or {}
@@ -210,8 +252,6 @@ def main() -> int:
     _assert(checks, "coverage store projection entry for target",
             bool(proj_entries), proj_entries[:3] or entries[:3])
 
-    if map_backup is not None:
-        map_backup.unlink(missing_ok=True)
     return _write(args.out, checks, runs, t_all)
 
 

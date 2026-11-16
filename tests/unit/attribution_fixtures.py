@@ -85,10 +85,14 @@ def write_map(project_root: Path,
         "tests_face": tests_face,
         "instrumentable_lines": instrumentable,
         "arms": {"gut_full": arm},
+        # SEE-1587 D3：真实 /6 产物携带执行完整性证据；零引用（pairs=0）
+        # 属合法空面——probes_fired>0 证明测试确已执行。
         "arms_state": {"gut_full": {"state": "valid",
                                     "invalid_reason": None,
                                     "bundles": 1,
-                                    "pairs": len(arm["test_to_files"])}},
+                                    "pairs": len(arm["test_to_files"]),
+                                    "probes_fired": 640,
+                                    "vacuous": False}},
         "notes": [],
     }
     out = Path(project_root) / ".qa-cache" / "attribution-map.json"

@@ -519,3 +519,109 @@ def test_projection_loader_never_consumes_manual_entries(tmp_path):
     reused, err = coverlink.load_reusable_coverage(
         str(project), str(target), sel_glob)
     assert reused is None and "schema mismatch" in err
+
+
+# ------------------------------------------------- 硬化补盲（变异存活点）
+# 以下判据封闭 SEE-1587 hardener 轮注入变异的存活点（仅测试侧补强）：
+# - CL2：projection covered ∩ 探针可插桩面（不可插桩行不得进入覆盖集）
+# - CL3：projection 并集必须含 script 车道行事实（不止 test 车道）
+# - CL5：load 侧绑定包 map_file_sha256 失配显式拒绝（即便 source_sha1 仍匹配）
+# - CL6：load 侧身份包漂移显式拒绝（不假过滤）
+
+
+def test_projection_intersects_covered_with_instrumentable(tmp_path):
+    """行事实中被投影的 covered 行必须 ∩ 探针可插桩面——不可插桩行不得
+    进入 projection 覆盖集（D3 过滤锚 = covered ∧ instrumentable）。"""
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "test_a.gd").write_text("extends GutTest\n")
+    target = project / "src" / "a.gd"
+    target.parent.mkdir(parents=True)
+    target.write_text(TARGET_SRC)
+    doc = _write_line_primary_doc(tmp_path, project, "src/a.gd", TARGET_SRC,
+                                  {"a": {5, 6}, "b": {6}})
+    rel = "src/a.gd"
+    # test_a 的行事实多出可插桩面之外的行 42 → 必须被 ∩ 掉
+    doc["arms"]["gut_full"]["test_to_lines"]["test_a.gd::ta"][rel] = [5, 6, 42]
+    doc["instrumentable_lines"][rel] = [5, 6]
+    covered, err = coverlink.project_coverage_from_map(
+        str(project), doc, str(target), ["res://tests/test_a.gd"],
+        "res://.gqt-attr-select/abc/", current_recipe_pristine="pristine-1")
+    assert err is None and covered == {5, 6}
+
+
+def test_projection_unions_script_lane_line_facts(tmp_path):
+    """投影并集必须含 script 车道行事实（before_all 等脚本级执行同样是
+    该脚本的测试面），不得只剩 test 车道。"""
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "test_a.gd").write_text("extends GutTest\n")
+    target = project / "src" / "a.gd"
+    target.parent.mkdir(parents=True)
+    target.write_text(TARGET_SRC)
+    doc = _write_line_primary_doc(tmp_path, project, "src/a.gd", TARGET_SRC,
+                                  {"a": {5}, "b": {6}})
+    rel = "src/a.gd"
+    doc["arms"]["gut_full"]["script_to_lines"] = {"test_a.gd": {rel: [7]}}
+    doc["instrumentable_lines"][rel] = [5, 6, 7]
+    covered, err = coverlink.project_coverage_from_map(
+        str(project), doc, str(target), ["res://tests/test_a.gd"],
+        "res://.gqt-attr-select/abc/", current_recipe_pristine="pristine-1")
+    assert err is None and covered == {5, 7}
+
+
+def test_projection_loader_rejects_binding_target_sha_mismatch(tmp_path):
+    """绑定包 map_file_sha256 失配必须显式拒绝——即便缓存条目自身
+    source_sha1 仍与当前目标一致（binding 绑定的是映射快照，防御分层）。"""
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "test_a.gd").write_text("extends GutTest\n")
+    target = project / "src" / "a.gd"
+    target.parent.mkdir(parents=True)
+    target.write_text(TARGET_SRC)
+    doc = _write_line_primary_doc(tmp_path, project, "src/a.gd", TARGET_SRC,
+                                  {"a": {5}, "b": {6}})
+    glob = "res://.gqt-attr-select/abc/"
+    covered, err = coverlink.project_coverage_from_map(
+        str(project), doc, str(target), ["res://tests/test_a.gd"], glob,
+        current_recipe_pristine="pristine-1")
+    assert err is None
+    entry_path = coverlink.coverage_cache_path(str(project), str(target), glob)
+    raw = json.loads(entry_path.read_text(encoding="utf-8"))
+    # 只篡改 binding 的目标 sha；source_sha1 仍与当前文件一致
+    raw["projection"]["map_file_sha256"] = "0" * 64
+    entry_path.write_text(json.dumps(raw), encoding="utf-8")
+    lines, err = coverlink.load_projected_coverage(
+        str(project), str(target), glob,
+        current_recipe_pristine="pristine-1")
+    assert lines is None and "target changed since map" in err
+
+
+def test_projection_loader_rejects_identity_drift(tmp_path):
+    """投影 /2 条目身份包漂移 → 显式拒绝（不假过滤）；同身份命中。"""
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "test_a.gd").write_text("extends GutTest\n")
+    target = project / "src" / "a.gd"
+    target.parent.mkdir(parents=True)
+    target.write_text(TARGET_SRC)
+    doc = _write_line_primary_doc(tmp_path, project, "src/a.gd", TARGET_SRC,
+                                  {"a": {5}, "b": {6}})
+    glob = "res://.gqt-attr-select/abc/"
+    ident = {"inject_scheme": "x", "ops_version": "1",
+             "gut_addon_hash": "h1"}
+    covered, err = coverlink.project_coverage_from_map(
+        str(project), doc, str(target), ["res://tests/test_a.gd"], glob,
+        current_recipe_pristine="pristine-1", identity=ident)
+    assert err is None
+    # 同身份命中
+    lines, err = coverlink.load_projected_coverage(
+        str(project), str(target), glob, identity=ident,
+        current_recipe_pristine="pristine-1")
+    assert err is None and lines == {5}
+    # 身份漂移（gut_addon_hash 变）→ 显式失效
+    lines, err = coverlink.load_projected_coverage(
+        str(project), str(target), glob,
+        identity={**ident, "gut_addon_hash": "h2"},
+        current_recipe_pristine="pristine-1")
+    assert lines is None and "identity drift" in err

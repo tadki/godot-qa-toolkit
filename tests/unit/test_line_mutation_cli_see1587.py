@@ -74,7 +74,9 @@ def test_parse_lines_spec_single_range_multi():
 
 
 def test_parse_lines_spec_rejects_malformed():
-    for bad in ("", "0", "-3", "20-10", "a", "1-", "1,,2", "3-2"):
+    # "0-5": 区间下界非正（lo<=0 守卫）——单值 "0" 走另一分支；此处钉死
+    # 区间形态的非正下界同样拒绝（硬化补盲：TS5 注入存活点）。
+    for bad in ("", "0", "0-5", "-3", "20-10", "a", "1-", "1,,2", "3-2"):
         with pytest.raises(ValueError):
             parse_lines_spec(bad)
 

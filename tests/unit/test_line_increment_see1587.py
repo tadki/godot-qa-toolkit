@@ -394,3 +394,44 @@ def test_increment_fallback_artifact_is_line_primary(tmp_path, monkeypatch):
     assert "src_game/brand_new.gd" not in doc["instrumentable_lines"]
     assert doc["instrumentable_lines"]["src_game/cell.gd"]
     assert doc["increment"]["increments_since_full"] == 0
+
+
+# ------------------------------------------------- 硬化补盲（变异存活点）
+# 增量合并契约的删除/替换语义：既有集成用例只覆盖「同身份替换 + 保留」，
+# 未覆盖「删除脚本删边」与「重跑脚本内方法改名后旧身份清除」——用
+# `_merge_arm` 直接钉死两条语义（IN1 / IN2 注入存活点）。
+
+
+def test_merge_arm_drops_deleted_script_line_facts():
+    """删除脚本 → 其 test 车道与 script 车道行事实连同反查一并删除。"""
+    from godot_qa_toolkit.measurement.increment import _merge_arm
+
+    arm = {
+        "test_to_lines": {"test_b.gd::tb": {"a.gd": [3]}},
+        "script_to_lines": {"test_b.gd": {"a.gd": [3]}},
+    }
+    merged = _merge_arm(arm,
+                        {"test_to_lines": {}, "script_to_lines": {}},
+                        dropped={"test_b.gd"})
+    assert merged["test_to_lines"] == {}
+    assert merged["script_to_lines"] == {}
+    assert merged["line_to_tests"] == {}
+
+
+def test_merge_arm_replaces_rerun_script_stale_method_identity():
+    """重跑脚本按脚本名整体替换：该脚本内被改名/删除的方法旧身份不得残留
+    （否则留下陈旧行事实造成过选面）。"""
+    from godot_qa_toolkit.measurement.increment import _merge_arm
+
+    arm = {
+        "test_to_lines": {"test_a.gd::old": {"a.gd": [9]}},
+        "script_to_lines": {},
+    }
+    fresh = {
+        "test_to_lines": {"test_a.gd::new": {"a.gd": [4]}},
+        "test_to_files": {"test_a.gd::new": ["a.gd"]},
+        "script_to_lines": {},
+    }
+    merged = _merge_arm(arm, fresh, dropped=set())
+    assert merged["test_to_lines"] == {"test_a.gd::new": {"a.gd": [4]}}
+    assert merged["line_to_tests"] == {"a.gd": {"4": ["test_a.gd::new"]}}

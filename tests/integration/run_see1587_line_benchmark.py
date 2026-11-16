@@ -444,12 +444,40 @@ def _analyze(plan: dict, work: Path, aa: int, rounds: int) -> dict:
         gate_perf.append({"face": "combined", "ratio": combined_ratio,
                           "S0_median": total_med["S0"],
                           "S2_median": total_med["S2"]})
+    # SEE-1587 §SPEC-007 性能门——Owner 裁定口径（2026-11-16 逐字记案
+    # 「按1你的推荐执行，判pass」，Atlas 记案：S2/S0 ≤ 1 + A/A 噪声带）：
+    # 带宽按既有协议 aa_noise.spread_pct/100；合并面阈值取各面带宽最大值
+    # （保守上界，披露于 combined_noise_band）。字面 ≤1.0× 清单保留在
+    # perf_failures（信息性，不再单独判门）——只加不改，测量字段零变化。
+    bands = {face: ((d.get("aa_noise") or {}).get("spread_pct", 0.0)
+                    / 100.0) for face, d in faces_out.items()}
+    combined_band = max(bands.values()) if bands else 0.0
+    perf_nb: list[dict] = []
+    for face in faces_out:
+        r = faces_out[face]["ratios_vs_S0"].get("S2")
+        thr = 1.0 + bands.get(face, 0.0)
+        if r is not None and r > thr:
+            perf_nb.append({"face": face, "ratio": r,
+                            "threshold": round(thr, 6)})
+    if combined_ratio is not None \
+            and combined_ratio > 1.0 + combined_band:
+        perf_nb.append({"face": "combined", "ratio": combined_ratio,
+                        "threshold": round(1.0 + combined_band, 6)})
+    perf_basis = ("owner ruling 2026-11-16 (verbatim: 按1你的推荐执行，判pass): "
+                  "per-face and combined S2/S0 <= 1 + that face's A/A noise "
+                  "band (aa_noise.spread_pct/100, existing protocol); "
+                  "combined band = max of face bands; legacy literal "
+                  "<=1.0x list kept informational in perf_failures")
     return {"faces": faces_out,
             "combined_medians_s": total_med,
             "combined_ratio_S2_over_S0": combined_ratio,
             "gate": {"verdict_mismatches": gate_mismatch,
                      "perf_failures": gate_perf,
-                     "passed": not gate_mismatch and not gate_perf}}
+                     "perf_failures_noise_band": perf_nb,
+                     "perf_gate_basis": perf_basis,
+                     "noise_bands": bands,
+                     "combined_noise_band": round(combined_band, 6),
+                     "passed": not gate_mismatch and not perf_nb}}
 
 
 def main() -> int:
@@ -471,25 +499,42 @@ def main() -> int:
     ap.add_argument("--max-wall-seconds", type=float, default=480.0,
                     help="stop between completed rounds (0 = unlimited)")
     ap.add_argument("--analyze-only", action="store_true")
+    ap.add_argument("--plan-file", default=None,
+                    help="replay a prior report's plan for offline "
+                         "re-analysis of archived run records (no KOL/map "
+                         "needed; plan is authoritative, not recomputed)")
     args = ap.parse_args()
 
-    kol = Path(args.kol_root)
-    if not kol.is_dir():
-        raise SystemExit(f"kol-root missing: {kol}")
     work = Path(args.work_dir or (args.out + ".runs"))
     work.mkdir(parents=True, exist_ok=True)
     env = _env(args.godot_bin)
-    map_path = kol / ".qa-cache" / "attribution-map.json"
-    _ensure_map_faces(env, kol, args.targets, map_path, work,
-                      args.analyze_only)
-    doc = json.loads(map_path.read_text(encoding="utf-8"))
-    plan = _plan(kol, args.targets, args.rounds, args.aa, args.budget, doc)
-    missing = [p["target"] for p in plan.values()
-               if p["target"] not in (doc.get("file_sha256") or {})]
-    if missing:
-        raise SystemExit(
-            f"attribution map lacks benchmark targets {missing} — refusing "
-            "to benchmark without a usable map")
+    if args.plan_file:
+        # 离线复证模式：plan 从存档报告逐字回放（确定性取样结果不重推，
+        # 不依赖 KOL 树/映射），分析只消费已存档轮次记录。
+        archived = json.loads(Path(args.plan_file).read_text(
+            encoding="utf-8"))
+        plan = archived["plan"]
+        if archived.get("protocol", {}).get("aa") not in (None, args.aa) \
+                or archived.get("protocol", {}).get("rounds") \
+                not in (None, args.rounds):
+            raise SystemExit(
+                "--aa/--rounds do not match the archived protocol")
+    else:
+        kol = Path(args.kol_root)
+        if not kol.is_dir():
+            raise SystemExit(f"kol-root missing: {kol}")
+        map_path = kol / ".qa-cache" / "attribution-map.json"
+        _ensure_map_faces(env, kol, args.targets, map_path, work,
+                          args.analyze_only)
+        doc = json.loads(map_path.read_text(encoding="utf-8"))
+        plan = _plan(kol, args.targets, args.rounds, args.aa, args.budget,
+                     doc)
+        missing = [p["target"] for p in plan.values()
+                   if p["target"] not in (doc.get("file_sha256") or {})]
+        if missing:
+            raise SystemExit(
+                f"attribution map lacks benchmark targets {missing} — "
+                "refusing to benchmark without a usable map")
     required = _required_runs(plan, args.aa, args.rounds)
     t0 = time.monotonic()
     done = pending = 0

@@ -43,6 +43,10 @@ DEFAULT_GODOT = "/home/jerry/gqt-probe-bin/godot"
 PROGRESS_RE = re.compile(
     r"^\[(\d+)/(\d+)\]\s+(\w+)\s+L(\d+)\s+(\S+)\s+([\d.]+)s")
 ARMS = ("S0", "S1", "S2", "S3")
+# SEE-1587 D5：可判定 verdict——对账与 mismatch 判定的唯一合法输入；
+# run_error/timeout/suspect/uncovered 等不可判定结论不计入 compared，
+# 仅作 undecidable_excluded 披露（全不可判定轮落入 compared==0 门）。
+DECIDABLE_VERDICTS = ("killed", "survived")
 ARM_ARGS = {
     "S0": ["--select", "fn"],
     "S2": ["--select", "line"],
@@ -367,25 +371,37 @@ def _analyze(plan: dict, work: Path, aa: int, rounds: int) -> dict:
         ratios = {arm: (round(medians[arm] / medians["S0"], 4)
                         if medians.get(arm) and medians.get("S0")
                         else None) for arm in ARMS if arm != "S0"}
-        # verdict 对账（S1/S2 vs S3，仅两侧均执行的 stable_id）
+        # verdict 对账（S1/S2 vs S3，仅两侧均执行的 stable_id）。
+        # SEE-1587 D5（QA 回归）：仅**可判定 verdict**（killed/survived）
+        # 计入 compared 并参与 mismatch 判定；run_error/timeout/suspect/
+        # uncovered 等不可判定结论不计入（全 run_error 轮自然落入既有
+        # compared==0 门），被排除的不可判定对计数作披露字段
+        # （undecidable_excluded，只加不改）。
         recon = {}
         s3 = arm_details.get("S3") or []
         s3_verdicts: dict[str, str] = {}
         for rec in s3:
             s3_verdicts.update(rec["metrics"]["verdicts"])
         for arm in ("S0", "S1", "S2"):
-            mism, common = [], 0
+            mism, common, undec = [], 0, 0
             for rec in arm_details.get(arm) or []:
                 v = rec["metrics"]["verdicts"]
                 for sid, verdict in v.items():
-                    if sid in s3_verdicts:
-                        common += 1
-                        if s3_verdicts[sid] != verdict:
-                            mism.append({"id": sid, "arm": verdict,
-                                         "S3": s3_verdicts[sid]})
+                    if sid not in s3_verdicts:
+                        continue
+                    s3_verdict = s3_verdicts[sid]
+                    if verdict not in DECIDABLE_VERDICTS \
+                            or s3_verdict not in DECIDABLE_VERDICTS:
+                        undec += 1
+                        continue
+                    common += 1
+                    if s3_verdict != verdict:
+                        mism.append({"id": sid, "arm": verdict,
+                                     "S3": s3_verdict})
             recon[arm] = {"compared": common,
                           "mismatches": mism[:20],
-                          "mismatch_count": len(mism)}
+                          "mismatch_count": len(mism),
+                          "undecidable_excluded": undec}
         for arm in ("S1", "S2"):
             if recon[arm]["mismatch_count"]:
                 gate_mismatch.append({"face": face, "arm": arm,

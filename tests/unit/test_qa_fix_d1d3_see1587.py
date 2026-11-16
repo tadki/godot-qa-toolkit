@@ -505,3 +505,94 @@ def test_d2_stale_forensics_pruned_to_single_copy(tmp_path):
     e2e._invalidate_existing_map(map_path)
     stale = list(tmp_path.glob("attribution-map.json.stale-*"))
     assert len(stale) == 1 and stale[0].read_text() == '{"cur": 1}'
+
+
+# ---------------------------------------------------------------- D5：对账口径
+
+
+def test_d5_all_run_error_rounds_red(tmp_path):
+    """D5 剧本：全轮 run_error（不可判定）→ compared=0 → 必须红。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    verr = {"utils/x.gd#f#1": "run_error", "utils/x.gd#f#2": "run_error",
+            "utils/x.gd#f#3": "run_error"}
+    _fill_face(bench, work, "utils", verdicts=verr,
+               walls={"S0": 100.0, "S1": 95.0, "S2": 99.0, "S3": 110.0})
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    assert rep["gate"]["passed"] is False
+    fails = {g["arm"] for g in rep["gate"]["compared_gate_failures"]}
+    assert fails == {"S0", "S1", "S2"}
+    for arm in ("S0", "S1", "S2"):
+        assert rep["faces"]["utils"]["verdict_reconciliation"][arm][
+            "compared"] == 0
+
+
+def test_d5_mixed_rounds_reconcile_decidable_only(tmp_path):
+    """混合轮：可判定部分正常对账（含 mismatch），run_error 不凑数、
+    不参与 mismatch，计入 undecidable_excluded 披露。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    # S3: id1 killed / id2 killed / id3 survived
+    # S2: id1 killed（一致）、id2 run_error（不可判定→排除）、
+    #     id3 survived（一致）→ compared=2、mismatch=0、undec=1
+    s3v = {"utils/x.gd#f#1": "killed", "utils/x.gd#f#2": "killed",
+           "utils/x.gd#f#3": "survived"}
+    s2v = {"utils/x.gd#f#1": "killed", "utils/x.gd#f#2": "run_error",
+           "utils/x.gd#f#3": "survived"}
+    _write_run(bench, work, "utils", "S2", "aa1", verdicts=s2v, wall=95.0)
+    for arm in bench.ARMS:
+        _write_run(bench, work, "utils", arm, 1,
+                   verdicts=(s3v if arm == "S3" else s2v), wall=95.0)
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    r = rep["faces"]["utils"]["verdict_reconciliation"]["S2"]
+    assert r["compared"] == 2 and r["mismatch_count"] == 0
+    assert r["undecidable_excluded"] == 1
+    assert rep["gate"]["passed"] is True
+
+
+def test_d5_undecidable_mismatch_not_counted_but_disclosed(tmp_path):
+    """S3=killed vs 臂=run_error：既不计入 compared 也不计 mismatch，
+    只进 undecidable_excluded（排除不掩盖——可判定样本量随之下降）。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    s3v = {"utils/x.gd#f#1": "killed"}
+    s2v = {"utils/x.gd#f#1": "run_error"}
+    _write_run(bench, work, "utils", "S2", "aa1", verdicts=s2v, wall=95.0)
+    for arm in bench.ARMS:
+        _write_run(bench, work, "utils", arm, 1,
+                   verdicts=(s3v if arm == "S3" else s2v), wall=95.0)
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    r = rep["faces"]["utils"]["verdict_reconciliation"]["S2"]
+    assert r["compared"] == 0 and r["mismatch_count"] == 0
+    assert r["undecidable_excluded"] == 1
+    assert rep["gate"]["passed"] is False  # compared==0 门
+
+
+def test_d5_healthy_decidable_mix_unaffected(tmp_path):
+    """健康轮：killed/survived 混合对账不受影响；mismatch 仍被抓。"""
+    bench = _load_bench()
+    work = tmp_path / "runs"
+    plan = _plan_one()
+    s3v = {"utils/x.gd#f#1": "killed", "utils/x.gd#f#2": "survived"}
+    same = {"utils/x.gd#f#1": "killed", "utils/x.gd#f#2": "survived"}
+    diff = {"utils/x.gd#f#1": "killed", "utils/x.gd#f#2": "killed"}
+    _write_run(bench, work, "utils", "S2", "aa1", verdicts=same, wall=95.0)
+    for arm in bench.ARMS:
+        _write_run(bench, work, "utils", arm, 1,
+                   verdicts=(s3v if arm == "S3" else same), wall=95.0)
+    rep = bench._analyze(plan, work, aa=1, rounds=1)
+    r = rep["faces"]["utils"]["verdict_reconciliation"]["S2"]
+    assert r["compared"] == 2 and r["mismatch_count"] == 0
+    assert r["undecidable_excluded"] == 0
+    assert rep["gate"]["passed"] is True
+    # 注回真 mismatch（S2 幸存 vs S3 击杀）→ 红
+    work2 = tmp_path / "runs2"
+    for arm in bench.ARMS:
+        _write_run(bench, work2, "utils", arm, 1,
+                   verdicts=(s3v if arm == "S3" else diff), wall=95.0)
+    rep2 = bench._analyze(plan, work2, aa=1, rounds=1)
+    assert rep2["gate"]["passed"] is False
+    assert rep2["gate"]["verdict_mismatches"]

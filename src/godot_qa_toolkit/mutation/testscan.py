@@ -125,6 +125,46 @@ def derive_tests_glob_meta(target_res_path: str, tests_dir: Path,
     return glob, meta
 
 
+_SELECT_MODES = frozenset({"line", "fn", "file", "full"})
+
+
+def resolve_selection_mode(select_mode: str,
+                           selection_meta: dict | None = None,
+                           select_ids: list | None = None,
+                           select_lines: list | None = None) -> str:
+    """实际生效的选面（SEE-1589 A-M4/M5/L1/L5 唯一判别口径）。
+
+    优先级：卡尺（--mutation > --lines）> 显式 --tests 接管 > --select。
+    显式 --tests 时 select_mode 仍是 line（默认值），但实际执行面由用户
+    接管——继续报 line 会误导（L1）；未知值 fail-loud，不静默回落。
+    """
+    meta = selection_meta or {}
+    if select_ids:
+        return "mutation"
+    if select_lines:
+        return "lines"
+    if meta.get("source") == "explicit_tests":
+        return "explicit_tests"
+    mode = str(select_mode or "line").lower()
+    if mode not in _SELECT_MODES:
+        raise ValueError(f"unknown selection mode: {select_mode!r}")
+    return mode
+
+
+def concurrency_disclosure(select_mode: str, groups: int | None,
+                           jobs: int | None) -> dict:
+    """并发上限披露（M5）：行级/函数级分片的 jobs 上限 = 签名组数。
+
+    仅当分组数小于请求并发（确被钳制）时披露；未钳制或非分组模式返回空片。
+    """
+    if str(select_mode).lower() not in ("line", "fn"):
+        return {}
+    if not groups or not jobs or groups >= jobs:
+        return {}
+    return {"jobs": int(groups), "selection_groups": int(groups),
+            "jobs_limit_reason": "selection_groups"}
+
+
 def selection_disclosure(selection_meta: dict | None) -> dict:
     """§SPEC-613 选测披露片段（summary 透出的唯一拼装点）。
 

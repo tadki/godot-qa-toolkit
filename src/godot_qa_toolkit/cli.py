@@ -422,8 +422,9 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
         select_mode=getattr(args, "select_mode", "line"))
-    if len(files) == 1 and args.jobs is None:
-        # 缺省单文件对外保持既有 flat CLI 契约，results 信封仅限编排层。
+    if len(files) == 1:
+        # SEE-1589 A-M3：单文件对外恒为 flat CLI 契约（--jobs 1 不得套用
+        # 多文件 results[] 信封）；信封仅限多文件编排层。
         envelope = result
         result = envelope["results"][0]
         result["summary"].setdefault("jobs", envelope["jobs"])
@@ -759,12 +760,14 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
 
 def cmd_measure_run(args: argparse.Namespace) -> int:
     import json as _json
+    import time as _time
 
     from pathlib import Path as _P
 
     from .measurement.orchestrator import MeasurementError, run_measurement
     from .measurement.recipe import verify_recipe
 
+    run_started = _time.time()
     rc = _apply_godot_bin_or_contract("measure.run", args)
     if rc is not None:
         return rc
@@ -871,9 +874,38 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_json.dumps(report, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    return _emit({"tool": "measure.run", "ok": report["ok"],
-                  "summary": report,
-                  "failures": ([] if report["ok"] else
+    # SEE-1589 A-M1：union 不可认证 ≠ 产物不可用。行映射已写出且臂有
+    # 执行证据（pairs/probes）时，可用产物不得被失败退出码误导丢弃——
+    # 以 certification 字段区分「映射可用、union 未认证」。
+    attribution_usable = False
+    if attribution_out:
+        try:
+            from .mutation.truth_select import arms_valid
+            map_file = _P(attribution_out)
+            # 陈旧产物不得冒充本轮可用证据（上一轮残留文件 freshness 门）。
+            fresh = map_file.stat().st_mtime >= run_started - 1.0
+            doc = _json.loads(map_file.read_text(encoding="utf-8"))
+            attribution_usable = fresh and arms_valid(
+                doc.get("arms_state") or {})
+        except (OSError, ValueError):
+            attribution_usable = False
+    union_certified = bool(report.get("ok"))
+    certification = ("certified" if union_certified
+                     else "uncertified" if attribution_usable else "unusable")
+    summary = dict(report)
+    summary.update({
+        "certification": certification,
+        "union_certified": union_certified,
+        "attribution_usable": attribution_usable,
+        "exit_semantics": ("certified" if union_certified
+                           else "artifacts_usable_union_uncertified"
+                           if attribution_usable else "failed"),
+    })
+    if attribution_out:
+        summary["attribution_map"] = str(attribution_out)
+    ok = union_certified or attribution_usable
+    return _emit({"tool": "measure.run", "ok": ok, "summary": summary,
+                  "failures": ([] if ok else
                                [{"reason": "union invalid or arms invalid"}])})
 
 

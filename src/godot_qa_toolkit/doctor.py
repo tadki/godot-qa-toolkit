@@ -61,6 +61,12 @@ def resolve_editable_location() -> str | None:
     return None
 
 
+def _is_gqt_checkout(path: Path) -> bool:
+    """gqt 检出判据（source 树形态）：pyproject + src/godot_qa_toolkit。"""
+    return (path / "pyproject.toml").is_file() \
+        and (path / "src" / "godot_qa_toolkit").is_dir()
+
+
 def locate_toolkit_root(start: Path) -> Path | None:
     """从 start 向上找工具库根；环境变量优先，退回 .dev/qa-toolkit 旧约定。
 
@@ -71,11 +77,16 @@ def locate_toolkit_root(start: Path) -> Path | None:
     if env_root:
         cand = Path(env_root)
         return cand if cand.is_dir() else None
+    checkouts: list[Path] = []
     for p in (start, *start.parents):
         cand = p / ".dev" / "qa-toolkit"
         if cand.is_dir():
             return cand
-    return None
+        if _is_gqt_checkout(p):
+            checkouts.append(p)
+    # L3：直接在 gqt 检出内运行（worktree/独立检出）也是合法自检场景，
+    # 不能因缺少历史 `.dev/qa-toolkit` 布局而误报 skipped。
+    return checkouts[0] if checkouts else None
 
 
 def _gitlink_head(root: Path) -> str | None:
@@ -102,7 +113,12 @@ def check_install(cwd: Path | None = None) -> tuple[bool, dict]:
 
     if toolkit_root is None:
         # 有安装但目标树未解析（独立全局使用是合法形态）：跳过根比对，不误报。
-        return True, {"status": "skipped", "reason": "cwd is not inside a toolkit tree (standalone usage)"}
+        return True, {
+            "status": "skipped",
+            "reason": "cwd is not inside a toolkit tree (standalone usage)",
+            "fix_hint": "in a gqt checkout run from its root, or set "
+                        "GQT_TOOLKIT_ROOT=<gqt checkout root> and rerun",
+        }
 
     if editable is None:
         return False, {
@@ -112,11 +128,27 @@ def check_install(cwd: Path | None = None) -> tuple[bool, dict]:
         }
 
     if Path(editable).resolve() != toolkit_root.resolve():
+        head_installed = _gitlink_head(Path(editable))
+        head_root = _gitlink_head(toolkit_root)
+        # L3：多检出同 HEAD 是合法形态（editable 指向主检出、当前在
+        # worktree 内跑），不应 exit 2 误报错配；仅在 HEAD 真不同时报错。
+        if head_installed and head_root and head_installed == head_root \
+                and _is_gqt_checkout(Path(editable)) \
+                and _is_gqt_checkout(toolkit_root):
+            return True, {
+                "status": "ok_multi_checkout",
+                "editable_location": editable,
+                "toolkit_root": str(toolkit_root),
+                "gitlink_head": head_root,
+                "note": "editable install points at a different checkout "
+                        "of the same HEAD; no action required",
+            }
         return False, {
             "status": "mismatch",
             "editable_location": editable,
             "toolkit_root": str(toolkit_root),
-            "gitlink_head": _gitlink_head(toolkit_root),
+            "installed_head": head_installed,
+            "gitlink_head": head_root,
             "fix_hint": _FIX_HINT,
         }
 

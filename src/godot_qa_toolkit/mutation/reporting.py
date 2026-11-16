@@ -37,19 +37,23 @@ def _setup_error_result(file: str, err) -> dict:
     }
 
 
-def _no_sites_result(file: str, scoped: bool | None = None) -> dict:
-    return {
-        "tool": "mutation",
-        "ok": True,
-        "summary": {"file": file, "mutants": 0, "killed": 0, "survived": 0,
-                    "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
-                    "scoped": bool(scoped)},
-        "failures": [],
-    }
+def _no_sites_result(file: str, scoped: bool | None = None,
+                     zero_ref: bool = False) -> dict:
+    summary = {"file": file, "mutants": 0, "killed": 0, "survived": 0,
+               "timeout": 0, "kill_rate": 0.0, "note": "no mutation sites",
+               "scoped": bool(scoped)}
+    if zero_ref:
+        # SEE-1589 A-L2：映射明确判零测试且位点为零——同样是一次短路，
+        # 与 `zero_ref_short_circuit_result` 同键，文档/实测口径一致。
+        summary["zero_ref_short_circuit"] = True
+        summary["short_circuit_reason"] = "no_mutation_sites"
+    return {"tool": "mutation", "ok": True, "summary": summary,
+            "failures": []}
 
 
 def _run_error_result(file: str, error: str, failure_reason: str,
-                      hint: str | None = None) -> dict:
+                      hint: str | None = None,
+                      action_kind: str | None = None) -> dict:
     """统一 run_error 中止契约（contract.md §4.3 中止形态）。
 
     hint（SEE-1356 L1）：baseline 超时中止附 suggested_action，机器可执行
@@ -58,6 +62,8 @@ def _run_error_result(file: str, error: str, failure_reason: str,
     summary = {"file": file, "run_error": True, "error": error}
     if hint:
         summary["suggested_action"] = hint
+    if action_kind:
+        summary["suggested_action_kind"] = action_kind
     return {
         "tool": "mutation",
         "ok": False,

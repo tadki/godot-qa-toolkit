@@ -93,6 +93,79 @@ def resolve_exec_scheme(project_root: str, target_res: str,
     return COLD_SCHEME, route
 
 
+def build_worker_disclosure(project_root: str, target_res: str,
+                            requested: bool | None, scheme: str,
+                            route) -> dict:
+    """每轮机器可读通道披露（SEE-1589 B §SPEC-002）。
+
+    `exec_scheme` 单独存在时只能看到结果，看不到「为什么冷」——本块把
+    静态路由 reason（含成员上下文）、闭包规模、显式 flag 是否被拒一并
+    落盘，禁止无解释静默冷通道。
+    """
+    from .channel_router import summarize_reasons
+    if route is None:
+        channel = "not_evaluated"
+        reasons: tuple[str, ...] = ()
+        closure_size = 0
+    else:
+        channel = getattr(route, "channel", "unknown")
+        reasons = tuple(getattr(route, "reasons", ()) or ())
+        closure_size = len(getattr(route, "closure", ()) or ())
+    if scheme == WORKER_SCHEME:
+        decision, reason = "worker", "worker_reset_session"
+    elif channel == "cold":
+        decision, reason = "cold_route_excluded", "route_reason_present"
+    elif not worker_enabled(requested):
+        decision, reason = "cold_worker_disabled", "worker_flag_or_env_off"
+    elif not gut_direct_drive_available(project_root):
+        decision = "cold_gut_direct_unavailable"
+        reason = "gut_addon_missing"
+    else:
+        decision, reason = "cold_unknown", "unresolved"
+    return {
+        "requested": requested,
+        "route": channel,
+        "exec_scheme": scheme,
+        "decision": decision,
+        "reason": reason,
+        "route_reasons": list(reasons),
+        "reason_counts": summarize_reasons(reasons),
+        "closure_size": closure_size,
+        "override_refused": bool(requested) and scheme != WORKER_SCHEME,
+    }
+
+
+def _fatal_reason_code(events: list[str]) -> str:
+    """会话致命事件 → 稳定 reason 码（机器可读不可达原因）。"""
+    joined = " ".join(events).lower()
+    if "user:// tree drift" in joined:
+        return "user_state_drift"
+    if "connection fingerprint drift" in joined:
+        return "connection_drift"
+    if "parity" in joined:
+        return "parity_mismatch"
+    return "session_fatal"
+
+
+def degraded_worker_disclosure(base: dict, fatal_events: list[str]) -> dict:
+    """执行后回填：会话致命 → 该轮实际全部降级冷通道，必须如实披露。
+
+    SEE-1589 B：旧输出在 fatal 后仍报 decision=worker（仅 stderr 有告警），
+    真实执行是「1 腿 worker + 其余全冷」。`user://` 树在腿间漂移 = 测试
+    写 user:// 状态、常驻进程无法维持逐 mutant 隔离 → 结构性不可达。
+    """
+    out = dict(base or {})
+    if not fatal_events:
+        return out
+    out.update(
+        decision="worker_degraded_cold",
+        reason=_fatal_reason_code(list(fatal_events)),
+        fatal_events=list(fatal_events),
+        equivalence="cold_rerun_all_remaining_legs",
+    )
+    return out
+
+
 def identity_for_target(identity: dict | None, project_root: str,
                         target_res: str, worker_flag: bool | None = None
                         ) -> tuple[dict | None, object, str]:

@@ -393,16 +393,37 @@ class TestWMATRIX:
             shadow.create_slot(str(proj), "linux")
 
 
-class TestFreshFarmLifecycle:
-    def test_fresh_farm_new_slot_each_acquire(self, tmp_path):
-        """linux fresh 农场：每次 acquire 全新槽（无复用面），release 删除。"""
+class TestWarmFarmLifecycle:
+    def test_linux_warm_slot_reused_across_acquire(self, tmp_path):
+        """SEE-1589 B：linux 与 win64 同走 warm 池——第二次 acquire 复用
+        同一槽（旧行为「linux 每次全新 fresh 农场」已由 B 轮替代）。"""
         proj, _ = _write_project(tmp_path)
         s1 = shadowpool.acquire_slot(str(proj), "linux", ["calc.gd"],
                                      wiring_hash="w1")
         root1 = Path(s1.root)
         assert root1.is_dir()
+        assert s1.farm["decision"] == "created"
+        assert s1.farm["mode"] == "warm"
         shadowpool.release_slot(s1)
-        assert not root1.exists(), "fresh 槽归还即删"
+        assert root1.exists(), "warm 槽归还保留供复用"
+        s2 = shadowpool.acquire_slot(str(proj), "linux", ["calc.gd"],
+                                     wiring_hash="w1")
+        try:
+            assert Path(s2.root) == root1, "同一 wiring_hash 必须复用同一槽"
+            assert s2.farm["decision"] == "reused"
+            assert s2.farm["reason"] == "warm_reused"
+        finally:
+            shadowpool.release_slot(s2)
+
+    def test_fresh_farm_path_still_deletes_on_release(self, tmp_path):
+        """无池锁能力时 fresh 回退路径仍归还即删（逃生面保持）。"""
+        proj, _ = _write_project(tmp_path)
+        slot = shadowpool._acquire_fresh(str(proj), "linux", ["calc.gd"],
+                                         False)
+        root = Path(slot.root)
+        assert root.is_dir()
+        shadowpool.release_slot(slot)
+        assert not root.exists(), "fresh 槽归还即删"
 
     def test_prune_farm_removes_only_expired_slots(self, tmp_path):
         """fresh 农场崩溃残留清理按年龄：超龄槽删除、新鲜槽保留。"""

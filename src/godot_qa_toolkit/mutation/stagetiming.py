@@ -25,12 +25,20 @@ from contextlib import contextmanager
 from pathlib import Path
 
 STAGE_KEYS = ("test_scan", "prewarm", "baseline", "per_mutant",
-              "worker_boot", "slot_sync", "prefilter", "total")
+              "worker_boot", "slot_sync", "prefilter", "farm_provision",
+              "planning", "route_scan", "total")
 
 # 分片执行阶段——分片 summary 携带、运行级并入的唯一键集（编排阶段父层
 # 已自测：单元同名值语义不同，如单元 baseline=快照耗时 vs 父层=预跑墙钟，
 # 并入会双计）。
-EXEC_STAGE_KEYS = ("per_mutant", "worker_boot", "slot_sync")
+EXEC_STAGE_KEYS = ("per_mutant", "worker_boot", "slot_sync",
+                   "farm_provision", "route_scan")
+
+# 对账口径（SEE-1589 B §SPEC-008）：slot_sync 是含 farm_provision +
+# baseline + per_mutant 的窗口，不参与求和；total 是墙钟基准本身。
+RECONCILE_STAGE_KEYS = ("test_scan", "prewarm", "baseline", "per_mutant",
+                        "worker_boot", "prefilter", "farm_provision",
+                        "planning", "route_scan")
 
 
 class StageClock:
@@ -62,6 +70,24 @@ def merge_execution_stages(clock: StageClock, timings: dict | None) -> None:
         v = (timings or {}).get(k)
         if isinstance(v, (int, float)):
             clock.add(k, float(v))
+
+
+def reconcile(disclosure: dict, wall_s: float, **extra) -> dict:
+    """阶段分解对账到墙钟（SEE-1589 B §SPEC-008）。
+
+    `unexplained_s` = 墙钟 − 已归因阶段之和（不为负）；farm 制备、prewarm/
+    import、route 静态扫描与 planning 现均有独立阶段，余量即真实未归因面。
+    """
+    attributed = sum(float((disclosure or {}).get(k) or 0.0)
+                     for k in RECONCILE_STAGE_KEYS)
+    out = {"wall_s": round(max(0.0, float(wall_s)), 3),
+           "attributed_s": round(attributed, 3),
+           "unexplained_s": round(max(0.0, float(wall_s) - attributed), 3),
+           # 并行分片各阶段求和可能超过墙钟（并发重叠）——显式披露溢出，
+           # 不得让 unexplained=0 伪装成「完全归因」。
+           "over_attributed_s": round(max(0.0, attributed - float(wall_s)), 3)}
+    out.update(extra)
+    return out
 
 
 def self_rss_peak_mb() -> float:

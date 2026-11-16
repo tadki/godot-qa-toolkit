@@ -60,6 +60,9 @@ class MutationSlot:
         self.targets = [t.replace("\\", "/") for t in targets]
         self.targeted_only = targeted_only
         self.freshness: list[str] = []  # 分层权威逐层结论披露
+        # 机器可读农场披露（SEE-1589 B §SPEC-002）：mode/decision/reason/
+        # validation/proof_binding；freshness 保留为人类可读兼容面。
+        self.farm: dict = {}
         self.slot_id = Path(root).name if root else ""
         self.provision: dict = {}
         self._slot_lock_fd: int | None = None
@@ -291,14 +294,39 @@ def _full_census_layer(project_root: str, slot: MutationSlot) -> bool:
 # acquire / release
 # ---------------------------------------------------------------------------
 
+def _set_farm(slot: MutationSlot, decision: str, reason: str,
+              **extra) -> None:
+    slot.farm = {"mode": slot.mode, "decision": decision, "reason": reason,
+                 **extra}
+
+
+def _farm_after_rebuild(slot: MutationSlot, project_root: str,
+                        reason: str) -> None:
+    """重建后同样做 proof 双绑定并披露——旧实现重建枝不回填 proof_binding。"""
+    from . import prewarm_proof
+    ok, why = prewarm_proof.guard_baseline_root(slot.root, project_root)
+    slot.freshness.append("proof-bound" if ok
+                          else f"proof-drift-persists:{why}")
+    _set_farm(slot, "rebuilt", reason,
+              proof_binding="bound" if ok else "drift_persisted",
+              proof_reason=why, validation=list(slot.freshness))
+
+
 def acquire_slot(project_root: str, kind: str, targets: list[str],
                  wiring_hash: str, targeted_only: bool = False,
                  ) -> MutationSlot:
-    """获取影子槽：linux→fresh 农场（每 run 新建）；win64→warm 池（复用 +
-    分层新鲜度同步）。制备失败上抛 SlotProvisionError（调用方转 run_error）。"""
-    if kind != "win64":
-        return _acquire_fresh(project_root, kind, targets, targeted_only)
-    return _acquire_warm(project_root, targets, wiring_hash, targeted_only)
+    """获取影子槽：linux/win64 统一走 warm 池（复用 + 分层新鲜度同步）。
+
+    SEE-1589 B：旧实现 `kind != "win64"` 直接 fresh 农场——KOL（linux）每
+    run/每分片重建，warm 复用在真实目标上结构性不可达且无披露。现按同一
+    套三层权威复用；池锁不可用（无 fcntl / 加锁失败）才回 fresh 并具名披露。
+    制备失败上抛 SlotProvisionError（调用方转 run_error）。"""
+    if fcntl is None:
+        slot = _acquire_fresh(project_root, kind, targets, targeted_only)
+        slot.farm["reason_detail"] = "pool_lock_unavailable"
+        return slot
+    return _acquire_warm(project_root, targets, wiring_hash,
+                         targeted_only, kind=kind)
 
 
 def _acquire_fresh(project_root: str, kind: str, targets: list[str],
@@ -312,6 +340,9 @@ def _acquire_fresh(project_root: str, kind: str, targets: list[str],
     slot.freshness.append(
         f"fresh-farm:created(linked={provision['linked']},"
         f"copied={provision['copied']})")
+    _set_farm(slot, "created", "fresh_farm_created",
+              linked=provision["linked"], copied=provision["copied"],
+              proof_binding="pending")
     # B2a §4.2：fresh 农场 proof-aware 制备——复制后重算双摘要，失配
     # 废弃重建一次（MUST_REBUILD；baseline 计数在复核通过前为 0）。
     from . import prewarm_proof
@@ -331,11 +362,21 @@ def _acquire_fresh(project_root: str, kind: str, targets: list[str],
                                                        project_root)
         slot.freshness.append("proof-bound" if ok
                               else f"proof-drift-persists:{reason}")
+        slot.farm.update(decision="rebuilt", reason="proof_drift_rebuild",
+                         proof_binding="bound" if ok else "drift_persisted",
+                         proof_reason=reason)
+        if not ok:
+            slot.farm["reason"] = "proof_drift_persists"
+    elif reason.startswith("guard inactive"):
+        slot.farm.update(proof_binding="inactive", proof_reason=reason)
+    else:
+        slot.farm.update(proof_binding="bound", proof_reason=reason)
+    slot.farm["validation"] = list(slot.freshness)
     return slot
 
 
 def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
-                  targeted_only: bool) -> MutationSlot:
+                  targeted_only: bool, kind: str = "win64") -> MutationSlot:
     with _PoolLock(project_root):
         pool = _load_pool(project_root)
         now = time.time()
@@ -349,7 +390,7 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
             fd = _try_slot_lock(project_root, slot_id)
             if fd is None:
                 continue
-            slot = MutationSlot(root=rec.get("path") or "", kind="win64",
+            slot = MutationSlot(root=rec.get("path") or "", kind=kind,
                                 project_root=project_root, mode="warm",
                                 targets=targets, targeted_only=targeted_only)
             slot.slot_id = slot_id
@@ -361,13 +402,18 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
             # 走重建通道。
             if not rec.get("path") or not Path(slot.root).is_dir():
                 slot.freshness.append("slot_tree:missing")
-                _rebuild_locked(project_root, pool, slot, rec, wiring_hash, now)
+                _rebuild_locked(project_root, pool, slot, rec,
+                                wiring_hash, now)
+                _farm_after_rebuild(slot, project_root, "slot_tree_missing")
                 return slot
             if (not _sentinel_layer(project_root, slot, rec)
                     or not _targeted_three_way(project_root, slot, rec)
                     or not _full_census_layer(project_root, slot)):
                 # 歧义/哨兵漂移/census 不符 → 整槽重建（终案：任何歧义整槽重建）
-                _rebuild_locked(project_root, pool, slot, rec, wiring_hash, now)
+                _rebuild_locked(project_root, pool, slot, rec,
+                                wiring_hash, now)
+                _farm_after_rebuild(slot, project_root,
+                                    "freshness_ambiguity")
                 return slot
             _sync_repo_delta(project_root, slot, rec)
             rec["last_used_at"] = now
@@ -381,18 +427,21 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
                                                            project_root)
             if not ok:
                 slot.freshness.append(f"proof-drift:{reason}→rebuild")
-                _rebuild_locked(project_root, pool, slot, rec, wiring_hash, now)
-                ok, reason = prewarm_proof.guard_baseline_root(slot.root,
-                                                               project_root)
-                slot.freshness.append("proof-bound" if ok
-                                      else f"proof-drift-persists:{reason}")
-            slot.freshness.insert(0, "warm:reused")
+                _rebuild_locked(project_root, pool, slot, rec,
+                                wiring_hash, now)
+                slot.freshness.insert(0, "warm:reused")
+                _farm_after_rebuild(slot, project_root, "proof_drift_rebuild")
+            else:
+                slot.freshness.insert(0, "warm:reused")
+                _set_farm(slot, "reused", "warm_reused",
+                          proof_binding="bound", proof_reason=reason,
+                          validation=list(slot.freshness))
             return slot
         # 无可复用槽 → 新建（id 含 uuid：同秒同 PID 的并发 acquire 不得碰撞）
         slot_id = f"slot-{int(now)}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         fd = _try_slot_lock(project_root, slot_id)
         root, provision = shadow.create_slot(
-            project_root, "win64",
+            project_root, kind,
             slot_dir=_pool_dir(project_root) / "slots" / slot_id)
         rec = _new_record(project_root, str(root), wiring_hash, targets, now)
         pool["slots"][slot_id] = rec
@@ -401,7 +450,7 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
         _prune_pool_locked(project_root, pool, now)
         _save_pool(project_root, pool)
         slot = MutationSlot(root=str(root), project_root=project_root,
-                            kind="win64", mode="warm", targets=targets,
+                            kind=kind, mode="warm", targets=targets,
                             targeted_only=targeted_only)
         slot.slot_id = slot_id
         slot._slot_lock_fd = fd
@@ -409,14 +458,14 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
         slot.freshness.append(
             f"warm:created(linked={provision['linked']},"
             f"copied={provision['copied']})")
-        # B2a §4.2：win64 warm 新建枝 proof 双绑定（失配重建一次）。
+        # B2a §4.2：warm 新建枝 proof 双绑定（失配重建一次）。
         from . import prewarm_proof
         ok, reason = prewarm_proof.guard_baseline_root(slot.root, project_root)
         if not ok:
             slot.freshness.append(f"proof-drift:{reason}→rebuild")
             shutil.rmtree(slot.root, ignore_errors=True)
             root, provision = shadow.create_slot(
-                project_root, "win64",
+                project_root, kind,
                 slot_dir=_pool_dir(project_root) / "slots" / slot_id)
             slot.root = str(root)
             slot.provision = provision
@@ -424,11 +473,16 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
                                                            project_root)
             slot.freshness.append("proof-bound" if ok
                                   else f"proof-drift-persists:{reason}")
+        _set_farm(slot, "created", "warm_created",
+                  linked=provision["linked"], copied=provision["copied"],
+                  proof_binding="bound" if ok else "drift_persisted",
+                  proof_reason=reason, validation=list(slot.freshness))
         return slot
 
 
 def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
-                    rec: dict, wiring_hash: str, now: float) -> None:
+                    rec: dict, wiring_hash: str, now: float,
+                    kind: str | None = None) -> None:
     """整槽重建（锁内）：删旧树 → 新建 → 重写记录（任何歧义整槽重建）。"""
     # D-1 同族：标死记录 path="" 时 slot.root 不指向旧树——旧树恒在
     # 基准 slots/<slot_id> 下，按槽 id 清理（残留树不得被 overlay
@@ -438,7 +492,7 @@ def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
     if slot.root and Path(slot.root) != legacy:
         shutil.rmtree(slot.root, ignore_errors=True)
     root, provision = shadow.create_slot(
-        project_root, "win64",
+        project_root, kind or slot.kind,
         slot_dir=_pool_dir(project_root) / "slots" / slot.slot_id)
     slot.root = str(root)
     slot.provision = provision

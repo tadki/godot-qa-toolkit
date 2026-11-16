@@ -368,9 +368,10 @@ class TestPrewarmEntryFailClosed:
     def test_non_project_is_skipped(self, tmp_path):
         bare = tmp_path / "not_a_project"
         bare.mkdir()
-        assert pp.prewarm_with_proof(str(bare)) == {
-            "decision": "skipped_non_project", "import_calls": 0,
-            "probe_s": 0.0}
+        out = pp.prewarm_with_proof(str(bare))
+        assert out["decision"] == "skipped_non_project"
+        assert out["import_calls"] == 0
+        assert out["reason"] == "no_project_godot"
 
     def test_escape_hatch_reports_import_failure(
             self, tmp_path, monkeypatch, capsys):

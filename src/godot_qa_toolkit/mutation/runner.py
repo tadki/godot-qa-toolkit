@@ -56,8 +56,10 @@ from .identity import (COLD_SCHEME, INJECT_SCHEME,
                        WORKER_SCHEME, identity_pack, killer_certificate,
                        suspected_orphan)
 from .channel_router import CHANNEL_WORKER, route_target
-from .stagetiming import StageClock, self_rss_peak_mb
-from .worker_channel import (identity_for_target, resolve_exec_scheme,
+from .stagetiming import StageClock, reconcile, self_rss_peak_mb
+from .worker_channel import (build_worker_disclosure,
+                             degraded_worker_disclosure, identity_for_target,
+                             resolve_exec_scheme,
                              run_worker_legs, worker_enabled)
 # 统一 mutant 明细记录形态（SEE-1416 扩列）、结果塑形契约与统一报告构建
 # （SEE-1550 tidy 迁入）在 reporting.py（<800 行纪律拆分先例）；调用方留在
@@ -231,7 +233,9 @@ def run_mutation(    file_path: str,
         select_mode=select_mode, selection_meta=selection_meta)
     s = result.get("summary") if isinstance(result, dict) else None
     if isinstance(s, dict) and "stage_timings" in s:
-        s["stage_timings"]["total"] = round(time.monotonic() - t0, 3)
+        wall_s = time.monotonic() - t0
+        s["stage_timings"]["total"] = round(wall_s, 3)
+        s["stage_reconciliation"] = reconcile(s["stage_timings"], wall_s)
         s["rss_peak_mb"] = self_rss_peak_mb()
     return result
 
@@ -326,8 +330,9 @@ def _run_mutation_core(file_path: str,
     # SEE-1550 §SPEC-020：exec_scheme 按目标路由入身份包（worker 显式启用且
     # 路由判 worker 才 worker-reset/1；A9 默认冷）。parent 传入的 identity
     # 用同源解析覆盖 scheme——父子两侧 file_key 一致。
-    identity, _route, exec_scheme = identity_for_target(
-        identity, project_root, target_res_early, worker_channel)
+    with clock.stage("route_scan"):
+        identity, _route, exec_scheme = identity_for_target(
+            identity, project_root, target_res_early, worker_channel)
     if identity is None:
         identity = identity_pack(project_root, kind, exec_scheme=exec_scheme)
 
@@ -794,9 +799,10 @@ def _run_mutant_loop(
         auto_name = beacon.autoload_name_for(project_root, target_res)
         clock = clock or StageClock()
         t_slot = time.monotonic()
-        slot = shadowpool.acquire_slot(project_root, kind, [target_rel],
-                                       idpack.get("boot_wiring_hash", ""),
-                                       targeted_only=targeted_only)
+        with clock.stage("farm_provision"):
+            slot = shadowpool.acquire_slot(project_root, kind, [target_rel],
+                                           idpack.get("boot_wiring_hash", ""),
+                                           targeted_only=targeted_only)
         # killed 证书归属（SEE-1581）：以新鲜运行时映射为准；无新鲜映射 →
         # None（证书不产出，fail-safe 只偏向重跑），不与静态索引混用。
         ownership_holder: list = []
@@ -811,10 +817,15 @@ def _run_mutant_loop(
         # R-DW6 默认启用实测轮：身份与执行同源解析（resolve_exec_scheme 统一
         # 路由排除 + gut.gd 直驱可用性）——coverage/resume store file_key 与
         # 实际执行通道一致，杜绝 scheme 漂移性 store-miss。
-        exec_scheme_resolved, _route_resolved = resolve_exec_scheme(
-            project_root, target_res, worker_channel)
+        with clock.stage("route_scan"):
+            exec_scheme_resolved, route_resolved = resolve_exec_scheme(
+                project_root, target_res, worker_channel)
         use_worker = exec_scheme_resolved == WORKER_SCHEME
         slot_info["exec_scheme"] = exec_scheme_resolved
+        slot_info["worker_channel"] = build_worker_disclosure(
+            project_root, target_res, worker_channel, exec_scheme_resolved,
+            route_resolved)
+        slot_info["farm"] = dict(getattr(slot, "farm", {}) or {})
         try:
             beacon.seed_beacon_script(slot.root)
             timings_out: dict = {}
@@ -831,6 +842,8 @@ def _run_mutant_loop(
                           timings_out.get("worker_boot_s", 0.0))
                 if fatal_events:
                     slot_info["worker_fatal_events"] = fatal_events
+                    slot_info["worker_channel"] = degraded_worker_disclosure(
+                        slot_info.get("worker_channel") or {}, fatal_events)
             else:
                 with clock.stage("per_mutant"):
                     raw_pairs = _run_cold_legs(

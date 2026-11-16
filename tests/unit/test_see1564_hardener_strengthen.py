@@ -484,11 +484,14 @@ def _install_slot_fakes(monkeypatch, proj):
 def test_slot_sync_span_includes_acquire_cost(tmp_path, monkeypatch):
     """slot_sync span 必须含槽获取成本（确定性钟，2 分片恒定）。
 
-    tick 记账：t_slot=1.0 → acquire 3 tick → stage enter 5.0 / exit 6.0 →
-    add 处 7.0 → 每分片 slot_sync=6.0、per_mutant=1.0。span 平移变异
-    （t_slot 移到 acquire 后）→ slot_sync=3.0/分片；摘除 → 0——即红。
-    附带：envelope test_scan=3.0（precompute 1 + 2 分片 plan）、envelope
-    prefilter=2.0、unit prefilter=2.0——三处 stage 包裹摘除变异即红。"""
+    tick 记账（SEE-1589：新增 farm_provision / route_scan 两个嵌套阶段）：
+    t_slot=1.0 → farm_provision enter=2.0 → acquire 3 tick(3/4/5) →
+    farm_provision exit=6.0（≈4 tick）→ route_scan enter=7.0 / exit=8.0 →
+    per_mutant enter=9.0 / exit=10.0 → add 处 11.0 → 每分片
+    slot_sync=10.0、farm_provision=4.0、route_scan=2.0（身份解析 + 执行前
+    各一处）、per_mutant=1.0。
+    span 平移变异（t_slot 移到 acquire 后）→ slot_sync 缩小；摘除 → 0
+    ——即红。附带：envelope test_scan/prefilter 由父层包裹——摘除变异即红。"""
     proj_root = tmp_path / "projbase"
     _install_slot_fakes(monkeypatch, str(proj_root))
     proj, target = _write_project(tmp_path)
@@ -496,7 +499,9 @@ def test_slot_sync_span_includes_acquire_cost(tmp_path, monkeypatch):
                                 tests_glob="res://tests/unit/save/", jobs=2)
     s = result["results"][0]["summary"]
     assert s["stage_timings"]["per_mutant"] == 2.0    # 2 分片 × 1 tick
-    assert s["stage_timings"]["slot_sync"] == 12.0    # 2 分片 × 6.0
+    assert s["stage_timings"]["slot_sync"] == 20.0    # 2 分片 × 10.0
+    assert s["stage_timings"]["farm_provision"] == 8.0  # 2 分片 × 4 tick
+    assert s["stage_timings"]["route_scan"] == 4.0      # 2 分片 × 2 处包裹
     env_st = result["stage_timings"]
     # _plan_file_chunks 按文件调用（非按分片）：envelope test_scan =
     # precompute(1.0) + plan(1.0) = 2.0；prefilter = executor 包裹 1.0。

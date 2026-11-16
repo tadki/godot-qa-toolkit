@@ -758,6 +758,46 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
                   "summary": report, "failures": []})
 
 
+def _attribution_usable(attribution_out, run_started: float) -> bool:
+    """行映射可用性：本轮新鲜且臂执行证据有效（SEE-1589 A-M1）。
+
+    union 不可认证 ≠ 产物不可用——陈旧产物不得冒充本轮可用证据。
+    """
+    if not attribution_out:
+        return False
+    import json as _json
+    from pathlib import Path as _P
+
+    try:
+        from .mutation.truth_select import arms_valid
+        map_file = _P(attribution_out)
+        fresh = map_file.stat().st_mtime >= run_started - 1.0
+        doc = _json.loads(map_file.read_text(encoding="utf-8"))
+        return fresh and arms_valid(doc.get("arms_state") or {})
+    except (OSError, ValueError):
+        return False
+
+
+def _measure_run_summary(report: dict, attribution_out,
+                         attribution_usable: bool) -> tuple[dict, bool]:
+    """measure run 摘要 + 退出判定：区分映射可用与 union 未认证。"""
+    union_certified = bool(report.get("ok"))
+    certification = ("certified" if union_certified
+                     else "uncertified" if attribution_usable else "unusable")
+    summary = dict(report)
+    summary.update({
+        "certification": certification,
+        "union_certified": union_certified,
+        "attribution_usable": attribution_usable,
+        "exit_semantics": ("certified" if union_certified
+                           else "artifacts_usable_union_uncertified"
+                           if attribution_usable else "failed"),
+    })
+    if attribution_out:
+        summary["attribution_map"] = str(attribution_out)
+    return summary, (union_certified or attribution_usable)
+
+
 def cmd_measure_run(args: argparse.Namespace) -> int:
     import json as _json
     import time as _time
@@ -874,36 +914,9 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_json.dumps(report, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    # SEE-1589 A-M1：union 不可认证 ≠ 产物不可用。行映射已写出且臂有
-    # 执行证据（pairs/probes）时，可用产物不得被失败退出码误导丢弃——
-    # 以 certification 字段区分「映射可用、union 未认证」。
-    attribution_usable = False
-    if attribution_out:
-        try:
-            from .mutation.truth_select import arms_valid
-            map_file = _P(attribution_out)
-            # 陈旧产物不得冒充本轮可用证据（上一轮残留文件 freshness 门）。
-            fresh = map_file.stat().st_mtime >= run_started - 1.0
-            doc = _json.loads(map_file.read_text(encoding="utf-8"))
-            attribution_usable = fresh and arms_valid(
-                doc.get("arms_state") or {})
-        except (OSError, ValueError):
-            attribution_usable = False
-    union_certified = bool(report.get("ok"))
-    certification = ("certified" if union_certified
-                     else "uncertified" if attribution_usable else "unusable")
-    summary = dict(report)
-    summary.update({
-        "certification": certification,
-        "union_certified": union_certified,
-        "attribution_usable": attribution_usable,
-        "exit_semantics": ("certified" if union_certified
-                           else "artifacts_usable_union_uncertified"
-                           if attribution_usable else "failed"),
-    })
-    if attribution_out:
-        summary["attribution_map"] = str(attribution_out)
-    ok = union_certified or attribution_usable
+    attribution_usable = _attribution_usable(attribution_out, run_started)
+    summary, ok = _measure_run_summary(report, attribution_out,
+                                       attribution_usable)
     return _emit({"tool": "measure.run", "ok": ok, "summary": summary,
                   "failures": ([] if ok else
                                [{"reason": "union invalid or arms invalid"}])})

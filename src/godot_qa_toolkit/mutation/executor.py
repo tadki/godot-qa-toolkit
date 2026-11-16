@@ -1473,10 +1473,10 @@ def _inject_one(r: dict, ctx: dict) -> None:
     plan = ctx["plan"]
     s = r["summary"]
     # §SPEC-613：自动选测披露随报告透出（显式 --tests 时缺省缺席）。
-    from .testscan import selection_disclosure
+    from .testscan import (concurrency_disclosure, resolve_selection_mode,
+                           selection_disclosure)
     s.update(selection_disclosure(ctx["test_selection"]))
     if ctx.get("selection_mode"):
-        from .testscan import concurrency_disclosure, resolve_selection_mode
         s["selection_mode"] = resolve_selection_mode(
             ctx["selection_mode"], ctx.get("test_selection"))
         groups = len(ctx.get("selection_groups") or []) or None

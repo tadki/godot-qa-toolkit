@@ -105,11 +105,12 @@ def suggested_action(timeout_s: int) -> str:
     """
     if suggested_action_kind(timeout_s) == "raise_timeout":
         return f"rerun with --timeout {BUDGET_CAP_S}"
-    return ("full-face baseline exceeded the {0}s budget cap: --select full "
-            "runs the project's whole GUT suite, which does not fit this "
-            "budget on real-scale projects; rerun with --select line|fn "
-            "(default line) or a caliper face (--lines/--mutation), or "
-            "reduce the project's .gutconfig.json dirs".format(int(timeout_s)))
+    return (f"full-face baseline exceeded the {int(timeout_s)}s budget cap: "
+            "--select full runs the project's whole GUT suite, which does "
+            "not fit this budget on real-scale projects; rerun with "
+            "--select line|fn (default line) or a caliper face "
+            "(--lines/--mutation), or reduce the project's .gutconfig.json "
+            "dirs")
 
 
 def project_relative(project_root: str, file_path: str) -> str:

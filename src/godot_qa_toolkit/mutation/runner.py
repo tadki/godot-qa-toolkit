@@ -78,7 +78,7 @@ from .planner import dry_run_estimate, plan_execution
 from .progress import make_reporter
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
-from ..timing import (BUDGET_CAP_S, explicit_timing_meta, project_relative,
+from ..timing import (explicit_timing_meta, project_relative,
                       resolve_budget, suggested_action, suggested_action_kind)
 
 

@@ -481,8 +481,7 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
 
 
 def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
-                    rec: dict, wiring_hash: str, now: float,
-                    kind: str | None = None) -> None:
+                    rec: dict, wiring_hash: str, now: float) -> None:
     """整槽重建（锁内）：删旧树 → 新建 → 重写记录（任何歧义整槽重建）。"""
     # D-1 同族：标死记录 path="" 时 slot.root 不指向旧树——旧树恒在
     # 基准 slots/<slot_id> 下，按槽 id 清理（残留树不得被 overlay
@@ -492,7 +491,7 @@ def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
     if slot.root and Path(slot.root) != legacy:
         shutil.rmtree(slot.root, ignore_errors=True)
     root, provision = shadow.create_slot(
-        project_root, kind or slot.kind,
+        project_root, slot.kind,
         slot_dir=_pool_dir(project_root) / "slots" / slot.slot_id)
     slot.root = str(root)
     slot.provision = provision

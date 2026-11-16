@@ -53,7 +53,6 @@ BUILTIN_OFFLINE_PROVIDERS = frozenset({
 ENV_TOGGLE = "GQT_PREWARM_SENTINEL"
 _IMPORT_TIMEOUT_S = 300
 _CHUNK = 65536
-_INPUT_EXCLUDED_SUBTREES = (".git", ".qa-cache", ".godot")
 # 任意深度排除域（与 shadow._EXCLUDED_DIRS 逐项对齐）：影子槽 _populate 在
 # 每一层递归跳过 .git/.qa-cache，而旧 _scan_state 只看顶层 → 嵌套
 # `addons/<submodule>/.git`（KOL 实测 5885 vs 5884）使证书 input_digest

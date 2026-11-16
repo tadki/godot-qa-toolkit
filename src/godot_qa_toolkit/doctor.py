@@ -101,6 +101,24 @@ def _gitlink_head(root: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _same_head_multi_checkout(editable: str, toolkit_root: Path,
+                              installed_head: str | None,
+                              root_head: str | None) -> dict | None:
+    """多检出同 HEAD 是合法形态（L3）；仅在 HEAD 真不同时报错。"""
+    if not (installed_head and root_head and installed_head == root_head
+            and _is_gqt_checkout(Path(editable))
+            and _is_gqt_checkout(toolkit_root)):
+        return None
+    return {
+        "status": "ok_multi_checkout",
+        "editable_location": editable,
+        "toolkit_root": str(toolkit_root),
+        "gitlink_head": root_head,
+        "note": "editable install points at a different checkout "
+                "of the same HEAD; no action required",
+    }
+
+
 def check_install(cwd: Path | None = None) -> tuple[bool, dict]:
     """执行一致性检查；返回 (ok, detail)。ok=False 时 detail 带修复指引。"""
     cwd = Path(cwd) if cwd else Path.cwd()
@@ -130,19 +148,10 @@ def check_install(cwd: Path | None = None) -> tuple[bool, dict]:
     if Path(editable).resolve() != toolkit_root.resolve():
         head_installed = _gitlink_head(Path(editable))
         head_root = _gitlink_head(toolkit_root)
-        # L3：多检出同 HEAD 是合法形态（editable 指向主检出、当前在
-        # worktree 内跑），不应 exit 2 误报错配；仅在 HEAD 真不同时报错。
-        if head_installed and head_root and head_installed == head_root \
-                and _is_gqt_checkout(Path(editable)) \
-                and _is_gqt_checkout(toolkit_root):
-            return True, {
-                "status": "ok_multi_checkout",
-                "editable_location": editable,
-                "toolkit_root": str(toolkit_root),
-                "gitlink_head": head_root,
-                "note": "editable install points at a different checkout "
-                        "of the same HEAD; no action required",
-            }
+        multi = _same_head_multi_checkout(
+            editable, toolkit_root, head_installed, head_root)
+        if multi is not None:
+            return True, multi
         return False, {
             "status": "mismatch",
             "editable_location": editable,

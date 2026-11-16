@@ -5,10 +5,12 @@
 - Build a reproducible **measurement suite definition** (which GUT face and
   which acceptance features participate in measurement).
 - Run dual-arm coverage measurement: full GUT face plus acceptance suite, both
-  instrumented, yielding per-function line-set unions and CRAP data.
+  instrumented, yielding per-function line-set unions and CRAP data. With
+  `--test-attribution`, the same run also records per-test/per-script covered
+  lines as the primary attribution facts.
 - Diagnose per-feature acceptance timing.
-- Incrementally rebuild the attribution map (`test-attribution/5`) that mutation
-  selection depends on.
+- Incrementally rebuild the line-primary attribution map (`test-attribution/6`)
+  that mutation selection and Coverage Store projection depend on.
 
 ## Prerequisites
 
@@ -36,7 +38,9 @@ gqt measure run autoload systems --project-root . --recipe recipe.json --out rep
   --shard-width 6 --acceptance-repeats 3 \
   --stability-baseline previous-report.json --evidence-dir coverage-evidence
 
-# Produce the attribution map (the truth source behind mutation selection)
+# Produce the line-primary attribution map (the truth source behind mutation).
+# The same measured line facts later project mutation's Coverage Store without
+# another instrumentation or GUT pass.
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json \
   --test-attribution --test-attribution-out attribution-map.json
 
@@ -60,8 +64,10 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - run: `measurement-report/2`, with `crap` records (see crap.md) and the
   two-arm coverage union; `certification.status="not_certified"`,
   `evidence_level="exploratory"`, `diagnostic_only=true`.
-- map-update: a `test-attribution/5` artifact; `--calibration-every`
-  (default 5) forces a full rebuild after N increments.
+- map-update: a `test-attribution/6` artifact; changed production files replace
+  their related line facts, changed tests replace the whole test identity, and
+  file/function/reverse views are recomputed from the merged lines.
+  `--calibration-every` (default 5) forces a full rebuild after N increments.
 - exit `0` = complete execution; `1` = verdict/validation failure;
   `2` = argument error. On diagnostic lanes `ok` only means the command
   completed; lane anomalies are data, not exit codes.
@@ -75,8 +81,14 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   score.
 - Coverage across arms is a **line-set union, never an average**
   (`coverage = |C_gut ∪ C_acceptance| / total`).
-- Incremental map rebuilds must pass a conservation check (dropped edges are
-  rejected); unstable lanes produce no scores.
+- Incremental map rebuilds must pass a conservation check (dropped identities
+  outside the declared rerun/delete surface are rejected); unstable lanes
+  produce no scores.
+- Attribution usability requires real execution evidence: no bundle, zero tests,
+  or zero probes without `vacuous` is invalid. A legitimate empty face remains
+  usable when probes fired or the measured surface is genuinely vacuous. An
+  invalid map fails loud; auto mode rebuilds instead of consuming a false empty
+  truth.
 
 ## Boundaries
 
@@ -85,9 +97,18 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - The W4 probe (default `aidomain_integration`) records measured wall clock
   into `performance.acceptance_probe`; `measure risk --performance-file`
   accepts externally fed measurements.
-- The attribution map is the single truth source for mutation selection;
-  `measure coverage` line facts feed both the mutation coverage prefilter and
-  the CRAP coverage input.
+- The `/6` attribution map stores `test_to_lines`, `script_to_lines`,
+  `line_to_tests`, and the instrumentable line surface. File/function views are
+  derived from those lines plus the source registry, not independently measured.
+- Mutation projects the scripts in its actual `tests_glob` into a
+  `see1420-coverage/2` entry from the same `/6` facts. A persisted projection or
+  a fresh map can serve the prefilter without another instrumentation pass;
+  binding drift invalidates the projection and is disclosed.
+- `measure coverage` remains the explicit manual `see1420-coverage/1`
+  compatibility and diagnostic lane, and a CRAP coverage input. It is not the
+  default attribution-production path and is not being removed in this change.
+- Schema upgrades are fail-loud. Auto-managed old or unusable maps are rebuilt;
+  an explicit old-schema `--attribution-map` is rejected without being rewritten.
 
 ## Command reference (aligned with v0.3.0 `--help`)
 
@@ -121,7 +142,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 | `--acceptance-shards <n>` | 4 | Acceptance parallel shard count |
 | `--shard-log-dir <dir>` | omitted | Retain per-shard full logs and raw sink copies |
 | `--evidence-dir <dir>` | omitted | Per-arm `coverage-evidence/2` bundle + run record output dir |
-| `--test-attribution` | off | Emit a test→file attribution artifact (`test-attribution/5`); with it off, the default path is byte-identical |
+| `--test-attribution` | off | Emit a line-primary `test-attribution/6` artifact with per-test/per-script covered lines, reverse lookup, derived file/function views and execution evidence; with it off, the default path is byte-identical |
 | `--test-attribution-out <path>` | `<--out>.attribution.json` | Attribution artifact path |
 | `--attribution-causal` | off | Also wrap `call_deferred/create_timer` creation sites so their callbacks are attributed to the creating test; requires `--test-attribution` |
 | `--acceptance-adaptive` | off | Run acceptance reps round-by-round and stop early once the line-set union stabilises (bound stays `--acceptance-repeats`) |
@@ -151,7 +172,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 | `<roots...>` (positional) | required | Target `.gd` roots — must be the same universe as the baseline artifact |
 | `--project-root <root>` | required | Target Godot project root |
 | `--recipe <path>` | required | `measurement-suite/2` JSON (same content as the baseline run) |
-| `--baseline <path>` | required | Prior attribution artifact (`test-attribution/5`) |
+| `--baseline <path>` | required | Prior line-primary attribution artifact (`test-attribution/6`) |
 | `--changed <path>` | omitted, repeatable | Changed/new/removed file path |
 | `--out <path>` | required | Incremented attribution artifact output path |
 | `--timeout <s>` | 180 | Per-leg GUT timeout seconds |

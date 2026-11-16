@@ -31,17 +31,21 @@ only through an explicit `--project-root`.
   and generated GUT tests, then run and contract-mutate inside your project —
   full-matrix mutation proves the assertions actually bite. No steps registry;
   tests call your project's `testing_api.gd` adapter.
-- **Mutation testing that picks the right tests.** Test selection comes from
-  the runtime truth map: function-level grouping by default, a bounded
-  file-level fallback, a terminal zero-reference short-circuit, and a loud
-  failure when the map is unusable — the full face only runs under the explicit
-  `--select full` audit switch. Mutants execute in disk shadow slots (your real
-  repo is never written), differential resume re-runs only unproven verdicts,
-  and kills are judged as newly-failing test sets, never by exit codes.
-- **Dual-arm measurement.** `measure suite` builds the hashed suite
-  definition; `measure run` executes the two coverage arms (full GUT face +
-  acceptance suite) whose line sets are **unioned, never averaged**, feeding
-  CRAP records and the attribution map that powers mutation selection.
+- **Mutation testing that picks the right tests.** Line-level runtime facts are
+  the primary truth: each mutant uses the tests that executed its source line,
+  and sites with identical test sets share one generated test glob and baseline.
+  Explicit line ranges and stable-id reruns use the same line-level mapping;
+  function/file views remain explicit calibration and fallback options. An
+  unusable map fails loudly, while the full face runs only under `--select
+  full`. Mutants execute in disk shadow slots (your real repo is never written),
+  differential resume re-runs only unproven verdicts, and kills are judged as
+  newly-failing test sets, never by exit codes.
+- **Dual-arm measurement, one instrumentation pass.** `measure suite` builds
+  the hashed suite definition; `measure run` executes the full GUT and
+  acceptance arms whose line sets are **unioned, never averaged**. With
+  attribution enabled, the same run records per-test/per-script covered lines,
+  derives file/function views, and lets mutation project the matching Coverage
+  Store without a second instrumentation or GUT pass.
 - **Guards and self-checks.** A Pure Core architecture guard, CC parity,
   registry snapshot diffs, and `gqt doctor` for editable-install consistency.
 
@@ -95,8 +99,13 @@ gqt gherkin compile acceptance/foo.feature --project-root . --write
 gqt gherkin run    --project-root . --key foo
 gqt gherkin mutate --project-root . --key foo
 
-# Mutation testing (default: function-level truth-map selection)
+# Mutation testing (default: line-level truth-map selection)
 gqt mutation src/save/save_manager.gd --project-root . --budget 50
+
+# Caliper rerun by line range / multi-segment range / stable mutant id
+gqt mutation src/save/save_manager.gd --project-root . --lines 10-20,30,35-40
+gqt mutation src/save/save_manager.gd --project-root . \
+  --mutation "src/save/save_manager.gd#func:save#2"
 
 # Single file across a worker pool (default pool = max(2, cpu//2))
 gqt mutation <file> --project-root . --jobs 8

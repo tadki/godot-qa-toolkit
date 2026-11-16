@@ -12,11 +12,11 @@
 |---|---|---|---|---|
 | L1 | 单文件靶向 + `--scan` + 大文件警告熔断 | 先算清要跑多少，别盲跑 | **部分采纳**：拒绝单文件靶向（多文件 + worker 池是 gqt 既有优势）；`--dry-run` 升级为差分计数预估；新增 `--mutation-warning`（默认 50，截断前全量计数）+ 截断 N/M 强制披露 | 警告熔断的语义保留；靶向的机制与 gqt 域优势冲突 |
 | L2 | 函数级 SHA-256 差分 + 快照持久化 | 没变的东西不重跑 | **采纳（核心）**：scope 级哈希差分 + per-file manifest + 差分跳过规则 + survived 永不缓存信任 | 语义完全同构；哈希粒度按 GDScript 结构重定义（见 §2） |
-| L3 | 覆盖率前置过滤 + `--reuse-coverage` | 没被测试覆盖的 mutant 不用跑 | **采纳**：复用 `gqt measure coverage` 自家行级事实（不引 LCOV 外部格式），provenance 校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 数据面自有；"外部格式互操作"机制被拒绝 |
+| L3 | 覆盖率前置过滤 + `--reuse-coverage` | 没被测试覆盖的 mutant 不用跑 | **采纳并升级为同源投影**：手动 `measure coverage` `/1` store → 行事实 `/2` 投影 store → 新鲜 `/6` map 现场投影；provenance/绑定校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 同一轮插桩的行事实服务选面与过滤；无需为默认 mutation 再跑一次 coverage |
 | L4 | 沙盒目录克隆 + 多进程 worker 池 | 隔离变异副作用 + 并行执行 | **SEE-1420 拒绝沙盒（内存注入）；SEE-1550 反转为 per-worker 隔离磁盘影子槽**（hardlink COW，无硬链接 FS 退真拷贝；`.godot` 整树实拷贝） | take_over_path 内存注入存在可达性缺口：启动前完成的 autoload / preload / 组合根装配继续持有旧 Script（KOL 23 autoload 实证，假 survived）；hardlink COW 把拷贝税压到被改写文件本身，槽归还断言保留「中断无残骸」性质 |
 | L5 | baseline 动态超时熔断 | 超时判定要随基线耗时自适应 | **采纳（小改）**：自适应上限 = `max(timeout, baseline×F+1)`，`--timeout-factor` 默认 2.0 只放大不收紧；**拒绝 UB 默认 10**（JVM 抖动所迫，gqt 域无此噪声） | 倍数是环境参数不是语义 |
 | L6 | Babashka 快启动 / no-mutate / 常驻热 worker | 削启动税 + 跳过不可变区域 | **no-mutate 采纳**（`# gqt: no-mutate` 函数级 + 行级）；**Babashka 不适用**（gqt 是 Python 常驻 CLI，无冷启动问题）；**常驻热 worker 拒绝本轮降 backlog**（Godot 引擎级状态泄漏风险，重启条件量化见定案 §五） | 快启动语义在 gqt 域不存在；热 worker 的假 verdict 代价不对称 |
-| L7 | `--mutation` / `--lines` 单点重跑 | 秒级复核单个位点 | **采纳**：`--mutation <file>#<scope_id>#<n>` / `--lines`，1 baseline + N selected，绕过差分复用与 coverage 前置过滤（防假阴性的公平抽查通道） | 直接采纳，id 寻址按 D3 重定义 |
+| L7 | `--mutation` / `--lines` 单点重跑 | 秒级复核单个位点 | **采纳并扩展**：稳定 id 或行号规格（单行/区间/多段）选中位点，使用选中行的测试集合并集；1 baseline + N selected，绕过差分复用与 coverage 前置过滤（防假阴性的公平抽查通道） | 卡尺只收窄位点与测试面，不改变 kill 判定 |
 
 ## 2. gqt Mutation 架构：五阶段流水线
 
@@ -39,11 +39,13 @@
 - manifest 在场即差分（默认开启），跳过规则：未改 scope 且上次 killed/suspect/invalid_mutant → 复用；survived / timeout / timeout_pinned / run_error → **永远重跑**；scope hash 变更 → 该 scope 全跑；header hash 变更 → 全文件全跑；hash 全同 → 零执行速断。
 - `--mutate-all` 是唯一显式退路；被跳过位点逐条 id 披露 `diff_skipped`。
 
-### ③ 预算规划 — `planner.py`（+ timing store 协商）
+### ③ 预算规划与行级选面 — `planner.py` / `truth_select.py`（+ timing store 协商）
 
+- 默认 `--select line`：从 `/6` map 的 `line_to_tests` 与 `script_to_lines` 取得每个位点所在行的测试脚本集，按 `frozenset(line→tests)` 签名分组；同签名位点共享一个内容寻址选择目录与 baseline。`fn` / `file` 只作显式校准和回退视图，`full` 只作显式全脸审计。
+- 显式 `--lines` 支持单行、连续区间与多段，先与实际位点求交并披露 `requested / hit / skipped_no_site`；`--mutation` 与 `--lines` 都使用选中行的测试并集，无映射位点在卡尺通道披露后公平执行。
 - budget 按**差分后 retry 数**计（截断保序，拒轮转）；位点数 > budget 强制披露 `total_sites`。
 - 自适应 timeout：baseline 永远实测（判定语义），timing store 历史 p90 只喂预算锚（缓存锚只抬下限）；`--timeout-factor` 可覆盖放大系数。
-- resume key 负面清单：`--mutation-warning`、`--timeout-factor`、`timeout_streak` 绝不进任何 key——调配置不引发重跑。
+- resume key 负面清单：`--mutation-warning`、`--timeout-factor`、`timeout_streak` 绝不进任何 key——调配置不引发重跑。行级选择目录 glob 仍在 key 内，组面改变会自然失效旧条目，避免跨测试集假复用。
 
 ### ④ worker 池执行 — `executor.py`（+ `gutrun.py` / `inject.py` / `godot_gate.py`）
 
@@ -57,13 +59,13 @@
 - 落盘 `<root>/.qa-cache/gqt-mutation-resume-v2/<file-key>/`：manifest.json（per-file 索引层：schema/header hash/含位点 scope hash 表，收尾方单点写）+ `<stable-id>.json`（per-mutant 条目：verdict + 全签名五元组 + scope_hash + timeout_streak）。
 - tmp + `os.replace` 原子写；各 worker 各写各 id，无跨 worker 竞态；损坏/身份不符条目 = 拒收重跑，绝不脏合并。
 - timeout_streak：复用位点重判仍 timeout → +1；streak ≥ 2 → 独立 verdict `timeout_pinned`（永不并入 killed、不计 ok 门禁、持续可见）；任一后续 run 非超时 → 解除清零。毒 run 守卫：单 run timeout ≥50% 且 ≥5 条 → 本窗口 streak 挂起并披露。
-- `coverlink.py`：`gqt measure coverage` 成功 run 的行级事实（含 `instrumentable_lines` 可插桩集 + provenance）落盘 `<root>/.qa-cache/gqt-coverage/<key>.json`，供 `--reuse-coverage` 前置过滤；provenance 不符 = 缓存作废，宁多跑不假阴性。
+- `coverlink.py` 统一 prefilter 数据源：显式 `measure coverage` 仍写 `/1` 手动条目；默认行级选面可把同一轮 `/6` 行事实按实际 `tests_glob` 投影成 `/2` 条目，或在新鲜 map 上现场投影。`/1` 与 `/2` 按 schema 分流、互不冒充；源码、recipe、测试面或身份绑定漂移即失效，全部层不可用时回退不过滤，宁多跑不假阴性。
 
 ## 3. 优化思想提炼（抽象层）
 
 1. **哈希换算力**：用 SHA（scope 级 + header 级）把"要不要跑"变成 O(1) 判定——算力买断执行力。差分的正确性不在哈希本身而在**跳过规则的白名单**：只有"可证明不受影响"的位点才允许跳过。
 2. **差分保真（宁重跑不假绿）**：加速必须以不产生假绿为前提。survived / timeout / timeout_pinned / run_error 永不缓存信任——缓存只加速"已证明的杀死"，从不加速"未证明的存活"。红线优先于任何性能收益。
-3. **卡尺闭环**：单点重跑是差分体系的"卡尺"——补测迭代里 survivor → 补断言 → `--mutation <id>` 秒级确认，把"验证一个修复"的成本从全量轮降到 1 baseline + 1 mutant；它同时是差分与覆盖率过滤的防假阴性抽查通道（被过滤位点的公平复核）。
+3. **卡尺闭环**：稳定 id 与行规格是差分体系的"卡尺"——补测迭代里 survivor → 补断言 → `--mutation <id>` 复核，或用 `--lines 10-20,30` 一次覆盖多个改动段；选中位点使用对应行的测试并集，把验证成本收敛到实际改动面。它同时是差分与覆盖率过滤的防假阴性抽查通道（无映射位点也可公平执行）。
 4. **质量不降的显式化**：每一次跳过都必须留下机器可查的痕迹——`diff_skipped` 逐条 id、`untouched_ranges` 行号区间、`uncovered` 独立 verdict、verdict 全签名五元组防 id 漂移、timeout_pinned 永不洗白进 killed。**信息不披露 = 优化不合法**。
 5. **机制适配性（语义 vs 机制分离）**：UB 的沙盒克隆、Babashka 启动器、JVM timeout×10 都是各自生态约束的产物；gqt 的磁盘影子注入（SEE-1550 起；更早的内存注入被可达性缺口证伪）、常驻 CLI、自适应 ×2 是 GDScript/GUT 域的同语义重造。跨体系移植时先问"这是问题还是解法"——问题可移植，解法未必。
 6. **预算协商与负面清单**：配置参数（警告阈值、超时系数）是每 run 的执行策略，不是 verdict 的身份成分——凡不改变"这个 mutant 是否已死"判断的东西绝不进缓存 key，否则调一次配置全库重跑。
@@ -101,3 +103,12 @@ P5 常驻热 worker：scoped 单轮 GUT 均值 < 7s 成主流 / mutant 数 ≥20
 - **成本感知分片（E6-5）**：`stage_timings` 归一为四键先验，单文件 run 收尾方单点原子写；串/并行估算只在小规模域（≤8 位点）内生效。域门是正确性/稳定性防线而非参数调优——慢槽或异常先验不得把大规模目标误降级，出域与无先验的 fail-safe 都是现行并行。决策线 stderr 全披露，0 值保留旧先验消除串行轮的逐轮翻转。
 - **gdself 索引进程内复用（E6-4）**：规划相位按 project root 只读复用一份正向索引，进程结束即失效、零持久化。复用的等价锚是「多文件规划结果与逐文件构建逐位一致」；不把缓存身份引入 verdict 面。
 - **prewarm 新鲜度证明（E1）**：跳过导入的唯一依据是「当前输入内容摘要 + `.godot` 整树输出封印 + 引擎链内容身份」三者与证书逐位一致。证书签发要求两次成功导入内容定点，导入失败/错误输出/树歧义/未知 importer/自定义插件/锁不可用一律不签发。keep sidecar 是非导入配置输入（字节入摘要、不入 provider 闭包、零输出合法），bare 启动器无法解析为具体文件时同样不签发。真实仓、baseline-in-farm 与普通 farm 的 baseline 执行根在启动前双绑定，失配先重签证/重建——加速只作用于可证明新鲜的导入，绝不把 mtime 或存在性当内容证明。
+
+## 7. SEE-1587 增量：行级主真值与同轮 Coverage Store
+
+- **行事实唯一主真值**：`test-attribution/6` 保存 per-test/per-script covered line sets、`line_to_tests` 反查与可插桩行面；file/function 边由行事实 + 源码 registry 派生，不再独立测量。同一轮插桩因此同时服务选面、CRAP 输入与 mutation prefilter，无需第二次 GUT。
+- **模板与增量单源**：attribution prepcache algo 使用 `attr-line/1` 编码行级粒度，缓存读回连带 `block_map`；全量与增量共用 `_instrument_pair`。生产变更替换相关文件的行事实，测试变更按测试身份整体替换，派生视图与反查从合并结果重算。
+- **执行完整性先于空面结论**：无 bundle、零测试或零探针且非 vacuous 都不是有效真值；合法空面必须有探针点火或真实 vacuous 证据。auto 模式对失效产物重建，显式旧 schema 产物 fail-loud，不把工具链失效消费成零引用假绿。
+- **投影的身份边界**：`/2` 条目绑定 map schema、recipe pristine、目标文件 sha 与测试面摘要，另保留源码、tests_glob、binary/identity 校验。任一漂移只使该层失效并披露；所有层失效时不过滤，绝不把陈旧覆盖当成当前事实。
+- **执行机制复用**：worker、共享 baseline、并行与 killed 证书差分仍按 chunk 工作；行级只改变 chunk 的测试集合签名。glob 进 resume key，升级或组面变化后自然重跑。显式 `--jobs 1` 串行仍使用文件级并集，是正确但收敛较弱的兼容边界。
+- **验收 harness 不得假绿**：行级基准以 A/A 噪声带裁定 S2/S0 性能门，只有 killed/survived 参与 verdict 对账；run_error 等不可判定项单列排除且不凑 compared。中断/待续输出 `status=pending`、`ok=false`、RC=1，全部完成并通过完整性门后才给终判。

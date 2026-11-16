@@ -176,6 +176,10 @@ def then_summary_keys(bdd_state: dict) -> None:
         "selection_mode",
         # SEE-1587 §SPEC-004：显式 --tests 披露「未使用行级选面」（只加不改）
         "test_selection",
+        # SEE-1589 B：三项机制具名 reason + 阶段对账（只加不改）
+        "worker_channel",
+        "farm",
+        "stage_reconciliation",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

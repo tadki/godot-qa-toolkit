@@ -128,6 +128,8 @@ class TestDefaultParallelRouting:
             "test_selection",
             # SEE-1581 第六批：选面模式披露（fn 默认 / file / full 审计）
             "selection_mode",
+            # SEE-1589 B：三项机制具名 reason + 阶段对账（只加不改）
+            "worker_channel", "farm", "stage_reconciliation",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")

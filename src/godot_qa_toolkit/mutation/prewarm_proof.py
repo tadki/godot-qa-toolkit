@@ -54,6 +54,16 @@ ENV_TOGGLE = "GQT_PREWARM_SENTINEL"
 _IMPORT_TIMEOUT_S = 300
 _CHUNK = 65536
 _INPUT_EXCLUDED_SUBTREES = (".git", ".qa-cache", ".godot")
+# 任意深度排除域（与 shadow._EXCLUDED_DIRS 逐项对齐）：影子槽 _populate 在
+# 每一层递归跳过 .git/.qa-cache，而旧 _scan_state 只看顶层 → 嵌套
+# `addons/<submodule>/.git`（KOL 实测 5885 vs 5884）使证书 input_digest
+# 恒失配，guard_baseline_root 每轮必判 drift。见 SEE-1589 B §SPEC-001。
+_ANY_DEPTH_EXCLUDED = frozenset({".git", ".qa-cache"})
+# gqt 自生成顶层条目（beacon 宿主 / worker 会话目录 / 选测物化目录）——
+# 既不在源仓、也不是项目输入；旧口径把它们计入执行根摘要，使 warm 槽
+# 复用后 guard 恒失配（KOL 实测 only_slot=.gqt_beacon_host_*.gd、
+# .gqt-worker/*；only_project=.gqt-attr-select/*）。
+_GQT_GENERATED_PREFIX = ".gqt"
 _OUTPUT_SUBTREE = ".godot"
 _GUT_CONFIG = ".gutconfig.json"
 _JUNIT_KEY = "junit_xml_file"
@@ -235,15 +245,19 @@ def _scan_state(project_root: str) -> dict:
     import_files: list[Path] = []
     output_lines: list[str] = []
     for rel in sorted(files):
-        path = files[rel]
-        top = rel.split("/", 1)[0]
-        sha = _sha256_file(path)
+        parts = rel.split("/")
+        top = parts[0]
         if top == _OUTPUT_SUBTREE:
-            output_lines.append(_entry_line(rel, "f", sha))
+            output_lines.append(
+                _entry_line(rel, "f", _sha256_file(files[rel])))
             continue
-        if top in _INPUT_EXCLUDED_SUBTREES or rel in junit:
+        # 排除判定先于哈希：池槽/嵌套 .git 的字节不进摘要，也不白付 IO。
+        if any(p in _ANY_DEPTH_EXCLUDED for p in parts) or rel in junit:
             continue
-        input_lines.append(_entry_line(rel, "f", sha))
+        if top.startswith(_GQT_GENERATED_PREFIX):
+            continue
+        path = files[rel]
+        input_lines.append(_entry_line(rel, "f", _sha256_file(path)))
         if rel.endswith(".import"):
             import_files.append(path)
     for f in import_files:
@@ -474,6 +488,13 @@ def _invalidate_proof(project_root: str) -> str:
     return "absent"
 
 
+def _timed_import(project_root: str) -> tuple[bool, str, float]:
+    """测量面：导入墙钟随返回值披露（stage_timings 的 import 归属）。"""
+    t0 = time.perf_counter()
+    ok, reason = _run_import(project_root)
+    return ok, reason, round(time.perf_counter() - t0, 3)
+
+
 def _run_import(project_root: str) -> tuple[bool, str]:
     """同源 measurement 导入（godot_command 同源）；rc/输出/OSError 三重门。"""
     from .inject import godot_command
@@ -538,19 +559,22 @@ def prewarm_with_proof(project_root: str) -> dict:
                  "probe_s": 0.0}
     if not os.path.isfile(os.path.join(project_root, "project.godot")):
         out["decision"] = "skipped_non_project"
+        out["reason"] = "no_project_godot"
         return out
     try:
         if _env_disabled():
-            ok, reason = _run_import(project_root)
+            ok, reason, import_s = _timed_import(project_root)
             out.update(import_calls=1, decision="disabled",
+                       import_wall_s=import_s,
                        reason=reason if not ok else "env escape hatch")
             print(f"prewarm: import (escape hatch {ENV_TOGGLE} set)",
                   file=sys.stderr)
             return out
         lock = _PrewarmLock(project_root)
         if not lock.acquire():
-            ok, reason = _run_import(project_root)
+            ok, reason, import_s = _timed_import(project_root)
             out.update(import_calls=1, decision="imported_no_lock",
+                       import_wall_s=import_s,
                        reason="flock unavailable")
             print("prewarm: import (no reliable lock — cross-process "
                   "fresh-skip disabled)", file=sys.stderr)
@@ -560,9 +584,10 @@ def prewarm_with_proof(project_root: str) -> dict:
         finally:
             lock.release()
     except Exception as e:  # noqa: BLE001 — LOW-5：预热失败不打破统一 JSON
-        ok, reason = _run_import(project_root)
+        ok, reason, import_s = _timed_import(project_root)
         out.update(import_calls=out.get("import_calls", 0) + 1,
                    decision="imported_uncertified",
+                   import_wall_s=import_s,
                    reason=f"prewarm flow error: {e}; import fallback rc_ok={ok}")
         print(f"prewarm: import (flow error fallback: {e})", file=sys.stderr)
         return out
@@ -581,7 +606,7 @@ def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
         if state["input_digest"] == cert["input_digest"] \
                 and state["output_digest"] == cert["output_seal"]:
             out.update(decision="fresh_skip", import_calls=0,
-                       proof_id=cert["proof_id"],
+                       proof_id=cert["proof_id"], reason="proof_fresh",
                        probe_s=round(time.perf_counter() - t0, 3))
             print(f"prewarm: fresh_skip proof={cert['proof_id']} "
                   f"input={cert['input_digest'][:8]} "
@@ -595,8 +620,9 @@ def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
               file=sys.stderr)
     # 失效先行 → 双导入定点 → 原子发布
     invalidate = _invalidate_proof(project_root)
-    ok, reason = _run_import(project_root)
+    ok, reason, import_s1 = _timed_import(project_root)
     out["import_calls"] = 1
+    out["import_wall_s"] = import_s1
     if not ok:
         out["reason"] = f"first import failed: {reason}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)
@@ -607,8 +633,9 @@ def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
         out["reason"] = f"post-import scan ambiguous: {e}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)
         return out
-    ok2, reason2 = _run_import(project_root)
+    ok2, reason2, import_s2 = _timed_import(project_root)
     out["import_calls"] = 2
+    out["import_wall_s"] = round(import_s1 + import_s2, 3)
     if not ok2:
         out["reason"] = f"verification import failed: {reason2}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)

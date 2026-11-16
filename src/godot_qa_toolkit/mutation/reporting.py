@@ -274,6 +274,14 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
         summary["slot_mode"] = info["slot_mode"]
     if info.get("freshness"):
         summary["freshness"] = info["freshness"]
+    # SEE-1589 B §SPEC-002：机器可读具名 reason（禁止无解释静默冷通道/
+    # 静默 farm 重建）。freshness 字符串列表保留为人类可读兼容面。
+    if info.get("worker_channel"):
+        summary["worker_channel"] = info["worker_channel"]
+    if info.get("farm"):
+        summary["farm"] = info["farm"]
+    if info.get("worker_fatal_events"):
+        summary["worker_fatal_events"] = info["worker_fatal_events"]
     _emit_killed_certificates(summary, results)
     _emit_suspected_orphans(summary, results, info)
 

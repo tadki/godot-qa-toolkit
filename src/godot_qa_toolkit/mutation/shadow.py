@@ -309,6 +309,15 @@ def relink_from_repo(project_root: str, slot_root: str, target_rel: str) -> None
             pass
         raise SlotProvisionError(
             f"relink {target_rel} into slot failed ({e})") from e
+    finally:
+        # POSIX rename 在「新旧是同一 inode 的两个硬链接」时是 no-op：
+        # os.replace 成功但不删除 tmp，临时文件永久残留并污染槽摘要
+        # （SEE-1589 B 实测：systems/container/.gqt_relink_*.tmp 使 warm
+        # 复用每轮判 proof 漂移并整槽重建）。成功路径恒清一次。
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def restore_target(project_root: str, slot_root: str, target_rel: str) -> None:

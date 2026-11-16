@@ -245,15 +245,16 @@ class TestBudgetPrune:
 
 
 class TestLinuxFreshFarm:
-    def test_fresh_farm_per_run(self, tmp_path):
-        """Linux/ext4 fresh 农场：每 run 新建、release 即删（约秒级）。"""
+    def test_linux_warm_slot_lifecycle(self, tmp_path):
+        """SEE-1589 B：Linux 与 win64 同走 warm 池（复用），不再每 run 新建。"""
         proj, _ = _write_project(tmp_path)
         s1 = shadowpool.acquire_slot(str(proj), "linux", ["calc.gd"],
                                      wiring_hash="w")
         root1 = Path(s1.root)
-        assert s1.mode == "fresh"
+        assert s1.mode == "warm"
+        assert s1.farm["decision"] == "created"
         shadowpool.release_slot(s1)
-        assert not root1.exists()
+        assert root1.exists(), "warm 槽保留供下一轮复用"
 
     def test_targeted_channel_on_single_point(self, tmp_path, monkeypatch):
         """单点定向同步通道：targeted_only acquire 跳过全量 delta。"""

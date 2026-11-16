@@ -33,6 +33,7 @@ from .resume2 import ResumeStoreV2
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .scopemanifest import build_manifest
 from .stagetiming import (StageClock, merge_execution_stages, qa_disk_bytes,
+                          reconcile,
                           self_rss_peak_mb)
 from .runner import (_auto_scan_tests_glob_meta, _resolve_auto_glob,
                      _res_path_of, run_mutation)
@@ -151,7 +152,7 @@ def _group_by_file(files: list[str]) -> list[str]:
     return list(dict.fromkeys(files))
 
 
-def prewarm_import(project_root: str) -> None:
+def prewarm_import(project_root: str) -> dict:
     """并发路径预热：导入幂等，消除 worker 首轮 .godot 缓存竞争。
 
     非 Godot 项目目录（无 project.godot，如单测 toy fixture）跳过——
@@ -165,9 +166,10 @@ def prewarm_import(project_root: str) -> None:
     重导入披露具体原因。
     """
     if not os.path.isfile(os.path.join(project_root, "project.godot")):
-        return
+        return {"decision": "skipped_non_project", "import_calls": 0,
+                "reason": "no_project_godot"}
     from . import prewarm_proof
-    prewarm_proof.prewarm_with_proof(project_root)
+    return prewarm_proof.prewarm_with_proof(project_root)
 
 
 def _guard_baseline(root: str, project_root: str) -> tuple[bool, str]:
@@ -237,11 +239,17 @@ def _finalize_run_envelope(envelope: dict, files: list[str],
                            disk_before: int) -> dict:
     """常规路径信封装饰（§SPEC-202 只加不改）：总耗时与执行阶段合并、
     系统测量字段挂载、单文件投影、旋钮披露、E6-5 成本先验收尾写。"""
-    clock.add("total", time.monotonic() - t0)
+    wall_s = time.monotonic() - t0
+    clock.add("total", wall_s)
     for r in envelope.get("results", []):
         merge_execution_stages(
             clock, (r.get("summary") or {}).get("stage_timings"))
     envelope["stage_timings"] = clock.disclosure()
+    prewarm_info = envelope.get("prewarm") or {}
+    envelope["stage_reconciliation"] = reconcile(
+        envelope["stage_timings"], wall_s,
+        prewarm_import_s=float(prewarm_info.get("import_wall_s") or 0.0),
+        prewarm_decision=prewarm_info.get("decision"))
     envelope["rss_peak_mb"] = self_rss_peak_mb()
     envelope["disk_delta_bytes"] = qa_disk_bytes(project_root) - disk_before
     disc = knobs_disclosure(knob_state.get("baseline_in_farm"))
@@ -266,6 +274,11 @@ def _project_single_file(envelope: dict, files: list[str],
         envelope["disk_delta_bytes"]
     if envelope.get("knobs"):
         results[0]["summary"]["knobs"] = envelope["knobs"]
+    if envelope.get("prewarm"):
+        results[0]["summary"]["prewarm"] = envelope["prewarm"]
+    if envelope.get("stage_reconciliation"):
+        results[0]["summary"]["stage_reconciliation"] = \
+            envelope["stage_reconciliation"]
     summary = results[0].get("summary") or {}
     cost_priors.record(project_root, envelope.get("stage_timings") or {},
                        envelope.get("jobs") or 0,
@@ -427,19 +440,21 @@ def _run_mutation_files_impl(
     # 显式 jobs 一体生效（§SPEC-002：总数 ≤ jobs 即退）；--jobs 1 在上方
     # 串行快路径已拦截。
     selection_meta: dict = {}
+    prewarm_info: dict = {"decision": "not_reached", "import_calls": 0}
     if len(files) == 1:
-        ret, tests_glob, selection_meta = _single_file_serial_gate(
-            files, project_root, budget=budget, timeout_s=timeout_s,
-            tests_glob=tests_glob, jobs=jobs, dry_run=dry_run, resume=resume,
-            binary_kind=binary_kind, timing_store=timing_store,
-            mutation_warning=mutation_warning, timeout_factor=timeout_factor,
-            mutate_all=mutate_all, worker_channel=worker_channel,
-            select_mode=select_mode)
+        with clock.stage("planning"):
+            ret, tests_glob, selection_meta = _single_file_serial_gate(
+                files, project_root, budget=budget, timeout_s=timeout_s,
+                tests_glob=tests_glob, jobs=jobs, dry_run=dry_run,
+                resume=resume, binary_kind=binary_kind,
+                timing_store=timing_store, mutation_warning=mutation_warning,
+                timeout_factor=timeout_factor, mutate_all=mutate_all,
+                worker_channel=worker_channel, select_mode=select_mode)
         if ret is not None:
             return ret
 
     with clock.stage("prewarm"):
-        prewarm_import(project_root)
+        prewarm_info = prewarm_import(project_root)
     chunks, settled, v2ctx = _build_chunks(files, project_root, budget,
                                            timeout_s, tests_glob, jobs,
                                            resume, binary_kind=binary_kind,
@@ -466,7 +481,7 @@ def _run_mutation_files_impl(
     results = _order_results(files, results_merged, settled)
     _attach_chunk_selection(results, chunks)
     envelope = {**merged, "ok": all(r["ok"] for r in results),
-                "results": results}
+                "results": results, "prewarm": prewarm_info}
     # SEE-1416 §SPEC-1416-3：多文件信封顶层 summary.attention——跨文件
     # 非 killed 明细合并投影（≤5 条，B 记录形态）；单文件 flat 契径不加
     # attention（保持既有形态，兼容判据 §SPEC-1416-3）。
@@ -658,6 +673,8 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
         # SEE-1587 §SPEC-006：prefilter 来源披露随分片透出（计数经
         # _accumulate_chunk 专用合并求和，source 取首个非空）
         "coverage_prefilter",
+        # SEE-1589 B §SPEC-002/008：三项机制具名 reason 与阶段对账随分片透出
+        "worker_channel", "farm", "stage_reconciliation",
     )
     per_file: dict[str, dict] = {}
     resumed_present = any("resumed" in cr["summary"] for cr in chunk_results)

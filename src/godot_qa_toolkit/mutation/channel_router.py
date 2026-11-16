@@ -27,6 +27,17 @@ from pathlib import Path
 
 # preload("res://x") / load("res://x") 字面量（与 testscan 同源形态）
 _RES_REF_PATTERN = re.compile(r'\b(?:preload|load)\s*\(\s*"([^"]+)"\s*\)')
+# 标识符 token（裸名引用判定的唯一依据；注释/字符串先剥除）
+_IDENT_PATTERN = re.compile(r"[A-Za-z_]\w*")
+# 注释 / 字符串剥除（保留换行，token 语义不变）。GDScript 无字符字面量，
+# 单引号只在字符串起始位置有意义；三引号须先于单/双引号匹配。
+_CODE_NOISE = re.compile(
+    r'#.*?$'
+    r'|"""(?:\\.|[^\\])*?"""'
+    r"|'''(?:\\.|[^\\])*?'''"
+    r'|"(?:\\.|[^"\\\n])*"'
+    r"|'(?:\\.|[^'\\\n])*'",
+    re.MULTILINE)
 # 顶层 class_name 声明（compile-time 全局类；内嵌 class X 不匹配）
 _CLASS_NAME_DECL = re.compile(r"^class_name\s+([A-Za-z_]\w*)", re.MULTILINE)
 # .tscn/.tres ext_resource 的 path 属性
@@ -84,6 +95,22 @@ def parse_autoload_table(project_root: str) -> dict[str, str]:
     return autoload_map(project_root)
 
 
+def _strip_noise(text: str) -> str:
+    """剥除注释与字符串（保留其余文本；token 语义不变）。"""
+    return _CODE_NOISE.sub(" ", text)
+
+
+def _code_tokens(stripped: str) -> set[str]:
+    """源码 token 集合：裸名引用只可能来自真实标识符。
+
+    SEE-1589 B：旧实现对每个文件 × 每个 autoload/class_name 各做一次
+    `re.search`（KOL 6.3MB × 245 名 ≈ 24 万次正则，实测 20.6s/进程），
+    且把注释/字符串里的名字也当成 compile-time 边，闭包过度扩张。token
+    单遍提取后做集合交集：同语义、更准确、亚秒级。
+    """
+    return set(_IDENT_PATTERN.findall(stripped))
+
+
 def build_reference_graph(
         project_root: str,
         files: list[Path] | None = None,
@@ -101,9 +128,10 @@ def build_reference_graph(
         files = _iter_project_sources(project_root)
     autoload_table = parse_autoload_table(project_root)
     name_to_res = {v: k for k, v in autoload_table.items()}
-    # pass 1：顶层 class_name 声明表（全局类名 → 声明脚本 res 路径）
+    # pass 1：源码文本 + token 集 + 顶层 class_name 声明表
     class_decls: dict[str, str] = {}
     texts: dict[Path, str] = {}
+    tokens: dict[Path, set[str]] = {}
     for p in files:
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -111,7 +139,9 @@ def build_reference_graph(
             continue
         texts[p] = text
         if p.suffix == ".gd":
-            m = _CLASS_NAME_DECL.search(text)
+            stripped = _strip_noise(text)
+            tokens[p] = _code_tokens(stripped)
+            m = _CLASS_NAME_DECL.search(stripped)
             if m is not None:
                 class_decls.setdefault(m.group(1),
                                        _file_res_path(project_root, p))
@@ -121,14 +151,14 @@ def build_reference_graph(
         refs: set[str] = set()
         if p.suffix == ".gd":
             refs.update(_RES_REF_PATTERN.findall(text))
+            toks = tokens.get(p, set())
             # autoload 裸名使用：compile-time 绑定（B2 探针实证不可重定向）
             for name, res in name_to_res.items():
-                if re.search(r"\b" + re.escape(name) + r"\b", text):
+                if name in toks:
                     refs.add(res)
             # class_name 裸名使用：compile-time 全局类绑定（同绑定语义族）
             for name, res in class_decls.items():
-                if res != holder_res and re.search(r"\b" + re.escape(name)
-                                                   + r"\b", text):
+                if res != holder_res and name in toks:
                     refs.add(res)
         else:
             refs.update(_EXT_RESOURCE_PATH.findall(text))
@@ -219,6 +249,15 @@ def route_target(project_root: str, target_res: str,
         reasons.append(REASON_ELIGIBLE_WORKER)
     return RouteDecision(target_res=target_res, channel=channel,
                          reasons=tuple(reasons), closure=closure)
+
+
+def summarize_reasons(reasons) -> dict[str, int]:
+    """reason 码 → 计数（冒号后成员上下文折叠；机器可读披露的稳定形态）。"""
+    counts: dict[str, int] = {}
+    for r in reasons or ():
+        code = str(r).split(":", 1)[0]
+        counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def route_project_census(project_root: str) -> dict:

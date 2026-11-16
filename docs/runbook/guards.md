@@ -53,13 +53,16 @@ GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
   separately and **never counted into governance net benefit** — the machine
   gate is `governance_net.countable_added == added - scope_escape`.
 - doctor: one JSON on **stderr** with a `status` of `ok` (editable install
-  resolves to the current toolkit tree), `mismatch` (editable install points
-  elsewhere; includes `editable_location` / `toolkit_root` / `gitlink_head` /
-  `fix_hint`), `not_installed` (a toolkit tree is present but no editable
-  install exists; includes `fix_hint`), or `skipped` (nothing comparable — no
-  editable install and no toolkit tree resolved, or cwd outside a toolkit
-  tree / standalone usage). Exit `0` for `ok` / `skipped`, `2` for
-  `mismatch` / `not_installed`; stdout stays empty.
+  resolves to the current toolkit tree), `ok_multi_checkout` (editable points
+  at a *different* gqt checkout of the **same HEAD** — a legal multi-checkout
+  shape with a `note` that no action is required), `mismatch` (different HEADs
+  or an unresolvable pairing; includes `editable_location` / `toolkit_root` /
+  `gitlink_head` / `fix_hint`), `not_installed` (a toolkit tree is present but
+  no editable install exists; includes `fix_hint`), or `skipped` (nothing
+  comparable — no editable install and no toolkit tree resolved, or cwd outside
+  a toolkit tree / standalone usage; the cwd case carries a `fix_hint`). Exit
+  `0` for `ok` / `ok_multi_checkout` / `skipped`, `2` for `mismatch` /
+  `not_installed`; stdout stays empty.
 
 ## Failure semantics
 
@@ -123,7 +126,10 @@ No other options; rules v1 = `core/extends-whitelist` / `no-engine-api` /
 
 Self-checks the "editable install vs current worktree gitlink" consistency.
 The self-check JSON goes to **stderr** and stdout stays empty. `status` is one
-of `ok` / `mismatch` / `not_installed` / `skipped` (see Output & exit codes);
-exit `0` = ok or skipped, `2` = mismatch or not_installed (with a `fix_hint`).
-The `GQT_TOOLKIT_ROOT` environment variable selects the checkout to compare
-against.
+of `ok` / `ok_multi_checkout` / `mismatch` / `not_installed` / `skipped` (see
+Output & exit codes); exit `0` = ok / ok_multi_checkout / skipped, `2` =
+mismatch or not_installed (with a `fix_hint`). The toolkit root is resolved
+from `GQT_TOOLKIT_ROOT`, else by walking up from cwd; running inside a gqt
+source checkout (pyproject + `src/godot_qa_toolkit`) is a valid self-check
+context, not a skip. When cwd is outside any toolkit tree, the skipped output
+carries a fix hint: run from the checkout root or set `GQT_TOOLKIT_ROOT`.

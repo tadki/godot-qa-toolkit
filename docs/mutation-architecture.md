@@ -50,7 +50,7 @@
 ### ④ worker 池执行 — `executor.py`（+ `gutrun.py` / `inject.py` / `godot_gate.py`）
 
 - 默认并行（jobs = `max(2, cpu//2)`），单文件同样 per-mutant 分片；变异点 ≤ jobs 自动退串行；共享 baseline 快照（worker 自跑 baseline 会 N 倍放大启动税且污染 timeout 锚）。
-- 磁盘影子注入（SEE-1550 M0，反转 SEE-1420 内存注入）：每 worker 隔离 hardlink COW 影子槽（`.godot` 整树实拷贝），mutant 经「临时文件 + `os.replace`」于引擎启动前写入影子内目标 `.gd`，真实仓零写入；四级 beacon（磁盘读回哈希 → load 编译 → autoload 同源 → GUT 运行证据）钉住全加载形态可达性；win64 持久 warm 池 / Linux fresh 农场分域执行（`shadow.py` / `shadowpool.py` / `beacon.py`）。
+- 磁盘影子注入（SEE-1550 M0，反转 SEE-1420 内存注入）：每 worker 隔离 hardlink COW 影子槽（`.godot` 整树实拷贝），mutant 经「临时文件 + `os.replace`」于引擎启动前写入影子内目标 `.gd`，真实仓零写入；四级 beacon（磁盘读回哈希 → load 编译 → autoload 同源 → GUT 运行证据）钉住全加载形态可达性；Linux/win64 统一持久 warm 池（池锁不可用时才回退 fresh ext4 农场），分层新鲜度权威 + 每轮具名 reason（`shadow.py` / `shadowpool.py` / `beacon.py`）。
 - kill 判定 = 失败测试名集合相对 baseline 的差集（不看 exit code）；`godot_gate` 跨进程 flock 槽位闸统一 mutation/coverage 的 Godot 并发上限。
 - `gutrun.py` 承担 GUT 子进程调用与 launch-failure 甄别（毒条目防护：启动失败类 run_error 不落盘，防 `--resume` 误复用）。
 
@@ -112,3 +112,14 @@ P5 常驻热 worker：scoped 单轮 GUT 均值 < 7s 成主流 / mutant 数 ≥20
 - **投影的身份边界**：`/2` 条目绑定 map schema、recipe pristine、目标文件 sha 与测试面摘要，另保留源码、tests_glob、binary/identity 校验。任一漂移只使该层失效并披露；所有层失效时不过滤，绝不把陈旧覆盖当成当前事实。
 - **执行机制复用**：worker、共享 baseline、并行与 killed 证书差分仍按 chunk 工作；行级只改变 chunk 的测试集合签名。glob 进 resume key，升级或组面变化后自然重跑。显式 `--jobs 1` 串行仍使用文件级并集，是正确但收敛较弱的兼容边界。
 - **验收 harness 不得假绿**：行级基准以 A/A 噪声带裁定 S2/S0 性能门，只有 killed/survived 参与 verdict 对账；run_error 等不可判定项单列排除且不凑 compared。中断/待续输出 `status=pending`、`ok=false`、RC=1，全部完成并通过完整性门后才给终判。
+
+## 8. SEE-1589 增量：三项提速机制在真实目标可达
+
+B 轮的目标不是「再优化一次」，而是解释并消除**机制在真实项目上结构性不可达**：三处缺陷都不是参数问题，而是判据域与世界不一致。
+
+- **路由判据域（闭包谓词）**：旧引用图把注释与字符串中的 autoload/`class_name` 名字当成 compile-time 边，并对每个名逐文件跑正则（真实项目 20.6s/进程）；闭包从真实 34 文件膨胀到 487 文件，绝大多数目标恒判冷。定案是把「编译期可达」收窄为 token 级事实——只有真实标识符使用才成边。语义不变（autoload / GUT 域 / 场景持有者仍恒冷），但判据回到它声称测量的东西。
+- **槽位复用域（平台分叉）**：旧实现只让 win64 走 warm 池，其余平台一律 fresh 农场——Linux 上「warm 复用」不是性能差，而是代码路径不可达且无披露。定案是 Linux/win64 同走一套 warm 池与分层新鲜度权威；平台差异只保留在池锁可用性（不可用才回退 fresh 并具名披露），不再以平台身份替用户做不可见决策。
+- **摘要域（proof 与槽树不对称）**：prewarm 证书只在顶层排除 `.git`/`.qa-cache`，影子槽却在任意深度排除；嵌套的 `addons/godot_mcp/.git` 指针使每轮摘要必失配，形成 `proof-drift-persists` 与每轮整槽重建。gqt 自生成物（`.gqt-worker` / `.gqt_beacon_host*` / `.gqt-attr-select`）与重链临时文件同样污染槽摘要。定案是把两侧收敛到同一排除域，并让重链在成功路径恒清临时文件——证明只在它能证明的域内生效。
+- **披露先于信任**：三项机制的每次决策都有机器可读 reason（`worker_channel` / `farm` / `prewarm` 块），会话致命后的实际降级态（多数腿已冷跑）不得继续报 worker。原则与 §3.4 相同：机制失效不可怕，静默失效才不可接受。
+- **阶段全归因**：旧 `stage_timings` 只覆盖约 56% 墙钟，farm 制备、prewarm/import、路由扫描与规划不在账上。定案新增 `farm_provision` / `planning` / `route_scan` 阶段与 `stage_reconciliation`（墙钟 − 已归因 = 未解释；并发重叠以 `over_attributed_s` 显式披露），使「提速不见了」可以被定位而不是被估算。
+- **A 面契约收敛**：有效选面统一由单一判别点给出（`line`/`fn`/`file`/`full`/`lines`/`mutation`/`explicit_tests`）；单文件对外恒为 flat 信封；`measure run` 区分「union 已认证」与「映射本轮可用」；全脸超时建议在到达预算上限后改指可执行的窄面路径，而不是回显同一个超时值。共同原则：**契约描述实际生效面，不描述调用者以为生效的面**。

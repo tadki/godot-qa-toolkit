@@ -457,7 +457,8 @@ def _install_slot_fakes(monkeypatch, proj):
     ticks = itertools.count(1.0, 1.0)
     monkeypatch.setattr(runner_mod.time, "monotonic", lambda: next(ticks))
 
-    def fake_acquire(root, kind, rel, h, targeted_only=False):
+    def fake_acquire(root, kind, rel, h, targeted_only=False,
+                     required_globs=None):
         for _ in range(3):  # acquire 消耗 3 tick（制备成本进 span）
             runner_mod.time.monotonic()
         slot_dir = Path(proj) / "fake-slot"
@@ -603,7 +604,8 @@ def test_runner_worker_boot_harvest_counted(tmp_path, monkeypatch):
 
     monkeypatch.setattr(wc_mod, "execute_worker_branch", shim)
 
-    def fake_acquire(root, kind, rel, h, targeted_only=False):
+    def fake_acquire(root, kind, rel, h, targeted_only=False,
+                     required_globs=None):
         slot_dir = tmp_path / "wslot"
         slot_dir.mkdir(parents=True, exist_ok=True)
         return SimpleNamespace(root=str(slot_dir), project_root=str(tmp_path),

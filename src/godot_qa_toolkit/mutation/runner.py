@@ -807,9 +807,11 @@ def _run_mutant_loop(
         clock = clock or StageClock()
         t_slot = time.monotonic()
         with clock.stage("farm_provision"):
-            slot = shadowpool.acquire_slot(project_root, kind, [target_rel],
-                                           idpack.get("boot_wiring_hash", ""),
-                                           targeted_only=targeted_only)
+            slot = shadowpool.acquire_slot(
+                project_root, kind, [target_rel],
+                idpack.get("boot_wiring_hash", ""),
+                targeted_only=targeted_only,
+                required_globs=[tests_glob] if tests_glob else None)
         # killed 证书归属（SEE-1581）：以新鲜运行时映射为准；无新鲜映射 →
         # None（证书不产出，fail-safe 只偏向重跑），不与静态索引混用。
         ownership_holder: list = []

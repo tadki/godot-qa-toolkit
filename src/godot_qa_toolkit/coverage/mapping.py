@@ -133,17 +133,29 @@ def project_file_coverage(
         scripts = [s for s in scripts if _in_face(s)]
 
     bk = binary_kind or detect_binary_kind()
-    covered, reason = project_coverage_from_map(
-        str(root), doc, str(path), scripts, face,
-        binary_kind=bk,
-        identity=identity if identity is not None else identity_pack(str(root), bk),
-        current_recipe_pristine=truth._fresh_recipe_hash(str(root)),
-        tests_face=current_tests_face(str(root)))
+    try:
+        covered, reason = project_coverage_from_map(
+            str(root), doc, str(path), scripts, face,
+            binary_kind=bk,
+            identity=identity if identity is not None else identity_pack(str(root), bk),
+            current_recipe_pristine=truth._fresh_recipe_hash(str(root)),
+            tests_face=current_tests_face(str(root)))
+    except CoverageMappingError:
+        raise
+    except Exception as e:  # noqa: BLE001 — 畸形 map 的任何异常都转具名域错误
+        raise CoverageMappingError(
+            "projection_failed",
+            f"{type(e).__name__}: {e}") from e
     if covered is None:
         raise CoverageMappingError("projection_unavailable", reason)
 
-    inst = {int(l) for l in
-            ((doc.get("instrumentable_lines") or {}).get(rel) or [])}
+    try:
+        inst = {int(l) for l in
+                ((doc.get("instrumentable_lines") or {}).get(rel) or [])}
+    except (TypeError, ValueError) as e:
+        raise CoverageMappingError(
+            "attribution_map_malformed",
+            f"instrumentable_lines for {rel} malformed: {e}") from e
     total = len(inst)
     cov = len(covered & inst) if inst else len(covered)
     pct = round(100.0 * cov / total, 2) if total else 100.0

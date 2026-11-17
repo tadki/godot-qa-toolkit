@@ -177,73 +177,6 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
 
-def _mapped_project(tmp_path, gd_text="func add(a, b):\n\tvar c = a + b\n\treturn c\n"):
-    import attribution_fixtures as fx
-
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    target = proj / "calc.gd"
-    target.write_text(gd_text, encoding="utf-8")
-    (proj / "tests").mkdir()
-    (proj / "tests" / "test_x.gd").write_text("extends Node\n", encoding="utf-8")
-    fx.write_map(proj, {"calc.gd": ["test_x.gd::test_a"]})
-    return proj, target
-
-
-def _no_godot(monkeypatch):
-    monkeypatch.setattr(
-        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
-        lambda *a, **k: "linux")
-    monkeypatch.setattr(
-        "godot_qa_toolkit.mutation.identity.identity_pack",
-        lambda *a, **k: {"kind": "linux"})
-
-
-def _write_raw_map(project_root, rel, instrumentable, covered_lines,
-                   probes_fired):
-    """Raw test-attribution/6 doc with full control（哨兵/车道测试用）。"""
-    import hashlib
-
-    import attribution_fixtures as fx
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
-
-    fx.install_recipe(project_root)
-    recipe, error = build_recipe(project_root)
-    assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
-    ident = "test_x.gd::test_a"
-    arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
-           "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
-           "function_pairs": 0, "test_to_functions": {},
-           "script_to_functions": {},
-           "file_to_tests": {rel: [ident]},
-           "file_to_scripts": {rel: ["test_x.gd"]},
-           "line_pairs": len(covered_lines),
-           "script_line_pairs": len(covered_lines),
-           "test_to_lines": {ident: {rel: list(covered_lines)}},
-           "script_to_lines": {},
-           "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
-    doc = {"schema_version": "test-attribution/6",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
-           "project_root": str(project_root), "identity": ident,
-           "causal": {"enabled": False},
-           "file_sha256": {rel: hashlib.sha256(
-               (Path(project_root) / rel).read_bytes()).hexdigest()},
-           "target_files": [rel],
-           "tests_face": {"tests/test_x.gd": hashlib.sha256(
-               (Path(project_root) / "tests" / "test_x.gd").read_bytes()).hexdigest()},
-           "instrumentable_lines": {rel: list(instrumentable)},
-           "arms": {"gut_full": arm},
-           "arms_state": {"gut_full": {"state": "valid",
-                                       "invalid_reason": None, "bundles": 1,
-                                       "pairs": len(covered_lines),
-                                       "probes_fired": probes_fired,
-                                       "vacuous": False}},
-           "notes": []}
-    out = Path(project_root) / ".qa-cache" / "attribution-map.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
-
 class TestProbeSinkRobustness:
     """SPEC-002: 追加写 + run 唯一 sink + ID-keyed 数据面 + user:// 优先。"""
 
@@ -364,4 +297,3 @@ func f(x):
         # 无 else → 仅 if 一个分支（行 3）；covered={2} 不含行 3
         assert s["branch_total"] == 1
         assert s["branch_covered"] == 0
-

@@ -671,4 +671,3 @@ def test_default_measure_snapshot_excludes_preexisting_bundles(
                    "res://tests/unit/")
     assert "bundle" in out2
     assert out2["bundle"]["run_uuid"] != out["bundle"]["run_uuid"]
-

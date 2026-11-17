@@ -37,7 +37,6 @@ from godot_qa_toolkit.mutation.identity import (
     boot_wiring_hash,
     certificate_valid,
     deps_closure_sha1,
-    disclose_superseded,
     godot_version_string,
     gut_addon_hash,
     identity_pack,
@@ -339,51 +338,6 @@ class TestCertReuseDiff:
         assert plan.triggers[sid] == "reused:killed"
         assert seen["called"] == 1
 
-
-class TestOpsBumpDisclosure:
-    def test_superseded_resume_store_disclosed_not_deleted(self, tmp_path,
-                                                           capsys):
-        """OPS bump：旧 v2 store（ops_version 不符）不读不写不删 + 披露。"""
-        proj = _write_project(tmp_path, with_gut=False)
-        store_dir = proj / ".qa-cache" / "gqt-mutation-resume-v2" / "oldkey"
-        store_dir.mkdir(parents=True)
-        manifest = {"schema": "see1420-resume/2", "ops_version": "see1420/1",
-                    "file_key": "oldkey"}
-        (store_dir / "manifest.json").write_text(json.dumps(manifest),
-                                                 encoding="utf-8")
-        entry = store_dir / "x.json"
-        entry.write_text(json.dumps({"schema": "see1420-resume/2",
-                                     "verdict": "killed"}),
-                         encoding="utf-8")
-        disclose_superseded(proj, store_dir.parent,
-                            proj / ".qa-cache" / "gqt-coverage")
-        err = capsys.readouterr().err
-        assert f"ops_version != {OPS_VERSION}" in err
-        assert "neither read, written, nor deleted" in err
-        assert entry.exists() and (store_dir / "manifest.json").exists(), \
-            "旧条目不删"
-
-    def test_current_ops_store_not_disclosed(self, tmp_path, capsys):
-        proj = _write_project(tmp_path, with_gut=False)
-        store_dir = proj / ".qa-cache" / "gqt-mutation-resume-v2" / "k"
-        store_dir.mkdir(parents=True)
-        (store_dir / "manifest.json").write_text(json.dumps(
-            {"schema": "see1420-resume/2", "ops_version": OPS_VERSION,
-             "file_key": "k"}), encoding="utf-8")
-        disclose_superseded(proj, store_dir.parent,
-                            proj / ".qa-cache" / "gqt-coverage")
-        assert "ops_version !=" not in capsys.readouterr().err
-
-    def test_superseded_coverage_store_disclosed(self, tmp_path, capsys):
-        """coverage store 无 inject_scheme 身份（旧 schema）→ 披露。"""
-        proj = _write_project(tmp_path, with_gut=False)
-        cov_dir = proj / ".qa-cache" / "gqt-coverage"
-        cov_dir.mkdir(parents=True)
-        (cov_dir / "old.json").write_text(json.dumps(
-            {"schema": "see1420-coverage/1", "covered_lines": [2]}),
-            encoding="utf-8")
-        disclose_superseded(proj, proj / ".qa-cache" / "noresume", cov_dir)
-        assert "lack" in capsys.readouterr().err
 
     def test_file_key_includes_identity(self, tmp_path):
         proj = _write_project(tmp_path, with_gut=False)

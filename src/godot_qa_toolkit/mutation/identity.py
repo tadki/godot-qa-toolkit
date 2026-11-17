@@ -202,10 +202,6 @@ def identity_sha1(pack: dict) -> str:
 _DEPS_MAX_DEPTH = 8
 
 
-# A09（SEE-1594 S4）：静态 TestOwnershipIndex（含 _TEST_FUNC_PATTERN 静态
-# 扫描）已物理退役——kill 证书归属唯一来源 = 运行时真值映射
-# （truth_select.RuntimeOwnership）；无新鲜映射 → 证书不产出（保守重跑），
-# 绝不静态兜底。
 
 def _res_to_fs(project_root: str, res_path: str) -> Path:
     return Path(project_root) / res_path.removeprefix("res://")
@@ -401,52 +397,3 @@ def _res_hits(ref: str, target_res: str) -> bool:
     ref_cf = ref.strip().casefold()
     target_cf = target_res.strip().casefold()
     return ref_cf == target_cf or ref_cf.endswith("/" + target_cf)
-
-
-# ---------------------------------------------------------------------------
-# 旧 store 一次性失效披露（Owner 裁决菜单 B）
-# ---------------------------------------------------------------------------
-
-def disclose_superseded(project_root: str, resume_store_dir: Path,
-                        coverage_store_dir: Path) -> None:
-    """OPS_VERSION 已 bump 后的旧 v2 store：不读不写不删，仅 stderr 披露。
-
-    判据 = manifest.json 的 ops_version ≠ 当前 OPS_VERSION（只读 manifest
-    索引层，条目文件零扫描）；coverage store 以目录在场 + schema 无
-    inject_scheme 字段为旧态信号（读一个已存在条目样本）。"""
-    try:
-        manifests = sorted(resume_store_dir.glob("*/manifest.json"))
-    except OSError:
-        manifests = []
-    stale = 0
-    for m in manifests:
-        try:
-            import json
-            raw = json.loads(m.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            stale += 1
-            continue
-        if isinstance(raw, dict) and raw.get("ops_version") != OPS_VERSION:
-            stale += 1
-    if stale:
-        print(f"resume store: {stale} file-key group(s) under "
-              f"{resume_store_dir} carry ops_version != {OPS_VERSION} — "
-              f"superseded by OPS {OPS_VERSION} (disk-farm injection): old "
-              f"entries are neither read, written, nor deleted; first run "
-              f"re-executes all sites (one-time invalidation)", file=sys.stderr)
-    try:
-        cov_files = sorted(coverage_store_dir.glob("*.json"))
-    except OSError:
-        cov_files = []
-    if cov_files:
-        try:
-            import json
-            sample = json.loads(cov_files[0].read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            sample = None
-        if not isinstance(sample, dict) or \
-                "inject_scheme" not in (sample.get("identity") or {}):
-            print(f"coverage cache: entries under {coverage_store_dir} lack "
-                  f"inject_scheme identity — superseded by OPS {OPS_VERSION} "
-                  f"(old entries neither read nor deleted; first run "
-                  f"re-measures)", file=sys.stderr)

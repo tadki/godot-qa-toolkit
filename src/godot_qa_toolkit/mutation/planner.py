@@ -138,7 +138,6 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
                  map_path: "str | None | object" = MAP_PATH_UNRESOLVED):
     """串行自规划：D4 差分矩阵（killed 证书门）→ P2 覆盖前置过滤 →
     D6 budget-on-retry。"""
-    store2.disclose_v1_superseded()
     old_manifest = store2.load_manifest()
     prior_entries = store2.load_entries()
     # killed 证书复用门（SEE-1550 §SPEC-007）：killer 改/删/依赖变 → 仅该

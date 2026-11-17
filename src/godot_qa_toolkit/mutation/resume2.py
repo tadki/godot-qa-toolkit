@@ -49,8 +49,7 @@ def file_key(project_root: str, file_path: str, tests_glob: str | None,
              binary_kind: str | None = None,
              identity_sha: str | None = None) -> str:
     """file_key（SEE-1550）：增身份包成分——inject_scheme/godot 版本/wiring/
-    GUT 哈希任一漂移 = 旧 key 永不再命中（identity.disclose_superseded 披露，
-    旧条目不读不写不删）。"""
+    GUT 哈希任一漂移 = 旧 key 永不再命中（A14：旧条目不读不写不删）。"""
     kind = binary_kind if binary_kind is not None else binary_kind_tag(None)
     rel = project_relative(project_root, file_path)
     payload = f"{rel}|{tests_glob or ''}|{OPS_VERSION}|{kind}|{identity_sha or ''}"
@@ -107,20 +106,6 @@ class ResumeStoreV2:
     @staticmethod
     def _sha1_text(text: str) -> str:
         return hashlib.sha1(text.encode("utf-8")).hexdigest()
-
-    def disclose_v1_superseded(self) -> bool:
-        """v1 目录在场 → stderr 一次性披露；返回是否在场。只披露，不读不写不删。"""
-        v1 = (Path(self.project_root) / ".qa-cache" / RESUME_V1_DIRNAME)
-        try:
-            present = v1.is_dir() and any(v1.iterdir())
-        except OSError:
-            return False
-        if present:
-            print(f"resume v1 store found at {v1} — schema {SCHEMA_V2} "
-                  f"supersedes it: v1 entries are neither read, written, nor "
-                  f"deleted; first v2 run re-executes all sites (one-time "
-                  f"invalidation, SEE-1420)", file=sys.stderr)
-        return present
 
     # -- manifest 索引层 --------------------------------------------------
 

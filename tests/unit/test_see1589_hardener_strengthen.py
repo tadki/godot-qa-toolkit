@@ -197,7 +197,7 @@ def test_c2_serial_gate_forwards_selection_meta(tmp_path, monkeypatch):
                         {"ok": True, "summary": {}})
     executor._single_file_serial_gate(
         [str(target)], str(proj), budget=50, timeout_s=60, tests_glob=None,
-        jobs=16, dry_run=False, resume=False, binary_kind=None,
+        jobs=16, dry_run=False, binary_kind=None,
         timing_store=None, mutation_warning=None, timeout_factor=None,
         mutate_all=False, worker_channel=None, select_mode="full")
     assert captured.get("selection_meta") == meta, \

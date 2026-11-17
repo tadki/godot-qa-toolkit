@@ -628,7 +628,7 @@ def test_fn_group_chunks_split_by_function(tmp_path):
     chunks, meta = executor._fn_group_chunks(
         str(target), str(proj), sel["tests_glob"], None,
         [_mutant(target, 2, "m-add"), _mutant(target, 8, "m-mul")],
-        src, None, False, None, 60, 10, False, None,
+        src, None, None, 60, 10, False, None,
         run_id="r1", identity=None, worker_channel=None,
         selection_meta=sel, total_sites=2)
     assert len(chunks) == 2 and len(meta) == 2
@@ -653,7 +653,7 @@ def test_fn_group_module_scope_mutant_falls_back_to_file_glob(tmp_path):
     chunks, meta = executor._fn_group_chunks(
         str(target), str(proj), sel["tests_glob"], None,
         [_mutant(target, 11, "m-module")],
-        src, None, False, None, 60, 10, False, None,
+        src, None, None, 60, 10, False, None,
         run_id="r2", identity=None, worker_channel=None,
         selection_meta=sel, total_sites=1)
     assert meta[0]["source"] == "file_fallback"
@@ -703,7 +703,7 @@ def test_serial_gate_never_shortcuts_fn_mode(tmp_path, monkeypatch):
                             "ok": True, "summary": {}})
     ret, glob, meta = executor._single_file_serial_gate(
         [str(proj / "calc.gd")], str(proj), budget=50, timeout_s=60,
-        tests_glob=None, jobs=10, dry_run=False, resume=False,
+        tests_glob=None, jobs=10, dry_run=False,
         binary_kind=None, timing_store=None, mutation_warning=None,
         timeout_factor=None, mutate_all=False, worker_channel=None,
         select_mode="fn")

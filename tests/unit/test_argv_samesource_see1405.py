@@ -132,7 +132,7 @@ class TestPoisonEntryGuard:
             return (0, "all passed [passed]")
         return fake
 
-    def _run(self, tmp_path, mode, resume=True):
+    def _run(self, tmp_path, mode):
         root, target = _mk_project(tmp_path / "proj")
         calls = {"n": 0}
         monkey_runs = self._fake_gut(calls, mode)
@@ -143,7 +143,7 @@ class TestPoisonEntryGuard:
             store = ResumeStoreV2(str(root), str(target), None)
             result = mrunner.run_mutation(
                 file_path=str(target), project_root=str(root), budget=4,
-                resume2_store=store, resume=resume)
+                resume2_store=store)
         finally:
             mrunner._run_gut_on_project = orig_gut
         return result, store
@@ -162,7 +162,7 @@ class TestPoisonEntryGuard:
 
     def test_normal_verdicts_still_persisted(self, tmp_path):
         """正对照：正常判定（survived）照常落盘——防护不误伤 resume 语义。"""
-        result, store = self._run(tmp_path, "ok", resume=True)
+        result, store = self._run(tmp_path, "ok")
         assert result["summary"]["run_errors"] == 0
         assert len(store.load_entries()) == 4
 

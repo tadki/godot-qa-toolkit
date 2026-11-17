@@ -86,7 +86,7 @@ def test_dispatch_parses_lines_before_any_run(monkeypatch):
     """非法规格在任何 GUT/映射工作前以参数错误契约收口（ok=false）。"""
     args = SimpleNamespace(
         files=["f.gd"], project_root="p", budget=10, timeout=60,
-        dry_run=False, tests=None, jobs=None, resume=False,
+        dry_run=False, tests=None, jobs=None,
         mutation_warning=50, timeout_factor=2.0, mutate_all=False,
         mutation=None, lines="20-10", worker_channel=False,
         select_mode="line", attribution_map=None, attribution_auto=True,
@@ -296,7 +296,7 @@ def test_line_group_chunks_groups_by_signature_not_by_line(tmp_path):
                       "mapping": {"path": map_path}}
     chunks, groups, no_mapped = _line_group_chunks(
         str(target), str(proj), "res://tests/", "linux", mutants,
-        selection_meta, None, False, 2.0, 60, 50, False, None,
+        selection_meta, None, 2.0, 60, 50, False, None,
         run_id="r1", identity=None, worker_channel=None, total_sites=9)
     # 同签名行（4 与 7）共享一个 chunk——组数按测试集合数，不是行数
     assert len(groups) == 2
@@ -323,7 +323,7 @@ def test_select_line_goes_through_orchestration_not_serial_fast_path(
     _line_map(proj, target)
     args = SimpleNamespace(
         files=[str(target)], project_root=str(proj), budget=10, timeout=60,
-        dry_run=False, tests=None, jobs=None, resume=False,
+        dry_run=False, tests=None, jobs=None,
         mutation_warning=50, timeout_factor=2.0, mutate_all=False,
         mutation=None, lines=None, worker_channel=False,
         select_mode="line", attribution_map=None, attribution_auto=True,
@@ -571,7 +571,7 @@ def test_all_no_mapped_sites_settle_uncovered_result(tmp_path, monkeypatch):
     map_path = _write_map(proj, doc)
     from godot_qa_toolkit.mutation import executor as ex
     chunks, ctx, settled = ex._plan_file_chunks(
-        str(target), str(proj), 50, 60, "res://tests/", 1, False, "linux",
+        str(target), str(proj), 50, 60, "res://tests/", 1, "linux",
         50, 2.0, False, False,
         {"res://tests/": {"rc": 0, "tail": "", "elapsed": 0.1}},
         auto_selection={
@@ -597,7 +597,7 @@ def test_plan_file_chunks_records_requested_jobs(tmp_path):
     map_path = _write_map(proj, doc)
     from godot_qa_toolkit.mutation import executor as ex
     chunks, ctx, settled = ex._plan_file_chunks(
-        str(target), str(proj), 50, 60, "res://tests/", 16, False, "linux",
+        str(target), str(proj), 50, 60, "res://tests/", 16, "linux",
         50, 2.0, False, False,
         {"res://tests/": {"rc": 0, "tail": "", "elapsed": 0.1}},
         auto_selection={
@@ -660,7 +660,7 @@ def test_line_group_chunk_carries_group_test_set(tmp_path):
                       "mapping": {"path": map_path}}
     chunks, groups, _nm = _line_group_chunks(
         str(target), str(proj), "res://tests/", "linux", mutants,
-        selection_meta, None, False, 2.0, 60, 50, False, None,
+        selection_meta, None, 2.0, 60, 50, False, None,
         run_id="r1", identity=None, worker_channel=None, total_sites=9)
     assert chunks
     for ch, g in zip(chunks, groups):

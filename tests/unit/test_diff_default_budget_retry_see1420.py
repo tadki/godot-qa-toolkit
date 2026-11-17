@@ -106,20 +106,34 @@ class TestDiffDefaultOn:
         assert calls2["n"] == 4  # baseline + 3
 
     def test_diff_skipped_lists_ids(self, tmp_path, monkeypatch):
+        """A09 后：证书唯一来源 = 新鲜运行时映射——种子 killer 身份映射后，
+        二轮差分 skipped 全命中（id 列表）。"""
         proj, target = _write_project(tmp_path)
 
         def kill_all(root, timeout_s=60, tests_glob=None):
             return (1, "* test_x\n\t\ttest_x [Failed]")
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        import attribution_fixtures as _fx
+        from godot_qa_toolkit.mutation import truth_select as _ts
+        _fx.install_recipe(proj)
+        _fx.line_facts_map(proj, {"test_x.gd::test_x": {"calc.gd": [2, 3]}},
+                           instrumentable={"calc.gd": [2, 3]})
+        _ts._fresh_recipe_hash.cache_clear()
+        _ts._test_scripts_by_name.cache_clear()
+
         monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
         mrunner.run_mutation(str(target), str(proj), budget=10,
-                             tests_glob="res://tests/")
+                             tests_glob="res://tests/",
+                             select_mode="line", reuse_coverage=False)
         r2 = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                  tests_glob="res://tests/")
+                                  tests_glob="res://tests/",
+                                  select_mode="line", reuse_coverage=False)
         skipped = r2["summary"]["diff_skipped"]
         assert len(skipped) == 3
         assert all(s.startswith("res") or "#" in s for s in skipped)
         assert all("calc.gd#func:add#" in s for s in skipped)
+
 
 
 class TestBudgetOnRetryEndToEnd:

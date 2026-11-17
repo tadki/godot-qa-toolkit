@@ -197,7 +197,6 @@ def run_mutation(    file_path: str,
     precomputed_baseline: dict | None = None,
     mutant_slice: tuple[int, int] | None = None,
     timing_store=None,
-    resume: bool = False,
     binary_kind: str | None = None,
     mutation_warning: int | None = None,
     timeout_factor: float | None = None,
@@ -225,7 +224,7 @@ def run_mutation(    file_path: str,
         dry_run=dry_run, tests_glob=tests_glob,
         precomputed_baseline=precomputed_baseline,
         mutant_slice=mutant_slice, timing_store=timing_store,
-        resume=resume, binary_kind=binary_kind,
+        binary_kind=binary_kind,
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, retry_ids=retry_ids,
         resume2_store=resume2_store, select_ids=select_ids,
@@ -255,7 +254,6 @@ def _run_mutation_core(file_path: str,
     precomputed_baseline: dict | None = None,
     mutant_slice: tuple[int, int] | None = None,
     timing_store=None,
-    resume: bool = False,
     binary_kind: str | None = None,
     mutation_warning: int | None = None,
     timeout_factor: float | None = None,
@@ -283,9 +281,9 @@ def _run_mutation_core(file_path: str,
     mutant_slice（SEE-1321 SPEC-003 修订）：per-mutant 并发 worker 的分片，
     只跑 [start, stop) 的 mutants；必须携带共享 baseline（worker 各自跑
     baseline 会 N 倍放大启动税且并发期耗时污染 timeout 锚）。
-    resume（SEE-1400 §SPEC-002）：v1 遗留开关。SEE-1420 起差分**默认开启**
-    （manifest 在场即差分，定案 D4）；--mutate-all 显式退路；本 flag 仅保留
-    summary.resumed 键在场性（无复用时为 0），语义已被差分吸收。
+    resume（A13 退役）：SEE-1400 v1 遗留开关已物理退役——差分自 SEE-1420
+    起默认开启（manifest 在场即差分，定案 D4），summary.resumed 恒在场
+    （= 本轮复用的 killed 数，无复用时为 0）。
     mutate_all（§SPEC-1420-07）：--mutate-all 显式全量——忽略旧 manifest，
     全位点执行（仍落盘 v2）。
     retry_ids（并发 worker 注入面）：父层（executor）已做差分规划与预算
@@ -449,7 +447,7 @@ def _run_mutation_core(file_path: str,
         path, project_root, original_src, backup, mutants, executed_list,
         reused, results_uncovered, prior_entries, scope_hashes, disclosures,
         budget, tests_glob, timing_store, timeout_s, precomputed_baseline,
-        store2, timeout_factor, header_hash, retry_ids, resume, scoped,
+        store2, timeout_factor, header_hash, retry_ids, scoped,
         total_sites, progress=progress, identity=identity,
         targeted_only=bool(select_ids or select_lines),
         worker_channel=worker_channel, clock=clock)
@@ -486,7 +484,7 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      executed_list, reused, results_uncovered, prior_entries,
                      scope_hashes, disclosures, budget, tests_glob,
                      timing_store, timeout_s, precomputed_baseline, store2,
-                     timeout_factor, header_hash, retry_ids, resume, scoped,
+                     timeout_factor, header_hash, retry_ids, scoped,
                      total_sites, progress=None, identity=None,
                      targeted_only=False, worker_channel=None,
                      clock: StageClock | None = None):
@@ -569,7 +567,7 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
     return _mutation_report(str(path), *_tally(results), invalid_count,
                             budget, results, scoped, baseline_reused,
                             timing_meta,
-                            resumed_count if (resumed_count or resume) else None,
+                            resumed_count if resumed_count else None,
                             disclosures=disclosures or None,
                             pinned_count=len(streaks.pinned_ids),
                             slot_info=slot_info, original_src=original_src,

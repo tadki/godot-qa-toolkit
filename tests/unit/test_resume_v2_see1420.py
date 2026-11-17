@@ -129,25 +129,6 @@ class TestPoisonEntries:
 
 
 class TestV1Supersession:
-    def test_v1_dir_disclosed_never_touched(self, tmp_path, capsys):
-        """v1 目录在场：stderr 一次性显式披露；不读不写不删。"""
-        proj, target = _write_project(tmp_path)
-        v1 = proj / ".qa-cache" / RESUME_V1_DIRNAME / "somekey"
-        v1.mkdir(parents=True)
-        (v1 / "0.json").write_text("{}", encoding="utf-8")
-        store = ResumeStoreV2(str(proj), str(target), "res://tests/")
-        assert store.disclose_v1_superseded() is True
-        err = capsys.readouterr().err
-        assert "v1" in err and "neither read, written, nor deleted" in err
-        # v1 内容原样保留（不删）
-        assert (v1 / "0.json").exists()
-
-    def test_no_v1_dir_no_disclosure(self, tmp_path, capsys):
-        proj, target = _write_project(tmp_path)
-        store = ResumeStoreV2(str(proj), str(target), "res://tests/")
-        assert store.disclose_v1_superseded() is False
-        assert "v1" not in capsys.readouterr().err
-
     def test_first_v2_run_reruns_all_with_v1_present(self, tmp_path,
                                                      monkeypatch, capsys):
         """一次性失效窗口端到端：v1 有历史 + v2 无 manifest → 全量重跑。"""
@@ -167,5 +148,5 @@ class TestV1Supersession:
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
                                  tests_glob="res://tests/")
         assert r["summary"]["killed"] == 3
-        assert calls["n"] == 4  # baseline + 3（v1 历史未迁移，不脏合并）
-        assert "resume v1 store found" in capsys.readouterr().err
+        assert calls["n"] == 4  # baseline + 3（v1 历史不迁移不读取——A14 后
+        # 不再披露，仅忽略）

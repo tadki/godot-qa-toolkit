@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
-import sys
 
-from .coverlink import MAP_PATH_UNRESOLVED, resolve_coverage_for_prefilter
+from .coverlink import (COVERAGE_PREFILTER_MISS_STATES,
+                        MAP_PATH_UNRESOLVED, apply_coverage_prefilter,
+                        coverage_prefilter_summary)
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .identity import certificate_valid
 from .reporting import _dry_run_result, _mutant_record
@@ -154,14 +155,13 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
             tests_scripts=tests_scripts, map_path=map_path)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     reused = plan.reused
-    if disclosures.get("coverage_prefilter") not in ("store_miss", "instrumentable_face_missing") \
+    if disclosures.get("coverage_prefilter") not in COVERAGE_PREFILTER_MISS_STATES \
             and reuse_coverage:
         src = disclosures.get("coverage_prefilter")
-        disclosures["coverage_prefilter"] = {
-            "source": src if isinstance(src, str) else None,
-            "uncovered": len(uncovered_mutants),
-            "covered_executed": len(executed_list),
-        }
+        # A08：summary.coverage_prefilter 唯一 writer（coverlink）
+        disclosures["coverage_prefilter"] = coverage_prefilter_summary(
+            src if isinstance(src, str) else None,
+            len(uncovered_mutants), len(executed_list))
     if plan.diff_active or mutate_all:
         # O3 对齐：差分在场与 --mutate-all 两径披露同一键集（retry_total /
         # executed / untouched_ranges / diff_skipped）——mutate_all 全量面
@@ -200,21 +200,10 @@ def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
     D3 锚：不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的
     位点**留在执行面**；可插桩集读不到 = 不过滤（宁多跑不假阴性）。
     """
-    if not reuse_coverage:
-        return [], plan.executed
-    cov_lines, inst_lines, cov_reason, source = resolve_coverage_for_prefilter(
-        project_root, str(path), tests_glob, scripts=tests_scripts,
-        binary_kind=binary_kind, identity=identity, map_path=map_path)
-    if cov_lines is None or inst_lines is None:
-        print(f"mutation: coverage store miss ({cov_reason}) — "
-              f"running unfiltered", file=sys.stderr)
-        disclosures["coverage_prefilter"] = source or "store_miss"
-        return [], plan.executed
-    disclosures["coverage_prefilter"] = source
-    uncovered = [m for m in plan.executed
-                 if m.line not in cov_lines and m.line in inst_lines]
-    pool = [m for m in plan.executed
-            if m.line in cov_lines or m.line not in inst_lines]
-    return uncovered, pool
+    # A07（SEE-1594 S3）：应用逻辑单一 helper 在 coverlink，本函数只保留
+    # 形参适配；D3 锚/miss 披露口径与 executor 路径同源。
+    return apply_coverage_prefilter(
+        plan.executed, str(path), project_root, tests_glob, tests_scripts,
+        binary_kind, identity, reuse_coverage, disclosures, map_path)
 
 

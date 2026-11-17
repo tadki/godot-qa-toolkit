@@ -521,19 +521,64 @@ def _prefilter_live_projection(
 
 
 def selection_map_path(selection_meta: dict) -> "str | None | object":
-    """selection_meta → prefilter map_path（S2.2/S2.3 单一出处）。
+    """selection_meta → prefilter map_path（S2.2/S2.3/S3 单一出处）。
 
-    - source=runtime_mapping 但 mapping.path 缺失 →
-      MAP_PATH_METADATA_INCONSISTENT（元数据不一致哨兵：消费侧以具名不一致
-      原因披露，绝不误报 explicit --tests、绝不默认重猜）；
+    - source=runtime_mapping 但无 resolved map path（mapping 为 None 或
+      无 path 的 dict 均算）→ MAP_PATH_METADATA_INCONSISTENT（元数据不一致
+      哨兵：消费侧以具名不一致原因披露，绝不误报 explicit --tests、绝不
+      默认重猜）；
     - 其余按既有语义返回 path 或 None（显式 tests/全脸 = selection 无映射，
       explicit-None 披露归其专属）。"""
     sel_mapping = selection_meta.get("mapping")
     map_path = (sel_mapping or {}).get("path")
-    if sel_mapping is not None and not map_path \
-            and selection_meta.get("source") == "runtime_mapping":
+    if not map_path and selection_meta.get("source") == "runtime_mapping":
         return MAP_PATH_METADATA_INCONSISTENT
     return map_path
+
+
+def apply_coverage_prefilter(executed, file_path, project_root, tests_glob,
+                             tests_scripts, binary_kind, identity,
+                             reuse_coverage, disclosures,
+                             map_path=_UNRESOLVED_MAP):
+    """A07（SEE-1594 S3）：mutation coverage 前置过滤的**单一应用 helper**
+    （planner/executor 共用，禁止复制后再分叉）。
+
+    语义单点：reuse 关断即全量；解析链经 resolve_coverage_for_prefilter；
+    miss = stderr 告警 + 不过滤（宁多跑不假阴性），disclosures 只在提供时
+    写入；D3 锚 = uncovered ∈ instrumentable ∧ ∉ covered——不可插桩行上的
+    位点留在执行面。返回 (uncovered, pool)。"""
+    if not reuse_coverage:
+        return [], executed
+    cov, inst, reason, source = resolve_coverage_for_prefilter(
+        project_root, file_path, tests_glob, scripts=tests_scripts,
+        binary_kind=binary_kind, identity=identity, map_path=map_path)
+    if cov is None or inst is None:
+        print(f"mutation: coverage store miss ({reason}) for {file_path} "
+              f"— running unfiltered", file=sys.stderr)
+        if disclosures is not None:
+            disclosures["coverage_prefilter"] = source or "store_miss"
+        return [], executed
+    if disclosures is not None:
+        disclosures["coverage_prefilter"] = source
+    uncovered = [m for m in executed
+                 if getattr(m, "line", -1) not in cov
+                 and getattr(m, "line", -1) in inst]
+    pool = [m for m in executed
+            if getattr(m, "line", -1) in cov
+            or getattr(m, "line", -1) not in inst]
+    return uncovered, pool
+
+
+COVERAGE_PREFILTER_MISS_STATES = ("store_miss", "instrumentable_face_missing")
+COVERAGE_PREFILTER_SOURCES = ("projection_store", "projection_live")
+
+
+def coverage_prefilter_summary(source, uncovered, covered_executed) -> dict:
+    """A08（SEE-1594 S3）：summary.coverage_prefilter dict 的唯一 writer
+    （serial 与 orchestrator/worker 聚合同源；键集即契约形状，miss 态为
+    str 由调用方按 MISS_STATES 判定后直传）。"""
+    return {"source": source, "uncovered": uncovered,
+            "covered_executed": covered_executed}
 
 
 def resolve_coverage_for_prefilter(

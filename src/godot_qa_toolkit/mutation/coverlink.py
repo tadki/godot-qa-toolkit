@@ -39,8 +39,11 @@ COVERAGE_CACHE_DIRNAME = "gqt-coverage"
 # 兼容回退默认解析）；显式 None = selection 已运行但无 mapping（如显式
 # --tests）→ 显式跳过 map 派生层，绝不重猜默认 map。S2.2：公开常量供
 # planner/executor 形参缺省复用（单一哨兵语义，避免第三套漂移）。
+# S2.3：runtime_mapping 却无 path = 元数据不一致 → 独立哨兵，消费侧以
+# 具名不一致原因披露（绝不冒充 explicit --tests 文案）。
 _UNRESOLVED_MAP = object()
 MAP_PATH_UNRESOLVED = _UNRESOLVED_MAP
+MAP_PATH_METADATA_INCONSISTENT = object()
 
 
 def coverage_identity(identity: dict | None) -> dict | None:
@@ -517,6 +520,22 @@ def _prefilter_live_projection(
     return None, None, "map lacks instrumentable surface"
 
 
+def selection_map_path(selection_meta: dict) -> "str | None | object":
+    """selection_meta → prefilter map_path（S2.2/S2.3 单一出处）。
+
+    - source=runtime_mapping 但 mapping.path 缺失 →
+      MAP_PATH_METADATA_INCONSISTENT（元数据不一致哨兵：消费侧以具名不一致
+      原因披露，绝不误报 explicit --tests、绝不默认重猜）；
+    - 其余按既有语义返回 path 或 None（显式 tests/全脸 = selection 无映射，
+      explicit-None 披露归其专属）。"""
+    sel_mapping = selection_meta.get("mapping")
+    map_path = (sel_mapping or {}).get("path")
+    if sel_mapping is not None and not map_path \
+            and selection_meta.get("source") == "runtime_mapping":
+        return MAP_PATH_METADATA_INCONSISTENT
+    return map_path
+
+
 def resolve_coverage_for_prefilter(
         project_root: str, file_path: str, tests_glob: str | None,
         scripts: "list[str] | set[str] | None" = None,
@@ -558,6 +577,11 @@ def resolve_coverage_for_prefilter(
         resolved = _truth.map_path(root)
         if not resolved:
             reasons.append("no attribution map for projection")
+    elif map_path is MAP_PATH_METADATA_INCONSISTENT:
+        resolved = None
+        reasons.append("selection metadata inconsistent: source="
+                       "runtime_mapping without resolved map path — "
+                       "map-derived coverage prefilter skipped")
     elif map_path:
         resolved = map_path
     else:

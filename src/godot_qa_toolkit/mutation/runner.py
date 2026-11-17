@@ -74,6 +74,7 @@ from .reporting import (
     classify_worker_leg, line_text_of,)
 from .godot_gate import GlobalGodotGate
 from .diffengine import apply_timeout_streaks, make_entry, streak_for
+from .coverlink import selection_map_path
 from .planner import dry_run_estimate, plan_execution
 from .progress import make_reporter
 from .resume2 import ResumeStoreV2
@@ -429,7 +430,7 @@ def _run_mutation_core(file_path: str,
             select_ids, select_lines, reuse_coverage, attention,
             mutant_slice, original_src, identity=identity, clock=clock,
             tests_scripts=selection_meta.get("tests") or None,
-            map_path=(selection_meta.get("mapping") or {}).get("path"))
+            map_path=selection_map_path(selection_meta))
 
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。

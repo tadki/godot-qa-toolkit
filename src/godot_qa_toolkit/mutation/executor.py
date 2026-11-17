@@ -24,7 +24,8 @@ from . import cost_priors, shadow
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
-from .coverlink import MAP_PATH_UNRESOLVED, resolve_coverage_for_prefilter
+from .coverlink import (MAP_PATH_UNRESOLVED, resolve_coverage_for_prefilter,
+                        selection_map_path)
 from .identity import certificate_valid, disclose_superseded, identity_pack
 from .baseline import (_BASELINE_FAILURE_REASONS, _baseline_key,
                        _run_baseline_snapshot)
@@ -933,7 +934,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             identity=identity,
             tests_scripts=selection_meta.get("tests") or None,
             disclosures=prefilter_disclosures,
-            map_path=(selection_meta.get("mapping") or {}).get("path"))
+            map_path=selection_map_path(selection_meta))
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     baseline = _ensure_shared_baseline(project_root, glob, jobs, timeout_s,
                                        baselines)
@@ -1117,6 +1118,14 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
     from . import truth_select
 
     mapping_path = (selection_meta.get("mapping") or {}).get("path")
+    if selection_meta.get("source") == "runtime_mapping" and not mapping_path:
+        # S2.3 HIGH：runtime_mapping 必携带 resolved map path——缺失 =
+        # selection 元数据不一致，具名 fail-loud；绝不回退默认路径重猜
+        # （与 resolver/prefilter 哨兵语义同源）。
+        raise truth_select.MutationSelectionError(
+            "selection_metadata_inconsistent",
+            "line_group_chunks: source=runtime_mapping without a resolved "
+            "map path — refusing to re-guess the default attribution map")
     rel = _res_path_of(f, project_root).removeprefix("res://")
     try:
         doc = truth_select.load_map(

@@ -376,6 +376,8 @@ def test_projection_unions_selected_tests_and_persists(tmp_path):
     project = tmp_path / "proj"
     (project / "tests").mkdir(parents=True)
     (project / "tests" / "test_a.gd").write_text("extends GutTest\n")
+    # S2.1 M2：裸名归属内检目录一致——face 必须登记全部事实脚本
+    (project / "tests" / "test_b.gd").write_text("extends GutTest\n")
     target = project / "src" / "a.gd"
     target.parent.mkdir(parents=True)
     target.write_text(TARGET_SRC)

@@ -113,9 +113,11 @@ def test_worker_route_prefilter_hits_cold_coverage(tmp_path, monkeypatch,
         instrumentable={"calc.gd": [2, 5]}, identity=_cold_ident(proj))
     capsys.readouterr()  # 清掉 seed 期输出
 
+    # S2.1：行为钉走 selection 真实解析路径（显式 --tests 不再消费 map 派生层）
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
     result = run_mutation_files([str(target)], str(proj), budget=10,
-                                timeout_s=60, tests_glob="res://tests/",
-                                jobs=2, reuse_coverage=True)
+                                timeout_s=60, jobs=2,
+                                select_mode="line", reuse_coverage=True)
     r = result["results"][0]
     s = r["summary"]
     err = capsys.readouterr().err
@@ -124,9 +126,10 @@ def test_worker_route_prefilter_hits_cold_coverage(tmp_path, monkeypatch,
         f"(D-2 drift regression): {err[-400:]}")
     # SRC 位点：line2 ×3（covered → 执行）、line5 ×3（instrumentable ∧
     # uncovered → 显式跳过）。
-    assert s.get("coverage_prefilter") == {
-        "source": "projection_store", "uncovered": 3,
-        "covered_executed": 3}
+    pf = s.get("coverage_prefilter")
+    assert isinstance(pf, dict)
+    assert pf["uncovered"] == 3 and pf["covered_executed"] == 3
+    assert pf["source"] in ("projection_live", "projection_store")
     uncovered = [f for f in r["failures"] if f.get("verdict") == "uncovered"]
     assert len(uncovered) == 3 and all(f["line"] == 5 for f in uncovered)
     assert s["mutants"] == 3 and s["killed"] == 3
@@ -146,11 +149,15 @@ def test_worker_route_prefilter_still_rejects_real_identity_drift(
         instrumentable={"calc.gd": [2, 5]}, identity=stale)
     capsys.readouterr()
 
+    # S2.1：显式 --tests 下盘上漂移条目不参与消费——不过滤全量跑，
+    # 漂移原因聚合披露可见（读拒绝单点钉在解析链，见 line_mutation_cli 套件）
     result = run_mutation_files([str(target)], str(proj), budget=10,
                                 timeout_s=60, tests_glob="res://tests/",
                                 jobs=2, reuse_coverage=True)
     s = result["results"][0]["summary"]
     err = capsys.readouterr().err
     assert "identity drift" in err  # 真漂移必须仍被抓住并披露
-    assert "coverage_prefilter" not in s  # 不过滤（宁多跑不假阴性）
+    assert "selection resolved no attribution map" in err
+    pf = s.get("coverage_prefilter")
+    assert pf is None or isinstance(pf, str)  # miss 态，不过滤
     assert s["mutants"] == 6  # 全部 6 位点回退执行

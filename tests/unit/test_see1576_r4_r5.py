@@ -189,17 +189,6 @@ def test_r5_run_mutation_relative_dry_run_anchored(tmp_path, monkeypatch):
     assert result["summary"]["file"].endswith("calc.gd")
 
 
-class _GutReached(RuntimeError):
-    pass
-
-
-def _gut_reached_patch(monkeypatch):
-    def _boom(*a, **k):
-        raise _GutReached("gut-reached")
-
-    monkeypatch.setattr(coverage_runner_mod, "_run_gut_for_coverage", _boom)
-
-
 def test_r5_coverage_relative_target_anchored(tmp_path, monkeypatch):
     """§SPEC-610：coverage 相对路径锚定到 project_root（映射投影语义）。"""
     import attribution_fixtures as fx

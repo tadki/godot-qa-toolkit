@@ -286,7 +286,8 @@ def test_increment_syncs_coverage_store_or_invalidates(tmp_path, monkeypatch):
     # 读回仍是旧值 {5}：消费侧必须以「映射当前行事实」为准再投影覆盖。
     lines, err = coverlink.load_projected_coverage(
         str(root), str(target), "res://.gqt-attr-select/abc/",
-        current_recipe_pristine="pristine-1", tests_face={})
+        current_recipe_pristine="pristine-1", tests_face={},
+        current_doc=baseline)
     assert err is None and lines == {5}
     # 增量后映射再投影：行集更新为 {5,6}，条目被覆盖写回
     covered, err = coverlink.project_coverage_from_map(
@@ -296,7 +297,8 @@ def test_increment_syncs_coverage_store_or_invalidates(tmp_path, monkeypatch):
     assert err is None and covered == {5, 6}
     lines, err = coverlink.load_projected_coverage(
         str(root), str(target), "res://.gqt-attr-select/abc/",
-        current_recipe_pristine="pristine-1", tests_face={})
+        current_recipe_pristine="pristine-1", tests_face={},
+        current_doc=doc)
     assert err is None and lines == {5, 6}
     # 绑定漂移场景：测试面变更后（增量会同步 tests_face），旧绑定失配 →
     # 显式失效

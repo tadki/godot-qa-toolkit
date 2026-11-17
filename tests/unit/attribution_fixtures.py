@@ -12,8 +12,9 @@ import json
 from pathlib import Path
 
 
-def install_recipe(project_root: Path) -> None:
+def install_recipe(project_root) -> None:
     """让 canonical recipe 可构建（选面新鲜判据需要）。"""
+    project_root = Path(project_root)
     (project_root / "tests").mkdir(parents=True, exist_ok=True)
     feats = project_root / "acceptance" / "features"
     feats.mkdir(parents=True, exist_ok=True)
@@ -99,3 +100,97 @@ def write_map(project_root: Path,
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     return str(out)
+
+
+def line_facts_map(project_root: Path,
+                   facts: dict[str, dict[str, list[int]]], *,
+                   instrumentable: dict[str, list[int]] | None = None,
+                   probes: int = 640,
+                   path: str | Path | None = None) -> str:
+    """SEE-1594 S2：可配置行事实映射（完整 res:// 身份 → {rel: 行集}）。
+
+    instrumentable：rel → 可插桩行集（缺省 [2, 3]）；probes：执行证据。
+    写合法 test-attribution/6 到指定路径（缺省约定默认位置），返回路径。"""
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    project_root = Path(project_root)
+    install_recipe(project_root)
+    recipe, error = build_recipe(project_root)
+    assert error is None, error
+    raw = recipe_hash({k: v for k, v in recipe.items()
+                       if k != "recipe_hash"})
+    rels = sorted({r for by_rel in facts.values() for r in by_rel}
+                  | set(instrumentable or {}))
+    shas = {rel: hashlib.sha256((project_root / rel).read_bytes())
+            .hexdigest() for rel in rels if (project_root / rel).is_file()}
+    arm = {"test_to_files": {}, "script_to_files": {}, "tests": 0,
+           "scripts": 0, "files": len(rels), "pairs": 0, "function_pairs": 0,
+           "test_to_functions": {}, "script_to_functions": {},
+           "file_to_tests": {rel: [] for rel in rels},
+           "file_to_scripts": {rel: [] for rel in rels},
+           "line_pairs": 0, "script_line_pairs": 0, "test_to_lines": {},
+           "script_to_lines": {}, "line_to_tests": {}}
+    for ident, by_rel in facts.items():
+        for rel, lines in by_rel.items():
+            arm["test_to_files"].setdefault(ident, []).append(rel)
+            arm["file_to_tests"].setdefault(rel, [])
+            if ident not in arm["file_to_tests"][rel]:
+                arm["file_to_tests"][rel].append(ident)
+            arm["test_to_lines"].setdefault(ident, {})[rel] = list(lines)
+            arm["line_pairs"] += len(lines)
+            for line in lines:
+                bucket = arm["line_to_tests"].setdefault(rel, {}) \
+                    .setdefault(str(line), [])
+                if ident not in bucket:
+                    bucket.append(ident)
+    arm["tests"] = len(arm["test_to_files"])
+    arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
+    doc = {
+        "schema_version": "test-attribution/6",
+        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "project_root": str(project_root),
+        "identity": "res://script::test_name",
+        "causal": {"enabled": False},
+        "file_sha256": shas,
+        "target_files": sorted(shas),
+        "tests_face": _tests_face_of(project_root),
+        "instrumentable_lines": instrumentable or {rel: [2, 3]
+                                                   for rel in rels},
+        "arms": {"gut_full": arm},
+        "arms_state": {"gut_full": {"state": "valid", "invalid_reason": None,
+                                    "bundles": 1, "pairs": arm["pairs"],
+                                    "probes_fired": probes, "vacuous": False}},
+        "notes": [],
+    }
+    out = Path(path) if path is not None else (
+        Path(project_root) / ".qa-cache" / "attribution-map.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    return str(out)
+
+
+def _tests_face_of(project_root: Path) -> dict[str, str]:
+    tests_root = Path(project_root) / "tests"
+    if not tests_root.is_dir():
+        return {}
+    return {str(p.relative_to(project_root)): hashlib.sha256(
+        p.read_bytes()).hexdigest()
+        for p in sorted(tests_root.rglob("*.gd"))}
+
+
+def seed_projection(project_root: Path, target: Path,
+                    facts: dict[str, dict[str, list[int]]], *,
+                    scripts: list[str], instrumentable: dict[str, list[int]],
+                    tests_glob: str = "res://tests/",
+                    identity=None) -> str:
+    """SEE-1594 S2：经生产写侧落 /2 派生缓存条目（绑定映射内容与执行
+    证据；A04 后 prefilter store 层的唯一合法种子方式）。返回映射路径。"""
+    from godot_qa_toolkit.mutation import coverlink, truth_select
+    map_file = line_facts_map(project_root, facts,
+                              instrumentable=instrumentable)
+    doc = json.loads(Path(map_file).read_text(encoding="utf-8"))
+    pristine = truth_select._fresh_recipe_hash(str(project_root))
+    covered, why = coverlink.project_coverage_from_map(
+        str(project_root), doc, str(target), scripts, tests_glob,
+        identity=identity, current_recipe_pristine=pristine)
+    assert covered is not None, why
+    return map_file

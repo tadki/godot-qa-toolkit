@@ -51,14 +51,16 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                     mutate_all, retry_ids, select_ids, select_lines,
                     reuse_coverage, attention, mutant_slice, original_src,
                     identity: dict | None = None, clock=None,
-                    tests_scripts: "list[str] | None" = None):
+                    tests_scripts: "list[str] | None" = None,
+                    map_path: "str | None" = None):
     """执行面规划（P1 差分 / P3 寻址 / P2 覆盖过滤三模式互斥落定）。
 
     返回 (prior_entries, reused, untouched, disclosures, executed_list,
     uncovered_records)。worker 注入路径（retry_ids）不自建 plan、不写
     manifest（父层单点写）；卡尺寻址（select_*）强制新执行绕过差分。
-    tests_scripts = 本次 tests_glob 承载的测试脚本集（SEE-1587 投影回退
-    需要；None = 不可得则投影层下沉不过滤）。
+    tests_scripts = 本次 tests_glob 承载的测试脚本集（投影层需要）；
+    map_path = selection 已解析映射路径（A06；None = 不可得则投影层下沉
+    不过滤）。
     """
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
         project_root, str(path), tests_glob, binary_kind=binary_kind,
@@ -75,7 +77,8 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                         scope_hashes, budget, tests_glob, binary_kind,
                         mutate_all, reuse_coverage, mutant_slice,
                         original_src, disclosures, identity=identity,
-                        clock=clock, tests_scripts=tests_scripts)
+                        clock=clock, tests_scripts=tests_scripts,
+                        map_path=map_path)
 
 
 def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
@@ -130,7 +133,8 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
                  scope_hashes, budget, tests_glob, binary_kind, mutate_all,
                  reuse_coverage, mutant_slice, original_src, disclosures,
                  identity: dict | None = None, clock=None,
-                 tests_scripts: "list[str] | None" = None):
+                 tests_scripts: "list[str] | None" = None,
+                 map_path: "str | None" = None):
     """串行自规划：D4 差分矩阵（killed 证书门）→ P2 覆盖前置过滤 →
     D6 budget-on-retry。"""
     store2.disclose_v1_superseded()
@@ -147,7 +151,7 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
         uncovered_mutants, retry_pool = _apply_coverage_prefilter(
             plan, path, project_root, tests_glob, binary_kind,
             reuse_coverage, disclosures, identity=identity,
-            tests_scripts=tests_scripts)
+            tests_scripts=tests_scripts, map_path=map_path)
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     reused = plan.reused
     if disclosures.get("coverage_prefilter") not in ("store_miss", "instrumentable_face_missing") \
@@ -182,13 +186,16 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
 def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
                               binary_kind, reuse_coverage, disclosures,
                               identity: dict | None = None,
-                              tests_scripts: "list[str] | None" = None):
-    """§SPEC-1420-12（L3/D7 P2）+ SEE-1550 L1 + SEE-1587：coverage 前置
-    过滤（budget 之前）——预算只花在 covered 位点上；uncovered 显式标记。
+                              tests_scripts: "list[str] | None" = None,
+                              map_path: "str | None" = None):
+    """§SPEC-1420-12（L3/D7 P2）+ SEE-1550 L1 + SEE-1587 + SEE-1594 S2：
+    coverage 前置过滤（budget 之前）——预算只花在 covered 位点上；
+    uncovered 显式标记。
 
-    数据源统一经 coverlink.resolve_coverage_for_prefilter：手动 /1 store →
-    同轮投影 /2 store → 行级主真值现场投影（scripts = 本次 tests_glob 承载
-    的测试脚本集）——三层全失才回退不过滤，绝不假过滤。source 进
+    数据源统一经 coverlink.resolve_coverage_for_prefilter：/2 投影 store
+    （绑定映射内容与执行证据）→ 行级主真值现场投影（scripts = 本次
+    tests_glob 承载的测试脚本集；map_path = selection 已解析映射路径，
+    A06）——两层全失才回退不过滤，绝不假过滤。source 进
     disclosures["coverage_prefilter"] 披露。
     D3 锚：不可插桩行（成员初始化器/参数默认值/内部类体等探针面外）上的
     位点**留在执行面**；可插桩集读不到 = 不过滤（宁多跑不假阴性）。
@@ -197,7 +204,7 @@ def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
         return [], plan.executed
     cov_lines, inst_lines, cov_reason, source = resolve_coverage_for_prefilter(
         project_root, str(path), tests_glob, scripts=tests_scripts,
-        binary_kind=binary_kind, identity=identity)
+        binary_kind=binary_kind, identity=identity, map_path=map_path)
     if cov_lines is None or inst_lines is None:
         print(f"mutation: coverage store miss ({cov_reason}) — "
               f"running unfiltered", file=sys.stderr)

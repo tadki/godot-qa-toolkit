@@ -4,8 +4,8 @@
 一次测量运行同时产出 line-primary Attribution Map（test-attribution/6）与
 mutation 可消费的 Coverage Store（see1420-coverage/2 同轮投影）；随后默认
 mutation（--select line）同时吃到行级选面与 coverage 前置过滤——
-`summary.coverage_prefilter.source` 出现实际来源（coverage_store /
-projection_store / projection_live），非常态 store miss。
+`summary.coverage_prefilter.source` 出现实际来源（projection_store /
+projection_live；SEE-1594 A04 已退役 coverage_store），非常态 store miss。
 
 用法（KOL 仅只读源；全部在 /tmp 真副本执行）：
     python tests/integration/run_see1587_e2e.py \
@@ -28,7 +28,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 DEFAULT_GODOT = "/home/jerry/gqt-probe-bin/godot"
-PROJECTION_SOURCES = {"coverage_store", "projection_store", "projection_live"}
+PROJECTION_SOURCES = {"projection_store", "projection_live"}
 
 
 def _env(godot_bin: str | None) -> dict:

@@ -45,6 +45,11 @@ def _write_project(tmp_path):
         "func test_killed_by_probe():\n\tpass\n")
     target = proj / "calc.gd"
     target.write_text(SRC)
+    # SEE-1594 A05：store 层种子 = /2 绑定当前映射——recipe 必须可构建
+    import attribution_fixtures as _fx
+    from godot_qa_toolkit.mutation import truth_select as _truth
+    _fx.install_recipe(proj)
+    _truth._fresh_recipe_hash.cache_clear()
     return proj, target
 
 
@@ -96,14 +101,17 @@ def _install_worker_fakes(monkeypatch):
 
 def test_worker_route_prefilter_hits_cold_coverage(tmp_path, monkeypatch,
                                                    capsys):
-    """worker 目标 + cold coverage 条目（glob 对齐）→ prefilter 生效：
-    line2（covered）执行、line5（instrumentable ∧ uncovered）显式跳过。"""
+    """worker 目标 + cold /2 投影条目（绑定映射，glob 对齐）→ prefilter
+    生效：line2（covered）执行、line5（instrumentable ∧ uncovered）显式
+    跳过。"""
     _install_worker_fakes(monkeypatch)
     proj, target = _write_project(tmp_path)
-    assert save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                         instrumentable_lines={2, 5},
-                         identity=_cold_ident(proj)) is True
-    capsys.readouterr()  # 清掉 save 期输出
+    import attribution_fixtures as _fx
+    _fx.seed_projection(
+        proj, target, {"test_forms.gd::t1": {"calc.gd": [2]}},
+        scripts=["res://tests/test_forms.gd"],
+        instrumentable={"calc.gd": [2, 5]}, identity=_cold_ident(proj))
+    capsys.readouterr()  # 清掉 seed 期输出
 
     result = run_mutation_files([str(target)], str(proj), budget=10,
                                 timeout_s=60, tests_glob="res://tests/",
@@ -117,7 +125,7 @@ def test_worker_route_prefilter_hits_cold_coverage(tmp_path, monkeypatch,
     # SRC 位点：line2 ×3（covered → 执行）、line5 ×3（instrumentable ∧
     # uncovered → 显式跳过）。
     assert s.get("coverage_prefilter") == {
-        "source": "coverage_store", "uncovered": 3,
+        "source": "projection_store", "uncovered": 3,
         "covered_executed": 3}
     uncovered = [f for f in r["failures"] if f.get("verdict") == "uncovered"]
     assert len(uncovered) == 3 and all(f["line"] == 5 for f in uncovered)
@@ -131,9 +139,11 @@ def test_worker_route_prefilter_still_rejects_real_identity_drift(
     _install_worker_fakes(monkeypatch)
     proj, target = _write_project(tmp_path)
     stale = {**_cold_ident(proj), "godot_version": "bogus-drift"}
-    assert save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                         instrumentable_lines={2, 5},
-                         identity=stale) is True
+    import attribution_fixtures as _fx
+    _fx.seed_projection(
+        proj, target, {"test_forms.gd::t1": {"calc.gd": [2]}},
+        scripts=["res://tests/test_forms.gd"],
+        instrumentable={"calc.gd": [2, 5]}, identity=stale)
     capsys.readouterr()
 
     result = run_mutation_files([str(target)], str(proj), budget=10,

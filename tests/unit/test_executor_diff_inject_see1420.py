@@ -220,11 +220,17 @@ def test_parallel_reuse_coverage_keeps_non_instrumentable_sites(
                         lambda *a, **k: {"rc": 0, "tail": "pass",
                                          "elapsed": 5.0})
 
-    from godot_qa_toolkit.mutation.coverlink import save_coverage
+    from godot_qa_toolkit.mutation import truth_select as _truth
+    import attribution_fixtures as _fx
     # 位点行 2/3/4；2、3 covered 且可插桩；行 4 不可插桩（探针面外）
-    assert save_coverage({2, 3}, 4, proj, target,
-                         "res://tests/unit/save/",
-                         instrumentable_lines={2, 3})
+    # SEE-1594 A04/A05：种子 = 绑定映射的 /2 派生缓存
+    _fx.install_recipe(proj)
+    _truth._fresh_recipe_hash.cache_clear()
+    _fx.seed_projection(
+        proj, target, {"test_killed_by_probe.gd::t1": {"calc.gd": [2, 3]}},
+        scripts=["res://tests/unit/save/test_killed_by_probe.gd"],
+        instrumentable={"calc.gd": [2, 3]},
+        tests_glob="res://tests/unit/save/")
 
     result = run_mutation_files([target], proj, budget=10, timeout_s=60,
                                 tests_glob="res://tests/unit/save/",

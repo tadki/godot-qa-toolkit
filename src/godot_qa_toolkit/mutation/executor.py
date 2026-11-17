@@ -932,7 +932,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             plan, f, project_root, glob, binary_kind, reuse_coverage,
             identity=identity,
             tests_scripts=selection_meta.get("tests") or None,
-            disclosures=prefilter_disclosures)
+            disclosures=prefilter_disclosures,
+            map_path=(selection_meta.get("mapping") or {}).get("path"))
     executed_list, untouched = budget_on_retry(retry_pool, budget)
     baseline = _ensure_shared_baseline(project_root, glob, jobs, timeout_s,
                                        baselines)
@@ -1208,13 +1209,15 @@ def _warn_serial_fallback(file: str, reason: str | None) -> None:
 
 def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
                               reuse_coverage, identity=None,
-                              tests_scripts=None, disclosures=None):
-    """§SPEC-1420-12（P2）+ SEE-1550 L1 + SEE-1587：coverage 前置过滤先于
-    budget（预算只花在 covered 位点）；uncovered 全部显式标记（父层合并时
-    注入报告）。
+                              tests_scripts=None, disclosures=None,
+                              map_path=None):
+    """§SPEC-1420-12（P2）+ SEE-1550 L1 + SEE-1587 + SEE-1594 S2：coverage
+    前置过滤先于 budget（预算只花在 covered 位点）；uncovered 全部显式标记
+    （父层合并时注入报告）。
 
-    数据源统一经 coverlink.resolve_coverage_for_prefilter（手动 /1 store →
-    同轮投影 /2 store → 行级主真值现场投影），三层全失才回退不过滤。
+    数据源统一经 coverlink.resolve_coverage_for_prefilter（/2 投影 store →
+    行级主真值现场投影；map_path = selection 已解析映射路径，A06），两层
+    全失才回退不过滤。
     D3 修复：过滤锚 = covered ∧ instrumentable——不可插桩行上的位点留在
     执行面（与 planner._apply_coverage_prefilter 同语义）；可插桩集不可得
     = 不过滤（宁多跑不假阴性）。"""
@@ -1222,7 +1225,7 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
         return [], plan.executed
     cov, inst, cov_reason, source = resolve_coverage_for_prefilter(
         project_root, f, glob, scripts=tests_scripts,
-        binary_kind=binary_kind, identity=identity)
+        binary_kind=binary_kind, identity=identity, map_path=map_path)
     if cov is None or inst is None:
         print(f"mutation: coverage store miss ({cov_reason}) for {f} "
               f"— running unfiltered", file=sys.stderr)
@@ -1506,7 +1509,7 @@ def _inject_one(r: dict, ctx: dict) -> None:
             pf["source"] = pf_source
         s["coverage_prefilter"] = pf
     elif isinstance(pf_source, str) and pf_source in (
-            "coverage_store", "projection_store", "projection_live"):
+            "projection_store", "projection_live"):
         # SEE-1587：prefilter 成功生效（零 uncovered）也必须披露来源——
         # 「默认路径不再常态 store miss」的证据面；miss 态不在此新增键。
         s["coverage_prefilter"] = {

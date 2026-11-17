@@ -8,8 +8,9 @@
   位点照常执行并披露 no_mapped_tests；
 - 默认整文件：按 `frozenset(line→tests)` 签名分组（同签名共享一个 glob，
   禁止一行一组）；无映射测试位点按 uncovered 口径标记不静默丢弃；
-- coverage prefilter 消费同轮投影（/1 → /2 → live 投影链，身份/绑定漂移
-  逐层披露不假过滤）；显式 `--tests` 披露未使用行级选面。
+- coverage prefilter 消费映射派生链（/2 投影缓存绑定映射内容与执行证据 →
+  live 现场投影；身份/绑定漂移逐层披露不假过滤；SEE-1594 A04：/1 手动
+  store 已退役）；显式 `--tests` 披露未使用行级选面。
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from godot_qa_toolkit import cli
-from godot_qa_toolkit.mutation import planner, runner, truth_select
+from godot_qa_toolkit.mutation import coverlink, planner, runner, truth_select
 from godot_qa_toolkit.mutation.coverlink import (
     resolve_coverage_for_prefilter,
     save_coverage,
@@ -212,7 +213,8 @@ def _write_map(proj: Path, doc: dict) -> str:
 
 
 def _line_map(proj: Path, target: Path) -> str:
-    """行 4/7 → test_a；行 10 → test_b；行 13 无映射。"""
+    """行 4/7 → test_a；行 10 → test_b；行 13 无映射（身份 = 运行时注册表
+    裸名形态：GUT CollectedScript.get_filename() = path.get_file()）。"""
     doc = _map_doc(proj, target, {
         4: ["test_a.gd::t1"],
         7: ["test_a.gd::t1"],
@@ -465,15 +467,22 @@ def test_prefilter_live_projection_then_cache(tmp_path):
 
 
 def test_prefilter_store_takes_priority(tmp_path):
+    """SEE-1594 A04/A05：store 层 = /2 派生缓存（绑定当前映射）；命中优先
+    于 live 投影——种子行事实不同于映射事实可证先后。"""
     proj, target = _project(tmp_path)
-    _line_map(proj, target)
+    map_path = _line_map(proj, target)
+    doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
+    rel = "calc.gd"
+    binding = coverlink._projection_binding(doc, rel)
+    assert binding is not None
     glob = "res://tests/"
-    save_coverage({2}, 6, str(proj), str(target), glob,
-                  instrumentable_lines={1, 2, 3, 4, 5, 6})
+    assert save_coverage({2}, 6, str(proj), str(target), glob,
+                         instrumentable_lines={1, 2, 3, 4, 5, 6},
+                         projection=binding) is True
     cov, inst, reason, source = resolve_coverage_for_prefilter(
         str(proj), str(target), glob,
         scripts=["res://tests/unit/test_a.gd"])
-    assert source == "coverage_store" and cov == {2}
+    assert source == "projection_store" and cov == {2}
 
 
 def test_prefilter_stale_map_falls_back_unfiltered_with_reasons(tmp_path):
@@ -490,12 +499,16 @@ def test_prefilter_stale_map_falls_back_unfiltered_with_reasons(tmp_path):
 
 def test_prefilter_identity_drift_reason_kept_in_fallback(tmp_path):
     proj, target = _project(tmp_path)
+    map_path = _line_map(proj, target)
+    doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
+    binding = coverlink._projection_binding(doc, "calc.gd")
     glob = "res://tests/"
     from godot_qa_toolkit.mutation.identity import identity_pack
     ident = identity_pack(str(proj), "linux")
-    save_coverage({2}, 6, str(proj), str(target), glob,
-                  instrumentable_lines={1, 2, 3},
-                  identity=dict(ident, gut_addon_hash="drifted"))
+    assert save_coverage({2}, 6, str(proj), str(target), glob,
+                         instrumentable_lines={1, 2, 3},
+                         identity=dict(ident, gut_addon_hash="drifted"),
+                         projection=binding) is True
     cov, inst, reason, state = resolve_coverage_for_prefilter(
         str(proj), str(target), glob, scripts=None, identity=ident)
     assert cov is None
@@ -522,9 +535,10 @@ def test_mutation_default_line_mode_uses_projection_prefilter(tmp_path,
     assert r["summary"].get("test_selection", {}).get("source") \
         == "runtime_mapping"
 
-def test_projection_matches_res_identity_to_basename_selection():
-    """行事实身份是全路径（res://）时脚本集合按 basename 匹配——否则并集
-    静默为空 = 全量假 uncovered（真实运行时身份形态回归守卫）。"""
+def test_projection_requires_full_res_identity():
+    """SEE-1594 A12：行事实按完整 res:// 身份归属——全路径身份与全路径
+    selection 精确匹配（选面侧 `_line_script_sets` 的名字解析含同名歧义
+    披露，属另一机制，不受投影侧影响）。"""
     doc = {
         "schema_version": "test-attribution/6",
         "recipe_hash_pristine": "pristine-1",
@@ -543,14 +557,6 @@ def test_projection_matches_res_identity_to_basename_selection():
                 "res://tests/unit/test_b.gd": {"calc.gd": [10]}},
         }},
     }
-    # 用内部归一逻辑验证：跨层身份（全路径 vs 裸名）都能命中
-    from pathlib import Path as _P
-    names_ident = {"x"}
-    assert _P("res://tests/unit/test_a.gd".split("::", 1)[0]).name \
-        == _P("test_a.gd").name
-    # 端到端：_line_script_sets 同时接受两种形态（上方单测），投影侧
-    # basename 归一由同一 Path(...).name 口径保证——直接断言脚本集合包含
-    # 全路径身份的 basename
     sets = truth_select._line_script_sets(doc, "calc.gd", {4, 10})
     assert sets[4] == {"test_a.gd"}
     assert sets[10] == {"test_b.gd"}

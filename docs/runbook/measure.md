@@ -110,12 +110,14 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   `line_to_tests`, and the instrumentable line surface. File/function views are
   derived from those lines plus the source registry, not independently measured.
 - Mutation projects the scripts in its actual `tests_glob` into a
-  `see1420-coverage/2` entry from the same `/6` facts. A persisted projection or
-  a fresh map can serve the prefilter without another instrumentation pass;
+  `see1420-coverage/2` entry from the same `/6` facts. A persisted projection —
+  bound to the current map's content and execution evidence (SEE-1594 A05) —
+  or a fresh map can serve the prefilter without another instrumentation pass;
   binding drift invalidates the projection and is disclosed.
-- `measure coverage` remains the explicit manual `see1420-coverage/1`
-  compatibility and diagnostic lane, and a CRAP coverage input. It is not the
-  default attribution-production path and is not being removed in this change.
+- The manual `see1420-coverage/1` store is retired (SEE-1594 A04): mutation
+  prefilter no longer reads it, and no writer produces it. Leftover `/1`
+  files on disk are rejected by schema. Coverage answers come from the
+  line-level map (single source of truth).
 - Schema upgrades are fail-loud. Auto-managed old or unusable maps are rebuilt;
   an explicit old-schema `--attribution-map` is rejected without being rewritten.
 

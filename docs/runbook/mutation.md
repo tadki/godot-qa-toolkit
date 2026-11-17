@@ -110,9 +110,11 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 - Single-file runs always use the flat `{tool, ok, summary, failures}`
   envelope, including `--jobs 1`; `{tool, ok, jobs, results[]}` exists only for
   multi-file runs.
-  `coverage_prefilter.source` distinguishes `coverage_store` (manual
-  `see1420-coverage/1`), `projection_store` (persisted `see1420-coverage/2`),
-  and `projection_live` (fresh line facts projected on demand).
+  `coverage_prefilter.source` distinguishes `projection_store` (persisted
+  `see1420-coverage/2` derived cache bound to the current map's content and
+  execution evidence) and `projection_live` (fresh line facts projected on
+  demand). SEE-1594 S2 retired the manual `see1420-coverage/1` store layer;
+  leftover `/1` files on disk are rejected by schema and never consulted.
 - `failures` lists only non-killed records (each with an `id`), verdicts in
   survived / timeout / run_error / suspect / invalid_mutant / timeout_pinned /
   uncovered. Verdict and kind are open enums.

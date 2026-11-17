@@ -915,26 +915,52 @@ def run_coverage(
             _write_failure_evidence(evidence_out, str(path), src, tests_glob,
                                     msg)
         return _err_envelope(str(path), msg, min_percent=min_percent)
-    arms_state = doc.get("arms_state") or {}
-    if not _truth.arms_valid(arms_state):
+    try:
+        arms_state = doc.get("arms_state") or {}
+        arms_ok = _truth.arms_valid(arms_state)
+        probes_raw = (arms_state.get("gut_full") or {}).get("probes_fired")
+    except (AttributeError, TypeError) as e:
+        msg = (f"attribution map execution evidence malformed "
+               f"({type(e).__name__}: {e}); refusing to fabricate")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
+    if not arms_ok:
         msg = ("attribution map execution evidence invalid (arms_state); "
                "line facts untrustworthy")
         if evidence_out:
             _write_failure_evidence(evidence_out, str(path), src, tests_glob,
                                     msg)
         return _err_envelope(str(path), msg, min_percent=min_percent)
-    probes = _map_probes_fired(doc)
-    if probes is None:
+    if probes_raw is None:
         msg = ("attribution map lacks execution evidence (probes_fired "
                "missing); refusing to fabricate a trusted score")
         if evidence_out:
             _write_failure_evidence(evidence_out, str(path), src, tests_glob,
                                     msg)
         return _err_envelope(str(path), msg, min_percent=min_percent)
-    probes = int(probes)
+    try:
+        probes = int(probes_raw)
+    except (TypeError, ValueError) as e:
+        msg = (f"attribution map probes_fired malformed "
+               f"({probes_raw!r}); refusing to fabricate")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
 
-    inst = set(proj["instrumentable_lines"])
-    covered = (set(proj["covered_lines"]) & inst) if inst else set(proj["covered_lines"])
+    try:
+        inst = {int(l) for l in
+                (proj["instrumentable_lines"] or [])}
+        covered = {int(l) for l in
+                   (proj["covered_lines"] or [])}
+    except (TypeError, ValueError) as e:
+        msg = (f"projection covered/instrumentable lines malformed: {e}")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
     total = len(inst)
 
     # 执行证据哨兵：映射构建期 probes_fired==0 且存在有效行事实 → 行事实

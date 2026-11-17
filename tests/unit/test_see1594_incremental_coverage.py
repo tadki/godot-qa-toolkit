@@ -178,6 +178,8 @@ class TestBoundaryFaceFilter:
         doc = json.loads(map_path.read_text(encoding="utf-8"))
         doc["arms"]["gut_full"]["test_to_lines"].setdefault(
             IDENT_COMPAT, {}).setdefault("utils/t.gd", []).append(3)
+        doc["arms"]["gut_full"]["test_to_files"].setdefault(
+            IDENT_COMPAT, []).append("utils/t.gd")
         map_path.write_text(json.dumps(doc, ensure_ascii=False),
                             encoding="utf-8")
         return proj, target
@@ -201,21 +203,17 @@ class TestBoundaryFaceFilter:
         assert out["scripts"] == ["res://tests/unit/test_a.gd"]
 
     def test_startswith_regression_would_bleed(self, tmp_path, monkeypatch):
-        """判别力反例：裸 startswith 会把相邻目录的行事实混入 unit 面；
-        边界匹配必须剔除——回归即红。"""
-        import godot_qa_toolkit.coverage.mapping as mapping_mod
-
+        """生产回归判别：驱动 `project_file_coverage`——unit_compat 的行事实
+        （行 3）不得混入 unit 面（covered={2}）；回归到裸 startswith 时
+        covered 变 {2,3}，本用例即红。"""
         proj, target = self._proj_with_adjacent_dirs(tmp_path)
         _no_godot(monkeypatch)
-        face = "res://tests/unit/"
-        scripts = ["res://tests/unit/test_a.gd",
-                   "res://tests/unit_compat/test_a_compat.gd"]
-        kept = [s for s in scripts
-                if s == face or s.startswith(
-                    face if face.endswith("/") else face + "/")]
-        assert kept == ["res://tests/unit/test_a.gd"]
-        assert [s for s in scripts if s.startswith("res://tests/unit")] != kept
-        assert mapping_mod is not None
+        from godot_qa_toolkit.coverage.mapping import project_file_coverage
+        out = project_file_coverage(str(proj), str(target),
+                                    tests_glob="res://tests/unit/")
+        # 生产行为：unit 面只吸收 test_a 的行 2；compat 的行 3 被边界过滤剔除
+        assert out["covered_lines"] == {2}
+        assert out["coverage_percent"] == 50.0
 
 
 class TestExecutionEvidenceSentinel:
@@ -238,8 +236,8 @@ class TestExecutionEvidenceSentinel:
     def test_probes_missing_is_run_error(self, tmp_path, monkeypatch):
         """映射 arms_state 缺 probes_fired → 具名 fail-loud（不伪造）。"""
         proj, target = _proj(tmp_path)
-        map_path = _install_map(proj, covered_lines=[2], probes_fired=None) \
-            if False else _install_map(proj, covered_lines=[2])
+        map_path = _install_map(proj, covered_lines=[2],
+                                probes_fired=0)
         doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
         del doc["arms_state"]["gut_full"]["probes_fired"]
         Path(map_path).write_text(json.dumps(doc, ensure_ascii=False),
@@ -291,3 +289,73 @@ class TestRunCoverageMapping:
         before = target.read_bytes()
         run_coverage(str(target), str(proj), min_percent=50.0)
         assert target.read_bytes() == before  # 投影路径绝不写真实文件
+
+
+class TestTimeoutPassthrough:
+    """§SPEC-025：`--timeout` 必须透传到映射构建（run_measurement）与增量
+    （run_attribution_increment）的真实执行 seam——缺失即静默 no-op 回归。"""
+
+    def test_timeout_reaches_map_build(self, tmp_path, monkeypatch):
+        import attribution_fixtures as fx
+
+        proj, target = _proj(tmp_path)
+        fx.install_recipe(proj)
+        _no_godot(monkeypatch)
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        captured = {}
+
+        def fake_run_measurement(root, target_files, recipe, **kwargs):
+            captured["timeout_s"] = kwargs.get("timeout_s")
+            raise RuntimeError("stop-here")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.measurement.orchestrator.run_measurement",
+            fake_run_measurement)
+        result = run_coverage(str(target), str(proj), timeout_s=555)
+        assert captured["timeout_s"] == 555
+        assert result["ok"] is False
+        assert "555" in result["summary"]["error"] or "stop-here" in str(
+            result["summary"]["error"])
+
+    def test_timeout_reaches_incremental(self, tmp_path, monkeypatch):
+        import attribution_fixtures as fx
+
+        proj, target = _proj(tmp_path)
+        fx.install_recipe(proj)
+        _install_map(proj, covered_lines=[2])
+        stale = target.read_text(encoding="utf-8") + "\n# stale\n"
+        target.write_text(stale, encoding="utf-8")
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        captured = {}
+
+        import godot_qa_toolkit.measurement.increment as increment_mod
+
+        def fake_increment(*args, **kwargs):
+            captured["timeout_s"] = kwargs.get("timeout_s")
+            raise RuntimeError("stop-here")
+
+        monkeypatch.setattr(increment_mod, "run_attribution_increment",
+                            fake_increment)
+        run_coverage(str(target), str(proj), timeout_s=777)
+        assert captured["timeout_s"] == 777
+
+
+class TestMalformedMap:
+    """§SPEC-025：畸形映射（instrumentable_lines 非法）→ 具名域错误，
+    不得裸 traceback。"""
+
+    def test_instrumentable_lines_malformed_is_named_error(
+            self, tmp_path, monkeypatch):
+        proj, target = _proj(tmp_path)
+        map_path = _install_map(proj, covered_lines=[2])
+        doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
+        doc["instrumentable_lines"]["utils/t.gd"] = ["not-a-number"]
+        Path(map_path).write_text(json.dumps(doc, ensure_ascii=False),
+                                  encoding="utf-8")
+        _no_godot(monkeypatch)
+        result = run_coverage(str(target), str(proj))
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True
+        # 投影/解析层任一收口均可：具名域错误 + 非裸 traceback
+        assert ("malformed" in result["summary"]["error"]
+                or "projection_failed" in result["summary"]["error"])

@@ -335,6 +335,28 @@ class TestMalformedArmsState:
         assert result["summary"].get("run_error") is True
 
 
+class TestMalformedInstrumentableLines:
+    """§SPEC-025/027：map 顶层 instrumentable_lines 为 truthy 非 dict（如
+    list）→ 具名 run_error/域错误，绝不裸 traceback。"""
+
+    def test_top_level_truthy_non_dict_is_named_run_error(
+            self, tmp_path, monkeypatch):
+        proj, target = _proj(tmp_path)
+        map_path = _install_map(proj, covered_lines=[2])
+        doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
+        doc["instrumentable_lines"] = [2, 3]
+        Path(map_path).write_text(json.dumps(doc, ensure_ascii=False),
+                                  encoding="utf-8")
+        _no_godot(monkeypatch)
+        result = run_coverage(str(target), str(proj))
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True
+        # 具名域错误钉：错误必须出自顶层类型检查本体；投影兜底 AttributeError
+        # 转发的 projection_failed 不满足（钉住 §SPEC-025/027 域命名）。
+        assert "instrumentable_lines top-level malformed" in \
+            result["summary"]["error"]
+
+
 class TestRunCoverageMapping:
     """run_coverage 顶层契约（映射投影路径）。"""
 

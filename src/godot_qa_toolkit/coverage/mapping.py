@@ -125,6 +125,18 @@ def project_file_coverage(
     except truth.SelectionError as e:
         raise CoverageMappingError("attribution_map_unusable", str(e)) from e
 
+    # 顶层 instrumentable_lines 必须在投影前验证：_projection_map_reject 会
+    # 对 truthy 非 dict 裸抛 AttributeError，再被投影兜底 except 转发成
+    # projection_failed，遮蔽本处具名收口（§SPEC-025/027 域命名）。
+    inst_all = doc.get("instrumentable_lines")
+    if inst_all is None:
+        inst_all = {}
+    if not isinstance(inst_all, dict):
+        raise CoverageMappingError(
+            "attribution_map_malformed",
+            f"instrumentable_lines top-level malformed: "
+            f"{type(inst_all).__name__}")
+
     scripts = list(sel.get("tests") or [])
     face = tests_glob or "res://tests/"
     if tests_glob:
@@ -155,14 +167,6 @@ def project_file_coverage(
     if covered is None:
         raise CoverageMappingError("projection_unavailable", reason)
 
-    inst_all = doc.get("instrumentable_lines")
-    if inst_all is None:
-        inst_all = {}
-    if not isinstance(inst_all, dict):
-        raise CoverageMappingError(
-            "attribution_map_malformed",
-            f"instrumentable_lines top-level malformed: "
-            f"{type(inst_all).__name__}")
     inst_raw = inst_all.get(rel)
     if not isinstance(inst_raw, (list, tuple, set)):
         raise CoverageMappingError(

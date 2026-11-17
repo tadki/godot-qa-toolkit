@@ -391,11 +391,26 @@ def _run_mutation_core(file_path: str,
             identity=identity)
         # §SPEC-012：dry-run 同样如实披露选面（串行路径此前整体丢弃
         # selection meta，silent full-face 无从鉴别）。
-        from .testscan import selection_disclosure
+        from .testscan import resolve_selection_mode, selection_disclosure
         estimate["summary"].update(selection_disclosure(selection_meta))
-        if selection_meta.get("source"):
-            estimate["summary"].setdefault(
-                "selection_mode", select_mode)
+        # 与完整执行路径同一判别点：卡尺 `--lines`/`--mutation` 与显式
+        # `--tests` 必须在 dry-run 也披露实际生效面（此前误报 select_mode）。
+        estimate["summary"].setdefault(
+            "selection_mode",
+            resolve_selection_mode(select_mode, selection_meta or {},
+                                   select_ids, select_lines))
+        # 卡尺 `--lines` 的求交披露在 dry-run 也与完整路径同源（requested/
+        # hit/skipped_no_site），避免只在实际执行轮才可见。
+        if select_lines is not None:
+            lines = {int(v) for v in select_lines}
+            dry_hit = sorted({m.line for m in mutants if m.line in lines})
+            estimate["summary"]["lines_selection"] = {
+                "requested": sorted(lines),
+                "requested_count": len(lines),
+                "hit": dry_hit,
+                "hit_count": len(dry_hit),
+                "skipped_no_site": sorted(lines - set(dry_hit)),
+            }
         return estimate
 
     if not mutants:

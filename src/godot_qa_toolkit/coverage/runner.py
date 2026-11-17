@@ -1207,9 +1207,10 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
 
     try:
         txn_dir.mkdir(parents=True, exist_ok=True)
+        # 不 fsync：进程被中断（SIGKILL/超时/外部杀）后备份仍在 OS 页缓存中，
+        # 下一次入口可读来自愈；机器掉电不在工具契约内。省略 fsync 让事务
+        # 固定开销落回噪声带内（§SPEC-023），且不影响进程级中断恢复。
         backup_path.write_text(backup, encoding="utf-8")
-        with open(backup_path, "rb") as _bf:
-            os.fsync(_bf.fileno())
         txn_path.write_text(_json.dumps({
             "path": str(target), "pid": os.getpid(), "sha256": orig_sha,
             "backup": str(backup_path), "started_at": time.time(),

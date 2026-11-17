@@ -20,7 +20,7 @@ from godot_qa_toolkit.mutation import truth_select
 from godot_qa_toolkit.mutation.identity import identity_pack
 from godot_qa_toolkit.mutation.inject import detect_binary_kind
 
-IDENT = "res://tests/test_x.gd::t1"
+IDENT = "test_x.gd::t1"  # 运行时注册表裸名形态（选面侧按名查表）
 GLOB = "res://tests/"
 
 
@@ -49,6 +49,8 @@ def _write_project(tmp_path, src=SRC):
     # recipe 可先于任何 run_mutation 构建成功——防止 _fresh_recipe_hash 的
     # lru_cache 把早期 None（recipe 不可构建）缓存住毒化后续种子/绑定。
     fx.install_recipe(proj)
+    # 真实测试文件：auto 选面按 tests 树查表解析身份（S2.1 行为钉走选面路径）
+    (proj / "tests" / "test_x.gd").write_text("extends GutTest\n")
     truth_select._fresh_recipe_hash.cache_clear()
     return proj, target
 
@@ -127,16 +129,17 @@ class TestCoveragePrefilter:
             return (1, KILL_TAIL)
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
+        # S2.1：显式 --tests 不再消费 map 派生 prefilter——行为钉走
+        # selection 真实解析路径（行级选面 + 新鲜映射）
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                 tests_glob=GLOB,
-                                 reuse_coverage=True)
+                                 select_mode="line", reuse_coverage=True)
         uncovered = [f for f in r["failures"] if f["verdict"] == "uncovered"]
         assert len(uncovered) == 3  # sub 的 3 个位点全部显式标记
         assert all(f["line"] == 5 for f in uncovered)
         # covered 位点照常执行
-        assert r["summary"]["coverage_prefilter"] == {
-            "source": "projection_store", "uncovered": 3,
-            "covered_executed": 3}
+        pf = r["summary"]["coverage_prefilter"]
+        assert pf["uncovered"] == 3 and pf["covered_executed"] == 3
+        assert pf["source"] in ("projection_live", "projection_store")
         assert r["summary"]["killed"] == 3
 
     def test_uncovered_not_in_ok_gate(self, tmp_path, monkeypatch):
@@ -154,13 +157,14 @@ class TestCoveragePrefilter:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                 tests_glob=GLOB,
-                                 reuse_coverage=True)
+                                 select_mode="line", reuse_coverage=True)
         assert r["ok"] is True  # covered 全 killed + uncovered 显式跳过
 
     def test_store_miss_runs_unfiltered_with_disclosure(self, tmp_path,
                                                         monkeypatch,
                                                         capsys):
+        """S2.1 语义双钉：显式 --tests（无 selection 映射）→ map 派生层
+        跳过并披露；无默认 map 时同理——两种 miss 形态都不过滤。"""
         proj, target = _write_project(tmp_path)
 
         state = {"n": 0}
@@ -176,7 +180,8 @@ class TestCoveragePrefilter:
                                  tests_glob=GLOB,
                                  reuse_coverage=True)
         assert r["summary"]["coverage_prefilter"] == "store_miss"
-        assert "coverage store miss" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "coverage store miss" in err
         assert r["summary"]["killed"] == 6  # 未过滤
 
     def test_prefilter_before_budget(self, tmp_path, monkeypatch):
@@ -197,15 +202,14 @@ class TestCoveragePrefilter:
                 return (0, "baseline ok")
             return (1, KILL_TAIL)
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         r = mrunner.run_mutation(str(target), str(proj), budget=2,
-                                 tests_glob=GLOB,
-                                 reuse_coverage=True)
+                                 select_mode="line", reuse_coverage=True)
         s = r["summary"]
         # one 的 5 位点 uncovered 显式标记；two 的 3 位点 covered，budget=2 截断
-        assert s["coverage_prefilter"] == {
-            "source": "projection_store", "uncovered": 5,
-            "covered_executed": 2}
+        pf = s["coverage_prefilter"]
+        assert pf["uncovered"] == 5 and pf["covered_executed"] == 2
         assert s["executed"] == 2
         uncovered = [f for f in r["failures"] if f["verdict"] == "uncovered"]
         assert len(uncovered) == 5
@@ -228,22 +232,57 @@ class TestCoveredVerdictConsistency:
             return kill_all
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
-        full = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                    tests_glob=GLOB,
-                                    mutate_all=True)
-        assert full["summary"]["killed"] == 6
-        # 只覆盖 add 体（行 2）→ covered 位点 = 3；位点行全可插桩（D3）
+        # 只覆盖 add 体（行 2）→ covered 位点 = 3；位点行全可插桩（D3）。
+        # 种子先行：auto 选面（mode=auto）在两腿都需要新鲜映射；
+        # 全量对照腿显式关断 prefilter（reuse_coverage=False）。
         _seed_projection(proj, target, {2}, {2, 5})
+        full = mrunner.run_mutation(str(target), str(proj), budget=10,
+                                    select_mode="line", mutate_all=True,
+                                    reuse_coverage=False)
+        assert full["summary"]["killed"] == 6
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         filtered = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                        tests_glob=GLOB,
-                                        mutate_all=True, reuse_coverage=True)
-        key = lambda r: (r["summary"]["killed"], r["summary"]["survived"],
-                         r["ok"])  # noqa: E731
+                                        select_mode="line", mutate_all=True,
+                                        reuse_coverage=True)
         # covered 位点（3 个）与全量跑同口径 killed；uncovered 3 显式标记
         assert filtered["summary"]["killed"] == 3
         assert filtered["summary"]["coverage_prefilter"]["uncovered"] == 3
         assert filtered["ok"] is True and full["ok"] is True
+
+
+class TestExplicitTestsNoMapPrefilter:
+    """SEE-1594 S2.1 MEDIUM-1：显式 `--tests`（selection 运行但无 mapping）
+    → map 派生 prefilter 显式跳过并披露——不重猜默认 map（旧实现回退默认
+    map 过滤 = 隐性第二真源，本反例 RED）。"""
+
+    def test_explicit_tests_does_not_read_default_map(self, tmp_path,
+                                                      monkeypatch, capsys):
+        proj, target = _write_project(tmp_path)
+        # 默认位置的映射 + /2 条目：行 2 covered、行 5 uncovered——若实现
+        # 回退默认 map，sub 的 3 位点会被过滤（killed=3）
+        _seed_projection(proj, target, {2}, {2, 5})
+        state = {"n": 0}
+
+        def kill_all(root, timeout_s=60, tests_glob=None):
+            state["n"] += 1
+            if state["n"] == 1:
+                return (0, "baseline ok")
+            return (1, KILL_TAIL)
+
+        monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
+        r = mrunner.run_mutation(str(target), str(proj), budget=10,
+                                 tests_glob=GLOB,
+                                 reuse_coverage=True)
+        s = r["summary"]
+        pf = s["coverage_prefilter"]
+        assert isinstance(pf, str), (
+            f"explicit --tests must skip map-derived prefilter, got {pf!r}")
+        assert pf == "store_miss"
+        # 未过滤：全部 6 位点真实执行（默认 map 的行事实未参与）
+        assert s["killed"] == 6
+        err = capsys.readouterr().err
+        assert "coverage store miss" in err
+        assert "selection resolved no attribution map" in err
 
 
 class TestCaliperBypassesPrefilter:

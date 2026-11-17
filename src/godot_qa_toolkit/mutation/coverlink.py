@@ -35,6 +35,11 @@ PROJECTION_SOURCE = "attribution_line_facts"
 
 COVERAGE_CACHE_DIRNAME = "gqt-coverage"
 
+# S2.1 MEDIUM-1：map_path 形参哨兵——调用方未解析映射（仅直接调用/旧测试
+# 兼容回退默认解析）；显式 None = selection 已运行但无 mapping（如显式
+# --tests）→ 显式跳过 map 派生层，绝不重猜默认 map。
+_UNRESOLVED_MAP = object()
+
 
 def coverage_identity(identity: dict | None) -> dict | None:
     """coverage 通道身份（§SPEC-208 D-2）：exec_scheme 恒 canonical cold。
@@ -262,16 +267,28 @@ def project_coverage_from_map(
             Path(face_rel).parent.as_posix())
 
     def _match(sp: str) -> "tuple[set[str], str | None]":
-        """身份脚本段 → (候选 selected 脚本集, 歧义原因)。"""
+        """身份脚本段 → (候选 selected 脚本集, 歧义原因)。S2.1 MEDIUM-2：
+        目录一致性在归属函数内部校验——selected 脚本目录必须落在 map
+        tests_face 记录的该裸名目录内，不依赖 caller 纪律。"""
         if sp.startswith("res://"):
             return ({sp} if sp in script_set else set()), None
         cands = {s for s in script_set if Path(s).name == sp}
         if len(cands) > 1:
             return set(), (f"same-name script(s) [{sp}] selected from "
                            "multiple directories")
-        if len(cands) == 1 and len(face_dirs.get(sp, ())) > 1:
-            return set(), (f"same-name script(s) [{sp}] exist across "
-                           f"directories {sorted(face_dirs[sp])}")
+        if len(cands) == 1:
+            face = face_dirs.get(sp, set())
+            if len(face) > 1:
+                return set(), (f"same-name script(s) [{sp}] exist across "
+                               f"directories {sorted(face)}")
+            # res:// 经 pathlib 会折叠成 res:/——先剥前缀再取目录，
+            # 与 tests_face 的 rel 目录同一口径比较
+            cand_dir = Path(
+                next(iter(cands)).replace("res://", "", 1)).parent.as_posix()
+            if cand_dir not in face:
+                return set(), (f"same-name script(s) [{sp}] selected from "
+                               f"[{cand_dir}] but map tests_face records "
+                               f"{sorted(face)} — attribution unverifiable")
         return cands, None
 
     covered: set[int] = set()
@@ -502,10 +519,10 @@ def resolve_coverage_for_prefilter(
         project_root: str, file_path: str, tests_glob: str | None,
         scripts: "list[str] | set[str] | None" = None,
         binary_kind=None, identity: dict | None = None,
-        map_path: "str | None" = None,
+        map_path: "str | None | object" = _UNRESOLVED_MAP,
         ) -> tuple[set[int] | None, set[int] | None, str | None, str | None]:
     """mutation prefilter 统一解析链（SEE-1587 消费面单一出处；
-    SEE-1594 S2 单真源化）。
+    SEE-1594 S2/S2.1 单真源化）。
 
     返回 (covered, instrumentable, reason, source)：
     1. `projection_store`——`see1420-coverage/2` 派生缓存（绑定含映射内容
@@ -514,10 +531,15 @@ def resolve_coverage_for_prefilter(
        tests_glob 承载的测试脚本集；零第二次插桩/零 GUT），落盘为 /2 条目
        供后续复用。
 
-    map_path（A06）= selection 实际解析的映射路径（executor/planner 传
-    `selection_meta["mapping"]["path"]`）；None（直接调用/测试）回退默认
-    解析。两层共享同一次映射加载（A05 合并读取）。旧 `/1` 手动 store 已
-    退役（A04），盘上残留条目按 schema 分流永不命中。
+    map_path（A06/S2.1）三态：
+    - 未传（哨兵）：直接调用/旧测试兼容——回退默认解析；
+    - 路径：selection 实际解析的映射（executor/planner 传
+      `selection_meta["mapping"]["path"]`），原样消费；
+    - 显式 None：selection 已运行但无 mapping（显式 `--tests` 等）——
+      **显式跳过 store/live 并披露**，绝不重猜默认 map（生产流单真源不靠
+      "恰好一致"）。
+    两层共享同一次映射加载（A05 合并读取）。旧 `/1` 手动 store 已退役
+    （A04），盘上残留条目按 schema 分流永不命中。
 
     任一层失败都继续下沉，全部失败原因**逐层保留**（reason 聚合，身份漂移
     /绑定漂移不因下沉而不可见）；全部不可用 → (None, None, 原因,
@@ -528,16 +550,24 @@ def resolve_coverage_for_prefilter(
     from . import truth_select as _truth
 
     root = str(Path(project_root).resolve())
-    resolved = map_path or _truth.map_path(root)
     reasons: list[str] = []
     doc: dict | None = None
+    if map_path is _UNRESOLVED_MAP:
+        resolved = _truth.map_path(root)
+        if not resolved:
+            reasons.append("no attribution map for projection")
+    elif map_path:
+        resolved = map_path
+    else:
+        resolved = None
+        reasons.append("selection resolved no attribution map (explicit "
+                       "--tests override) — map-derived coverage prefilter "
+                       "skipped")
     if resolved:
         try:
             doc = _truth.load_map(resolved)
         except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
             reasons.append(f"attribution map unusable: {e}")
-    else:
-        reasons.append("no attribution map for projection")
     pristine = _truth._fresh_recipe_hash(root)
     proj_cov, proj_inst, proj_why = _prefilter_projection_store(
         project_root, file_path, tests_glob, binary_kind, identity, pristine,

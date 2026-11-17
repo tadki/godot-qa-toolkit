@@ -121,9 +121,27 @@ class TestWarmPool:
         assert rec["wiring_hash"] == "w1"
 
 
+def _tamper_projection_identity(proj, target, tests_glob_contains):
+    """把 materialized glob 下的 /2 条目身份改成漂移形态（读侧必须拒绝）。"""
+    import json as _json
+    cache = (Path(proj) / ".qa-cache" / "gqt-coverage")
+    for entry in sorted(cache.glob("*.json")):
+        raw = _json.loads(entry.read_text(encoding="utf-8"))
+        if tests_glob_contains in (raw.get("tests_glob") or ""):
+            ident = raw.get("identity") or {}
+            ident["gut_addon_hash"] = "drifted"
+            raw["identity"] = ident
+            entry.write_text(_json.dumps(raw, ensure_ascii=False),
+                             encoding="utf-8")
+            return entry
+    raise AssertionError("no projected entry under the selection glob")
+
+
 class TestCoveragePrefilterAuto:
     def test_auto_enabled_with_matching_identity(self, tmp_path, monkeypatch):
-        """默认自动启用：/2 绑定映射 ∧ 身份包全匹配 → uncovered 过滤生效。"""
+        """默认自动启用：selection 解析映射 → /2 绑定命中 → uncovered 过滤
+        生效（S2.1 起显式 --tests 不再消费 map 派生 prefilter，行为钉走
+        真实选面路径）。"""
         proj, target = _write_project(tmp_path)
         _seed(proj, target, {2}, {2, 5})
         state = {"n": 0}
@@ -134,16 +152,19 @@ class TestCoveragePrefilterAuto:
                 return (0, "* t0\n[passed]")
             return (1, KILL_TAIL)
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         r = run_mutation(str(target), str(proj), budget=10,
-                         tests_glob="res://tests/")
+                         select_mode="line")
         uncovered = [f for f in r["failures"] if f["verdict"] == "uncovered"]
         assert len(uncovered) == 3, "sub 的 3 个 uncovered 位点被过滤"
         assert r["ok"] is True, "uncovered 不进 ok 门禁"
 
-    def test_identity_drift_disables_with_disclosure(self, tmp_path,
-                                                     monkeypatch, capsys):
-        """任一漂移（身份不符）→ 禁用并披露（宁多跑不假阴性）。"""
+    def test_drifted_leftover_entry_leaks_nothing_under_explicit_tests(
+            self, tmp_path, monkeypatch, capsys):
+        """S2.1 单真源性质：/1 时代的身份漂移读拒绝保留在解析链单点钉
+        （test_line_mutation_cli_see1587）；显式 --tests 下盘上残留漂移
+        条目不参与任何消费——不泄漏不毒化（全量跑 = 未过滤）。"""
         proj, target = _write_project(tmp_path)
         _seed(proj, target, {2}, {2, 5},
               identity=dict(_ident(proj), gut_addon_hash="drifted"))
@@ -158,8 +179,11 @@ class TestCoveragePrefilterAuto:
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         r = run_mutation(str(target), str(proj), budget=10,
                          tests_glob="res://tests/")
-        assert r["summary"]["killed"] == 6, "漂移 = 不过滤全跑"
-        assert "identity drift" in capsys.readouterr().err
+        assert r["summary"]["killed"] == 6, "残留条目不消费 = 全量跑"
+        err = capsys.readouterr().err
+        # 漂移原因聚合披露可见（宁披露），但绝不参与过滤
+        assert "identity drift" in err
+        assert "selection resolved no attribution map" in err
 
     def test_no_reuse_coverage_flag_disables(self, tmp_path, monkeypatch):
         proj, target = _write_project(tmp_path)

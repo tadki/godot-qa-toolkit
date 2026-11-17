@@ -24,7 +24,7 @@ from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 KILL_TAIL = "* test_x\n\t\ttest_x [Failed]"
 
 # SEE-1594 A04/A05：store 层唯一合法种子 = 绑定映射的 /2 派生缓存
-IDENT = "res://tests/test_x.gd::t1"
+IDENT = "test_x.gd::t1"  # 运行时注册表裸名形态（auto 选面按名查表）
 
 
 def _seed(proj, target, covered, instrumentable):
@@ -43,6 +43,8 @@ def _write_project(tmp_path, src):
     target = proj / "calc.gd"
     target.write_text(src)
     fx.install_recipe(proj)
+    # 真实测试文件：auto 选面按 tests 树查表解析身份（S2.1 行为钉走选面路径）
+    (proj / "tests" / "test_x.gd").write_text("extends GutTest\n")
     from godot_qa_toolkit.mutation import truth_select
     truth_select._fresh_recipe_hash.cache_clear()
     return proj, target
@@ -83,9 +85,9 @@ class TestD3NonInstrumentableNotUncovered:
         # 可插桩面 = {7}（行 7 可插桩但未覆盖——它才是合法 uncovered 对象）
         _seed(proj, target, set(), {7})
         monkeypatch.setattr(mrunner, "_run_gut_on_project", _mk_kill_fake())
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                 tests_glob="res://tests/",
-                                 reuse_coverage=True)
+                                 select_mode="line", reuse_coverage=True)
         s = r["summary"]
         # 行 3/4（不可插桩）位点照常执行并被杀——绝不标 uncovered
         uncovered = [f for f in r["failures"] if f["verdict"] == "uncovered"]
@@ -105,10 +107,10 @@ class TestD3NonInstrumentableNotUncovered:
                                                                monkeypatch,
                                                                capsys):
         """/2 条目无 instrumentable_lines（盘上手写残留形态）→ 不过滤
-        （宁多跑不假阴性；face 缺失降级路径保留）。"""
+        （宁多跑不假阴性；face 缺失降级路径保留；S2.1 起解析链单点钉）。"""
         import json as _json
 
-        from godot_qa_toolkit.mutation import coverlink, truth_select
+        from godot_qa_toolkit.mutation import coverlink
         proj, target = _write_project(tmp_path, INIT_SRC)
         map_file = fx.line_facts_map(
             proj, {IDENT: {"calc.gd": []}},
@@ -119,14 +121,13 @@ class TestD3NonInstrumentableNotUncovered:
                              identity=_ident(proj),
                              projection=coverlink._projection_binding(
                                  doc, "calc.gd")) is True
-        monkeypatch.setattr(mrunner, "_run_gut_on_project", _mk_kill_fake())
-        r = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                 tests_glob="res://tests/",
-                                 reuse_coverage=True)
-        assert r["summary"]["coverage_prefilter"] == \
-            "instrumentable_face_missing"
-        assert "instrumentable face unavailable" in capsys.readouterr().err
-        assert not [f for f in r["failures"] if f["verdict"] == "uncovered"]
+        cov, inst, reason, state = coverlink.resolve_coverage_for_prefilter(
+            str(proj), str(target), "res://tests/",
+            scripts=None, identity=_ident(proj),
+            map_path=map_file)
+        assert cov is None and inst is None
+        assert state == "instrumentable_face_missing"
+        assert "instrumentable face unavailable" in (reason or "")
 
 
 # ---------------------------------------------------------------------------

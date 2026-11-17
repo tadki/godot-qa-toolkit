@@ -322,3 +322,16 @@ class TestA12FullIdentityAttribution:
         cov, inst, reason, source = _resolve(proj, [UNIT, COMPAT],
                                              map_path=map_path)
         assert cov == {2, 3}
+
+    def test_selected_dir_outside_map_face_is_named_failure(self, tmp_path):
+        """S2.1 MEDIUM-2：selected `tests2/foo.gd` vs map face `tests/foo.gd`
+        ——裸名归属必须在归属函数内部比较目录；旧实现按裸名归属（RED）。"""
+        proj = _proj(tmp_path)
+        doc = _map_doc(proj, {"foo.gd::t": {TARGET: [2]}})
+        map_path = _write_map(doc, Path(proj) / ".qa-cache"
+                              / "attribution-map.json")
+        cov, inst, reason, source = _resolve(proj, ["res://tests2/foo.gd"],
+                                             map_path=map_path)
+        assert cov is None, (
+            f"selected dir outside map face must not inherit facts: {cov}")
+        assert reason is not None and "identity mismatch" in reason

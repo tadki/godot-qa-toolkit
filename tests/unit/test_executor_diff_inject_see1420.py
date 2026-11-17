@@ -223,12 +223,15 @@ def test_parallel_reuse_coverage_keeps_non_instrumentable_sites(
     from godot_qa_toolkit.mutation import truth_select as _truth
     import attribution_fixtures as _fx
     # 位点行 2/3/4；2、3 covered 且可插桩；行 4 不可插桩（探针面外）
-    # SEE-1594 A04/A05：种子 = 绑定映射的 /2 派生缓存
+    # SEE-1594 A04/A05：种子 = 绑定映射的 /2 派生缓存。
+    # S2.1：显式 --tests 下 map 派生 prefilter 跳过 → 全量执行，
+    # 本测试的字面断言（无 uncovered、9 位点全杀）由跳过语义保证；
+    # D3 锚（不可插桩行留执行面）由 test_fix_d3_o1_o2_o3 行级选面路径钉住。
     _fx.install_recipe(proj)
     _truth._fresh_recipe_hash.cache_clear()
     _fx.seed_projection(
-        proj, target, {"test_killed_by_probe.gd::t1": {"calc.gd": [2, 3]}},
-        scripts=["res://tests/unit/save/test_killed_by_probe.gd"],
+        proj, target, {"test_save.gd::t1": {"calc.gd": [2, 3]}},
+        scripts=["res://tests/unit/save/test_save.gd"],
         instrumentable={"calc.gd": [2, 3]},
         tests_glob="res://tests/unit/save/")
 

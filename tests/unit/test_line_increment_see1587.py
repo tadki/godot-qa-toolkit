@@ -260,7 +260,9 @@ def test_increment_syncs_coverage_store_or_invalidates(tmp_path, monkeypatch):
     _fake_arm_factory(monkeypatch, fresh)
     baseline = _baseline_doc("rh")
     baseline["project_root"] = str(root)
-    baseline["tests_face"] = {}
+    # S2.1 M2：tests_face 须登记事实脚本（裸名归属内检目录一致）
+    baseline["tests_face"] = {"tests/test_a.gd": hashlib.sha256(
+        (root / "tests" / "test_a.gd").read_bytes()).hexdigest()}
     baseline["file_sha256"] = {
         "src_game/cell.gd": hashlib.sha256(
             (root / "src_game" / "cell.gd").read_bytes()).hexdigest()}
@@ -271,7 +273,7 @@ def test_increment_syncs_coverage_store_or_invalidates(tmp_path, monkeypatch):
     covered, err = coverlink.project_coverage_from_map(
         str(root), baseline, str(target), ["res://tests/test_a.gd"],
         "res://.gqt-attr-select/abc/", current_recipe_pristine="pristine-1",
-        tests_face={})
+        tests_face=baseline["tests_face"])
     assert err is None and covered == {5}
     # 增量刷新
     out = tmp_path / "inc.json"
@@ -286,19 +288,19 @@ def test_increment_syncs_coverage_store_or_invalidates(tmp_path, monkeypatch):
     # 读回仍是旧值 {5}：消费侧必须以「映射当前行事实」为准再投影覆盖。
     lines, err = coverlink.load_projected_coverage(
         str(root), str(target), "res://.gqt-attr-select/abc/",
-        current_recipe_pristine="pristine-1", tests_face={},
-        current_doc=baseline)
+        current_recipe_pristine="pristine-1",
+        tests_face=baseline["tests_face"], current_doc=baseline)
     assert err is None and lines == {5}
     # 增量后映射再投影：行集更新为 {5,6}，条目被覆盖写回
     covered, err = coverlink.project_coverage_from_map(
         str(root), doc, str(target), ["res://tests/test_a.gd"],
         "res://.gqt-attr-select/abc/", current_recipe_pristine="pristine-1",
-        tests_face={})
+        tests_face=baseline["tests_face"])
     assert err is None and covered == {5, 6}
     lines, err = coverlink.load_projected_coverage(
         str(root), str(target), "res://.gqt-attr-select/abc/",
-        current_recipe_pristine="pristine-1", tests_face={},
-        current_doc=doc)
+        current_recipe_pristine="pristine-1",
+        tests_face=baseline["tests_face"], current_doc=doc)
     assert err is None and lines == {5, 6}
     # 绑定漂移场景：测试面变更后（增量会同步 tests_face），旧绑定失配 →
     # 显式失效

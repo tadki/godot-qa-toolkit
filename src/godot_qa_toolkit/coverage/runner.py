@@ -919,7 +919,7 @@ def run_coverage(
         arms_state = doc.get("arms_state") or {}
         arms_ok = _truth.arms_valid(arms_state)
         probes_raw = (arms_state.get("gut_full") or {}).get("probes_fired")
-    except (AttributeError, TypeError) as e:
+    except (AttributeError, TypeError, ValueError) as e:
         msg = (f"attribution map execution evidence malformed "
                f"({type(e).__name__}: {e}); refusing to fabricate")
         if evidence_out:

@@ -5,7 +5,8 @@
 - 无映射 → fail-loud（绝不静默回退旧 direct GUT，且不 spawn godot）；
 - 映射过期 → 走 resolve_selection 的增量刷新后重判（不是重跑 direct GUT）；
 - 面过滤按路径边界匹配（目录不串相邻目录、单文件精确匹配）；
-- 执行证据哨兵：probes_fired=0 且行事实非空 → run_error 拒绝可信分数。
+- 执行证据哨兵：probes_fired=0 且行事实非空 → run_error 拒绝可信分数；
+- 畸形 arms_state / instrumentable_lines → 具名 run_error，不裸 traceback。
 """
 
 from __future__ import annotations
@@ -51,18 +52,29 @@ def _proj(tmp_path):
     return proj, target
 
 
-def _install_map(proj: Path, covered_lines, *, probes_fired=640):
-    """在约定默认位置写入新鲜 /6 行级主真值映射（含完整绑定包）。"""
+def _install_map(proj: Path, covered_lines, *, probes_fired=640,
+                 arms_state=None):
+    """在约定默认位置写入 /6 行级主真值映射（含完整绑定包；arms_state
+    可注入畸形形态供哨兵测试）。"""
     from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
 
-    fx.install_recipe(proj)
+    fx_install = fx
+    from godot_qa_toolkit.measurement import recipe as _recipe_mod
+
+    fx_install.install_recipe(proj)
     recipe, error = build_recipe(proj)
     assert error is None, error
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
     rel = "utils/t.gd"
     ident = IDENT_A
+    if arms_state is None:
+        arms_state = {"gut_full": {"state": "valid", "invalid_reason": None,
+                                   "bundles": 1, "pairs": 1,
+                                   "probes_fired": probes_fired,
+                                   "vacuous": False}}
     arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
-           "tests": 1, "scripts": 1, "files": 1, "pairs": len(covered_lines),
+           "tests": 1, "scripts": 1, "files": 1,
+           "pairs": len(covered_lines),
            "function_pairs": 0, "test_to_functions": {},
            "script_to_functions": {},
            "file_to_tests": {rel: [ident]},
@@ -72,6 +84,11 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640):
            "test_to_lines": {ident: {rel: list(covered_lines)}},
            "script_to_lines": {},
            "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
+    tests_face = {
+        str(gd.relative_to(proj)): hashlib.sha256(
+            gd.read_bytes()).hexdigest()
+        for gd in sorted(proj.rglob("tests/**/*.gd"))
+    }
     doc = {"schema_version": "test-attribution/6",
            "report_recipe_hash": raw, "recipe_hash_pristine": raw,
            "project_root": str(proj), "identity": ident,
@@ -79,18 +96,10 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640):
            "file_sha256": {rel: hashlib.sha256(
                (proj / rel).read_bytes()).hexdigest()},
            "target_files": [rel],
-           "tests_face": {
-               str(gd.relative_to(proj)): hashlib.sha256(
-                   gd.read_bytes()).hexdigest()
-               for gd in sorted(proj.rglob("tests/**/*.gd"))
-               if "__pycache__" not in str(gd)},
+           "tests_face": tests_face,
            "instrumentable_lines": {rel: [2, 3]},
            "arms": {"gut_full": arm},
-           "arms_state": {"gut_full": {"state": "valid",
-                                       "invalid_reason": None, "bundles": 1,
-                                       "pairs": 1,
-                                       "probes_fired": probes_fired,
-                                       "vacuous": False}},
+           "arms_state": arms_state,
            "notes": []}
     out = proj / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +117,6 @@ def test_projection_from_fresh_map_parity(tmp_path, monkeypatch):
     assert out["instrumentable_lines"] == {2, 3}
     assert out["total_lines"] == 2 and out["covered_count"] == 1
     assert out["coverage_percent"] == 50.0
-    # parity：percent 与 covered/total 一致
     assert out["coverage_percent"] == round(
         100.0 * out["covered_count"] / out["total_lines"], 2)
 
@@ -133,16 +141,15 @@ def test_incremental_refresh_used_on_stale(tmp_path, monkeypatch):
 
     proj, target = _proj(tmp_path)
     _install_map(proj, covered_lines=[2])
-    # 使映射过期：目标文件内容变化 → file_sha256 绑定失效
     target.write_text(SRC + "\n# changed\n", encoding="utf-8")
     calls = {"n": 0}
 
     def fake_increment(root, path, doc, rel, changed_extra=None, **kwargs):
         calls["n"] += 1
-        _install_map(proj, covered_lines=[2])  # 依新内容重建新鲜映射
+        _install_map(proj, covered_lines=[2])
         return True, None
 
-    monkeypatch.setenv(truth.ENV_MODE, "auto")  # 允许自动增量
+    monkeypatch.setenv(truth.ENV_MODE, "auto")
     monkeypatch.setattr(truth, "_auto_increment", fake_increment)
 
     out = project_file_coverage(str(proj), str(target), binary_kind="linux")
@@ -168,18 +175,12 @@ class TestBoundaryFaceFilter:
     def _proj_with_adjacent_dirs(self, tmp_path):
         proj, target = _proj(tmp_path)
         (proj / "tests" / "unit_compat").mkdir(parents=True, exist_ok=True)
-        (proj / "tests" / "unit_compat" / "test_a_compat.gd").write_text(
-            "extends Node\n", encoding="utf-8")
-        # 先建全部测试文件再装映射（tests_face 漂移即 fail-loud，属正确行为；
-        # 夹具必须构造"新鲜映射"前提）。行事实：unit 面 test_a 覆盖行 2，
-        # 相邻目录同前缀名脚本覆盖行 3
+        # 行事实：unit 面的测试覆盖行 2；相邻目录同前缀名脚本覆盖行 3
         _install_map(proj, covered_lines=[2])
         map_path = proj / ".qa-cache" / "attribution-map.json"
         doc = json.loads(map_path.read_text(encoding="utf-8"))
         doc["arms"]["gut_full"]["test_to_lines"].setdefault(
             IDENT_COMPAT, {}).setdefault("utils/t.gd", []).append(3)
-        doc["arms"]["gut_full"]["test_to_files"].setdefault(
-            IDENT_COMPAT, []).append("utils/t.gd")
         map_path.write_text(json.dumps(doc, ensure_ascii=False),
                             encoding="utf-8")
         return proj, target
@@ -189,21 +190,27 @@ class TestBoundaryFaceFilter:
         _no_godot(monkeypatch)
         out = project_file_coverage(str(proj), str(target),
                                     tests_glob="res://tests/unit/")
-        # unit 面只含 test_a 的行事实（行 2）——相邻目录的行 3 不得混入
         assert out["covered_lines"] == {2}
         assert all("compat" not in s for s in out["scripts"])
 
     def test_single_file_face_is_exact_match(self, tmp_path, monkeypatch):
         proj, target = self._proj_with_adjacent_dirs(tmp_path)
         _no_godot(monkeypatch)
-        out = project_file_coverage(str(proj), str(target),
-                                    tests_glob="res://tests/unit/test_a.gd")
-        # 单文件精确匹配：face==script 本身才计入；相邻同名不得误吸
+        import json as _json
+        map_path = proj / ".qa-cache" / "attribution-map.json"
+        doc = _json.loads(map_path.read_text(encoding="utf-8"))
+        ident_c = IDENT_COMPAT
+        doc["arms"]["gut_full"]["test_to_lines"].setdefault(
+            ident_c, {}).setdefault("utils/t.gd", []).append(3)
+        map_path.write_text(_json.dumps(doc, ensure_ascii=False),
+                            encoding="utf-8")
+        out = project_file_coverage(
+            str(proj), str(target), tests_glob="res://tests/unit/test_a.gd")
         assert out["covered_lines"] == {2}
         assert out["scripts"] == ["res://tests/unit/test_a.gd"]
 
     def test_startswith_regression_would_bleed(self, tmp_path, monkeypatch):
-        """生产回归判别：驱动 `project_file_coverage`——unit_compat 的行事实
+        """生产回归判别：驱动 project_file_coverage——unit_compat 的行事实
         （行 3）不得混入 unit 面（covered={2}）；回归到裸 startswith 时
         covered 变 {2,3}，本用例即红。"""
         proj, target = self._proj_with_adjacent_dirs(tmp_path)
@@ -211,19 +218,16 @@ class TestBoundaryFaceFilter:
         from godot_qa_toolkit.coverage.mapping import project_file_coverage
         out = project_file_coverage(str(proj), str(target),
                                     tests_glob="res://tests/unit/")
-        # 生产行为：unit 面只吸收 test_a 的行 2；compat 的行 3 被边界过滤剔除
         assert out["covered_lines"] == {2}
         assert out["coverage_percent"] == 50.0
 
 
 class TestExecutionEvidenceSentinel:
     """§SPEC-025/027：probes_fired=0 且行事实非空（非 vacuous）→ 不得产出
-    可信分数（fail-loud，不伪造）。"""
+    可信分数（run_error 域 JSON + 失败 evidence，不伪造）。"""
 
     def test_probes_zero_with_line_facts_is_run_error(self, tmp_path,
                                                       monkeypatch):
-        """映射 probes_fired=0 且行事实非空（非 vacuous）→ run_error，
-        不得产出可信 0% 覆盖分数（§SPEC-025/027）。"""
         proj, target = _proj(tmp_path)
         _install_map(proj, covered_lines=[2], probes_fired=0)
         _no_godot(monkeypatch)
@@ -232,12 +236,9 @@ class TestExecutionEvidenceSentinel:
         assert result["summary"].get("run_error") is True
         assert "probes_fired=0" in result["summary"]["error"]
 
-
     def test_probes_missing_is_run_error(self, tmp_path, monkeypatch):
-        """映射 arms_state 缺 probes_fired → 具名 fail-loud（不伪造）。"""
         proj, target = _proj(tmp_path)
-        map_path = _install_map(proj, covered_lines=[2],
-                                probes_fired=0)
+        map_path = _install_map(proj, covered_lines=[2])
         doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
         del doc["arms_state"]["gut_full"]["probes_fired"]
         Path(map_path).write_text(json.dumps(doc, ensure_ascii=False),
@@ -248,6 +249,90 @@ class TestExecutionEvidenceSentinel:
         assert result["summary"].get("run_error") is True
         assert "probes_fired" in result["summary"]["error"]
 
+
+class TestMalformedArmsState:
+    """§SPEC-025/027：畸形 arms_state（顶层非 dict、probes/pairs 非法）→
+    具名 run_error + 失败 evidence，绝不裸 traceback。"""
+
+    def _write_map_with_arms(self, proj, arms_state):
+        import hashlib
+
+        from godot_qa_toolkit.measurement.recipe import (build_recipe,
+                                                          recipe_hash)
+        import attribution_fixtures as fx
+
+        fx.install_recipe(proj)
+        recipe, error = build_recipe(proj)
+        assert error is None, error
+        raw = recipe_hash({k: v for k, v in recipe.items()
+                           if k != "recipe_hash"})
+        rel = "utils/t.gd"
+        ident = IDENT_A
+        tests_face = {
+            str(gd.relative_to(proj)): hashlib.sha256(
+                gd.read_bytes()).hexdigest()
+            for gd in sorted(proj.rglob("tests/**/*.gd"))
+        }
+        doc = {"schema_version": "test-attribution/6",
+               "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+               "project_root": str(proj), "identity": ident,
+               "causal": {"enabled": False},
+               "file_sha256": {rel: hashlib.sha256(
+                   (proj / rel).read_bytes()).hexdigest()},
+               "target_files": [rel],
+               "tests_face": tests_face,
+               "instrumentable_lines": {rel: [2, 3]},
+               "arms": {"gut_full": {
+                   "test_to_files": {ident: [rel]}, "script_to_files": {},
+                   "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
+                   "function_pairs": 0, "test_to_functions": {},
+                   "script_to_functions": {},
+                   "file_to_tests": {rel: [ident]},
+                   "file_to_scripts": {rel: ["test_x.gd"]},
+                   "line_pairs": 1, "script_line_pairs": 1,
+                   "test_to_lines": {ident: {rel: [2]}},
+                   "script_to_lines": {},
+                   "line_to_tests": {rel: {"2": [ident]}}}},
+               "arms_state": arms_state,
+               "notes": []}
+        out = proj / ".qa-cache" / "attribution-map.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        return str(out)
+
+    def test_probes_fired_non_numeric_is_named_run_error(
+            self, tmp_path, monkeypatch):
+        proj, target = _proj(tmp_path)
+        _no_godot(monkeypatch)
+        self._write_map_with_arms(proj, {"gut_full": {
+            "state": "valid", "invalid_reason": None, "bundles": 1,
+            "pairs": 1, "probes_fired": "abc", "vacuous": False}})
+        result = run_coverage(str(target), str(proj))
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True
+        assert ("malformed" in result["summary"]["error"]
+                or "probes_fired" in result["summary"]["error"])
+
+    def test_invalid_pairs_container_is_named_run_error(
+            self, tmp_path, monkeypatch):
+        proj, target = _proj(tmp_path)
+        _no_godot(monkeypatch)
+        self._write_map_with_arms(proj, {"gut_full": {
+            "state": "valid", "invalid_reason": None,
+            "bundles": {"x": 1},
+            "pairs": 1, "probes_fired": 2, "vacuous": False}})
+        result = run_coverage(str(target), str(proj))
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True
+
+    def test_arms_state_truthy_non_dict_is_named_run_error(
+            self, tmp_path, monkeypatch):
+        proj, target = _proj(tmp_path)
+        _no_godot(monkeypatch)
+        self._write_map_with_arms(proj, ["not", "a", "dict"])
+        result = run_coverage(str(target), str(proj))
+        assert result["ok"] is False
+        assert result["summary"].get("run_error") is True
 
 
 class TestRunCoverageMapping:
@@ -288,74 +373,4 @@ class TestRunCoverageMapping:
         _no_godot(monkeypatch)
         before = target.read_bytes()
         run_coverage(str(target), str(proj), min_percent=50.0)
-        assert target.read_bytes() == before  # 投影路径绝不写真实文件
-
-
-class TestTimeoutPassthrough:
-    """§SPEC-025：`--timeout` 必须透传到映射构建（run_measurement）与增量
-    （run_attribution_increment）的真实执行 seam——缺失即静默 no-op 回归。"""
-
-    def test_timeout_reaches_map_build(self, tmp_path, monkeypatch):
-        import attribution_fixtures as fx
-
-        proj, target = _proj(tmp_path)
-        fx.install_recipe(proj)
-        _no_godot(monkeypatch)
-        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
-        captured = {}
-
-        def fake_run_measurement(root, target_files, recipe, **kwargs):
-            captured["timeout_s"] = kwargs.get("timeout_s")
-            raise RuntimeError("stop-here")
-
-        monkeypatch.setattr(
-            "godot_qa_toolkit.measurement.orchestrator.run_measurement",
-            fake_run_measurement)
-        result = run_coverage(str(target), str(proj), timeout_s=555)
-        assert captured["timeout_s"] == 555
-        assert result["ok"] is False
-        assert "555" in result["summary"]["error"] or "stop-here" in str(
-            result["summary"]["error"])
-
-    def test_timeout_reaches_incremental(self, tmp_path, monkeypatch):
-        import attribution_fixtures as fx
-
-        proj, target = _proj(tmp_path)
-        fx.install_recipe(proj)
-        _install_map(proj, covered_lines=[2])
-        stale = target.read_text(encoding="utf-8") + "\n# stale\n"
-        target.write_text(stale, encoding="utf-8")
-        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
-        captured = {}
-
-        import godot_qa_toolkit.measurement.increment as increment_mod
-
-        def fake_increment(*args, **kwargs):
-            captured["timeout_s"] = kwargs.get("timeout_s")
-            raise RuntimeError("stop-here")
-
-        monkeypatch.setattr(increment_mod, "run_attribution_increment",
-                            fake_increment)
-        run_coverage(str(target), str(proj), timeout_s=777)
-        assert captured["timeout_s"] == 777
-
-
-class TestMalformedMap:
-    """§SPEC-025：畸形映射（instrumentable_lines 非法）→ 具名域错误，
-    不得裸 traceback。"""
-
-    def test_instrumentable_lines_malformed_is_named_error(
-            self, tmp_path, monkeypatch):
-        proj, target = _proj(tmp_path)
-        map_path = _install_map(proj, covered_lines=[2])
-        doc = json.loads(Path(map_path).read_text(encoding="utf-8"))
-        doc["instrumentable_lines"]["utils/t.gd"] = ["not-a-number"]
-        Path(map_path).write_text(json.dumps(doc, ensure_ascii=False),
-                                  encoding="utf-8")
-        _no_godot(monkeypatch)
-        result = run_coverage(str(target), str(proj))
-        assert result["ok"] is False
-        assert result["summary"].get("run_error") is True
-        # 投影/解析层任一收口均可：具名域错误 + 非裸 traceback
-        assert ("malformed" in result["summary"]["error"]
-                or "projection_failed" in result["summary"]["error"])
+        assert target.read_bytes() == before

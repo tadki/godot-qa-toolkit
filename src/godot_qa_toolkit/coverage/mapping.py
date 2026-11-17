@@ -104,6 +104,12 @@ def project_file_coverage(
         raise CoverageMappingError(
             getattr(e, "reason", None) or "attribution_selection_unavailable",
             str(e)) from e
+    except (TypeError, ValueError, AttributeError) as e:
+        # 畸形 arms_state 容器（如 bundles 为 dict）在 truth_select 内裸抛
+        # TypeError/ValueError → 转具名域错误（§SPEC-025/027 反例钉）。
+        raise CoverageMappingError(
+            "attribution_map_malformed",
+            f"{type(e).__name__}: {e}") from e
     if sel.get("source") != "runtime_mapping":
         raise CoverageMappingError(
             sel.get("reason") or "attribution_selection_unavailable",
@@ -149,7 +155,15 @@ def project_file_coverage(
     if covered is None:
         raise CoverageMappingError("projection_unavailable", reason)
 
-    inst_raw = (doc.get("instrumentable_lines") or {}).get(rel)
+    inst_all = doc.get("instrumentable_lines")
+    if inst_all is None:
+        inst_all = {}
+    if not isinstance(inst_all, dict):
+        raise CoverageMappingError(
+            "attribution_map_malformed",
+            f"instrumentable_lines top-level malformed: "
+            f"{type(inst_all).__name__}")
+    inst_raw = inst_all.get(rel)
     if not isinstance(inst_raw, (list, tuple, set)):
         raise CoverageMappingError(
             "attribution_map_malformed",

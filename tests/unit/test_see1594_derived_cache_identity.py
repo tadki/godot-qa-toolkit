@@ -394,3 +394,63 @@ class TestS22SelectionMetadataConsistency:
         assert disclosures.get("coverage_prefilter") == "projection_live"
         assert "explicit --tests" not in err
 
+
+class TestS23Consistency:
+    """S2.3：line_group chunk 链具名 fail-loud（不默认重猜）；pathless
+    runtime_mapping 的披露与其真实原因对应（不冒充 explicit --tests）。"""
+
+    def _proj_with_default_map(self, tmp_path):
+        proj = _proj(tmp_path)
+        doc = _map_doc(proj, {UNIT: {TARGET: [2]}})
+        _write_map(doc, Path(proj) / ".qa-cache" / "attribution-map.json")
+        return proj
+
+    def test_line_group_chunks_runtime_mapping_without_path_fails_loud(
+            self, tmp_path):
+        """HIGH：`_line_group_chunks` 直读链——runtime_mapping 无 path +
+        默认位置存在有效 map → 具名 fail-loud（旧实现静默读默认 map）。"""
+        from types import SimpleNamespace
+
+        from godot_qa_toolkit.mutation import executor, truth_select
+        proj = self._proj_with_default_map(tmp_path)
+        mutants = [SimpleNamespace(line=2, stable_id="calc.gd#func:f#1")]
+        selection_meta = {"source": "runtime_mapping", "reason": "fresh",
+                          "tests": [UNIT], "tests_glob": "res://tests/unit/",
+                          "zero_ref": False, "mapping": None,
+                          "ambiguous_names": []}
+        with pytest.raises(truth_select.MutationSelectionError) as ei:
+            executor._line_group_chunks(
+                str(Path(proj) / TARGET), str(proj), "res://tests/unit/",
+                None, mutants, selection_meta, None, False, 2.0, 60, 10,
+                False, None, run_id="r", identity=None,
+                worker_channel=None, total_sites=1)
+        assert "selection_metadata_inconsistent" in str(ei.value)
+
+    def test_selection_map_path_pathless_runtime_mapping_is_inconsistent(
+            self, tmp_path):
+        """MEDIUM：selection_map_path 单一出处——runtime_mapping 无 path →
+        不一致哨兵（消费侧具名披露）；显式 tests → None；有 path → 原样。"""
+        from godot_qa_toolkit.mutation import coverlink
+        assert coverlink.selection_map_path(
+            {"source": "runtime_mapping", "mapping": {}}) \
+            is coverlink.MAP_PATH_METADATA_INCONSISTENT
+        assert coverlink.selection_map_path(
+            {"source": "explicit_tests", "mapping": None}) is None
+        assert coverlink.selection_map_path(
+            {"source": "runtime_mapping",
+             "mapping": {"path": "/tmp/m.json"}}) == "/tmp/m.json"
+
+    def test_resolve_metadata_inconsistent_reason_is_truthful(
+            self, tmp_path):
+        """不一致哨兵的披露与其真实原因对应——绝不冒充 explicit --tests
+        文案。"""
+        from godot_qa_toolkit.mutation import coverlink
+        proj = self._proj_with_default_map(tmp_path)
+        cov, inst, reason, state = coverlink.resolve_coverage_for_prefilter(
+            str(proj), str(Path(proj) / TARGET), "res://tests/unit/",
+            scripts=[UNIT],
+            map_path=coverlink.MAP_PATH_METADATA_INCONSISTENT)
+        assert cov is None and inst is None
+        assert state == "store_miss"
+        assert "selection metadata inconsistent" in (reason or "")
+        assert "explicit --tests" not in (reason or "")

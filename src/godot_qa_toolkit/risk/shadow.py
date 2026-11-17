@@ -528,8 +528,6 @@ def default_measure(project_root: str, timing_store=None, evidence_out=None):
             file_path=str(Path(project_root) / label),
             project_root=project_root,
             min_percent=0.0,
-            timeout_s=300,
-            timing_store=timing_store,
             tests_glob=tests_glob,
             evidence_out=str(evidence_dir) if evidence_dir else None,
         )

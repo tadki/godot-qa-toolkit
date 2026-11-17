@@ -459,6 +459,7 @@ def test_run_shadow_from_paths_static_only(tmp_path: Path):
     assert report["unknown"]["share"] == 1.0  # static-only: everything unknown
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_run_shadow_from_paths_delegates_to_default_measure(
     tmp_path: Path, monkeypatch
 ):
@@ -541,6 +542,7 @@ def test_real_kol_selected_eligible_files_are_eligible():
         assert profile["eligible"] is True, (rel, profile)
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_default_measure_forwards_timing_store(monkeypatch, tmp_path: Path):
     """D-M2-1: the closure must pass the outer `timing_store` through to
     run_coverage — a hardcoded None here silently ignores the parameter and
@@ -743,6 +745,7 @@ def test_derive_per_entry_signature_helper_exists():
     assert per_entry["x.gd::two"]["covered"] == 3
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_default_measure_consumes_real_bundle_by_snapshot_diff(
     tmp_path: Path, monkeypatch
 ):

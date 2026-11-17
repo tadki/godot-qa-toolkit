@@ -193,7 +193,8 @@ def _default_map_reuse(path: str | None, explicit: bool
     return path, None
 
 
-def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
+def ensure_map(project_root: str | Path, files: list[str],
+               timeout_s: int | None = None) -> str | None:
     """默认自动生成/重建：约定默认位置缺失或不可用（旧 schema/无效状态）
     且 mode=auto → `gqt measure run --test-attribution` 一次（原子写、
     `<map>.lock` 串行化）。
@@ -232,7 +233,9 @@ def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
             tmp = _unique_tmp(out)
             try:
                 run_measurement(root, targets, recipe, test_attribution=True,
-                              attribution_out=tmp)
+                              attribution_out=tmp,
+                              **({"timeout_s": int(timeout_s)}
+                                 if timeout_s is not None else {}))
                 doc = load_map(tmp)
                 if not arms_valid(doc.get("arms_state") or {}):
                     raise MutationSelectionError(
@@ -262,7 +265,8 @@ def ensure_map(project_root: str | Path, files: list[str]) -> str | None:
 
 def _auto_increment(project_root: str, path: str, doc: dict,
                     rel: str,
-                    changed_extra: list[str] | None = None
+                    changed_extra: list[str] | None = None,
+                    timeout_s: int | None = None
                     ) -> tuple[bool, str | None]:
     """过期映射默认增量更新（串行化 + 守恒校验 + fail-loud）。
 
@@ -293,7 +297,8 @@ def _auto_increment(project_root: str, path: str, doc: dict,
             tmp = _unique_tmp(path)
             try:
                 report = run_attribution_increment(
-                    root, targets, recipe, path, changed, tmp)
+                    root, targets, recipe, path, changed, tmp,
+                    timeout_s=int(timeout_s) if timeout_s is not None else 180)
                 validate_refresh(current, load_map(tmp))
                 os.replace(tmp, path)
             finally:
@@ -455,7 +460,8 @@ def _evaluate(root: str, rel: str, doc: dict) -> dict:
             "scripts": scripts, "ambiguous": ambiguous, "mapping": mapping}
 
 
-def _regenerate(project_root: str, path: str, rel: str) -> bool:
+def _regenerate(project_root: str, path: str, rel: str,
+                timeout_s: int | None = None) -> bool:
     """旧 schema/无 file_sha256 的产物 → 整份重建到同一路径（auto 模式）。"""
     key = f"{Path(project_root).resolve()}::{path}"
     if key in _REGENERATED:
@@ -476,7 +482,9 @@ def _regenerate(project_root: str, path: str, rel: str) -> bool:
         tmp = _unique_tmp(path)
         try:
             run_measurement(root, targets, recipe, test_attribution=True,
-                          attribution_out=tmp)
+                          attribution_out=tmp,
+                          **({"timeout_s": int(timeout_s)}
+                             if timeout_s is not None else {}))
             validate_refresh(load_map(path), load_map(tmp))
             os.replace(tmp, path)
         finally:
@@ -516,7 +524,8 @@ def _detail_of(base: dict) -> str | None:
 
 def resolve_selection(project_root: str | Path, target_file: str,
                       map_path_override: str | None = None,
-                      strict: bool = True) -> dict:
+                      strict: bool = True,
+                      timeout_s: int | None = None) -> dict:
     """目标 → 文件级选面决策（严格模式不可用即 fail-loud）。
 
     mode=auto：映射过期 → 自动增量/重建一次后重判（台账披露）；仍不可用
@@ -545,12 +554,13 @@ def resolve_selection(project_root: str | Path, target_file: str,
     evaluation["mapping"]["path"] = path
     if not evaluation["ok"] and auto:
         if not (doc.get("file_sha256") or {}):
-            renewed = _regenerate(root, path, rel)
+            renewed = _regenerate(root, path, rel, timeout_s=timeout_s)
         else:
             drift = _tests_face_drift(root, doc)
             extra = drift["changed"] + drift["removed"]
             renewed, _err = _auto_increment(root, path, doc, rel,
-                                            changed_extra=extra)
+                                            changed_extra=extra,
+                                            timeout_s=timeout_s)
         if renewed:
             try:
                 doc = load_map(path)

@@ -105,6 +105,7 @@ class TestH3BranchLineMapping:
         # 分支行必须是 3/5（return 体首语句），不得是 2/4（if/else 头）
         assert lines == {3, 5}, f"branch lines leaked head lines: {lines}"
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_false_path_does_not_cover_if_branch(self, tmp_path, monkeypatch):
         import godot_qa_toolkit.coverage.runner as c
 
@@ -164,6 +165,7 @@ class TestH3BranchLineMapping:
 class TestH4StaleSinkPriority:
     """H4: 项目根陈旧 sink（pid 复用）不得遮蔽新鲜 user:// sink（实证已复现）。"""
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_user_sink_wins_over_stale_root_sink(self, tmp_path, monkeypatch):
         import godot_qa_toolkit.coverage.runner as c
 
@@ -355,6 +357,7 @@ class TestH10CoverageGodotPathFix:
         assert _godot_project_path(".") == "."
         assert _godot_project_path("proj") == "proj"
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_gut_invocation_uses_converted_path(self, tmp_path, monkeypatch):
         import godot_qa_toolkit.coverage.runner as c
 

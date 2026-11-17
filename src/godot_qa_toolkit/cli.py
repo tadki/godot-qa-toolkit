@@ -824,10 +824,9 @@ def cmd_measure_suite(args: argparse.Namespace) -> int:
 
 def cmd_measure_coverage(args: argparse.Namespace) -> int:
     from .coverage.runner import run_coverage
-    from .timing import TimingStore
 
-    # §SPEC-1525-001/002：覆盖注入先行——TimingStore 的 key 二进制成分与
-    # 启动 argv 解析同源（构造器内 detect_binary_kind 实时解析）。
+    # §SPEC-1525-001/002：godot-bin 覆盖先行——映射构建/增量仍需要 Godot
+    # （新鲜投影不启动进程时可无执行成本，但构建阶段必须能解析二进制）。
     early = _apply_godot_bin_or_contract("measure.coverage", args)
     if early is not None:
         return early
@@ -835,32 +834,26 @@ def cmd_measure_coverage(args: argparse.Namespace) -> int:
                                            target=getattr(args, "file", None))
     if rc is not None:
         return rc
-    from .coverage.evidence import prune_sinks as _prune, recover_bundle as _recover
+    from .coverage.evidence import prune_sinks as _prune
     from pathlib import Path as _P
 
-    if not getattr(args, "recover", None) and not getattr(args, "prune_sinks", None)             and not args.file:
+    if not getattr(args, "prune_sinks", None) and not args.file:
         return _emit({
             "tool": "measure.coverage",
             "ok": False,
             "summary": {"error": "measure mode requires a target file "
-                               "(or --recover/--prune-sinks)"},
+                               "(or --prune-sinks)"},
             "failures": [{"reason": "measure mode requires a target file"}],
         })
-    if getattr(args, "recover", None):
-        result = _recover(_P(args.recover), project_root=args.project_root)
-        result.update({"tool": "measure.coverage", "ok": True})
-        return _emit(result)
     if getattr(args, "prune_sinks", None):
+        # --prune-sinks 仅清理旧文件，绝不产生覆盖答案（§SPEC-027 A16）。
         result = _prune(args.project_root,
                         retention_days=getattr(args, "retain_days", 7))
         result.update({"tool": "measure.coverage", "ok": True})
         return _emit(result)
-    # §SPEC-079 B：measure 是 coverage 唯一拉起 Godot 的路径——入口不做
-    # 静态拦截（recover/prune 离线路径与 mocked 用例不受影响），
-    # 拉起点的 BinaryConfigError 由下方领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
-    # 缺 godot 时不在导入引导处掩盖 run_coverage 的「godot binary not found
-    # in PATH」判据；仅二进制可用时才做零配置首次导入。
+    # 缺 godot 时不预导入（新鲜投影不需要）；映射缺失/失效时构建阶段会
+    # fail-loud（BinaryConfigError 由下方领域 JSON 出口收口）。
     _gcmd, _gok, _greason = _godot_bin_ready(_P(args.project_root))
     if _gok:
         rc = _bootstrap_import_or_contract("measure.coverage", args)
@@ -871,8 +864,7 @@ def cmd_measure_coverage(args: argparse.Namespace) -> int:
             file_path=args.file,
             project_root=args.project_root,
             min_percent=args.min_percent,
-            timeout_s=args.timeout,
-            timing_store=TimingStore(args.project_root, args.file, "coverage", None),
+            timeout_s=getattr(args, "timeout", None),
             tests_glob=args.tests,
             evidence_out=getattr(args, "evidence_out", None),
         )
@@ -1519,27 +1511,33 @@ def build_parser() -> argparse.ArgumentParser:
     _add_godot_bin_arg(inc)
     inc.set_defaults(func=cmd_measure_map_update)
 
-    v = mssub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
+    v = mssub.add_parser(
+        "coverage",
+        help="line coverage of a single .gd file (line-level mapping projection, "
+             "no direct GUT)")
     v.add_argument("file", nargs="?", default=None,
-                   help="the .gd file to measure (required unless --recover/--prune-sinks)")
+                   help="the .gd file to measure (required unless --prune-sinks)")
     v.add_argument("--project-root", default=None,
                    help="project root containing addons/gut/; omitted = "
                         "discover from the target file or CWD")
     v.add_argument("--min-percent", type=float, default=80.0,
                    help="min coverage percent (default 80)")
-    v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
+    v.add_argument("--timeout", type=int, default=120,
+                   help="GUT timeout seconds for the map build / incremental "
+                        "refresh phases (default 120); a fresh projection runs "
+                        "no process and spends no GDP budget")
     v.add_argument("--tests", default=None,
-                   help="scoped GUT dir or single .gd path for per-suite attribution, "
-                        "e.g. res://tests/unit/time/ (SEE-1367 §SPEC-017); omitted = full res://tests/")
+                   help="restrict the mapped selection to test scripts under this "
+                        "res:// dir/file (e.g. res://tests/unit/); omitted = the "
+                        "full mapped test face")
     v.add_argument("--evidence-out", default=None,
-                   help="§SPEC-025/026: write coverage-evidence/2 bundles + run records "
-                        "here; omit for the legacy stdout-only contract (zero drift)")
-    v.add_argument("--recover", default=None,
-                   help="§SPEC-025: recover started-but-unfinished runs from this "
-                        "evidence dir without re-running GUT")
+                   help="write a coverage-evidence/2 bundle generated from the "
+                        "line map (hits_lines from projection; probes_fired from "
+                        "the map arms_state — no second GUT run)")
     v.add_argument("--prune-sinks", action="store_true",
-                   help="§SPEC-025/W1: delete qa-coverage-hits-* sinks older than "
-                        "--retain-days (default 7) under user:// and project root")
+                   help="delete leftover legacy qa-coverage-hits-* sink files "
+                        "older than --retain-days (cleanup only; never a coverage "
+                        "source)")
     v.add_argument("--retain-days", type=int, default=7,
                    help="retention period for --prune-sinks (default 7)")
     _add_godot_bin_arg(v)

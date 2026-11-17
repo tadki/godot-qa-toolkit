@@ -176,12 +176,17 @@ def test_prefilter_consumers_go_through_the_single_chain():
 
 
 def test_measure_coverage_manual_entry_is_the_only_store1_writer():
-    """/1 手动 store 的唯一写者是 `measure coverage` 链（coverage/runner）——
-    默认 mutation 链（measurement/mutation 包）不得写 /1（写侧只加不改：
-    投影经 save_coverage(projection=...) 走 /2）。"""
+    """SEE-1594 §SPEC-027 A04：`/1` 独立覆盖真源写者已退役——`measure
+    coverage` 不再写 `/1`；唯一 `save_coverage(` 调用在 `mutation/coverlink`
+    的**行事实投影**路径（`projection=` → `/2` 派生缓存），不是第二真源。"""
     writers = [path for path, text in _src_texts().items()
                if "save_coverage(" in text and "def save_coverage" not in text]
-    assert writers == ["coverage/runner.py"], writers
+    # A04：`coverage/runner.py` 不再写 `/1`；唯一 `save_coverage(` 仅存于其
+    # 定义文件 `mutation/coverlink.py`（投影路径写 `/2` 派生缓存，非第二真源），
+    # 故外部写者列表为空。
+    assert "coverage/runner.py" in _src_texts(), "runner module should remain"
+    assert "coverage/runner.py" not in writers, writers
+    assert writers == [], writers
 
 
 # ------------------------------------------------------------ 消费面迁移

@@ -35,6 +35,7 @@ def project_file_coverage(
     *,
     binary_kind: str | None = None,
     identity: dict | None = None,
+    timeout_s: int | None = None,
 ) -> dict:
     """由行级映射投影单文件覆盖（唯一消费实现，零 GUT/零第二次插桩）。
 
@@ -57,10 +58,17 @@ def project_file_coverage(
 
     # 映射是唯一真源：缺失时按 mutation 同款路径构建（mode=off 时只读）。
     if truth.mode() != "off":
-        truth.ensure_map(str(root), [str(path)])
+        try:
+            truth.ensure_map(str(root), [str(path)], timeout_s=timeout_s)
+        except Exception as e:  # noqa: BLE001 — 映射构建失败转具名域错误，
+            # 保证 CLI 恒出可解析 JSON（无裸 traceback）；坏 Godot/构建失败等
+            # 均在此收口，绝不静默回退旧 direct GUT。
+            raise CoverageMappingError(
+                "attribution_map_build_failed",
+                f"{type(e).__name__}: {e}") from e
 
     try:
-        sel = truth.resolve_selection(str(root), str(path))
+        sel = truth.resolve_selection(str(root), str(path), timeout_s=timeout_s)
     except truth.MutationSelectionError as e:  # fail-loud，不回退 GUT
         raise CoverageMappingError(
             getattr(e, "reason", None) or "attribution_selection_unavailable",

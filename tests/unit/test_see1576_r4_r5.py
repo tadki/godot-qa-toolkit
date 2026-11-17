@@ -200,6 +200,7 @@ def _gut_reached_patch(monkeypatch):
     monkeypatch.setattr(coverage_runner_mod, "_run_gut_for_coverage", _boom)
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_r5_coverage_relative_target_anchored(tmp_path, monkeypatch):
     """§SPEC-610：coverage/runner.py 同形态检查点保持同一口径（相对路径）。"""
     proj, _target = _write_project(tmp_path)
@@ -210,6 +211,7 @@ def test_r5_coverage_relative_target_anchored(tmp_path, monkeypatch):
         run_coverage("calc.gd", proj)
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_r5_coverage_absolute_target_unaffected(tmp_path, monkeypatch):
     """§SPEC-610：coverage 绝对路径直过（锚定只作用于相对路径）。"""
     proj, target = _write_project(tmp_path)

@@ -604,6 +604,7 @@ def test_partition_sources_routes_unreadable_files(tmp_path):
     assert negatives["bad.gd"] == ""
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_default_measure_fails_loud_when_bundle_count_is_zero(
     tmp_path, monkeypatch
 ):
@@ -635,6 +636,7 @@ def test_default_measure_fails_loud_when_bundle_count_is_zero(
                 "res://tests/unit/")
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_default_measure_snapshot_excludes_preexisting_bundles(
     tmp_path, monkeypatch
 ):

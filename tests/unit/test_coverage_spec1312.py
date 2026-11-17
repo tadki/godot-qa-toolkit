@@ -124,6 +124,7 @@ class TestProbeSinkRobustness:
 
     SINK = "qa-coverage-hits-test.txt"
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_sink_path_is_unique_per_run(self, tmp_path, monkeypatch):
         import godot_qa_toolkit.coverage.runner as c
         proj = tmp_path / "proj"
@@ -164,6 +165,7 @@ class TestProbeSinkRobustness:
         # 探针调用传整数 id
         assert "__qa_cov_probe_(0)" in instrumented or "__qa_cov_probe_0(" in instrumented
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_id_keyed_hits_decoded_back_to_lines(self, tmp_path, monkeypatch):
         proj = tmp_path / "proj"
         proj.mkdir()
@@ -199,6 +201,7 @@ class TestSentinels:
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_zero_probes_fired_is_run_error(self, tmp_path, monkeypatch):
         # GUT rc=0 但 sink 不存在 → 探针从未点火 ≠ 真实 0% 覆盖
         proj, target = self._write_project(tmp_path)
@@ -211,6 +214,7 @@ class TestSentinels:
         assert result["summary"].get("run_error") is True
         assert "probe" in result["failures"][0]["reason"].lower()
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_probes_fired_reported_in_summary(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)
         monkeypatch.setattr(
@@ -223,6 +227,7 @@ class TestSentinels:
         assert spy["written"], "spy never saw the sink name"
         assert result["summary"].get("probes_fired") == 1
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_no_executable_lines_is_vacuous(self, tmp_path, monkeypatch):
         proj = tmp_path / "proj"
         proj.mkdir()
@@ -267,6 +272,7 @@ func f(x):
         branches = _derive_branches(src)
         assert branches.total == 2
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_branch_fields_in_summary(self, tmp_path, monkeypatch):
         proj = tmp_path / "proj"
         proj.mkdir()

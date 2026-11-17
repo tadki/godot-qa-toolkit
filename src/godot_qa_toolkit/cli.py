@@ -140,8 +140,11 @@ def _git_diff_targets(root: str) -> list[str]:
     基准：HEAD（工作区相对 HEAD 的已跟踪改动，含暂存+未暂存）并上未跟踪的
     .gd 文件。非 Git 仓库 / git 失败 / 无改动 → ValueError（fail-loud）。"""
     def _git(*argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", root, *argv],
-                              capture_output=True, text=True)
+        # 不递归子模块：KOL 等仓的 vendor 子模块常是未初始化/断链 gitlink，
+        # 递归会 fatal: not a git repository 并让整轮 diff 失败。
+        return subprocess.run(
+            ["git", "-C", root, "-c", "submodule.recurse=false", *argv],
+            capture_output=True, text=True)
 
     top = _git("rev-parse", "--show-toplevel")
     if top.returncode != 0:
@@ -149,17 +152,26 @@ def _git_diff_targets(root: str) -> list[str]:
             f"not a git repository under {root}; no-arg mutation requires git "
             f"diff (pass files explicitly)")
     changed = _git("diff", "--name-only", "--diff-filter=ACMR",
-                   "--relative", "HEAD")
+                   "--relative", "--ignore-submodules=all", "HEAD")
     if changed.returncode != 0:
         raise ValueError(
             f"git diff HEAD failed under {root}: {changed.stderr.strip()[:240]}")
     untracked = _git("ls-files", "--others", "--exclude-standard")
     names = [ln.strip() for ln in
              (changed.stdout + "\n" + untracked.stdout).splitlines() if ln.strip()]
+
+    def _in_scope(name: str) -> bool:
+        parts = name.split("/")
+        # 排除隐藏目录（.qa-cache/.gqt-attr-select/.godot 等工具产物）与
+        # vendored addons/——它们不是被测项目源码，纳入会污染默认目标集。
+        if any(p.startswith(".") for p in parts):
+            return False
+        return not (parts and parts[0] == "addons")
+
     files: list[str] = []
     for name in sorted(dict.fromkeys(names)):
-        if name.endswith(".gd") and (Path(root) / name).is_file() \
-                and name not in files:
+        if (name.endswith(".gd") and _in_scope(name)
+                and (Path(root) / name).is_file() and name not in files):
             files.append(name)
     if not files:
         raise ValueError(

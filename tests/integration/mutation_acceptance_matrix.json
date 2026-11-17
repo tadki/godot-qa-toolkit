@@ -587,6 +587,14 @@
       }
     },
     {
+      "id": "A2-git-diff-positive-untracked",
+      "kind": "probe",
+      "profiles": [
+        "matrix"
+      ],
+      "probe": "git_diff"
+    },
+    {
       "id": "A2-git-diff-no-arg",
       "kind": "cli",
       "profiles": [

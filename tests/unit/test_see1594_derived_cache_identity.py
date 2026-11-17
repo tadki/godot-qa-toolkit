@@ -421,7 +421,7 @@ class TestS23Consistency:
         with pytest.raises(truth_select.MutationSelectionError) as ei:
             executor._line_group_chunks(
                 str(Path(proj) / TARGET), str(proj), "res://tests/unit/",
-                None, mutants, selection_meta, None, False, 2.0, 60, 10,
+                None, mutants, selection_meta, None, 2.0, 60, 10,
                 False, None, run_id="r", identity=None,
                 worker_channel=None, total_sites=1)
         assert "selection_metadata_inconsistent" in str(ei.value)

@@ -189,7 +189,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--mutate-all` | off | Force full execution (the only escape from diff reuse) |
 | `--mutation <file>#<scope_id>#<n>` | omitted | Single-site caliper (single file): fresh execution using that site's line-level tests; bypasses diff reuse and prefilter |
 | `--lines <spec>` | omitted | Single line `42`, range `10-20`, or multi-segment `10-20,30,35-40`; intersects actual sites, discloses no-site lines, and uses the selected lines' test union |
-| `--reuse-coverage` | same as default | Compatibility flag: the coverage prefilter is on by default; this flag is a no-op synonym |
+| `--reuse-coverage` | **retired** (SEE-1594 A13) | Removed: prefilter is on by default; use `--no-reuse-coverage` to disable |
 | `--no-reuse-coverage` | off | Explicitly disable the coverage prefilter, including store and live-projection layers |
 | `--worker-channel` | on by routing | Force the resident worker; static routing sends autoload/GUT-domain/scene-held targets cold and the refusal is disclosed as `worker_channel.override_refused=true` with named route reasons; `GQT_MUTATION_WORKER=0` opts out everywhere |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override; priority flag > env > PATH |

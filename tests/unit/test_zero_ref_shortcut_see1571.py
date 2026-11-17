@@ -311,7 +311,7 @@ class TestSerialGateDryRunContract:
         proj, target = _write_zero_ref_project(tmp_path, GD_WIDE_TARGET)
         ret, tests_glob, _selection_meta = executor._single_file_serial_gate(
             [target], proj, budget=50, timeout_s=60, tests_glob=None,
-            jobs=1, dry_run=True, resume=False, binary_kind=None,
+            jobs=1, dry_run=True, binary_kind=None,
             timing_store=None, mutation_warning=None, timeout_factor=None,
             mutate_all=False, worker_channel=None)
         assert ret is None, "dry-run 面不得产出零引用短路终态"

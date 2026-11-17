@@ -454,16 +454,21 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         import os as _os
         _os.environ[_truth.ENV_MODE] = "off"
     if not getattr(args, "dry_run", False):
-        # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
-        rc = _bootstrap_import_or_contract("mutation", args)
-        if rc is not None:
-            return rc
-        # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
-        try:
-            _truth.ensure_map(str(Path(args.project_root)),
-                              [str(f) for f in args.files])
-        except MutationSelectionError as e:
-            return _selection_error_payload(args, e)
+        # A20（SEE-1594 S5）：显式 --select full 是全脸审计——不需要映射，
+        # 不得被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file
+        # 默认路径仍自动生成/复用新鲜映射；不可用 fail-loud）。
+        full_face = getattr(args, "select_mode", "line") == "full"
+        if not full_face:
+            # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
+            rc = _bootstrap_import_or_contract("mutation", args)
+            if rc is not None:
+                return rc
+            # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
+            try:
+                _truth.ensure_map(str(Path(args.project_root)),
+                                  [str(f) for f in args.files])
+            except MutationSelectionError as e:
+                return _selection_error_payload(args, e)
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
@@ -560,7 +565,7 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
     result = run_mutation_files(
         files, args.project_root, budget=args.budget,
         timeout_s=args.timeout, dry_run=args.dry_run,
-        tests_glob=args.tests, jobs=args.jobs, resume=args.resume,
+        tests_glob=args.tests, jobs=args.jobs,
         binary_kind=binary_kind, timing_store=timing_store,
         mutation_warning=args.mutation_warning,
         timeout_factor=args.timeout_factor,
@@ -606,7 +611,6 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         dry_run=args.dry_run,
         tests_glob=args.tests,
         timing_store=timing_store,
-        resume=args.resume,
         binary_kind=binary_kind,
         mutation_warning=args.mutation_warning,
         timeout_factor=args.timeout_factor,
@@ -936,7 +940,8 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
 
 
 def _attribution_usable(attribution_out, run_started: float) -> bool:
-    """行映射可用性：本轮新鲜且臂执行证据有效（SEE-1589 A-M1）。
+    """行映射可用性（A22 中央校验）：schema/臂执行证据/目标文件绑定/
+    recipe 全部一致才算可用；event_counts_stale 的增量产物一律不可用。
 
     union 不可认证 ≠ 产物不可用——陈旧产物不得冒充本轮可用证据。
     """
@@ -946,11 +951,29 @@ def _attribution_usable(attribution_out, run_started: float) -> bool:
     from pathlib import Path as _P
 
     try:
+        from .measurement.recipe import build_recipe, recipe_hash as _raw_hash
         from .mutation.truth_select import arms_valid
         map_file = _P(attribution_out)
-        fresh = map_file.stat().st_mtime >= run_started - 1.0
         doc = _json.loads(map_file.read_text(encoding="utf-8"))
-        return fresh and arms_valid(doc.get("arms_state") or {})
+        # 中央校验 1：臂执行完整性（probes/bundles/pairs）
+        if not arms_valid(doc.get("arms_state") or {}):
+            return False
+        # 中央校验 2：A22——增量合并产物显式标记 event_counts_stale 的
+        # （事件计数未重测）不得冒充新鲜可用证据
+        if doc.get("increment", {}).get("event_counts_stale"):
+            return False
+        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）
+        if doc.get("recipe_hash_pristine"):
+            recipe, error = build_recipe(_P(attribution_out).parent.parent)
+            if error is not None:
+                return False
+            if _raw_hash({k: v for k, v in recipe.items()
+                          if k != "recipe_hash"}) != \
+                    doc.get("recipe_hash_pristine"):
+                return False
+        # 中央校验 4：本轮时间锚（映射文件不早于本轮开始——替代原 mtime
+        # 单点判新，仍保留防止上轮产物冒充）
+        return map_file.stat().st_mtime >= run_started - 1.0
     except (OSError, ValueError):
         return False
 
@@ -1292,11 +1315,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="worker pool size for per-file AND per-mutant slicing "
                         "(a single file is sliced per-mutant too); default = "
                         "max(2, cpu//2); --jobs 1 forces serial (SEE-1413)")
-    m.add_argument("--resume", action="store_true",
-                   help="skip mutants whose verdicts are already in the resume store "
-                        "(SEE-1400); fingerprint mismatch (source/tests/budget/ops) "
-                        "re-runs them — every run persists verdicts, resume just "
-                        "turns on the skip")
     m.add_argument("--select", dest="select_mode", default="line",
                    choices=["line", "fn", "file", "full"],
                    help="SEE-1587 test-selection granularity: line (default, "
@@ -1345,16 +1363,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "all fails loud); the selected sites run under the "
                         "union of their lines' test sets (discloses "
                         "no_mapped_tests); single-file only")
-    m.add_argument("--reuse-coverage", action="store_true",
-                   help="prefilter mutation sites by line coverage from the "
-                        "last `gqt measure coverage` run for this file "
-                        "(SEE-1420 P2; provenance-checked: source/tests/binary "
-                        "must match; uncovered sites are marked 'uncovered' "
-                        "and skipped)")
     m.add_argument("--no-reuse-coverage", action="store_true",
-                   help="disable the coverage prefilter (SEE-1550 L1: "
-                        "prefilter is ON by default when a fresh coverage "
-                        "store with a matching identity pack exists; "
+                   help="disable the coverage prefilter (SEE-1550 L1 / "
+                        "SEE-1594 S5: prefilter is ON by default and "
+                        "consumes the line-level mapping single-truth chain "
+                        "(/2 derived cache bound to the map content and "
+                        "execution evidence, then live projection); "
                         "uncovered sites never enter the ok gate)")
     m.add_argument("--worker-channel", action="store_true",
                    help="force the resident worker channel (SEE-1550 "

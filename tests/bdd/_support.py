@@ -49,5 +49,4 @@ def run_mutation(state: dict) -> dict:
         budget=4,
         timeout_s=60,
         tests_glob="res://tests/",
-        resume=False,
     )

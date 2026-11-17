@@ -180,7 +180,7 @@ def test_support_run_mutation_engine_policy_is_pinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``_support.run_mutation`` passes a fixed engine policy to the
-    mutation runner; drift in budget/timeout/tests_glob/resume must RED —
+    mutation runner; drift in budget/timeout/tests_glob must RED —
     the launch-guard scenarios fake the GUT layer and cannot observe these
     kwargs, so without this pin the helper policy is mutation-invisible."""
     import godot_qa_toolkit.mutation.runner as mrunner
@@ -204,7 +204,6 @@ def test_support_run_mutation_engine_policy_is_pinned(
         "budget": 4,
         "timeout_s": 60,
         "tests_glob": "res://tests/",
-        "resume": False,
     }
 
 

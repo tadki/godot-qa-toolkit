@@ -96,7 +96,7 @@ class TestPrepareBaselineRoot:
         target.write_text("func a():\n\treturn 1\n")
         monkeypatch.setattr(
             runner_mod, "_auto_scan_tests_glob",
-            lambda f, root: "res://tests/")
+            lambda f, root, select_mode="full": "res://tests/")
         monkeypatch.setattr(
             executor, "_prepare_baseline_root",
             lambda project_root, knob, clock, globs: (
@@ -107,7 +107,7 @@ class TestPrepareBaselineRoot:
             executor, "_run_baseline_snapshot",
             lambda root, g, t: snapshots.append(g) or {"rc": 0})
         baselines, failures = executor._precompute_baselines(
-            [str(target)], str(proj), 60, None)
+            [str(target)], str(proj), 60, None, select_mode="full")
         assert baselines == {}
         assert failures == {"res://tests/": "prewarm proof drift persists: x"}
         assert snapshots == [], "MUST_REBUILD 轮不得启动任何 baseline"
@@ -122,7 +122,7 @@ class TestPrepareBaselineRoot:
         farm.mkdir()
         monkeypatch.setattr(
             runner_mod, "_auto_scan_tests_glob",
-            lambda f, root: "res://tests/")
+            lambda f, root, select_mode="full": "res://tests/")
         monkeypatch.setattr(
             executor, "_prepare_baseline_root",
             lambda project_root, knob, clock, globs: (
@@ -131,7 +131,7 @@ class TestPrepareBaselineRoot:
             executor, "_run_baseline_snapshot",
             lambda root, g, t: {"rc": 0, "tail": "", "elapsed": 1.0})
         baselines, failures = executor._precompute_baselines(
-            [str(target)], str(proj), 60, None)
+            [str(target)], str(proj), 60, None, select_mode="full")
         assert "res://tests/" in baselines
         assert failures == {}
         assert not farm.exists(), "farm 槽必须在 finally 清理"

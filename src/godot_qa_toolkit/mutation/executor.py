@@ -28,7 +28,7 @@ from .coverlink import (COVERAGE_PREFILTER_MISS_STATES,
                         COVERAGE_PREFILTER_SOURCES,
                         MAP_PATH_UNRESOLVED, apply_coverage_prefilter,
                         coverage_prefilter_summary, selection_map_path)
-from .identity import certificate_valid, disclose_superseded, identity_pack
+from .identity import certificate_valid, identity_pack
 from .baseline import (_BASELINE_FAILURE_REASONS, _baseline_key,
                        _run_baseline_snapshot)
 from .progress import new_run_id
@@ -51,13 +51,13 @@ ENV_BASELINE_IN_FARM = "GQT_MUTATION_BASELINE_IN_FARM"
 
 
 def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
-                      tests_glob, resume, binary_kind, timing_store,
+                      tests_glob, binary_kind, timing_store,
                       mutation_warning, timeout_factor, reuse_coverage,
                       identity, worker_channel=None,
                       select_mode: str = "full") -> dict:
     """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。"""
     r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
-                     dry_run=dry_run, tests_glob=tests_glob, resume=resume,
+                     dry_run=dry_run, tests_glob=tests_glob,
                      binary_kind=binary_kind, timing_store=timing_store,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
@@ -91,14 +91,6 @@ def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
 def _detect_binary_kind() -> str:
     from .inject import detect_binary_kind
     return detect_binary_kind()
-
-
-def _disclose_superseded_stores(project_root: str) -> None:
-    """旧 store 一次性失效披露（OPS see1550/1 bump；不读不写不删旧条目）。"""
-    root = Path(project_root) / ".qa-cache"
-    disclose_superseded(project_root,
-                        root / "gqt-mutation-resume-v2",
-                        root / "gqt-coverage")
 
 
 def jobs_cap() -> int:
@@ -194,7 +186,6 @@ def run_mutation_files(
     dry_run: bool = False,
     tests_glob: str | None = None,
     jobs: int | None = None,
-    resume: bool = False,
     binary_kind: str | None = None,
     timing_store=None,
     mutation_warning: int | None = None,
@@ -214,7 +205,7 @@ def run_mutation_files(
     if dry_run:
         return _run_mutation_files_impl(
             files, project_root, budget=budget, timeout_s=timeout_s,
-            dry_run=dry_run, tests_glob=tests_glob, jobs=jobs, resume=resume,
+            dry_run=dry_run, tests_glob=tests_glob, jobs=jobs,
             binary_kind=binary_kind, timing_store=timing_store,
             mutation_warning=mutation_warning,
             timeout_factor=timeout_factor, mutate_all=mutate_all,
@@ -226,7 +217,7 @@ def run_mutation_files(
     t0 = time.monotonic()
     envelope = _run_mutation_files_impl(
         files, project_root, budget=budget, timeout_s=timeout_s,
-        dry_run=dry_run, tests_glob=tests_glob, jobs=jobs, resume=resume,
+        dry_run=dry_run, tests_glob=tests_glob, jobs=jobs,
         binary_kind=binary_kind, timing_store=timing_store,
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, reuse_coverage=reuse_coverage,
@@ -312,7 +303,7 @@ def _zero_ref_terminal(file: str, total: int,
 def _single_file_serial_gate(files: list[str], project_root: str, *,
                              budget: int, timeout_s: int,
                              tests_glob: str | None, jobs: int,
-                             dry_run: bool, resume: bool,
+                             dry_run: bool,
                              binary_kind: str | None, timing_store,
                              mutation_warning: int | None,
                              timeout_factor: float | None,
@@ -366,7 +357,7 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
     if total == 0 or 0 < total <= jobs or cost_serial:
         r = run_mutation(files[0], project_root, budget=budget,
                          timeout_s=timeout_s, dry_run=False,
-                         tests_glob=tests_glob, resume=resume,
+                         tests_glob=tests_glob,
                          binary_kind=binary_kind,
                          timing_store=timing_store,
                          mutation_warning=mutation_warning,
@@ -393,7 +384,6 @@ def _run_mutation_files_impl(
     dry_run: bool = False,
     tests_glob: str | None = None,
     jobs: int | None = None,
-    resume: bool = False,
     binary_kind: str | None = None,
     timing_store=None,
     mutation_warning: int | None = None,
@@ -429,12 +419,11 @@ def _run_mutation_files_impl(
     identity = identity_pack(project_root, kind)
     clock = clock or StageClock()
     knob_state = knob_state if knob_state is not None else {}
-    _disclose_superseded_stores(project_root)
     # SEE-1413：--jobs 1（显式串行）走单文件串行快路径；缺省时默认并行
     # 上限几乎必然 >1，不需要在这里走快路径。
     if len(files) == 1 and jobs == 1:
         return _serial_fast_path(files[0], project_root, budget, timeout_s,
-                                 dry_run, tests_glob, resume, binary_kind,
+                                 dry_run, tests_glob, binary_kind,
                                  timing_store, mutation_warning,
                                  timeout_factor, reuse_coverage, identity,
                                  worker_channel=worker_channel,
@@ -458,7 +447,7 @@ def _run_mutation_files_impl(
             ret, tests_glob, selection_meta = _single_file_serial_gate(
                 files, project_root, budget=budget, timeout_s=timeout_s,
                 tests_glob=tests_glob, jobs=jobs, dry_run=dry_run,
-                resume=resume, binary_kind=binary_kind,
+                binary_kind=binary_kind,
                 timing_store=timing_store, mutation_warning=mutation_warning,
                 timeout_factor=timeout_factor, mutate_all=mutate_all,
                 worker_channel=worker_channel, select_mode=select_mode)
@@ -469,7 +458,7 @@ def _run_mutation_files_impl(
         prewarm_info = prewarm_import(project_root)
     chunks, settled, v2ctx = _build_chunks(files, project_root, budget,
                                            timeout_s, tests_glob, jobs,
-                                           resume, binary_kind=binary_kind,
+                                           binary_kind=binary_kind,
                                            mutation_warning=mutation_warning,
                                            timeout_factor=timeout_factor,
                                            mutate_all=mutate_all,
@@ -579,7 +568,6 @@ def _chunk_worker(payload: dict) -> dict:
     timeout_factor（§SPEC-1420-02）随 payload 穿线。
     identity（SEE-1550）：父层身份包随 payload 注入——多 worker 同 key。
     """
-    resume = bool(payload.get("resume"))
     binary_kind = payload.get("binary_kind")
     timeout_factor = payload.get("timeout_factor")
     identity = payload.get("identity")
@@ -590,7 +578,7 @@ def _chunk_worker(payload: dict) -> dict:
         return run_mutation(
             payload["file"], payload["project_root"], budget=payload["budget"],
             timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
-            resume=resume, binary_kind=binary_kind,
+            binary_kind=binary_kind,
             timeout_factor=timeout_factor,
             mutate_all=bool(payload.get("mutate_all")),
             progress=payload.get("progress"),
@@ -603,7 +591,7 @@ def _chunk_worker(payload: dict) -> dict:
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
         precomputed_baseline=payload["baseline"],
         retry_ids=payload["retry_ids"],
-        resume=resume, binary_kind=binary_kind,
+        binary_kind=binary_kind,
         timeout_factor=timeout_factor,
         progress=payload.get("progress"),
         identity=identity,
@@ -786,8 +774,7 @@ def _file_summary(agg: dict, passthrough_keys: tuple[str, ...],
 
 
 def _build_chunks(files: list[str], project_root: str, budget: int,
-                  timeout_s: int, tests_glob: str | None,
-                  jobs: int, resume: bool = False,
+                  timeout_s: int, tests_glob: str | None, jobs: int,
                   binary_kind: str | None = None,
                   mutation_warning: int | None = None,
                   timeout_factor: float | None = None,
@@ -812,16 +799,19 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     run_id（SEE-1525）是本 run 的进度面标识，随 chunk 穿透到各 worker（同一
     run 的 per-worker 分片聚合在同一个目录下）。
     """
+    # A19（SEE-1594 S5）：baseline 共享判定必须使用实际生效的 select_mode
+    # （缺省 full 会把自动选面 glob 判成 None → 多文件 baseline 不共享 →
+    # chunk 退串行）。
     baselines, baseline_failures = _precompute_baselines(
         files, project_root, timeout_s, tests_glob, clock=clock,
-        knob_state=knob_state)
+        knob_state=knob_state, select_mode=select_mode)
     run_id = new_run_id()
     chunks: list[dict] = []
     settled: list[dict] = []
     v2ctx: dict = {}
     for f in files:
         file_chunks, file_ctx, file_settled = _plan_file_chunks(
-            f, project_root, budget, timeout_s, tests_glob, jobs, resume,
+            f, project_root, budget, timeout_s, tests_glob, jobs,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
             reuse_coverage, baselines, baseline_failures, run_id,
             identity=identity, worker_channel=worker_channel, clock=clock,
@@ -866,7 +856,7 @@ def _ensure_shared_baseline(project_root: str, glob: str | None, jobs: int,
 
 
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
-                      resume, binary_kind, mutation_warning, timeout_factor,
+                      binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
                       baseline_failures=None, run_id=None,
                       identity: dict | None = None,
@@ -920,7 +910,6 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         identity, project_root, _res_path_of(f, project_root), worker_channel)
     store2 = ResumeStoreV2(project_root, f, glob, binary_kind=binary_kind,
                            identity=identity)
-    store2.disclose_v1_superseded()
     old_manifest = store2.load_manifest()
     entries = store2.load_entries()
     # killed 证书复用门（SEE-1550 §SPEC-007）：定向校验 killer 闭包
@@ -947,7 +936,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         # 2≠1，白付一次全套 GUT）。
         r = run_mutation(f, project_root, budget=budget,
                          timeout_s=timeout_s, tests_glob=glob,
-                         resume=False, binary_kind=binary_kind,
+                         binary_kind=binary_kind,
                          mutation_warning=None, timeout_factor=timeout_factor,
                          mutate_all=mutate_all,
                          precomputed_baseline=baseline,
@@ -975,7 +964,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             "file": f, "project_root": project_root, "budget": budget,
             "timeout_s": timeout_s, "tests_glob": glob, "serial": True,
             "selection_meta": selection_meta, "selection_mode": select_mode,
-            "resume": resume, "binary_kind": binary_kind,
+            "binary_kind": binary_kind,
             "timeout_factor": timeout_factor, "total_sites": raw_total,
             "attention": attention, "mutate_all": mutate_all,
             "progress": {"run_id": run_id, "worker": "serial",
@@ -1001,7 +990,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
         if select_mode == "line":
             chunks, groups, no_mapped = _line_group_chunks(
                 f, project_root, glob, binary_kind, executed_list,
-                selection_meta, baseline, resume, timeout_factor, timeout_s,
+                selection_meta, baseline, timeout_factor, timeout_s,
                 budget, mutate_all, attention, run_id=run_id,
                 identity=identity, worker_channel=worker_channel,
                 total_sites=raw_total)
@@ -1026,14 +1015,14 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             return chunks, ctx, None
         chunks, groups = _fn_group_chunks(
             f, project_root, glob, binary_kind, executed_list, src,
-            baseline, resume, timeout_factor, timeout_s, budget, mutate_all,
+            baseline, timeout_factor, timeout_s, budget, mutate_all,
             attention, run_id=run_id, identity=identity,
             worker_channel=worker_channel, selection_meta=selection_meta,
             total_sites=raw_total)
         ctx["selection_groups"] = groups
         return chunks, ctx, None
     chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
-                              binary_kind, ids, baseline, resume,
+                              binary_kind, ids, baseline,
                               timeout_factor, raw_total, attention, jobs,
                               run_id=run_id, identity=identity,
                               worker_channel=worker_channel,
@@ -1053,7 +1042,7 @@ def _fid_of_line(registry: dict, line: int) -> str | None:
 
 
 def _fn_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
-                     src, baseline, resume, timeout_factor, timeout_s, budget,
+                     src, baseline, timeout_factor, timeout_s, budget,
                      mutate_all, attention, *, run_id, identity,
                      worker_channel, selection_meta, total_sites):
     """按函数分组出 chunk：每 chunk 独立选择目录 glob，基线共享文件级面。
@@ -1092,7 +1081,7 @@ def _fn_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
         chunks.append({
             "file": f, "project_root": project_root, "budget": budget,
             "timeout_s": timeout_s, "tests_glob": group_glob,
-            "resume": resume, "binary_kind": binary_kind,
+            "binary_kind": binary_kind,
             "timeout_factor": timeout_factor, "total_sites": total_sites,
             "attention": attention, "mutate_all": mutate_all,
             "retry_ids": [m.stable_id for m in mutants],
@@ -1105,7 +1094,7 @@ def _fn_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
 
 
 def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
-                       selection_meta, baseline, resume, timeout_factor,
+                       selection_meta, baseline, timeout_factor,
                        timeout_s, budget, mutate_all, attention, *, run_id,
                        identity, worker_channel, total_sites):
     """SEE-1587 行级分组：按位点所在行的测试集签名 `frozenset(line→tests)`
@@ -1172,7 +1161,7 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
         chunks.append({
             "file": f, "project_root": project_root, "budget": budget,
             "timeout_s": timeout_s, "tests_glob": group_glob,
-            "resume": resume, "binary_kind": binary_kind,
+            "binary_kind": binary_kind,
             "timeout_factor": timeout_factor, "total_sites": total_sites,
             "attention": attention, "mutate_all": mutate_all,
             "retry_ids": [m.stable_id for m in mutants],
@@ -1240,7 +1229,7 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
 
 
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
-                     ids, baseline, resume, timeout_factor, raw_total,
+                     ids, baseline, timeout_factor, raw_total,
                      attention, jobs, run_id=None, identity=None,
                      worker_channel=None, select_mode: str = "full"):
     """retry 位点保序分片（拒轮转——分片间零重叠，per-id 条目写无竞态）。
@@ -1265,7 +1254,8 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
             "binary_kind": binary_kind,
             "retry_ids": slice_ids,
             "baseline": baseline,
-            "resume": resume,
+            # resume 已退役（A13）：worker payload 不再携带
+
             "timeout_factor": timeout_factor,
             "total_sites": raw_total,
             "attention": attention,
@@ -1285,7 +1275,8 @@ def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
 
 def _precompute_baselines(files, project_root, timeout_s, tests_glob,
                           clock: StageClock | None = None,
-                          knob_state: dict | None = None):
+                          knob_state: dict | None = None,
+                          select_mode: str = "full"):
     """并发分派【之前】单进程冷启动 baseline（SPEC-005 锚点）。
 
     复用条件（SPEC-008）：同一 tests_glob（显式相同 / 全部退回全量 /
@@ -1307,8 +1298,21 @@ def _precompute_baselines(files, project_root, timeout_s, tests_glob,
     globs = {}
     for f in files:
         with clock.stage("test_scan"):
-            g = tests_glob if tests_glob \
-                else _auto_scan_tests_glob(f, project_root)
+            if tests_glob:
+                g = tests_glob
+            else:
+                # A19：baseline 共享判定使用实际生效 select_mode；单文件
+                # 选面不可用（缺映射/缺文件等）→ glob=None 跳过预跑——
+                # 逐文件的 fail-loud/settled 归属后续 _plan_file_chunks。
+                from .truth_select import MutationSelectionError
+                try:
+                    g = _auto_scan_tests_glob(f, project_root,
+                                              select_mode=select_mode)
+                except MutationSelectionError as e:
+                    print(f"baseline pre-run: selection unavailable for "
+                          f"{f} ({e}) — skipping shared baseline for this "
+                          f"file", file=sys.stderr)
+                    g = None
         globs[f] = g
     baselines: dict = {}
     failures: dict[str, str] = {}
@@ -1413,7 +1417,8 @@ def _provision_farm_slot(project_root: str,
         return project_root, None
 
 
-def _auto_scan_tests_glob(file_path: str, project_root: str) -> str | None:
+def _auto_scan_tests_glob(file_path: str, project_root: str,
+                          select_mode: str = "full") -> str | None:
     """父层推导 scoped glob（与 worker 侧 run_mutation 内推导同口径）。"""
     from .runner import _auto_scan_tests_glob as _runner_scan
     return _runner_scan(file_path, project_root)

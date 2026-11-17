@@ -899,9 +899,8 @@ def ownership_for(project_root: str, target_file: str,
     """新鲜映射 → RuntimeOwnership；无新鲜映射/解析异常 → None（A09）。
 
     None = 不产出 kill 证书 → killed 保守重跑（fail-safe 只偏向重跑）。
-    解析异常具名披露到 stderr（不吞错）；**绝不回退静态
-    静态索引**（结构性兜底已退役——静态归属会给 stale 索引签发
-    kill 证书）。"""
+    解析异常具名披露到 stderr（不吞错）；绝不回退静态归属索引
+    （结构性兜底已退役——静态归属会给 stale 索引签发 kill 证书）。"""
     import sys
     try:
         sel = resolve_selection(project_root, target_file, map_path_override)

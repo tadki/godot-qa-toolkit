@@ -199,16 +199,13 @@ def identity_sha1(pack: dict) -> str:
 # killed 证书（§SPEC-007）
 # ---------------------------------------------------------------------------
 
-# 测试脚本内 func 定义行（GUT 测试名即 func 名）；只认 tests 树。
-_TEST_FUNC_PATTERN = re.compile(r"(?m)^\s*func\s+(test_\w+)\s*\(")
-
 _DEPS_MAX_DEPTH = 8
 
 
-# A09（SEE-1594 S4）：静态 TestOwnershipIndex 已退役——kill 证书归属唯一
-# 来源 = 运行时真值映射（truth_select.RuntimeOwnership）；无新鲜映射 →
-# 证书不产出（保守重跑），绝不静态兜底。_TEST_FUNC_PATTERN 保留为
-# gdself 诊断面资产。
+# A09（SEE-1594 S4）：静态 TestOwnershipIndex（含 _TEST_FUNC_PATTERN 静态
+# 扫描）已物理退役——kill 证书归属唯一来源 = 运行时真值映射
+# （truth_select.RuntimeOwnership）；无新鲜映射 → 证书不产出（保守重跑），
+# 绝不静态兜底。
 
 def _res_to_fs(project_root: str, res_path: str) -> Path:
     return Path(project_root) / res_path.removeprefix("res://")

@@ -949,8 +949,6 @@ def _attach_killed_certificate(verdict: dict, tail: str,
     cert = killer_certificate(
         new_failures, owner, project_root,
         ownership_source=getattr(owner, "source", "runtime_mapping"))
-    import sys as _sys
-    _ln = sorted(new_failures)[-1] if new_failures else "?"
     if cert is not None:
         verdict["killed_by"] = cert
 

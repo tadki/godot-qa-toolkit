@@ -35,7 +35,7 @@ def _write_project(tmp_path):
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
     save = proj / "tests" / "unit" / "save"
     save.mkdir(parents=True, exist_ok=True)
-    # 杀手测试可归因（TestOwnershipIndex 唯一命中）——证书真实签发与校验
+    # 杀手测试可归因（运行时映射唯一命中）——证书真实签发与校验
     # 才能走通（否则证书门保守重跑，那是另一条语义，不是本钉子的对象）。
     (save / "test_save.gd").write_text(
         'preload("res://calc.gd")\n\n'

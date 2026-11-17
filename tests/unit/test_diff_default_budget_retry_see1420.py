@@ -146,8 +146,6 @@ class TestBudgetOnRetryEndToEnd:
 
             return kill_all
 
-        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
-        # A09：killed 复用唯一依据 = 运行时映射证书（coverage 过滤关断隔离）
         # A09：killed 复用唯一依据 = 新鲜运行时映射证书——首跑前与源码
         # 变更后各刷新一次映射（模拟生产 map 刷新）；coverage 过滤关断。
         import attribution_fixtures as _fx

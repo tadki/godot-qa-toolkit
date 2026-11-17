@@ -549,15 +549,16 @@ class TestS3UnifiedPrefilter:
     def test_disclosure_parity_with_fixed_resolve(self, tmp_path, monkeypatch,
                                                   capsys):
         """S4 首项：固定 resolve 返回——planner/executor 两包装的
-        coverage_prefilter 披露逐字段一致（含 stderr 原因），不再仅
-        membership 断言。"""
+        coverage_prefilter 披露逐字段一致，且 stderr 原因行逐字段一致
+        （真实 capsys 断言，非仅 membership）。"""
         from types import SimpleNamespace
 
         from godot_qa_toolkit.mutation import coverlink, executor, planner
 
         def fixed_resolve(project_root, file_path, tests_glob, scripts=None,
                           binary_kind=None, identity=None, map_path=None):
-            return ({2}, {2, 3, 4}, "projection_store: hit",
+            # miss 形态：触发 helper 的 stderr 原因行（原因逐字段可比）
+            return (None, None, "projection_store: stale entry — reproject",
                     "projection_store")
 
         monkeypatch.setattr(coverlink, "resolve_coverage_for_prefilter",
@@ -575,12 +576,15 @@ class TestS3UnifiedPrefilter:
             unc, pool = fn(plan, path_arg, str(proj), "res://tests/unit/",
                            None, True, disclosures=disclosures,
                            identity=None, tests_scripts=[UNIT])
+            err = capsys.readouterr().err
             out[name] = ([u.stable_id for u in unc],
                          [p.stable_id for p in pool],
-                         dict(disclosures))
-        assert out["planner"] == out["executor"]
-        unc_ids, _, disc = out["planner"]
-        assert unc_ids == ["m2"]            # line 3 ∈ inst ∧ ∉ covered
+                         dict(disclosures), err)
+        assert out["planner"] == out["executor"], (
+            f"disclosure/stderr parity broken: {out}")
+        # miss 形态：不过滤（宁多跑），披露保留 resolve 给出的 source
+        unc_ids, pool_ids, disc = out["planner"][:3]
+        assert unc_ids == [] and pool_ids == ["m1", "m2"]
         assert disc == {"coverage_prefilter": "projection_store"}
 
     def test_missing_line_is_contract_violation(self, tmp_path):

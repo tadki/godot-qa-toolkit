@@ -60,16 +60,6 @@ def _toy_gdself_project(base: Path) -> Path:
     return root
 
 
-@given("a toy project with class autoload scene literal and dynamic consumers")
-def given_toy_factory(bdd_state: dict, tmp_path: Path) -> None:
-    bdd_state["proj"] = _toy_gdself_project(tmp_path)
-
-
-@given("a toy project with a scene-bound script consumed only via its scene")
-def given_scene_script(bdd_state: dict, tmp_path: Path) -> None:
-    bdd_state["proj"] = _toy_gdself_project(tmp_path)
-
-
 @given("a toy project with a hub class consumed by many production files")
 def given_hub(bdd_state: dict, tmp_path: Path) -> None:
     bdd_state["proj"] = _toy_gdself_project(tmp_path)

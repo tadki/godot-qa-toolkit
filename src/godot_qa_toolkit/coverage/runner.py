@@ -762,6 +762,18 @@ def run_coverage(
         raise FileNotFoundError(
             f"coverage target not found: {file_path} (anchored: {path})")
 
+    # §SPEC-022：入口先自愈被 SIGKILL 等不可拦截中断留下的陈旧插桩现场；
+    # 无法确认可清洁 → fail-loud（`CoverageTxnError`）。
+    try:
+        selfheal_stale_instrumentation(project_root)
+    except CoverageTxnError as e:
+        return {
+            "tool": "measure.coverage",
+            "ok": False,
+            "summary": {"file": str(path), "run_error": True, "error": str(e)},
+            "failures": [{"reason": str(e)}],
+        }
+
     from .evidence import (
         build_bundle,
         build_run_record,
@@ -785,6 +797,21 @@ def run_coverage(
                 "error": read_error,
             },
             "failures": [{"reason": read_error}],
+        }
+    # §SPEC-022 陈旧现场守卫：目标源已含探针标记 = 旧版本中断残留，拒绝在其
+    # 之上再次插桩（否则会把残留当源码静默放大），显式要求从版本库还原。
+    # 当前版本 shadow 插桩已不写真实文件，此守卫只兜住历史/外部残留。
+    if _PROBE_PREFIX in original_src:
+        stale = (
+            f"target source appears already instrumented (contains "
+            f"'{_PROBE_PREFIX}'); refusing to run — this is leftover from an "
+            f"interrupted coverage run. Restore the file from version control "
+            f"(e.g. `git checkout -- {path}`) and re-run.")
+        return {
+            "tool": "measure.coverage",
+            "ok": False,
+            "summary": {"file": str(path), "run_error": True, "error": stale},
+            "failures": [{"reason": stale}],
         }
     backup = original_src
 
@@ -1043,46 +1070,189 @@ def _gut_selection_args(tests_glob: str | None) -> list[str]:
     return [f"-gdir={gdir}"]
 
 
+class CoverageTxnError(RuntimeError):
+    """陈旧插桩事务无法安全清洁（fail-loud，绝不静默覆盖）。"""
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+def selfheal_stale_instrumentation(project_root) -> dict:
+    """§SPEC-022：恢复被中断（SIGKILL 等无法执行 finally）的插桩事务。
+
+    只处理「陈旧」事务（记录 pid 已不存在）：仅当目标当前仍含探针标记且
+    backup 校验一致时才还原原码并清理事务；目标已非探针残留（可能被用户
+    改动）或 backup 校验不符 → 记 failed，聚合后 raise `CoverageTxnError`
+    （fail-loud，不静默覆盖用户改动）。活跃事务（pid 仍存活）跳过。
+    """
+    import json as _json
+
+    txn_dir = Path(project_root) / ".qa-cache" / "coverage-txn"
+    if not txn_dir.is_dir():
+        return {"healed": 0, "skipped_active": 0, "failed": []}
+    healed = skipped = 0
+    failed: list[dict] = []
+    for txn_path in sorted(txn_dir.glob("*.json")):
+        try:
+            txn = _json.loads(txn_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            failed.append({"txn": txn_path.name, "reason": f"unreadable: {e}"})
+            continue
+        if _pid_alive(txn.get("pid")):
+            skipped += 1
+            continue
+        target = Path(txn.get("path", ""))
+        backup_path = Path(txn.get("backup", ""))
+        try:
+            current = target.read_text(encoding="utf-8")
+            original = backup_path.read_text(encoding="utf-8")
+        except OSError as e:
+            failed.append({"txn": txn_path.name, "reason": f"missing file: {e}"})
+            continue
+        if _PROBE_PREFIX not in current:
+            failed.append({
+                "txn": txn_path.name,
+                "reason": "target no longer looks instrumented; refusing to "
+                          "overwrite possible user edits"})
+            continue
+        if txn.get("sha256") and hashlib.sha256(
+                original.encode("utf-8")).hexdigest() != txn["sha256"]:
+            failed.append({"txn": txn_path.name, "reason": "backup sha mismatch"})
+            continue
+        try:
+            target.write_text(original, encoding="utf-8")
+        except OSError as e:
+            failed.append({"txn": txn_path.name,
+                           "reason": f"restore failed: {e}"})
+            continue
+        for pth in (txn_path, backup_path):
+            try:
+                pth.unlink(missing_ok=True)
+            except OSError:
+                pass
+        healed += 1
+    if failed:
+        raise CoverageTxnError(
+            f"stale coverage instrumentation cannot be safely cleaned: {failed}")
+    return {"healed": healed, "skipped_active": skipped, "failed": []}
+
+
 def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: str,
                           total_lines: int, min_percent: float, timeout_s: int,
                           tests_glob: str | None = None) -> dict | None:
-    """落盘插桩文件 → headless GUT → 恢复原文件。返回 None 表示可继续统计命中；
-    否则返回已完成的中止契约（timeout / 启动失败 / GUT runner 缺失）。"""
-    with tempfile.TemporaryDirectory() as workdir:
-        backup_path = os.path.join(workdir, "original.gd")
-        shutil.copy2(str(path), backup_path)
+    """就地插桩 → GUT → **事务化恢复**（§SPEC-022）。
 
-        path.write_text(instrumented, encoding="utf-8")
-        gut_tail = ""
-        try:
-            gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
-            if not os.path.isfile(gut_fs):
-                raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
+    direct coverage 的设计是临时改写目标 .gd 完成插桩（契约写入边界），跑完
+    恢复。缺陷：SIGTERM/SIGKILL/超时打断时 finally 不执行 → 真实文件残留探针。
+    路由取舍见 §SPEC-022：shadow/独立副本插桩是更彻底的方向，但它要求 GUT
+    在完整项目克隆（含 `.godot` 实拷贝）上运行，会与测量子系统的 shadow
+    构建耦合、并对 coverage 的 user:// sink 与证据身份引入 parity 风险，属
+    独立迁移（登记 B）。本轮按最小正确修复：不改插桩写法，把「恢复」升级为
+    可验证事务——
+    - 事务记录 `<root>/.qa-cache/coverage-txn/<run>.json`（path/pid/sha256/
+      backup），backup 落持久路径并 fsync；
+    - finally 覆盖正常 / 异常 / GUT 超时（超时在内部捕获）恢复并清理事务；
+    - SIGINT/SIGTERM 处理器恢复并清理后按原默认行为退出；
+    - SIGKILL 不可拦截 → 下次 `measure coverage` 入口
+      `selfheal_stale_instrumentation` 依陈旧事务恢复；无法确认清洁则 fail-loud。
+
+    返回 None 表示可继续统计命中；否则返回已完成的中止契约（timeout /
+    启动失败 / GUT runner 缺失 / 事务不可建立）。"""
+    import json as _json
+    import signal as _signal
+    import uuid as _uuid
+
+    root = Path(project_root).resolve()
+    target = Path(path)
+    orig_sha = hashlib.sha256(backup.encode("utf-8")).hexdigest()
+    txn_dir = root / ".qa-cache" / "coverage-txn"
+    run_id = _uuid.uuid4().hex
+    backup_path = txn_dir / f"{run_id}.orig"
+    txn_path = txn_dir / f"{run_id}.json"
+
+    def _clear_txn() -> None:
+        for pth in (txn_path, backup_path):
             try:
-                # SEE-1400 §SPEC-003：coverage 与 mutation 同受跨进程槽位闸。
-                from ..mutation.godot_gate import GlobalGodotGate
-                with GlobalGodotGate(project_root):
-                    r = spawn_godot(
-                        [godot_command(), "--headless", "--path", _godot_project_path(project_root),
-                         "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob), "-gexit"],
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout_s,
-                        cwd=project_root,
-                    )
-                gut_tail = (r.stdout + r.stderr)[-1500:]
-            except subprocess.TimeoutExpired:
-                # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行补救指令。
-                return _gut_abort_result(
-                    path, total_lines, min_percent, "GUT timed out",
-                    f"GUT timed out after {timeout_s}s",
-                    run_error=True,
-                    hint=suggested_action(BUDGET_CAP_S))
-            finally:
-                path.write_text(backup, encoding="utf-8")
-        except Exception:
-            path.write_text(backup, encoding="utf-8")
-            raise
+                pth.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _restore() -> None:
+        try:
+            target.write_text(backup, encoding="utf-8")
+        finally:
+            _clear_txn()
+
+    prev_handlers: dict = {}
+
+    def _on_signal(signum, frame):
+        try:
+            _restore()
+        finally:
+            try:
+                _signal.signal(signum,
+                               prev_handlers.get(signum, _signal.SIG_DFL))
+                os.kill(os.getpid(), signum)
+            except (ValueError, OSError):
+                pass
+
+    try:
+        txn_dir.mkdir(parents=True, exist_ok=True)
+        backup_path.write_text(backup, encoding="utf-8")
+        with open(backup_path, "rb") as _bf:
+            os.fsync(_bf.fileno())
+        txn_path.write_text(_json.dumps({
+            "path": str(target), "pid": os.getpid(), "sha256": orig_sha,
+            "backup": str(backup_path), "started_at": time.time(),
+        }), encoding="utf-8")
+    except OSError as e:
+        _clear_txn()
+        return _gut_abort_result(
+            path, total_lines, min_percent, "coverage transaction unavailable",
+            f"cannot establish a recoverable instrumentation transaction under "
+            f"{txn_dir}: {e} (refusing to instrument the real file)",
+            run_error=True)
+
+    for _sig in (_signal.SIGINT, _signal.SIGTERM):
+        try:
+            prev_handlers[_sig] = _signal.signal(_sig, _on_signal)
+        except (ValueError, OSError):
+            pass
+
+    try:
+        target.write_text(instrumented, encoding="utf-8")
+        gut_tail = ""
+        gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
+        if not os.path.isfile(gut_fs):
+            raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
+        try:
+            # SEE-1400 §SPEC-003：coverage 与 mutation 同受跨进程槽位闸。
+            from ..mutation.godot_gate import GlobalGodotGate
+            with GlobalGodotGate(project_root):
+                r = spawn_godot(
+                    [godot_command(), "--headless", "--path",
+                     _godot_project_path(project_root),
+                     "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob),
+                     "-gexit"],
+                    capture_output=True, text=True, timeout=timeout_s,
+                    cwd=project_root,
+                )
+            gut_tail = (r.stdout + r.stderr)[-1500:]
+        except subprocess.TimeoutExpired:
+            # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行补救指令。
+            return _gut_abort_result(
+                path, total_lines, min_percent, "GUT timed out",
+                f"GUT timed out after {timeout_s}s",
+                run_error=True, hint=suggested_action(BUDGET_CAP_S))
 
         if r.returncode != 0 and _looks_like_godot_launch_failure(gut_tail):
             return _gut_abort_result(
@@ -1091,7 +1261,14 @@ def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: st
                 "godot launch failed (tests did not run): "
                 f"{gut_tail.strip()[:200]}",
                 run_error=True)
-    return None
+        return None
+    finally:
+        for _sig, _h in prev_handlers.items():
+            try:
+                _signal.signal(_sig, _h)
+            except (ValueError, OSError):
+                pass
+        _restore()
 
 
 def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[set[int], int]:

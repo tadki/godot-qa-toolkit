@@ -1,0 +1,1003 @@
+{
+  "version": "mutation-acceptance/1",
+  "note": "SEE-1594 A 面验收矩阵。占位符：{kol} {target} {budget} {map} {stable} {line} {testdir} {zero_ref} {worker_target}。use_map=true 时 env 注入 GQT_ATTRIBUTION_MAP={map}。每个 case 只允许 PASS/FAIL，不允许 SKIP（未跑/超时/找不到样本=FAIL）。",
+  "cases": [
+    {
+      "id": "A0-argparse-bad-select",
+      "kind": "cli",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--select",
+        "bogus",
+        "--dry-run"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": [
+          2
+        ],
+        "json": false,
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "A0-argparse-bad-budget",
+      "kind": "cli",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--budget",
+        "abc",
+        "--dry-run"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": [
+          2
+        ],
+        "json": false,
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "A0-dryrun-flat-envelope",
+      "kind": "cli",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--budget",
+        "{budget}"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "tool": "mutation",
+        "single_json": true,
+        "no_traceback": true,
+        "top_keys": [
+          "tool",
+          "ok",
+          "summary",
+          "failures"
+        ],
+        "summary_present": [
+          "mutants"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-select-full",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--select",
+        "full",
+        "--dry-run",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_equals": {
+          "selection_mode": "full"
+        }
+      }
+    },
+    {
+      "id": "A0-dryrun-select-line-default",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_in": {
+          "selection_mode": [
+            "line",
+            "lines",
+            "mutation"
+          ]
+        }
+      }
+    },
+    {
+      "id": "A0-dryrun-budget-truncation",
+      "kind": "cli",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--budget",
+        "1",
+        "--mutation-warning",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_truthy": [
+          "total_sites"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-lines-caliper",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--lines",
+        "{line}",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_equals": {
+          "selection_mode": "lines"
+        },
+        "summary_present": [
+          "lines_selection"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-mutation-id",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--mutation",
+        "{stable}",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_equals": {
+          "selection_mode": "mutation"
+        }
+      }
+    },
+    {
+      "id": "A0-dryrun-explicit-tests",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--tests",
+        "{testdir}",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_equals": {
+          "selection_mode": "explicit_tests"
+        }
+      }
+    },
+    {
+      "id": "A0-file-lines-address",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}#{line}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "summary_equals": {
+          "selection_mode": "lines"
+        }
+      }
+    },
+    {
+      "id": "A1-exec-jobs1-flat",
+      "kind": "cli",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--jobs",
+        "1",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 420,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "tool": "mutation",
+        "single_json": true,
+        "no_traceback": true,
+        "summary_equals": {
+          "jobs": 1
+        },
+        "summary_present": [
+          "mutants"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-lines-caliper",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--lines",
+        "{line}",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 300,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "summary_equals": {
+          "selection_mode": "lines"
+        }
+      }
+    },
+    {
+      "id": "A1-exec-mutation-caliper",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--mutation",
+        "{stable}",
+        "--budget",
+        "1"
+      ],
+      "timeout": 300,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "summary_equals": {
+          "selection_mode": "mutation"
+        }
+      }
+    },
+    {
+      "id": "A1-exec-worker-channel",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--worker-channel",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 420,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "summary_present": [
+          "worker_channel"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-stage-timings",
+      "kind": "cli",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--jobs",
+        "1",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 420,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "summary_present": [
+          "stage_timings",
+          "stage_reconciliation"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-no-reuse-coverage",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--no-reuse-coverage",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 420,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "A1-measure-suite",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "argv": [
+        "measure",
+        "suite",
+        "--project-root",
+        "{kol}",
+        "--out",
+        "{kol}/.qa-cache/acc-recipe.json"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "tool": "measure.suite",
+        "single_json": true,
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "A1-measure-complexity",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "argv": [
+        "measure",
+        "complexity",
+        "{kol}/{target}"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "tool": "measure.complexity",
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "A1-measure-risk-anchored",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "argv": [
+        "measure",
+        "risk",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--skip-measure",
+        "--report",
+        "{kol}/.qa-cache/acc-risk.json"
+      ],
+      "timeout": 180,
+      "expect": {
+        "rc": [
+          0
+        ],
+        "json": true,
+        "tool": "measure.risk",
+        "no_traceback": true,
+        "summary_equals": {
+          "evidence_level": "exploratory"
+        }
+      }
+    },
+    {
+      "id": "A1-measure-coverage",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "argv": [
+        "measure",
+        "coverage",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--timeout",
+        "120"
+      ],
+      "timeout": 540,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "tool": "measure.coverage",
+        "single_json": true,
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "A2-git-diff-no-arg",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "argv": [
+        "mutation",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--budget",
+        "1"
+      ],
+      "timeout": 120,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "failures_reason_regex": [
+          "no changed|git|nothing to mutate"
+        ]
+      }
+    },
+    {
+      "id": "A2-git-diff-non-git",
+      "kind": "cli",
+      "profiles": [
+        "matrix"
+      ],
+      "cwd": "/tmp",
+      "argv": [
+        "mutation",
+        "--project-root",
+        "/tmp/see1594-not-a-repo",
+        "--dry-run"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": [
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "failures_reason_regex": [
+          "does not exist|not a git repository|nothing to mutate"
+        ]
+      }
+    },
+    {
+      "id": "OC-probe-suggested-action",
+      "kind": "probe",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "probe": "suggested_action"
+    },
+    {
+      "id": "OC-probe-envelopes",
+      "kind": "probe",
+      "profiles": [
+        "matrix",
+        "output-contract"
+      ],
+      "probe": "envelopes"
+    },
+    {
+      "id": "FI-bad-root",
+      "kind": "cli",
+      "profiles": [
+        "fault-injection"
+      ],
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "/nonexistent-see1594",
+        "--dry-run"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": [
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "failures_reason_regex": [
+          "does not exist|not a directory"
+        ]
+      }
+    },
+    {
+      "id": "FI-bad-godot",
+      "kind": "cli",
+      "profiles": [
+        "fault-injection"
+      ],
+      "env": {
+        "GQT_GODOT_BIN": "/nonexistent-see1594/godot"
+      },
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": [
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "failures_reason_regex": [
+          "godot|binary|executable|unavailable"
+        ]
+      }
+    },
+    {
+      "id": "FI-missing-gut",
+      "kind": "cli",
+      "profiles": [
+        "fault-injection"
+      ],
+      "use_map": true,
+      "pre": [
+        {
+          "op": "rm",
+          "path": "{kol}/addons/gut/gut_cmdln.gd"
+        }
+      ],
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 180,
+      "expect": {
+        "rc": [
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "failures_reason_regex": [
+          "not found|gut"
+        ]
+      }
+    },
+    {
+      "id": "FI-bad-explicit-map",
+      "kind": "cli",
+      "profiles": [
+        "fault-injection"
+      ],
+      "pre": [
+        {
+          "op": "write",
+          "path": "{kol}/.qa-cache/acc-corrupt-map.json",
+          "text": "{ not valid json"
+        }
+      ],
+      "env": {
+        "GQT_ATTRIBUTION_MAP": "{kol}/.qa-cache/acc-corrupt-map.json"
+      },
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--no-attribution-auto",
+        "--dry-run",
+        "--budget",
+        "1"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": [
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "failures_reason_regex": [
+          "map|schema|attribution|json"
+        ]
+      }
+    },
+    {
+      "id": "FI-missing-tests-glob",
+      "kind": "cli",
+      "profiles": [
+        "fault-injection"
+      ],
+      "use_map": true,
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--tests",
+        "res://see1594_absent_dir/",
+        "--budget",
+        "1",
+        "--mutate-all"
+      ],
+      "timeout": 300,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "ok": false
+      }
+    },
+    {
+      "id": "FI-perm-target",
+      "kind": "cli",
+      "profiles": [
+        "fault-injection"
+      ],
+      "pre": [
+        {
+          "op": "chmod",
+          "path": "{kol}/{target}",
+          "mode": 0
+        }
+      ],
+      "argv": [
+        "mutation",
+        "{target}",
+        "--project-root",
+        "{kol}",
+        "--dry-run",
+        "--budget",
+        "1"
+      ],
+      "timeout": 60,
+      "expect": {
+        "rc": "nonzero",
+        "json": true,
+        "no_traceback": true
+      }
+    },
+    {
+      "id": "ZC-default-no-project-root",
+      "kind": "cli",
+      "profiles": [
+        "zero-config"
+      ],
+      "cwd": "{kol}",
+      "argv": [
+        "mutation",
+        "{target}"
+      ],
+      "timeout": 900,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "summary_present": [
+          "selection_mode"
+        ]
+      }
+    },
+    {
+      "id": "ZC-warm-rerun-no-project-root",
+      "kind": "cli",
+      "profiles": [
+        "zero-config"
+      ],
+      "cwd": "{kol}",
+      "argv": [
+        "mutation",
+        "{target}"
+      ],
+      "timeout": 900,
+      "expect": {
+        "rc": [
+          0,
+          1
+        ],
+        "json": true,
+        "no_traceback": true,
+        "summary_present": [
+          "farm"
+        ]
+      }
+    },
+    {
+      "id": "EQ-default-vs-mutate-all",
+      "kind": "equivalence",
+      "profiles": [
+        "equivalence"
+      ],
+      "use_map": true,
+      "runs": [
+        {
+          "label": "default",
+          "argv": [
+            "mutation",
+            "{target}",
+            "--project-root",
+            "{kol}",
+            "--budget",
+            "{budget}"
+          ],
+          "timeout": 600
+        },
+        {
+          "label": "mutate-all",
+          "argv": [
+            "mutation",
+            "{target}",
+            "--project-root",
+            "{kol}",
+            "--budget",
+            "{budget}",
+            "--mutate-all"
+          ],
+          "timeout": 600
+        }
+      ]
+    },
+    {
+      "id": "EQ-cold-vs-worker",
+      "kind": "equivalence",
+      "profiles": [
+        "equivalence"
+      ],
+      "use_map": true,
+      "runs": [
+        {
+          "label": "cold",
+          "env": {
+            "GQT_MUTATION_WORKER": "0"
+          },
+          "argv": [
+            "mutation",
+            "{target}",
+            "--project-root",
+            "{kol}",
+            "--budget",
+            "{budget}",
+            "--mutate-all"
+          ],
+          "timeout": 600
+        },
+        {
+          "label": "worker",
+          "argv": [
+            "mutation",
+            "{target}",
+            "--project-root",
+            "{kol}",
+            "--worker-channel",
+            "--budget",
+            "{budget}",
+            "--mutate-all"
+          ],
+          "timeout": 600
+        }
+      ]
+    },
+    {
+      "id": "EQ-fresh-vs-diff",
+      "kind": "equivalence",
+      "profiles": [
+        "equivalence"
+      ],
+      "use_map": true,
+      "runs": [
+        {
+          "label": "fresh-mutate-all",
+          "argv": [
+            "mutation",
+            "{target}",
+            "--project-root",
+            "{kol}",
+            "--budget",
+            "{budget}",
+            "--mutate-all"
+          ],
+          "timeout": 600
+        },
+        {
+          "label": "diff-reuse",
+          "argv": [
+            "mutation",
+            "{target}",
+            "--project-root",
+            "{kol}",
+            "--budget",
+            "{budget}"
+          ],
+          "timeout": 600
+        }
+      ]
+    }
+  ]
+}

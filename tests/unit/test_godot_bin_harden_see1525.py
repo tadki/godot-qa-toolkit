@@ -429,6 +429,7 @@ class TestCliContractHardening:
         assert "GQT_GODOT_BIN" in payload["summary"]["error"]
         assert payload["failures"]
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_unset_env_child_process_env_has_no_godot_bin(self, tmp_path,
                                                           monkeypatch):
         """unset 面：coverage 子进程 env 不得出现 GQT_GODOT_BIN 注入键

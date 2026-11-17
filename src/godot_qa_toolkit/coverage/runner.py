@@ -736,541 +736,133 @@ def _instrument(src: str, sink_name: str, flags: bool = False,
     return body + _probe_func(sink_name, len(manifest)), manifest
 
 
+def _err_envelope(file: str, message: str) -> dict:
+    return {"tool": "measure.coverage", "ok": False,
+            "summary": {"file": file, "run_error": True, "error": message},
+            "failures": [{"reason": message}]}
+
+
+def _write_mapping_evidence(evidence_out, file_path, gd_source, tests_glob,
+                            covered, total, probes) -> "str | None":
+    """由行级映射投影生成 coverage-evidence/2（§SPEC-025/027 A15）。
+
+    无第二次 GUT/插桩：hits_lines 来自映射投影；执行证据 probes_fired 取自
+    映射 arms_state（不得伪造）。写失败返回具名原因（调用方 fail-loud）。"""
+    try:
+        from .evidence import (build_bundle, evidence_dir_for, make_run_uuid,
+                               write_bundle)
+        d = evidence_dir_for(evidence_out)
+        d.mkdir(parents=True, exist_ok=True)
+        bundle = build_bundle(
+            run_uuid=make_run_uuid(), file_path=file_path, gd_source=gd_source,
+            tests_glob=tests_glob, hits_lines=sorted(covered),
+            probes_fired=int(probes), gut_ok=True, run_error=False,
+            timeout=False, zero_tests=False, vacuous=(total == 0))
+        write_bundle(d, bundle)
+        return None
+    except Exception as e:  # noqa: BLE001 — 具名失败，不静默
+        return f"evidence write failed: {type(e).__name__}: {e}"
+
+
 def run_coverage(
     file_path: str,
     project_root: str,
     min_percent: float = 80.0,
-    timeout_s: int = 120,
-    timing_store=None,
+    timeout_s: int | None = None,
     tests_glob: str | None = None,
     evidence_out: str | None = None,
 ) -> dict:
-    """对单个 .gd 文件算行覆盖（跑 GUT 后统计命中行）并出统一 JSON 契约。
+    """单文件行覆盖——由行级归属映射投影（§SPEC-025 唯一真源），零 GUT。
 
-    min_percent 阈值 gate（P0' 机器判定：覆盖率≥阈值=ok）。
-    返回 {"tool":"measure.coverage", "ok", "summary", "failures"}；
-    ok=True 表示覆盖率达标。`evidence_out`（§SPEC-025/026，可选）开启
-    coverage-evidence/2 生命周期：per-run UUID sink + run 记录 + bundle
-    落盘即清 sink；不传则 stdout 契约与 011b87d 逐字节一致（零漂移）。
+    - 新鲜映射 → 亚秒投影；缺失/失效 → 自动构建或增量重建（`--timeout`
+      绑定这些**真实执行阶段**；新鲜投影不启进程，无执行成本）。
+    - 旧 direct 就地插桩 + GUT + sink 执行体已物理退役；`--recover` 不再
+      作为覆盖来源（sink-recovery 已退役）。
+    - `probes_fired` 取自映射 `arms_state`（不伪造；缺失即 fail-loud）。
+    输出契约保持 file/total_lines/covered_lines/coverage_percent/min_percent/
+    branch_*/hits_lines。
     """
     from ..source_io import anchor_to_project_root, read_gd_source
+    from ..mutation import truth_select as _truth
+    from .mapping import CoverageMappingError, project_file_coverage
 
-    # §SPEC-610（SEE-1576 R-5）：与 mutation 两处检查点同口径——相对目标
-    # 锚定 --project-root（绝对路径直过）。
     path = Path(anchor_to_project_root(file_path, project_root))
     if not path.is_file():
         raise FileNotFoundError(
             f"coverage target not found: {file_path} (anchored: {path})")
-
-    # §SPEC-022：入口先自愈被 SIGKILL 等不可拦截中断留下的陈旧插桩现场；
-    # 无法确认可清洁 → fail-loud（`CoverageTxnError`）。
-    try:
-        selfheal_stale_instrumentation(project_root)
-    except CoverageTxnError as e:
-        return {
-            "tool": "measure.coverage",
-            "ok": False,
-            "summary": {"file": str(path), "run_error": True, "error": str(e)},
-            "failures": [{"reason": str(e)}],
-        }
-
-    from .evidence import (
-        build_bundle,
-        build_run_record,
-        clear_sink,
-        evidence_dir_for,
-        make_run_uuid,
-        sink_name_for,
-        update_run_record,
-        write_bundle,
-        write_run_record,
-    )
-    original_src, read_error = read_gd_source(str(path))
+    src, read_error = read_gd_source(str(path))
     if read_error is not None:
-        # §SPEC-028: single-file reads fail structurally, never crash
-        return {
-            "tool": "measure.coverage",
-            "ok": False,
-            "summary": {
-                "file": str(path),
-                "run_error": True,
-                "error": read_error,
-            },
-            "failures": [{"reason": read_error}],
-        }
-    # §SPEC-022 陈旧现场守卫：目标源已含探针标记 = 旧版本中断残留，拒绝在其
-    # 之上再次插桩（否则会把残留当源码静默放大），显式要求从版本库还原。
-    # 当前版本 shadow 插桩已不写真实文件，此守卫只兜住历史/外部残留。
-    if _PROBE_PREFIX in original_src:
-        stale = (
+        return _err_envelope(str(path), read_error)
+    if _PROBE_PREFIX in src:
+        return _err_envelope(
+            str(path),
             f"target source appears already instrumented (contains "
-            f"'{_PROBE_PREFIX}'); refusing to run — this is leftover from an "
-            f"interrupted coverage run. Restore the file from version control "
-            f"(e.g. `git checkout -- {path}`) and re-run.")
-        return {
-            "tool": "measure.coverage",
-            "ok": False,
-            "summary": {"file": str(path), "run_error": True, "error": stale},
-            "failures": [{"reason": stale}],
-        }
-    backup = original_src
-
-    executable_lines = _collect_executable_lines(original_src)
-    total_lines = len(executable_lines)
-
-    if total_lines == 0:
-        # §SPEC-026: vacuous bundles land too (no sink was created yet —
-        # zero executable lines means zero probes, nothing to recover)
-        if evidence_out:
-            uuid0 = make_run_uuid()
-            evidence_dir_for(evidence_out).mkdir(parents=True, exist_ok=True)
-            write_bundle(
-                evidence_dir_for(evidence_out),
-                build_bundle(
-                    run_uuid=uuid0, file_path=str(path), gd_source=original_src,
-                    tests_glob=tests_glob, hits_lines=[], probes_fired=0,
-                    gut_ok=True, run_error=False, timeout=False, zero_tests=False,
-                    vacuous=True,
-                ),
-            )
-        return _vacuous_result(str(path), min_percent)
-
-    # SEE-1356 L1：coverage 同 timing store 接入——缓存只喂预算锚，GUT 永远
-    # 实测；实测耗时回写采样。
-    timing_meta = explicit_timing_meta()
-    effective_timeout = timeout_s
-    if timing_store is not None:
-        hist = timing_store.read()
-        effective_timeout, timing_meta["timing_source"] = resolve_budget(
-            timeout_s, hist["last"] if hist else None)
-        timing_meta["samples_n"] = hist["samples_n"] if hist else 0
-        timing_meta["baseline_p90"] = hist["p90"] if hist else None
-
-    # run 唯一 sink（§SPEC-025）：per-run UUID——同进程顺序 run、并发进程、
-    # CLI 与 risk 内嵌路径全部天然互斥（修 D-候选-1：PID sink 在同进程
-    # 顺序 run 间累积命中，窄 glob 结果被上一 run 污染）。
-    run_uuid = make_run_uuid()
-    sink_name = sink_name_for(run_uuid)
-    evidence_dir = evidence_dir_for(evidence_out) if evidence_out else None
-    # §SPEC-030 (D-性能-1): build the registry + probe-manifest/2 ONCE on the
-    # evidence path — run record, bundle and recover all consume this single
-    # parse; build_bundle receives them instead of re-deriving (which doubled
-    # the lark parse cost per evidence run)
-    evidence_registry = None
-    evidence_probe_manifest = None
-    if evidence_dir is not None:
-        from ..registry.functions import build_file_registry
-        from ..registry.manifest import build_probe_manifest_v2
-
-        evidence_registry = build_file_registry(original_src, file_label=str(path))
-        evidence_probe_manifest = build_probe_manifest_v2(original_src, evidence_registry)
-    instrumented, manifest = _instrument(original_src, sink_name)
-
-    # 生成期 re-parse 预检：插桩产物不合法 = 插桩器 bug → 显式 run_error，
-    # 拒绝落盘跑假数据（把 parse error 从静默假 0% 变成生成期失败）。
-    try:
-        gdtoolkit_parser.parse(instrumented)
-    except Exception as e:
-        return _reparse_error_result(str(path), total_lines, min_percent, e)
-
-    if evidence_dir is not None:
-        from .evidence import sha256_text
-        run_record = build_run_record(
-            run_uuid=run_uuid,
-            file_path=str(path),
-            gd_source=original_src,
-            tests_glob=tests_glob,
-            probe_manifest=evidence_probe_manifest,
-        )
-        run_record["sink_path"] = str(
-            evidence_dir / sink_name
-        )  # record BOTH the sink name and a recovery-side path candidate
-        run_record["probe_plan_inline_note"] = (
-            "probe manifest inline carries fid materialization; the recovery "
-            "path re-attributes raw probe ids exactly like the online path"
-        )
-        write_run_record(evidence_dir, run_record)
-
-    t0 = time.monotonic()
-    gut_outcome = _run_gut_for_coverage(path, project_root, backup, instrumented,
-                                        total_lines, min_percent, effective_timeout,
-                                        tests_glob=tests_glob)
-    gut_elapsed = time.monotonic() - t0
-    if gut_outcome is not None:
-        # §SPEC-026: failure bundles land too (sink KEPT for --recover), with
-        # the abort class mapped into the sentinels
-        if evidence_dir is not None:
-            summary = gut_outcome.get("summary", {})
-            bundle = build_bundle(
-                run_uuid=run_uuid,
-                file_path=str(path),
-                gd_source=original_src,
-                tests_glob=tests_glob,
-                registry=evidence_registry,
-                probe_manifest=evidence_probe_manifest,
-                hits_lines=[],
-                probes_fired=0,
-                gut_ok=False,
-                run_error=bool(summary.get("run_error")),
-                timeout=bool(summary.get("timeout")),
-                zero_tests=False,
-                vacuous=False,
-            )
-            write_bundle(evidence_dir, bundle)
-            update_run_record(
-                evidence_dir, run_uuid,
-                status="run_error" if summary.get("run_error") else "timeout",
-            )
-        return gut_outcome
-    if timing_store is not None:
-        timing_store.record(gut_elapsed)
-
-    hits, probes_fired = _read_hits(project_root, sink_name, manifest)
-
-    if evidence_dir is not None:
-        bundle = build_bundle(
-            run_uuid=run_uuid,
-            file_path=str(path),
-            gd_source=original_src,
-            tests_glob=tests_glob,
-            registry=evidence_registry,
-            probe_manifest=evidence_probe_manifest,
-            hits_lines=sorted(hits),
-            probes_fired=probes_fired,
-            gut_ok=True,
-            run_error=False,
-            timeout=False,
-            zero_tests=False,
-            vacuous=False,
-        )
-        write_bundle(evidence_dir, bundle)
-        update_run_record(evidence_dir, run_uuid, status="bundle_written")
-        clear_sink(None, project_root, sink_name)
-
-    # 哨兵：GUT 正常退出但探针从未点火 ≠ 真实 0% 覆盖——数据不可信。
-    if probes_fired == 0:
-        # §SPEC-026: no-probe bundles land (zero_tests/probe-transport failure
-        # is the consumer's lane call); sink KEPT — the hits file is the only
-        # forensic evidence for why probes never fired
-        if evidence_dir is not None:
-            bundle = build_bundle(
-                run_uuid=run_uuid,
-                file_path=str(path),
-                gd_source=original_src,
-                tests_glob=tests_glob,
-                registry=evidence_registry,
-                probe_manifest=evidence_probe_manifest,
-                hits_lines=sorted(hits),
-                probes_fired=0,
-                gut_ok=True,
-                run_error=False,
-                timeout=False,
-                zero_tests=False,
-                vacuous=False,
-            )
-            write_bundle(evidence_dir, bundle)
-            update_run_record(evidence_dir, run_uuid,
-                              status="no_probe", zero_tests=False)
-        return _no_probe_result(str(path), total_lines, min_percent)
-
-    # SEE-1420 P2（L3/D7）：成功 run 的行级事实落盘（自家 JSON 超集，
-    # stdout 契约不动）——mutation --reuse-coverage 的唯一数据源。
-    from ..mutation.coverlink import save_coverage
-    from ..mutation.identity import identity_pack
-    from ..mutation.inject import detect_binary_kind
-    covered_pct = 100.0 * len(hits) / total_lines if total_lines else 100.0
-    # D3：可插桩行集随行级事实同盘落盘——mutation 前置过滤的唯一合法跳过
-    # 锚（不可插桩行 ≠ uncovered）。
-    # SEE-1550 L1：身份包随行级事实入档——mutation prefilter 要求
-    # store fresh ∧ 身份包全匹配。
-    save_coverage(hits, total_lines, project_root, str(path), tests_glob,
-                  coverage_percent=round(covered_pct, 2),
-                  instrumentable_lines={l.line for l in executable_lines},
-                  identity=identity_pack(project_root, detect_binary_kind()))
-
-    return _coverage_report(str(path), original_src, executable_lines, hits,
-                            probes_fired, min_percent, timing_meta)
-
-
-def _vacuous_result(file: str, min_percent: float) -> dict:
-    """零可执行行：空集覆盖不是满分证据——显式 vacuous 标记。"""
-    return {
-        "tool": "measure.coverage",
-        "ok": True,
-        "summary": {"file": file, "total_lines": 0, "covered_lines": 0,
-                    "coverage_percent": 100.0, "min_percent": min_percent,
-                    "vacuous": True,
-                    "note": "no executable lines"},
-        "failures": [],
-    }
-
-
-def _no_probe_result(file: str, total_lines: int, min_percent: float) -> dict:
-    """哨兵中止契约：探针未点火（sink 缺失/空）→ 数据不可信。"""
-    return {
-        "tool": "measure.coverage",
-        "ok": False,
-        "summary": {"file": file, "total_lines": total_lines,
-                    "covered_lines": 0, "coverage_percent": 0.0,
-                    "min_percent": min_percent,
-                    "probes_fired": 0,
-                    "run_error": True,
-                    "error": "no coverage probe fired — sink missing/empty"},
-        "failures": [{"reason": (
-            "coverage probe never fired (hits sink missing or empty) — "
-            "instrumentation or sink transport failed; data untrustworthy"
-        )}],
-    }
-
-
-def _reparse_error_result(file: str, total_lines: int, min_percent: float, err) -> dict:
-    return {
-        "tool": "measure.coverage",
-        "ok": False,
-        "summary": {"file": file, "total_lines": total_lines,
-                    "covered_lines": 0, "coverage_percent": 0.0,
-                    "min_percent": min_percent,
-                    "run_error": True,
-                    "error": f"instrumented source failed to parse: {err}"},
-        "failures": [{"reason": (
-            f"instrumentation produced unparseable source "
-            f"(instrumenter bug, no GUT run attempted): {err}"
-        )}],
-    }
-
-
-def _gut_abort_result(path, total_lines: int, min_percent: float,
-                      error: str, reason: str, run_error: bool = False,
-                      hint: str | None = None) -> dict:
-    err_summary = {"file": str(path), "total_lines": total_lines,
-                   "covered_lines": 0, "coverage_percent": 0.0,
-                   "min_percent": min_percent,
-                   "run_error": True,
-                   "error": error}
-    if hint:
-        err_summary["suggested_action"] = hint
-    return {
-        "tool": "measure.coverage",
-        "ok": False,
-        "summary": err_summary if run_error else {
-                   "file": str(path), "total_lines": total_lines,
-                   "covered_lines": 0, "coverage_percent": 0.0,
-                   "min_percent": min_percent, "error": error},
-        "failures": [{"reason": reason}],
-    }
-
-
-def _gut_selection_args(tests_glob: str | None) -> list[str]:
-    """tests_glob（SEE-1367 §SPEC-017）：受影响测试子集，替代全量 -gdir 以支持
-    逐套件归因度量。目录走 -gdir；.gd 文件走 -gselect（GUT 9.6 实测 -gtest
-    会全量展开，只有 -gselect 能精确过滤到单脚本，SEE-1316 同款结论）。"""
-    gdir = tests_glob if tests_glob else "res://tests/"
-    if gdir.endswith(".gd"):
-        return ["-gdir=res://tests/", f"-gselect={Path(gdir).stem}"]
-    return [f"-gdir={gdir}"]
-
-
-class CoverageTxnError(RuntimeError):
-    """陈旧插桩事务无法安全清洁（fail-loud，绝不静默覆盖）。"""
-
-
-def _pid_alive(pid) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
-    return True
-
-
-def selfheal_stale_instrumentation(project_root) -> dict:
-    """§SPEC-022：恢复被中断（SIGKILL 等无法执行 finally）的插桩事务。
-
-    只处理「陈旧」事务（记录 pid 已不存在）：仅当目标当前仍含探针标记且
-    backup 校验一致时才还原原码并清理事务；目标已非探针残留（可能被用户
-    改动）或 backup 校验不符 → 记 failed，聚合后 raise `CoverageTxnError`
-    （fail-loud，不静默覆盖用户改动）。活跃事务（pid 仍存活）跳过。
-    """
-    import json as _json
-
-    txn_dir = Path(project_root) / ".qa-cache" / "coverage-txn"
-    if not txn_dir.is_dir():
-        return {"healed": 0, "skipped_active": 0, "failed": []}
-    healed = skipped = 0
-    failed: list[dict] = []
-    for txn_path in sorted(txn_dir.glob("*.json")):
-        try:
-            txn = _json.loads(txn_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            failed.append({"txn": txn_path.name, "reason": f"unreadable: {e}"})
-            continue
-        if _pid_alive(txn.get("pid")):
-            skipped += 1
-            continue
-        target = Path(txn.get("path", ""))
-        backup_path = Path(txn.get("backup", ""))
-        try:
-            current = target.read_text(encoding="utf-8")
-            original = backup_path.read_text(encoding="utf-8")
-        except OSError as e:
-            failed.append({"txn": txn_path.name, "reason": f"missing file: {e}"})
-            continue
-        if _PROBE_PREFIX not in current:
-            failed.append({
-                "txn": txn_path.name,
-                "reason": "target no longer looks instrumented; refusing to "
-                          "overwrite possible user edits"})
-            continue
-        if txn.get("sha256") and hashlib.sha256(
-                original.encode("utf-8")).hexdigest() != txn["sha256"]:
-            failed.append({"txn": txn_path.name, "reason": "backup sha mismatch"})
-            continue
-        try:
-            target.write_text(original, encoding="utf-8")
-        except OSError as e:
-            failed.append({"txn": txn_path.name,
-                           "reason": f"restore failed: {e}"})
-            continue
-        for pth in (txn_path, backup_path):
-            try:
-                pth.unlink(missing_ok=True)
-            except OSError:
-                pass
-        healed += 1
-    if failed:
-        raise CoverageTxnError(
-            f"stale coverage instrumentation cannot be safely cleaned: {failed}")
-    return {"healed": healed, "skipped_active": skipped, "failed": []}
-
-
-def _run_gut_for_coverage(path, project_root: str, backup: str, instrumented: str,
-                          total_lines: int, min_percent: float, timeout_s: int,
-                          tests_glob: str | None = None) -> dict | None:
-    """就地插桩 → GUT → **事务化恢复**（§SPEC-022）。
-
-    direct coverage 的设计是临时改写目标 .gd 完成插桩（契约写入边界），跑完
-    恢复。缺陷：SIGTERM/SIGKILL/超时打断时 finally 不执行 → 真实文件残留探针。
-    路由取舍见 §SPEC-022：shadow/独立副本插桩是更彻底的方向，但它要求 GUT
-    在完整项目克隆（含 `.godot` 实拷贝）上运行，会与测量子系统的 shadow
-    构建耦合、并对 coverage 的 user:// sink 与证据身份引入 parity 风险，属
-    独立迁移（登记 B）。本轮按最小正确修复：不改插桩写法，把「恢复」升级为
-    可验证事务——
-    - 事务记录 `<root>/.qa-cache/coverage-txn/<run>.json`（path/pid/sha256/
-      backup），backup 落持久路径并 fsync；
-    - finally 覆盖正常 / 异常 / GUT 超时（超时在内部捕获）恢复并清理事务；
-    - SIGINT/SIGTERM 处理器恢复并清理后按原默认行为退出；
-    - SIGKILL 不可拦截 → 下次 `measure coverage` 入口
-      `selfheal_stale_instrumentation` 依陈旧事务恢复；无法确认清洁则 fail-loud。
-
-    返回 None 表示可继续统计命中；否则返回已完成的中止契约（timeout /
-    启动失败 / GUT runner 缺失 / 事务不可建立）。"""
-    import json as _json
-    import signal as _signal
-    import uuid as _uuid
-
-    root = Path(project_root).resolve()
-    target = Path(path)
-    orig_sha = hashlib.sha256(backup.encode("utf-8")).hexdigest()
-    txn_dir = root / ".qa-cache" / "coverage-txn"
-    run_id = _uuid.uuid4().hex
-    backup_path = txn_dir / f"{run_id}.orig"
-    txn_path = txn_dir / f"{run_id}.json"
-
-    def _clear_txn() -> None:
-        for pth in (txn_path, backup_path):
-            try:
-                pth.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    def _restore() -> None:
-        try:
-            target.write_text(backup, encoding="utf-8")
-        finally:
-            _clear_txn()
-
-    prev_handlers: dict = {}
-
-    def _on_signal(signum, frame):
-        try:
-            _restore()
-        finally:
-            try:
-                _signal.signal(signum,
-                               prev_handlers.get(signum, _signal.SIG_DFL))
-                os.kill(os.getpid(), signum)
-            except (ValueError, OSError):
-                pass
+            f"'{_PROBE_PREFIX}'); restore from version control first "
+            f"(legacy direct residue; new path never writes the real file)")
 
     try:
-        txn_dir.mkdir(parents=True, exist_ok=True)
-        # 不 fsync：进程被中断（SIGKILL/超时/外部杀）后备份仍在 OS 页缓存中，
-        # 下一次入口可读来自愈；机器掉电不在工具契约内。省略 fsync 让事务
-        # 固定开销落回噪声带内（§SPEC-023），且不影响进程级中断恢复。
-        backup_path.write_text(backup, encoding="utf-8")
-        txn_path.write_text(_json.dumps({
-            "path": str(target), "pid": os.getpid(), "sha256": orig_sha,
-            "backup": str(backup_path), "started_at": time.time(),
-        }), encoding="utf-8")
-    except OSError as e:
-        _clear_txn()
-        return _gut_abort_result(
-            path, total_lines, min_percent, "coverage transaction unavailable",
-            f"cannot establish a recoverable instrumentation transaction under "
-            f"{txn_dir}: {e} (refusing to instrument the real file)",
-            run_error=True)
-
-    for _sig in (_signal.SIGINT, _signal.SIGTERM):
-        try:
-            prev_handlers[_sig] = _signal.signal(_sig, _on_signal)
-        except (ValueError, OSError):
-            pass
+        proj = project_file_coverage(project_root, str(path), tests_glob,
+                                     timeout_s=timeout_s)
+    except CoverageMappingError as e:
+        return _err_envelope(str(path), str(e))
 
     try:
-        target.write_text(instrumented, encoding="utf-8")
-        gut_tail = ""
-        gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
-        if not os.path.isfile(gut_fs):
-            raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
-        try:
-            # SEE-1400 §SPEC-003：coverage 与 mutation 同受跨进程槽位闸。
-            from ..mutation.godot_gate import GlobalGodotGate
-            with GlobalGodotGate(project_root):
-                r = spawn_godot(
-                    [godot_command(), "--headless", "--path",
-                     _godot_project_path(project_root),
-                     "-s", GUT_SCRIPT_RES_PATH, *_gut_selection_args(tests_glob),
-                     "-gexit"],
-                    capture_output=True, text=True, timeout=timeout_s,
-                    cwd=project_root,
-                )
-            gut_tail = (r.stdout + r.stderr)[-1500:]
-        except subprocess.TimeoutExpired:
-            # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行补救指令。
-            return _gut_abort_result(
-                path, total_lines, min_percent, "GUT timed out",
-                f"GUT timed out after {timeout_s}s",
-                run_error=True, hint=suggested_action(BUDGET_CAP_S))
+        doc = _truth.load_map(proj["map_path"])
+    except Exception as e:  # noqa: BLE001
+        return _err_envelope(str(path), f"attribution map unusable: {e}")
+    arms_state = doc.get("arms_state") or {}
+    if not _truth.arms_valid(arms_state):
+        return _err_envelope(
+            str(path), "attribution map execution evidence invalid (arms_state)")
+    probes = (arms_state.get("gut_full") or {}).get("probes_fired")
+    if probes is None:
+        return _err_envelope(
+            str(path), "attribution map lacks execution evidence "
+            "(probes_fired missing); refusing to fabricate")
 
-        if r.returncode != 0 and _looks_like_godot_launch_failure(gut_tail):
-            return _gut_abort_result(
-                path, total_lines, min_percent,
-                "godot launch failed — coverage data untrustworthy",
-                "godot launch failed (tests did not run): "
-                f"{gut_tail.strip()[:200]}",
-                run_error=True)
-        return None
-    finally:
-        for _sig, _h in prev_handlers.items():
-            try:
-                _signal.signal(_sig, _h)
-            except (ValueError, OSError):
-                pass
-        _restore()
+    inst = set(proj["instrumentable_lines"])
+    covered = (set(proj["covered_lines"]) & inst) if inst else set(proj["covered_lines"])
+    total = len(inst)
+    cov = len(covered)
+    pct = round(100.0 * cov / total, 2) if total else 100.0
+    ok = pct >= min_percent
+    failures = []
+    if not ok:
+        failures.append({
+            "reason": f"coverage {pct}% below threshold {min_percent}%",
+            "covered": cov, "total": total,
+            "uncovered_lines": sorted(inst - covered)[:20]})
 
+    branches = _derive_branches(src)
+    b_total = branches.total
+    b_cov = sum(1 for b in branches.items
+                if b.line is not None and b.line in covered)
+    b_pct = round(100.0 * b_cov / b_total, 2) if b_total else 100.0
+
+    summary = {
+        "file": str(path), "total_lines": total, "covered_lines": cov,
+        "coverage_percent": pct, "min_percent": min_percent,
+        "probes_fired": int(probes), "probes_source": "map_arms_state",
+        "branch_total": b_total, "branch_covered": b_cov,
+        "branch_coverage_percent": b_pct,
+        "hits_lines": sorted(covered),
+        "coverage_source": "line_mapping_projection",
+        "attribution_map": proj["map_path"],
+        "selection_scripts": len(proj.get("scripts") or []),
+        "vacuous": total == 0,
+    }
+    if total == 0:
+        summary["note"] = "no executable lines"
+    summary.update(explicit_timing_meta())
+
+    if evidence_out:
+        why = _write_mapping_evidence(evidence_out, str(path), src, tests_glob,
+                                      covered, total, int(probes))
+        if why is not None:
+            return _err_envelope(str(path), why)
+
+    return {"tool": "measure.coverage", "ok": ok, "summary": summary,
+            "failures": failures}
 
 def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[set[int], int]:
     """读取命中：user:// sink 优先（探针实际写入侧），项目根仅作非 user:// 环境回退。

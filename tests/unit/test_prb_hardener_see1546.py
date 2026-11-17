@@ -223,6 +223,7 @@ def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out, gut_returns=
     return ev, rc, payload
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_lifecycle_success_lands_bundle_and_clears(tmp_path, monkeypatch):
     ev, rc, payload = _coverage_via_cli(
         tmp_path, monkeypatch, GD, ev := tmp_path / "ev", "success"
@@ -240,6 +241,7 @@ def test_evidence_lifecycle_success_lands_bundle_and_clears(tmp_path, monkeypatc
     assert bundle["recovered"] is False and bundle["sentinels"]["gut_ok"] is True
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_lifecycle_abort_lands_failure_bundle(tmp_path, monkeypatch):
     ev, rc, payload = _coverage_via_cli(
         tmp_path, monkeypatch, GD, tmp_path / "ev", "abort_run_error"
@@ -254,6 +256,7 @@ def test_evidence_lifecycle_abort_lands_failure_bundle(tmp_path, monkeypatch):
     assert bundle["file_state"] == "bundle_only"
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_lifecycle_no_probe_lands_bundle_keeps_sink_lane(tmp_path, monkeypatch):
     ev, rc, payload = _coverage_via_cli(
         tmp_path, monkeypatch, GD, tmp_path / "ev", "no_probe"
@@ -265,6 +268,7 @@ def test_evidence_lifecycle_no_probe_lands_bundle_keeps_sink_lane(tmp_path, monk
     assert bundle["sentinels"]["probes_fired"] == 0
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_lifecycle_vacuous_file_lands_bundle_without_gut(tmp_path):
     ev = tmp_path / "ev"
     ev.mkdir(exist_ok=True)
@@ -313,6 +317,7 @@ def test_evidence_lifecycle_read_error_is_structural(tmp_path):
     assert ev.glob("*.record.json")
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_reparse_generation_guard_is_structural(tmp_path, monkeypatch):
     """A corrupted instrumented artifact must fail at generation time
     (run_error) instead of landing on disk to produce fake 0% data."""
@@ -405,6 +410,7 @@ def test_resolve_user_sink_dir_returns_parent_when_sink_exists(tmp_path, monkeyp
     assert _resolve_user_sink_dir(str(proj)) == str(sink_dir)
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_same_process_sequential_runs_get_distinct_sinks(tmp_path, monkeypatch):
     """§SPEC-025 offline anchor for the D-候选-1 empirical gate: two
     sequential run_coverage calls in ONE process must use different sink
@@ -513,6 +519,7 @@ def test_build_bundle_uses_injected_registry_and_manifest(monkeypatch):
     assert f_row["state"] == "measured"
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch):
     """Three consumption points (run record, abort/success bundles) must share
     ONE registry build per run — a second build is the doubled lark parse

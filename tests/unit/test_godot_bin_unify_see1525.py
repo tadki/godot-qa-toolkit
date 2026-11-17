@@ -149,6 +149,7 @@ class TestPathFormSameSource:
         assert cov_runner._godot_project_path("/mnt/d/proj") == "D:\\proj"
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 class TestCoverageWiring:
     """§SPEC-001：coverage 启动 argv 首元走 godot_command() 同源；§SPEC-006：
     未设变量时兜底形态与 af728f5 一致，子进程 env 注入键零新增。"""

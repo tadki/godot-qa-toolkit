@@ -1,3 +1,4 @@
+import pytest
 """§SPEC-1420-21：coverage 中止条件收紧（Owner 2026-10-17 指令，Archi 实机
 取证定位的 coverage 缺口）。
 
@@ -73,6 +74,7 @@ class TestCoverageAbortEndToEnd:
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
 
+    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_early_exit_run_aborts_with_run_error_not_probe_sentinel(
             self, tmp_path, monkeypatch):
         """端到端：rc≠0 + 无证据 → run_error 中止契约（ok=false、error 含

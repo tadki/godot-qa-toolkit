@@ -42,78 +42,77 @@ class TestCollectExecutableLines:
 
 
 class TestRunCoverage:
-    def _write_project(self, tmp_path):
+    """SEE-1594 §SPEC-025：run_coverage 现在由行级映射投影驱动（零 GUT）。
+
+    旧的直接插桩/GUT/sink 行为已退役；这些用例改为验证映射投影语义、
+    阈值、零真实文件写入与 fail-loud。GUT/探针路径的旧用例在
+    test_coverage_spec1312 等处保留为 shared-primitive 测试或标记 obsolete。
+    """
+
+    def _project(self, tmp_path):
         proj = tmp_path / "proj"
-        proj.mkdir()
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        target = proj / "calc.gd"
-        target.write_text(GD_SOURCE)
+        (proj / "utils").mkdir(parents=True)
+        target = proj / "utils" / "t.gd"
+        target.write_text(GD_SOURCE, encoding="utf-8")
+        (proj / "tests").mkdir()
+        (proj / "tests" / "test_x.gd").write_text("extends Node\n",
+                                                  encoding="utf-8")
         return proj, target
 
-    def test_full_coverage_ok(self, tmp_path, monkeypatch):
-        proj, target = self._write_project(tmp_path)
-        # Simulate: hits file gets every executable line
-        self._fake_run_writing_hits(proj, {0, 1, 2, 3}, monkeypatch, captured := {})
-        result = run_coverage(str(target), str(proj), min_percent=80.0)
+    def _install_map(self, proj):
+        import attribution_fixtures as fx
+        fx.write_map(proj, {"utils/t.gd": ["test_x.gd::test_a"]})
+
+    def _no_godot(self, monkeypatch):
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+            lambda *a, **k: "linux")
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.identity.identity_pack",
+            lambda *a, **k: {"kind": "linux"})
+
+    def test_projection_above_threshold_ok(self, tmp_path, monkeypatch):
+        proj, target = self._project(tmp_path)
+        self._install_map(proj)
+        self._no_godot(monkeypatch)
+        # 映射夹具：covered={2}/inst={2,3} → 50%
+        result = run_coverage(str(target), str(proj), min_percent=50.0)
         assert result["ok"] is True
-        assert result["summary"]["coverage_percent"] == 100.0
+        assert result["summary"]["coverage_percent"] == 50.0
+        assert result["summary"]["coverage_source"] == "line_mapping_projection"
 
     def test_below_threshold_fails(self, tmp_path, monkeypatch):
-        proj, target = self._write_project(tmp_path)
-        self._fake_run_writing_hits(proj, {0}, monkeypatch, captured := {})
+        proj, target = self._project(tmp_path)
+        self._install_map(proj)
+        self._no_godot(monkeypatch)
         result = run_coverage(str(target), str(proj), min_percent=80.0)
         assert result["ok"] is False
         assert result["failures"]
         assert "below threshold" in result["failures"][0]["reason"]
 
-    def test_original_file_restored(self, tmp_path, monkeypatch):
-        proj, target = self._write_project(tmp_path)
-        before = target.read_text()
-        self._fake_run_writing_hits(proj, set(), monkeypatch, captured := {})
+    def test_zero_real_file_write(self, tmp_path, monkeypatch):
+        proj, target = self._project(tmp_path)
+        self._install_map(proj)
+        self._no_godot(monkeypatch)
+        before = target.read_bytes()
         run_coverage(str(target), str(proj))
-        assert target.read_text() == before
+        assert target.read_bytes() == before  # 新路径绝不写真实文件
 
-    def test_gut_timeout_fails(self, tmp_path, monkeypatch):
-        proj, target = self._write_project(tmp_path)
-
-        def timeout_run(*a, **k):
-            import subprocess
-            raise subprocess.TimeoutExpired(cmd="godot", timeout=120)
-
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run", timeout_run
-        )
+    def test_no_map_fail_loud(self, tmp_path, monkeypatch):
+        proj, target = self._project(tmp_path)  # 不写映射
+        self._no_godot(monkeypatch)
         result = run_coverage(str(target), str(proj))
         assert result["ok"] is False
-        assert "timed out" in result["failures"][0]["reason"]
+        assert result["summary"].get("run_error") is True
 
     def test_unified_contract_shape(self, tmp_path, monkeypatch):
-        proj, target = self._write_project(tmp_path)
-        self._fake_run_writing_hits(proj, set(), monkeypatch, captured := {})
+        proj, target = self._project(tmp_path)
+        self._install_map(proj)
+        self._no_godot(monkeypatch)
         result = run_coverage(str(target), str(proj))
         assert set(result) >= {"tool", "ok", "summary", "failures"}
         assert result["tool"] == "measure.coverage"
-
-    def test_godot_launch_failure_is_run_error_not_zero_coverage(self, tmp_path, monkeypatch):
-        # Revy QA FAIL (same root cause as mutation): a godot "File not found"
-        # launch failure exits 1 with empty hits — the runner must report a
-        # run_error (untrustworthy data), not a misleading 0.0% coverage.
-        proj, target = self._write_project(tmp_path)
-
-        def fake(*args, **kwargs):
-            class R:
-                returncode = 1
-                stdout = ""
-                stderr = "ERROR: Attempt to open script 'res://addons/gut/gut_cmdln.gd' resulted in error 'File not found'"
-            return R()
-
-        monkeypatch.setattr("godot_qa_toolkit.coverage.runner.subprocess.run", fake)
-        result = run_coverage(str(target), str(proj))
-        assert result["ok"] is False
-        assert result["summary"].get("run_error") is True, result["summary"]
-        assert any("run_error" in f or "godot" in f.get("reason", "").lower()
-                   for f in result["failures"])
+        assert result["summary"]["probes_source"] == "map_arms_state"
 
     def test_uses_res_path_for_gut(self):
         from godot_qa_toolkit.coverage import runner as c

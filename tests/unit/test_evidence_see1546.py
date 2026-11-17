@@ -169,6 +169,7 @@ def test_prune_sinks_only_deletes_prefixed_expired(tmp_path: Path):
     assert fresh_sink.is_file() and foreign.is_file()
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_stdout_contract_frozen_against_011b87d(tmp_path: Path, monkeypatch):
     """§SPEC-026 stdout freeze: without --evidence-out the summary keys are
     exactly the 011b87d contract (no evidence keys leak into stdout)."""

@@ -1322,6 +1322,7 @@ def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
     assert "import cache" in reason and "godot" in reason, reason
 
 
+@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_coverage_measure_missing_godot_clean_env(project, tmp_path):
     payload = _spawn_clean_env(
         ["measure", "coverage", _mutation_target(project)], project, tmp_path)

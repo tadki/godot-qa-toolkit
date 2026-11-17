@@ -69,7 +69,7 @@ def test_incremental_refresh_used_on_stale(tmp_path, monkeypatch):
     from godot_qa_toolkit.mutation import truth_select as truth
     calls = {"n": 0}
 
-    def fake_increment(root, path, doc, rel, changed_extra=None):
+    def fake_increment(root, path, doc, rel, changed_extra=None, **kwargs):
         calls["n"] += 1
         fx.write_map(proj, {TARGET: [IDENT]})  # 依新内容重建新鲜映射
         return True, None

@@ -3,7 +3,6 @@
 import pytest
 
 from godot_qa_toolkit.mutation.testscan import (
-    derive_tests_glob,
     scan_test_refs,
 )
 
@@ -51,61 +50,6 @@ class TestScanTestRefs:
         # "...save_manager.gd.bak" 字面量引用的是别的文件，不得命中
         assert not any("vendor" in h for h in hits)
 
-    def test_only_referencing_module_snapped(self, tests_tree):
-        dirs = derive_tests_glob("res://scripts/save_manager.gd", tests_tree)
-        assert dirs == "res://tests/unit/save/"
-
     def test_returns_full_res_path_for_scoring(self, tests_tree):
         hits = scan_test_refs("res://scripts/vendor.gd", tests_tree)
         assert len(hits) == 1 and hits[0].endswith("test_vendor.gd")
-
-
-class TestDeriveTestsGlob:
-    def test_single_hit_converges_to_file_glob(self, tests_tree):
-        # SEE-1400 §SPEC-005：单命中收敛到文件级（-gselect 通道）
-        assert derive_tests_glob("res://scripts/vendor.gd", tests_tree) == \
-            "res://tests/unit/vendor/test_vendor.gd"
-
-    def test_no_hits_returns_none(self, tests_tree):
-        assert derive_tests_glob("res://scripts/unknown.gd", tests_tree) is None
-
-    def test_multiple_files_stay_directory_level(self, tests_tree):
-        # 多命中维持目录级现状（test_save.gd + test_misc.gd 两文件）
-        assert derive_tests_glob("res://scripts/save_manager.gd",
-                                 tests_tree) == "res://tests/unit/save/"
-
-    def test_multiple_dirs_scored(self, tests_tree):
-        tests = tests_tree
-        extra = tests / "unit" / "integration"
-        extra.mkdir()
-        (extra / "test_integration.gd").write_text(
-            'var s = preload("res://scripts/save_manager.gd")\n')
-        assert derive_tests_glob("res://scripts/save_manager.gd", tests) == \
-            "res://tests/unit/save/"
-
-    def test_case_insensitive_reference(self, tmp_path):
-        tests = tmp_path / "tests"
-        d = tests / "unit" / "save"
-        d.mkdir(parents=True)
-        (d / "t.gd").write_text('preload("RES://SCRIPTS/Save_Manager.GD")\n')
-        # Windows 文件系统大小写不敏感；res:// 路径按 casefold 比对
-        assert derive_tests_glob("res://scripts/save_manager.gd", tests) == \
-            "res://tests/unit/save/t.gd"
-
-    def test_single_hit_at_tests_root_gives_file_path(self, tmp_path):
-        tests = tmp_path / "tests"
-        tests.mkdir()
-        (tests / "test_root.gd").write_text(
-            'preload("res://scripts/target.gd")\n')
-        assert derive_tests_glob("res://scripts/target.gd", tests) == \
-            "res://tests/test_root.gd"
-
-    def test_single_hit_multi_reference_still_file_level(self, tmp_path):
-        # 同一文件 preload + class_name 双形态命中仍属"恰好 1 个文件"
-        tests = tmp_path / "tests" / "unit"
-        tests.mkdir(parents=True)
-        (tests / "test_both.gd").write_text(
-            'const C = preload("res://scripts/target.gd")\n'
-            'var target = null\n')
-        assert derive_tests_glob("res://scripts/target.gd", tmp_path / "tests") \
-            == "res://tests/unit/test_both.gd"

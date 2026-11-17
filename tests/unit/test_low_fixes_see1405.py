@@ -104,12 +104,11 @@ class TestLow2DeadCode:
             assert "_target_identities" not in py.read_text(
                 encoding="utf-8"), py
 
-    def test_testscan_public_api_intact(self, tmp_path):
-        """删除死代码后公开 API 语义零漂移（反查/derive 仍工作）。"""
-        tests = tmp_path / "tests" / "unit" / "save"
-        tests.mkdir(parents=True)
-        (tests / "t.gd").write_text(
-            'const S = preload("res://scripts/save_manager.gd")\n')
-        assert testscan.derive_tests_glob(
-            "res://scripts/save_manager.gd", tmp_path / "tests") == \
-            "res://tests/unit/save/t.gd"
+    def test_testscan_static_selection_retired(self):
+        """A10（SEE-1594 S4）：静态选面已物理退役——runtime 映射为选面
+        唯一真源；反查诊断面（scan_test_refs/counts）保留。"""
+        assert not hasattr(testscan, "derive_tests_glob")
+        assert not hasattr(testscan, "_strength_glob")
+        assert not hasattr(testscan, "_INDEX_CACHE")
+        assert hasattr(testscan, "scan_test_refs")
+        assert hasattr(testscan, "scan_test_ref_counts")

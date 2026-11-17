@@ -109,18 +109,6 @@ class TestSpec016AllZeroMutants:
         assert all(r["summary"].get("mutants") == 0 for r in d["results"])
 
 
-class TestLow3StemWordBoundary:
-    def test_mock_prefixed_stem_not_matched(self, tmp_path):
-        """mock_save_manager.gd 的内容不得命中 save_manager（LOW-3 全词匹配）。"""
-        from godot_qa_toolkit.mutation.testscan import derive_tests_glob
-        tests = tmp_path / "tests"
-        d = tests / "unit" / "mocks"
-        d.mkdir(parents=True)
-        (d / "test_mock_save_manager.gd").write_text(
-            "var mock_save_manager = 1\n")
-        assert derive_tests_glob("res://scripts/save_manager.gd", tests) is None
-
-
 class TestLow4WslenvAppend:
     def test_existing_wslenv_preserved_win64(self, tmp_path, monkeypatch):
         """win64 通道：调用方既有 WSLENV 保留并追加放行项（LOW-4）。

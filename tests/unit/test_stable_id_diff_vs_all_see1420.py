@@ -145,15 +145,34 @@ class TestDiffVsMutateAllConsistency:
 
             return kill_all
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # A09：证书复用隔离——coverage 过滤关断
+        # A09：killed 复用唯一依据 = 新鲜运行时映射证书——首跑前与源码
+        # 变更后各刷新一次映射（模拟生产 map 刷新）；coverage 过滤关断。
+        import attribution_fixtures as _fx
+        from godot_qa_toolkit.mutation import truth_select as _ts
+
+        def _seed_map():
+            _fx.install_recipe(proj)
+            _fx.line_facts_map(proj, {"test_x.gd::test_x": {"calc.gd": [2, 5]}},
+                               instrumentable={"calc.gd": [2, 5]})
+            _ts._fresh_recipe_hash.cache_clear()
+            _ts._test_scripts_by_name.cache_clear()
+
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
+        _seed_map()
         full = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                    tests_glob="res://tests/")
+                                    tests_glob="res://tests/",
+                                    reuse_coverage=False)
         assert full["summary"]["killed"] == 8
         # 差分 + 预算截断：改 two 的函数体 → retry 3，budget=2 → untouched 1
         target.write_text(src.replace("return a + 2", "return a + 20"))
+        _seed_map()
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         r2 = mrunner.run_mutation(str(target), str(proj), budget=2,
-                                  tests_glob="res://tests/")
+                                  tests_glob="res://tests/",
+                                  reuse_coverage=False)
         s = r2["summary"]
         assert s["executed"] == 2 and s["retry_total"] == 3
         assert s["untouched_ranges"] and len(s["untouched_ranges"]) == 1

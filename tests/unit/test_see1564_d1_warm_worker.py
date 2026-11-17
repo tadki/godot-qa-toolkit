@@ -100,11 +100,37 @@ def test_warm_worker_second_round_full_reuse(tmp_path, monkeypatch):
     src = Path(target).read_text(encoding="utf-8")
     n_sites = len(executor._collect_mutations(src, target))
     assert n_sites > 1
+    # A09：kill 证书唯一来源 = 新鲜运行时映射——种子 killer 身份使证书
+    # 正常签发（静态兜底已退役，无映射 = 无证书 = 保守重跑）
+    import attribution_fixtures as _fx
+    from godot_qa_toolkit.mutation import truth_select as _truth
+    _fx.install_recipe(proj)
+    _truth._fresh_recipe_hash.cache_clear()
+    _fx.line_facts_map(proj, {"test_save.gd::test_killed_by_probe":
+                              {"calc.gd": [2]}},
+                       instrumentable={"calc.gd": [2, 5]})
+    # RuntimeOwnership 的 name→path 表经 lru_cache 查 tests 树——种子后失效
+    from godot_qa_toolkit.mutation import truth_select as _ts
+    _ts._test_scripts_by_name.cache_clear()
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
 
     r1 = run_mutation_files([target], proj, budget=10, timeout_s=60,
                             tests_glob="res://tests/unit/save/", jobs=2)
     s1 = r1["results"][0]["summary"]
     assert s1["mutants"] == n_sites and s1["killed"] == n_sites
+    # A09：证书唯一来源 = 新鲜运行时映射——run 1 必须已挂 runtime 证书
+    import json as _json
+    store_dir = Path(proj) / ".qa-cache" / "gqt-mutation-resume-v2"
+    certs_seen = []
+    for sf in sorted(store_dir.rglob("*.json")):
+        if sf.name == "manifest.json":
+            continue
+        raw = _json.loads(sf.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and raw.get("verdict") == "killed":
+            certs_seen.append((raw.get("id"), bool(raw.get("killed_by"))))
+    assert any(kb for _, kb in certs_seen), (
+        "store entries must carry runtime certificates (A09): "
+        f"certs_seen={certs_seen}")
 
     r2 = run_mutation_files([target], proj, budget=10, timeout_s=60,
                             tests_glob="res://tests/unit/save/", jobs=2)

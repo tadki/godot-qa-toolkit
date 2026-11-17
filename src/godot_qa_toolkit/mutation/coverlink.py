@@ -561,11 +561,9 @@ def apply_coverage_prefilter(executed, file_path, project_root, tests_glob,
     if disclosures is not None:
         disclosures["coverage_prefilter"] = source
     uncovered = [m for m in executed
-                 if getattr(m, "line", -1) not in cov
-                 and getattr(m, "line", -1) in inst]
+                 if m.line not in cov and m.line in inst]
     pool = [m for m in executed
-            if getattr(m, "line", -1) in cov
-            or getattr(m, "line", -1) not in inst]
+            if m.line in cov or m.line not in inst]
     return uncovered, pool
 
 

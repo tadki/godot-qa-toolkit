@@ -146,16 +146,35 @@ class TestBudgetOnRetryEndToEnd:
 
             return kill_all
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # A09：killed 复用唯一依据 = 运行时映射证书（coverage 过滤关断隔离）
+        # A09：killed 复用唯一依据 = 新鲜运行时映射证书——首跑前与源码
+        # 变更后各刷新一次映射（模拟生产 map 刷新）；coverage 过滤关断。
+        import attribution_fixtures as _fx
+        from godot_qa_toolkit.mutation import truth_select as _ts
+
+        def _seed_map():
+            _fx.install_recipe(proj)
+            _fx.line_facts_map(proj, {"test_x.gd::test_x": {"calc.gd": [2, 5]}},
+                               instrumentable={"calc.gd": [2, 5]})
+            _ts._fresh_recipe_hash.cache_clear()
+            _ts._test_scripts_by_name.cache_clear()
+
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
+        _seed_map()
         full = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                    tests_glob="res://tests/")
+                                    tests_glob="res://tests/",
+                                    reuse_coverage=False)
         # 位点数：one = AOR 3 + boundary 2 = 5；two = AOR 3 → 共 8
         assert full["summary"]["killed"] == 8
         # 只改 func two 的函数体 → 该 scope 全跑；one 的 killed 复用
         target.write_text(src.replace("return a + 2", "return a + 22"))
+        _seed_map()
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         r2 = mrunner.run_mutation(str(target), str(proj), budget=1,
-                                  tests_glob="res://tests/")
+                                  tests_glob="res://tests/",
+                                  reuse_coverage=False)
         s = r2["summary"]
         assert s["resumed"] == 5  # one 的 killed 复用
         assert s["retry_total"] == 3  # two 的位点全跑（scope 改写）

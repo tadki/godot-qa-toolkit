@@ -545,3 +545,54 @@ class TestS3UnifiedPrefilter:
             "projection_live", 1, 2) == {
             "source": "projection_live", "uncovered": 1,
             "covered_executed": 2}
+
+    def test_disclosure_parity_with_fixed_resolve(self, tmp_path, monkeypatch,
+                                                  capsys):
+        """S4 首项：固定 resolve 返回——planner/executor 两包装的
+        coverage_prefilter 披露逐字段一致（含 stderr 原因），不再仅
+        membership 断言。"""
+        from types import SimpleNamespace
+
+        from godot_qa_toolkit.mutation import coverlink, executor, planner
+
+        def fixed_resolve(project_root, file_path, tests_glob, scripts=None,
+                          binary_kind=None, identity=None, map_path=None):
+            return ({2}, {2, 3, 4}, "projection_store: hit",
+                    "projection_store")
+
+        monkeypatch.setattr(coverlink, "resolve_coverage_for_prefilter",
+                            fixed_resolve)
+        proj = self._seeded(tmp_path)
+        target = Path(proj) / TARGET
+        mutants = [SimpleNamespace(line=2, stable_id="m1"),
+                   SimpleNamespace(line=3, stable_id="m2")]
+        out = {}
+        for name, fn, path_arg in (
+                ("planner", planner._apply_coverage_prefilter, target),
+                ("executor", executor._apply_coverage_prefilter, str(target))):
+            plan = SimpleNamespace(executed=list(mutants))
+            disclosures: dict = {}
+            unc, pool = fn(plan, path_arg, str(proj), "res://tests/unit/",
+                           None, True, disclosures=disclosures,
+                           identity=None, tests_scripts=[UNIT])
+            out[name] = ([u.stable_id for u in unc],
+                         [p.stable_id for p in pool],
+                         dict(disclosures))
+        assert out["planner"] == out["executor"]
+        unc_ids, _, disc = out["planner"]
+        assert unc_ids == ["m2"]            # line 3 ∈ inst ∧ ∉ covered
+        assert disc == {"coverage_prefilter": "projection_store"}
+
+    def test_missing_line_is_contract_violation(self, tmp_path):
+        """S4 首项：位点缺 line 属性 = 契约违约——显式暴露（AttributeError），
+        不静默归入 pool。"""
+        from types import SimpleNamespace
+
+        from godot_qa_toolkit.mutation import coverlink
+        proj = self._seeded(tmp_path)
+        broken = SimpleNamespace(stable_id="m-broken")  # 无 line
+        with pytest.raises(AttributeError):
+            coverlink.apply_coverage_prefilter(
+                [broken], str(Path(proj) / TARGET), str(proj),
+                "res://tests/unit/", [UNIT], None, None, True, None,
+                map_path=coverlink.MAP_PATH_UNRESOLVED)

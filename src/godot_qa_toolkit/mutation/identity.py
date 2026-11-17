@@ -205,37 +205,10 @@ _TEST_FUNC_PATTERN = re.compile(r"(?m)^\s*func\s+(test_\w+)\s*\(")
 _DEPS_MAX_DEPTH = 8
 
 
-class TestOwnershipIndex:
-    """tests 树 func 定义 → 脚本路径索引（一次构建，killed 判定多次消费）。
-
-    同名测试定义在多个脚本 → 歧义（证书不确定 → None → 保守重跑）。
-    """
-
-    # R-3：类名以 Test 开头会被 pytest 误收集为测试类（PytestCollectionWarning
-    # 存量）——产品域索引类，显式退出收集面（最小不改行为）。
-    __test__ = False
-
-    def __init__(self, project_root: str):
-        self.project_root = str(Path(project_root).resolve())
-        self._map: dict[str, set[str]] = {}
-        tests = Path(self.project_root) / "tests"
-        if tests.is_dir():
-            for gd in sorted(tests.rglob("*.gd")):
-                try:
-                    text = gd.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                rel = gd.relative_to(self.project_root).as_posix()
-                for name in _TEST_FUNC_PATTERN.findall(text):
-                    self._map.setdefault(name, set()).add(rel)
-
-    def owner_of(self, test_name: str) -> str | None:
-        """唯一归属脚本的 res:// 形态；零命中或多命中 → None。"""
-        owners = self._map.get(test_name)
-        if not owners or len(owners) != 1:
-            return None
-        return "res://" + next(iter(owners))
-
+# A09（SEE-1594 S4）：静态 TestOwnershipIndex 已退役——kill 证书归属唯一
+# 来源 = 运行时真值映射（truth_select.RuntimeOwnership）；无新鲜映射 →
+# 证书不产出（保守重跑），绝不静态兜底。_TEST_FUNC_PATTERN 保留为
+# gdself 诊断面资产。
 
 def _res_to_fs(project_root: str, res_path: str) -> Path:
     return Path(project_root) / res_path.removeprefix("res://")
@@ -279,9 +252,8 @@ def deps_closure_sha1(project_root: str, script_res: str,
     return _sha1_text("\n".join(sorted(lines)))
 
 
-def killer_certificate(failures: set[str], ownership: TestOwnershipIndex,
-                       project_root: str,
-                       ownership_source: str = "structural_index",
+def killer_certificate(failures: set[str], ownership, project_root: str,
+                       ownership_source: str = "runtime_mapping",
                        ) -> list[dict] | None:
     """完整失败集 → killed_by 证书；任一 killer 归属/闭包不确定 → None。
 

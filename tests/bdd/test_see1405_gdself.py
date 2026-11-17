@@ -7,7 +7,6 @@ from pathlib import Path
 from pytest_bdd import given, scenarios, then, when
 
 from godot_qa_toolkit.mutation.gdself import query_consumers
-from godot_qa_toolkit.mutation.testscan import derive_tests_glob
 
 from ._support import fail_step as _fail
 
@@ -61,43 +60,14 @@ def _toy_gdself_project(base: Path) -> Path:
     return root
 
 
-def _derive_glob(bdd_state: dict, target: str) -> None:
-    project = bdd_state["proj"]
-    bdd_state["glob"] = derive_tests_glob(
-        target, project / "tests", project_root=str(project)
-    )
-
-
 @given("a toy project with class autoload scene literal and dynamic consumers")
 def given_toy_factory(bdd_state: dict, tmp_path: Path) -> None:
     bdd_state["proj"] = _toy_gdself_project(tmp_path)
 
 
-@when("the indexed glob of the factory target is derived")
-def when_factory_glob(bdd_state: dict) -> None:
-    _derive_glob(bdd_state, "res://systems/factory.gd")
-
-
-@then("the glob converges to the single direct test file")
-def then_single_factory_test(bdd_state: dict) -> None:
-    if bdd_state["glob"] != "res://tests/test_factory.gd":
-        _fail("factory glob did not converge to single test file", bdd_state["glob"])
-
-
 @given("a toy project with a scene-bound script consumed only via its scene")
 def given_scene_script(bdd_state: dict, tmp_path: Path) -> None:
     bdd_state["proj"] = _toy_gdself_project(tmp_path)
-
-
-@when("the indexed glob of the script target is derived")
-def when_scene_script_glob(bdd_state: dict) -> None:
-    _derive_glob(bdd_state, "res://systems/item_view.gd")
-
-
-@then("the glob converges to the scene consuming test file")
-def then_scene_test(bdd_state: dict) -> None:
-    if bdd_state["glob"] != "res://tests/test_scene.gd":
-        _fail("scene-bound script glob did not converge", bdd_state["glob"])
 
 
 @given("a toy project with a hub class consumed by many production files")

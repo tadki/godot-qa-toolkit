@@ -1,4 +1,4 @@
-"""SEE-1581 — mutation 选面改「运行时真值映射」（静态 TestOwnershipIndex 退役）。
+"""SEE-1581 — mutation 选面改「运行时真值映射」（A09 后静态归属零消费者）。
 
 合同（Owner 2026-11-14 拍板 + ④ 实测数据）：
 
@@ -866,7 +866,7 @@ class RuntimeOwnership:
     """kill 证书归属：测试名 → 脚本（来自新鲜映射身份；歧义/缺失 → None）。
 
     无映射或过期时由调用方传 None —— 证书不产出（fail-safe 只偏向重跑），
-    不与静态 TestOwnershipIndex 混用。"""
+    不与静态归属索引混用（A09 后静态索引已退役）。"""
 
     __test__ = False
 
@@ -894,29 +894,15 @@ class RuntimeOwnership:
         return paths[0]
 
 
-class StructuralOwnership:
-    """kill 证书归属的结构性兜底：测试名 → 脚本（tests/ 静态扫描）。
-
-    注意：这是**身份映射**（name→script），不是被退役的选面索引（gdself
-    file→tests）；选面永远只走运行时映射。兜底用于无新鲜映射时保住 warm
-    reuse（证书缺失会让 killed 全量保守重跑）；证书条目带
-    `ownership_source` 显式披露来源，不静默混用。
-    """
-
-    __test__ = False
-    source = "structural_index"
-
-    def __init__(self, project_root: str):
-        from .identity import TestOwnershipIndex
-        self._idx = TestOwnershipIndex(project_root)
-
-    def owner_of(self, test_name: str) -> str | None:
-        return self._idx.owner_of(test_name)
-
-
 def ownership_for(project_root: str, target_file: str,
                   map_path_override: str | None = None):
-    """新鲜映射 → RuntimeOwnership；否则 StructuralOwnership（带来源披露）。"""
+    """新鲜映射 → RuntimeOwnership；无新鲜映射/解析异常 → None（A09）。
+
+    None = 不产出 kill 证书 → killed 保守重跑（fail-safe 只偏向重跑）。
+    解析异常具名披露到 stderr（不吞错）；**绝不回退静态
+    静态索引**（结构性兜底已退役——静态归属会给 stale 索引签发
+    kill 证书）。"""
+    import sys
     try:
         sel = resolve_selection(project_root, target_file, map_path_override)
         mp = sel.get("mapping") or {}
@@ -925,6 +911,10 @@ def ownership_for(project_root: str, target_file: str,
             owner = RuntimeOwnership(project_root, doc)
             owner.source = "runtime_mapping"
             return owner
-    except Exception:  # noqa: BLE001 — 解析失败按无新鲜映射处理
-        pass
-    return StructuralOwnership(project_root)
+        print(f"ownership: no fresh runtime mapping for {target_file} "
+              "(no kill certificate — conservative rerun)", file=sys.stderr)
+        return None
+    except Exception as e:  # noqa: BLE001 — 具名披露后按无新鲜映射处理
+        print(f"ownership: resolution failed ({type(e).__name__}: {e}) — "
+              "no kill certificate (conservative rerun)", file=sys.stderr)
+        return None

@@ -939,7 +939,8 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
                   "summary": report, "failures": []})
 
 
-def _attribution_usable(attribution_out, run_started: float) -> bool:
+def _attribution_usable(attribution_out, run_started: float,
+                        project_root: str | None = None) -> bool:
     """行映射可用性（A22 中央校验）：schema/臂执行证据/目标文件绑定/
     recipe 全部一致才算可用；event_counts_stale 的增量产物一律不可用。
 
@@ -962,9 +963,13 @@ def _attribution_usable(attribution_out, run_started: float) -> bool:
         # （事件计数未重测）不得冒充新鲜可用证据
         if doc.get("increment", {}).get("event_counts_stale"):
             return False
-        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）
+        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）。
+        # project_root 由调用侧显式传入（--attribution-out/--out 可指到
+        # 仓库外，路径算术猜根会把校验错归因为 recipe 漂移）。
         if doc.get("recipe_hash_pristine"):
-            recipe, error = build_recipe(_P(attribution_out).parent.parent)
+            root = _P(project_root) if project_root \
+                else _P(attribution_out).parent.parent
+            recipe, error = build_recipe(root)
             if error is not None:
                 return False
             if _raw_hash({k: v for k, v in recipe.items()
@@ -1122,7 +1127,8 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_json.dumps(report, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    attribution_usable = _attribution_usable(attribution_out, run_started)
+    attribution_usable = _attribution_usable(
+        attribution_out, run_started, project_root=args.project_root)
     summary, ok = _measure_run_summary(report, attribution_out,
                                        attribution_usable)
     return _emit({"tool": "measure.run", "ok": ok, "summary": summary,

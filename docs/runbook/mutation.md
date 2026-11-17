@@ -180,7 +180,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--dry-run` | off | List mutation sites without running GUT; emits a diff estimate when a manifest exists |
 | `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping and discloses `explicit_tests` |
 | `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value |
-| `--resume` | off | Legacy disclosure flag; differential reuse is automatic whenever a v2 manifest exists |
+| `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |
 | `--select {line,fn,file,full}` | `line` | line = test-set signature groups; fn/file = explicit calibration/fallback views; full = explicit full-face audit. The reported `selection_mode` also uses `lines` / `mutation` for calipers and `explicit_tests` when `--tests` takes over |
 | `--attribution-map <path>` | auto-managed `.qa-cache/attribution-map.json` | Explicit `test-attribution/6` line-primary artifact; read-only pass-through, schema mismatch fails loud without rebuild |
 | `--no-attribution-auto` | off | Disable automatic map generation/incremental refresh; with no usable map the run fails loud |

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from .coverlink import resolve_coverage_for_prefilter
+from .coverlink import MAP_PATH_UNRESOLVED, resolve_coverage_for_prefilter
 from .diffengine import budget_on_retry, plan_diff, untouched_ranges
 from .identity import certificate_valid
 from .reporting import _dry_run_result, _mutant_record
@@ -52,7 +52,7 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                     reuse_coverage, attention, mutant_slice, original_src,
                     identity: dict | None = None, clock=None,
                     tests_scripts: "list[str] | None" = None,
-                    map_path: "str | None" = None):
+                    map_path: "str | None | object" = MAP_PATH_UNRESOLVED):
     """执行面规划（P1 差分 / P3 寻址 / P2 覆盖过滤三模式互斥落定）。
 
     返回 (prior_entries, reused, untouched, disclosures, executed_list,
@@ -134,7 +134,7 @@ def _plan_serial(store2, path, project_root, mutants, header_hash,
                  reuse_coverage, mutant_slice, original_src, disclosures,
                  identity: dict | None = None, clock=None,
                  tests_scripts: "list[str] | None" = None,
-                 map_path: "str | None" = None):
+                 map_path: "str | None | object" = MAP_PATH_UNRESOLVED):
     """串行自规划：D4 差分矩阵（killed 证书门）→ P2 覆盖前置过滤 →
     D6 budget-on-retry。"""
     store2.disclose_v1_superseded()
@@ -187,7 +187,7 @@ def _apply_coverage_prefilter(plan, path, project_root, tests_glob,
                               binary_kind, reuse_coverage, disclosures,
                               identity: dict | None = None,
                               tests_scripts: "list[str] | None" = None,
-                              map_path: "str | None" = None):
+                              map_path: "str | None | object" = MAP_PATH_UNRESOLVED):
     """§SPEC-1420-12（L3/D7 P2）+ SEE-1550 L1 + SEE-1587 + SEE-1594 S2：
     coverage 前置过滤（budget 之前）——预算只花在 covered 位点上；
     uncovered 显式标记。

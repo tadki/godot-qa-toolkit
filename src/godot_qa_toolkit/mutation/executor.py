@@ -24,7 +24,7 @@ from . import cost_priors, shadow
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
-from .coverlink import resolve_coverage_for_prefilter
+from .coverlink import MAP_PATH_UNRESOLVED, resolve_coverage_for_prefilter
 from .identity import certificate_valid, disclose_superseded, identity_pack
 from .baseline import (_BASELINE_FAILURE_REASONS, _baseline_key,
                        _run_baseline_snapshot)
@@ -1210,7 +1210,7 @@ def _warn_serial_fallback(file: str, reason: str | None) -> None:
 def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
                               reuse_coverage, identity=None,
                               tests_scripts=None, disclosures=None,
-                              map_path=None):
+                              map_path=MAP_PATH_UNRESOLVED):
     """§SPEC-1420-12（P2）+ SEE-1550 L1 + SEE-1587 + SEE-1594 S2：coverage
     前置过滤先于 budget（预算只花在 covered 位点）；uncovered 全部显式标记
     （父层合并时注入报告）。

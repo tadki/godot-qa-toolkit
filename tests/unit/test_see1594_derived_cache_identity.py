@@ -335,3 +335,62 @@ class TestA12FullIdentityAttribution:
         assert cov is None, (
             f"selected dir outside map face must not inherit facts: {cov}")
         assert reason is not None and "identity mismatch" in reason
+
+
+class TestS22SelectionMetadataConsistency:
+    """S2.2：runtime_mapping 缺 resolved map path = selection 元数据不一致
+    ——三链（line_group/function/chunk）具名 fail-loud，绝不默认重猜；
+    planner/executor 缺省参数不得误报 explicit --tests。"""
+
+    def _proj_with_default_map(self, tmp_path):
+        from types import SimpleNamespace
+        proj = _proj(tmp_path)
+        doc = _map_doc(proj, {UNIT: {TARGET: [2]}})
+        _write_map(doc, Path(proj) / ".qa-cache" / "attribution-map.json")
+        return proj, SimpleNamespace(executed=[])
+
+    def test_line_group_runtime_mapping_without_path_fails_loud(
+            self, tmp_path):
+        from godot_qa_toolkit.mutation import truth_select
+        proj, _ = self._proj_with_default_map(tmp_path)
+        file_sel = {"source": "runtime_mapping", "reason": "fresh",
+                    "tests": [UNIT], "tests_glob": "res://tests/unit/",
+                    "zero_ref": False, "mapping": None,
+                    "ambiguous_names": []}
+        with pytest.raises(truth_select.MutationSelectionError) as ei:
+            truth_select.resolve_line_group_selection(
+                str(proj), str(Path(proj) / TARGET), [2],
+                file_selection=file_sel)
+        assert "selection_metadata_inconsistent" in str(ei.value)
+
+    def test_function_runtime_mapping_without_path_fails_loud(
+            self, tmp_path):
+        from godot_qa_toolkit.mutation import truth_select
+        proj, _ = self._proj_with_default_map(tmp_path)
+        file_sel = {"source": "runtime_mapping", "reason": "fresh",
+                    "tests": [UNIT], "tests_glob": "res://tests/unit/",
+                    "zero_ref": False, "mapping": None,
+                    "ambiguous_names": []}
+        with pytest.raises(truth_select.MutationSelectionError) as ei:
+            truth_select.resolve_function_selection(
+                str(proj), str(Path(proj) / TARGET), "f",
+                file_selection=file_sel)
+        assert "selection_metadata_inconsistent" in str(ei.value)
+
+    def test_omitted_map_path_is_not_misreported_as_explicit_tests(
+            self, tmp_path, monkeypatch, capsys):
+        """planner/executor 缺省参数（漏穿线）不得落进 explicit-None 分支
+        误报 `explicit --tests override`——缺省 = 未解析哨兵（通用回退）。"""
+        from godot_qa_toolkit.mutation import planner
+        proj, plan = self._proj_with_default_map(tmp_path)
+        target = Path(proj) / TARGET
+        disclosures: dict = {}
+        uncovered, pool = planner._apply_coverage_prefilter(
+            plan, str(target), str(proj), "res://tests/unit/", None, True,
+            disclosures, identity=None, tests_scripts=[UNIT])
+        err = capsys.readouterr().err
+        # 缺省 = 未解析哨兵 → 通用回退（默认解析）正常命中，绝不误报显式
+        # --tests；「不过滤」语义由显式 None 分支承担
+        assert disclosures.get("coverage_prefilter") == "projection_live"
+        assert "explicit --tests" not in err
+

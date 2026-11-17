@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+import attribution_fixtures as fx
 from godot_qa_toolkit.mutation import runner as mrunner
 from godot_qa_toolkit.mutation.coverlink import save_coverage
 from godot_qa_toolkit.mutation.identity import identity_pack
@@ -22,6 +23,17 @@ from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 
 KILL_TAIL = "* test_x\n\t\ttest_x [Failed]"
 
+# SEE-1594 A04/A05：store 层唯一合法种子 = 绑定映射的 /2 派生缓存
+IDENT = "res://tests/test_x.gd::t1"
+
+
+def _seed(proj, target, covered, instrumentable):
+    fx.seed_projection(
+        proj, target, {IDENT: {"calc.gd": sorted(covered)}},
+        scripts=["res://tests/test_x.gd"],
+        instrumentable={"calc.gd": sorted(instrumentable)},
+        identity=_ident(proj))
+
 
 def _write_project(tmp_path, src):
     proj = tmp_path / "proj"
@@ -30,6 +42,9 @@ def _write_project(tmp_path, src):
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
     target = proj / "calc.gd"
     target.write_text(src)
+    fx.install_recipe(proj)
+    from godot_qa_toolkit.mutation import truth_select
+    truth_select._fresh_recipe_hash.cache_clear()
     return proj, target
 
 
@@ -66,8 +81,7 @@ class TestD3NonInstrumentableNotUncovered:
         假阴性实证）；修复后：它们留在执行面、正常出 verdict。"""
         proj, target = _write_project(tmp_path, INIT_SRC)
         # 可插桩面 = {7}（行 7 可插桩但未覆盖——它才是合法 uncovered 对象）
-        save_coverage(set(), 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={7}, identity=_ident(proj))
+        _seed(proj, target, set(), {7})
         monkeypatch.setattr(mrunner, "_run_gut_on_project", _mk_kill_fake())
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
                                  tests_glob="res://tests/",
@@ -90,12 +104,21 @@ class TestD3NonInstrumentableNotUncovered:
     def test_instrumentable_face_missing_falls_back_unfiltered(self, tmp_path,
                                                                monkeypatch,
                                                                capsys):
-        """旧 schema（无 instrumentable_lines）→ 不过滤（宁多跑不假阴性）。"""
+        """/2 条目无 instrumentable_lines（盘上手写残留形态）→ 不过滤
+        （宁多跑不假阴性；face 缺失降级路径保留）。"""
+        import json as _json
+
+        from godot_qa_toolkit.mutation import coverlink, truth_select
         proj, target = _write_project(tmp_path, INIT_SRC)
-        # 旧 schema（无 face）但身份包匹配 → 走 face 缺失降级路径（钉的是
-        # face 降级而非身份漂移；身份漂移格由 prefilter 测试文件承接）
-        save_coverage(set(), 6, str(proj), str(target), "res://tests/",
-                      identity=_ident(proj))
+        map_file = fx.line_facts_map(
+            proj, {IDENT: {"calc.gd": []}},
+            instrumentable={"calc.gd": [7]})
+        doc = _json.loads(Path(map_file).read_text(encoding="utf-8"))
+        # 无 instrumentable_lines 键的 /2 条目（绑定仍对当前映射有效）
+        assert save_coverage(set(), 6, str(proj), str(target), "res://tests/",
+                             identity=_ident(proj),
+                             projection=coverlink._projection_binding(
+                                 doc, "calc.gd")) is True
         monkeypatch.setattr(mrunner, "_run_gut_on_project", _mk_kill_fake())
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
                                  tests_glob="res://tests/",

@@ -17,8 +17,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation import shadow, shadowpool
-from godot_qa_toolkit.mutation.coverlink import load_reusable_coverage, \
-    save_coverage
 from godot_qa_toolkit.mutation.identity import identity_pack
 from godot_qa_toolkit.mutation.inject import detect_binary_kind
 from godot_qa_toolkit.mutation import runner as mrunner
@@ -42,7 +40,23 @@ def _write_project(tmp_path):
     (tests / "test_x.gd").write_text("extends GutTest\n\nfunc test_x():\n\tpass\n")
     target = proj / "calc.gd"
     target.write_text(SRC)
+    # SEE-1594 A05：/2 种子绑定当前映射——recipe 必须可构建（防 lru_cache
+    # 把 recipe 不可构建期的 None 缓存毒化绑定校验）
+    import attribution_fixtures as _fx
+    from godot_qa_toolkit.mutation import truth_select as _truth
+    _fx.install_recipe(proj)
+    _truth._fresh_recipe_hash.cache_clear()
     return proj, target
+
+
+def _seed(proj, target, covered, instrumentable, identity=None):
+    """SEE-1594 A04/A05：store 层唯一合法种子 = 绑定映射的 /2 派生缓存。"""
+    import attribution_fixtures as _fx
+    return _fx.seed_projection(
+        proj, target, {"test_x.gd::t1": {"calc.gd": sorted(covered)}},
+        scripts=["res://tests/test_x.gd"],
+        instrumentable={"calc.gd": sorted(instrumentable)},
+        identity=identity if identity is not None else _ident(proj))
 
 
 def _ident(proj):
@@ -109,10 +123,9 @@ class TestWarmPool:
 
 class TestCoveragePrefilterAuto:
     def test_auto_enabled_with_matching_identity(self, tmp_path, monkeypatch):
-        """默认自动启用：store fresh ∧ 身份包全匹配 → uncovered 过滤生效。"""
+        """默认自动启用：/2 绑定映射 ∧ 身份包全匹配 → uncovered 过滤生效。"""
         proj, target = _write_project(tmp_path)
-        save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5}, identity=_ident(proj))
+        _seed(proj, target, {2}, {2, 5})
         state = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):
@@ -132,9 +145,8 @@ class TestCoveragePrefilterAuto:
                                                      monkeypatch, capsys):
         """任一漂移（身份不符）→ 禁用并披露（宁多跑不假阴性）。"""
         proj, target = _write_project(tmp_path)
-        save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5},
-                      identity=dict(_ident(proj), gut_addon_hash="drifted"))
+        _seed(proj, target, {2}, {2, 5},
+              identity=dict(_ident(proj), gut_addon_hash="drifted"))
         state = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):
@@ -151,8 +163,7 @@ class TestCoveragePrefilterAuto:
 
     def test_no_reuse_coverage_flag_disables(self, tmp_path, monkeypatch):
         proj, target = _write_project(tmp_path)
-        save_coverage({2}, 6, str(proj), str(target), "res://tests/",
-                      instrumentable_lines={2, 5}, identity=_ident(proj))
+        _seed(proj, target, {2}, {2, 5})
         state = {"n": 0}
 
         def fake(root, timeout_s=60, tests_glob=None):

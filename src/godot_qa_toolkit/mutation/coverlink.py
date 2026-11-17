@@ -1,22 +1,18 @@
-"""SEE-1420 Phase 3 — coverage 前置过滤的持久化链路（定案 L3/D7，P2）。
+"""coverage 前置过滤的持久化链路（SEE-1420 P2 → SEE-1587 → SEE-1594 S2）。
 
-复用自家 JSON 落盘（拒绝 LCOV 外部格式）：
-- ``<project>/.qa-cache/gqt-coverage/<key>.json``——`gqt measure coverage`
-  成功 run 的扩展落盘（stdout 契约的超集：多带全量 covered_lines；stdout 契约不动）；
-- ``--reuse-coverage`` 读回时做 provenance 校验：schema + 项目内相对路径 +
-  源码 sha1 + tests_glob 精确匹配 + 二进制类型——任一不符 = 无该数据
-  （mutation 侧告警后【不过滤】继续跑，宁多跑不假阴性）。
+SEE-1594 S2（A04/A05/A06）单一真源链：行级主真值映射（test-attribution/6）
+是覆盖与 prefilter 的唯一真源；``see1420-coverage/2``（``<project>/.qa-cache/
+gqt-coverage/<key>.json``）只是该映射的**派生缓存**——绑定包含映射内容与
+执行证据指纹（A05），映射任一内容变化即显式失效；live projection 消费
+selection 已解析的映射路径（A06），不重猜默认。旧 `/1` 手动 store 的
+writer/reader/prefilter 层已物理退役（A04）；盘上残留 /1 条目按 schema
+分流永不命中（宁 miss 不假过滤）。
+
+- 投影条目携带绑定包（map schema / recipe pristine / 文件 sha / 测试面
+  摘要 / 映射内容 sha / 执行证据 sha）——读回要求与当前树和当前映射全
+  匹配，任一漂移 = 显式失效（可再投影，绝不假过滤）；
 - 覆盖数据是「行级事实」，位点级结论由 mutation 侧按位点行号现推——
   uncovered 不持久化、不进 v2 条目（coverage 刷新后立即生效）。
-
-SEE-1587 — 同轮插桩 Coverage Store 投影（see1420-coverage/2）：
-- 行级主真值映射（test-attribution/6）携带 per-test covered line sets，
-  按 mutation 实际测试集合（选择目录 tests_glob）做行集并集即得该 glob 的
-  行覆盖——纯派生，零第二次插桩、零 GUT 轮次；
-- 投影条目升 schema 为 ``see1420-coverage/2`` 并携带绑定包（map schema /
-  recipe pristine / 文件 sha / 测试面摘要）——旧 prefilter 读 /2 一律
-  schema mismatch 不过滤（fail-safe）；/2 读回要求绑定包与当前树全匹配，
-  任一漂移 = 显式失效（可再投影，绝不假过滤）。
 """
 
 from __future__ import annotations
@@ -31,9 +27,9 @@ from pathlib import Path
 from ..timing import binary_kind_tag, project_relative, store_key
 from .identity import COLD_SCHEME
 
+# 退役的 /1 手动 schema 字面量：仅保留为盘上残留条目的拒绝守卫
+# （_projection_cache_basic_reject），不再有任何写入/读取路径。
 SCHEMA_COVERAGE = "see1420-coverage/1"
-# SEE-1587：同轮插桩行事实投影条目。/1 = 手动 measure coverage 产物；
-# /2 = attribution 行事实投影产物。两态互不冒充（读侧按 schema 分流）。
 SCHEMA_COVERAGE_PROJECTION = "see1420-coverage/2"
 PROJECTION_SOURCE = "attribution_line_facts"
 
@@ -71,16 +67,19 @@ def save_coverage(covered_lines: set[int], total_lines: int,
                   instrumentable_lines: set[int] | None = None,
                   identity: dict | None = None,
                   projection: dict | None = None) -> bool:
-    """coverage 成功 run 的行级事实落盘（原子写；失败告警一次，best-effort）。
+    """投影行级事实落盘（原子写；失败告警一次，best-effort）。
 
-    instrumentable_lines（D3）：本次 run 的探针可插桩行集——mutation 前置
-    过滤的唯一合法跳过锚。None = 旧 schema 形态（读回侧按无该集降级）。
+    projection（A05 绑定包）必填：条目恒为 see1420-coverage/2 派生缓存
+    （A04：/1 手动 schema 已退役，本写侧不再产出无绑定条目）。
+    instrumentable_lines（D3）：本次投影的探针可插桩行集——mutation 前置
+    过滤的唯一合法跳过锚。
     identity（SEE-1550 L1）：缓存身份包入档——读回侧要求 fresh ∧ 身份包全
     匹配才允许 prefilter 生效。
-    projection（SEE-1587）：非 None 时本条目是 attribution 行事实投影，
-    schema 升为 see1420-coverage/2 并携带绑定包——与手动 measure coverage
-    条目（/1）互不冒充。
     """
+    if projection is None:
+        raise ValueError(
+            "save_coverage requires a projection binding (see1420-coverage/2 "
+            "derived cache only; the manual /1 schema is retired)")
     kind = binary_kind_tag(binary_kind)
     rel = project_relative(project_root, file_path)
     try:
@@ -91,8 +90,7 @@ def save_coverage(covered_lines: set[int], total_lines: int,
               file=sys.stderr)
         return False
     doc = {
-        "schema": (SCHEMA_COVERAGE_PROJECTION if projection is not None
-                   else SCHEMA_COVERAGE),
+        "schema": SCHEMA_COVERAGE_PROJECTION,
         "rel": rel,
         "tests_glob": tests_glob,
         "binary_kind": kind,
@@ -101,9 +99,8 @@ def save_coverage(covered_lines: set[int], total_lines: int,
         "covered_lines": sorted(int(l) for l in covered_lines),
         "coverage_percent": coverage_percent,
         "recorded_at": time.time(),
+        "projection": dict(projection),
     }
-    if projection is not None:
-        doc["projection"] = dict(projection)
     if identity is not None:
         # §SPEC-208：落档身份归一为 coverage 通道身份（cold/canonical）——
         # 现有写侧（coverage/runner 恒 cold）为 no-op，未来任何通道调用都
@@ -129,82 +126,6 @@ def save_coverage(covered_lines: set[int], total_lines: int,
         return False
 
 
-def load_reusable_coverage(project_root: str, file_path: str,
-                           tests_glob: str | None, binary_kind=None,
-                           identity: dict | None = None
-                           ) -> tuple[set[int] | None, str | None]:
-    """读回可复用的 covered 行集；provenance 不符 = (None, 原因)。
-
-    源码 sha1 在读回时对当前文件实测（落盘后源码变更即失效——行级事实
-    必须锚定同一份源码）。vacuous（零可执行行）按无数据降级——过滤无意义。
-    identity（SEE-1550 L1）：给出时要求条目身份包全匹配——任一漂移（含
-    旧 schema 无 identity）= (None, 漂移原因)，prefilter 禁用并披露。
-    """
-    lines, _doc_or_reason = _load_coverage_doc(project_root, file_path,
-                                               tests_glob, binary_kind,
-                                               identity=identity)
-    if lines is None:
-        return None, _doc_or_reason
-    return lines, None
-
-
-def load_instrumentable_lines(project_root: str, file_path: str,
-                              tests_glob: str | None, binary_kind=None,
-                              identity: dict | None = None
-                              ) -> tuple[set[int] | None, str | None]:
-    """D3：读回可插桩行集（provenance 同 load_reusable_coverage）。
-
-    旧 schema（无 instrumentable_lines 键）返回 None——调用方按
-    「整文件视为可插桩」的既有语义降级（不假阴性也不扩面）。
-    """
-    _, doc_or_reason = _load_coverage_doc(project_root, file_path, tests_glob,
-                                          binary_kind, identity=identity)
-    if isinstance(doc_or_reason, str):
-        return None, doc_or_reason
-    raw = doc_or_reason
-    inst = raw.get("instrumentable_lines")
-    if not isinstance(inst, list):
-        return None, "coverage cache lacks instrumentable_lines (old schema)"
-    return {int(l) for l in inst if isinstance(l, (int, float))}, None
-
-
-def _load_coverage_doc(project_root: str, file_path: str,
-                       tests_glob: str | None, binary_kind=None,
-                       identity: dict | None = None
-                       ) -> tuple[set[int] | None, dict | str | None]:
-    """provenance 校验 + (covered_lines, doc-or-reason) 复合读取。"""
-    kind = binary_kind_tag(binary_kind)
-    path = coverage_cache_path(project_root, file_path, tests_glob,
-                               binary_kind=kind)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None, "no cached coverage for this (file, tests_glob)"
-    if not isinstance(raw, dict) or raw.get("schema") != SCHEMA_COVERAGE:
-        return None, "coverage cache schema mismatch"
-    if raw.get("rel") != project_relative(project_root, file_path):
-        return None, "coverage cache path mismatch"
-    if raw.get("tests_glob") != tests_glob:
-        return None, "coverage cache tests_glob mismatch (exact-match rule)"
-    if raw.get("binary_kind") != kind:
-        return None, "coverage cache binary kind mismatch"
-    if identity is not None and raw.get("identity") != coverage_identity(
-            identity):
-        return None, ("coverage cache identity drift (fresh + identity-pack "
-                      "match required — store invalidated)")
-    try:
-        source_sha1 = hashlib.sha1(
-            Path(file_path).read_bytes()).hexdigest()
-    except OSError as e:
-        return None, f"cannot read target file: {e}"
-    if raw.get("source_sha1") != source_sha1:
-        return None, "coverage cache stale (source changed since measurement)"
-    lines = raw.get("covered_lines")
-    if not isinstance(lines, list):
-        return None, "coverage cache malformed (covered_lines missing)"
-    return ({int(l) for l in lines if isinstance(l, (int, float))}, raw)
-
-
 # ---------------------------------------------------------------- SEE-1587
 # 同轮插桩行事实投影：test-attribution/6 行事实 → (file, tests_glob) 条目
 
@@ -214,6 +135,13 @@ def tests_face_digest(tests_face: dict) -> str:
     canon = {str(k): str(v) for k, v in sorted((tests_face or {}).items())}
     return hashlib.sha256(json.dumps(
         canon, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _canonical_sha256(obj) -> str:
+    """任意 JSON 值的排序稳定 sha256（A05 绑定指纹的统一实现）。"""
+    return hashlib.sha256(json.dumps(
+        obj, ensure_ascii=False, sort_keys=True,
         separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -233,14 +161,18 @@ def current_tests_face(project_root: str | os.PathLike) -> dict[str, str]:
 
 
 def _projection_binding(doc: dict, rel: str) -> dict | None:
-    """投影绑定包：map schema / recipe pristine / 文件 sha / 测试面摘要。
-    doc 缺行级主真值前置（schema 非 /6 或绑定缺失）→ None（拒绝投影）。"""
+    """投影绑定包：map schema / recipe pristine / 文件 sha / 测试面摘要 /
+    映射内容 sha / 执行证据 sha（A05）。doc 缺行级主真值前置（schema 非 /6
+    或绑定缺失）→ None（拒绝投影）。"""
     binding = {
         "source": PROJECTION_SOURCE,
         "map_schema": doc.get("schema_version"),
         "map_recipe_pristine": doc.get("recipe_hash_pristine"),
         "map_file_sha256": (doc.get("file_sha256") or {}).get(rel),
         "map_tests_face_sha": tests_face_digest(doc.get("tests_face") or {}),
+        "map_content_sha256": _canonical_sha256(doc),
+        "execution_evidence_sha256": _canonical_sha256(
+            doc.get("arms_state") or {}),
     }
     if not binding["map_recipe_pristine"] or not binding["map_file_sha256"]:
         return None
@@ -311,22 +243,63 @@ def project_coverage_from_map(
         return None, reason
     instrumentable = (doc.get("instrumentable_lines") or {}).get(rel)
     arm = (doc.get("arms") or {}).get("gut_full") or {}
-    # 身份归一：运行时注册表身份是 `res://tests/x.gd::test` / `res://tests/x.gd`
-    # 全路径，选择目录承载的是脚本 res:// 路径——两侧统一取 basename 比较
-    # （按全路径与裸名互比会让并集静默为空 = 全量假 uncovered）。
-    def _base(name: str) -> str:
-        return Path(str(name).split("::", 1)[0]).name
+    # A12（SEE-1594）：行事实身份归属禁 basename 猜测并集。注册表身份的
+    # 脚本段是 GUT 裸文件名（CollectedScript.get_filename() = path.get_file()），
+    # 无法区分同名不同目录脚本；投影归属规则：
+    # - 全路径身份（res://...）：与 selection 脚本精确全等；
+    # - 裸名身份：唯一同名 selected 脚本才可归属；该裸名在 map tests_face
+    #   跨多个目录，或 selection 同名脚本多于一个 → 歧义 fail-loud。
+    script_set = {str(s) for s in scripts}
+    bare_sel = sorted(s for s in script_set if not s.startswith("res://"))
+    if bare_sel:
+        return None, (
+            "line facts identity mismatch: selection scripts must be full "
+            f"res:// paths, got {bare_sel} — full res:// script identity "
+            "required (ambiguous attribution)")
+    face_dirs: dict[str, set[str]] = {}
+    for face_rel in (doc.get("tests_face") or {}):
+        face_dirs.setdefault(Path(face_rel).name, set()).add(
+            Path(face_rel).parent.as_posix())
 
-    script_names = {_base(s) for s in scripts}
+    def _match(sp: str) -> "tuple[set[str], str | None]":
+        """身份脚本段 → (候选 selected 脚本集, 歧义原因)。"""
+        if sp.startswith("res://"):
+            return ({sp} if sp in script_set else set()), None
+        cands = {s for s in script_set if Path(s).name == sp}
+        if len(cands) > 1:
+            return set(), (f"same-name script(s) [{sp}] selected from "
+                           "multiple directories")
+        if len(cands) == 1 and len(face_dirs.get(sp, ())) > 1:
+            return set(), (f"same-name script(s) [{sp}] exist across "
+                           f"directories {sorted(face_dirs[sp])}")
+        return cands, None
+
     covered: set[int] = set()
+    ambiguity: "str | None" = None
     for ident, by_rel in (arm.get("test_to_lines") or {}).items():
-        if _base(ident) not in script_names:
+        sp = str(ident).split("::", 1)[0]
+        cands, why = _match(sp)
+        if why is not None:
+            if ambiguity is None:
+                ambiguity = why
+            continue
+        if not cands:
             continue
         covered.update(int(l) for l in (by_rel.get(rel) or ()))
     for script, by_rel in (arm.get("script_to_lines") or {}).items():
-        if _base(script) not in script_names:
+        sp = str(script)
+        cands, why = _match(sp)
+        if why is not None:
+            if ambiguity is None:
+                ambiguity = why
+            continue
+        if not cands:
             continue
         covered.update(int(l) for l in ((by_rel or {}).get(rel) or ()))
+    if ambiguity is not None:
+        return None, (
+            f"line facts identity mismatch: {ambiguity} — full res:// "
+            "script identity required (ambiguous attribution)")
     inst_set = {int(l) for l in instrumentable}
     covered &= inst_set
     binding = _projection_binding(doc, rel)
@@ -375,9 +348,10 @@ def _projection_cache_basic_reject(
 def _projection_binding_reject(
         binding: dict, file_path: str,
         current_recipe_pristine: "str | None",
-        tests_face: "dict | None", project_root: str) -> "str | None":
-    """投影绑定包校验（目标文件 sha / recipe pristine / 测试面摘要）。
-    失配返回显式原因；通过返回 None。"""
+        tests_face: "dict | None", project_root: str,
+        current_doc: "dict | None" = None) -> "str | None":
+    """投影绑定包校验（目标文件 sha / recipe pristine / 测试面摘要 /
+    映射内容 sha / 执行证据 sha）。失配返回显式原因；通过返回 None。"""
     try:
         file_sha = hashlib.sha256(
             Path(file_path).read_bytes()).hexdigest()
@@ -394,6 +368,17 @@ def _projection_binding_reject(
         str(root))
     if binding.get("map_tests_face_sha") != tests_face_digest(face_now):
         return "projection binding stale (tests face drift)"
+    if current_doc is None:
+        # A05：绑定含映射内容/执行证据指纹——当前映射不可读即无法验证，
+        # 宁 miss 不假命中（绝不绑定无主缓存）。
+        return "attribution map unavailable for projection binding check"
+    if binding.get("map_content_sha256") != _canonical_sha256(current_doc):
+        return ("projection binding stale (attribution map content "
+                "changed since projection)")
+    if binding.get("execution_evidence_sha256") != _canonical_sha256(
+            current_doc.get("arms_state") or {}):
+        return ("projection binding stale (execution evidence changed "
+                "since projection)")
     return None
 
 
@@ -402,14 +387,14 @@ def _load_projection_raw(
         binary_kind=None, identity: dict | None = None, *,
         current_recipe_pristine: str | None = None,
         tests_face: dict | None = None,
+        current_doc: "dict | None" = None,
         ) -> tuple[dict | None, str | None]:
     """投影条目读取 + 全量 provenance 校验（load 侧唯一实现）。
 
-    - /1（手动 measure coverage 条目）→ (None, 原因)——投影消费面不用
-      手动条目，两态互不冒充；
+    - /1（已退役手动条目，盘上残留）→ (None, 原因)——永不命中；
     - /2 但基础 provenance（rel/glob/kind/身份包/源码 sha1）或绑定包与
-      当前树任一失配 → (None, 显式失效原因)——显式失效 = 消费侧回退
-      不过滤并可再投影，绝不假过滤。"""
+      当前树/当前映射任一失配 → (None, 显式失效原因)——显式失效 = 消费
+      侧回退不过滤并可再投影，绝不假过滤。"""
     kind = binary_kind_tag(binary_kind)
     path = coverage_cache_path(project_root, file_path, tests_glob,
                                binary_kind=kind)
@@ -429,7 +414,7 @@ def _load_projection_raw(
         return None, "coverage cache lacks projection binding"
     reason = _projection_binding_reject(binding, file_path,
                                         current_recipe_pristine, tests_face,
-                                        project_root)
+                                        project_root, current_doc=current_doc)
     if reason is not None:
         return None, reason
     return raw, None
@@ -440,11 +425,14 @@ def load_projected_coverage(
         binary_kind=None, identity: dict | None = None, *,
         current_recipe_pristine: str | None = None,
         tests_face: dict | None = None,
+        current_doc: "dict | None" = None,
         ) -> tuple[set[int] | None, str | None]:
-    """读回投影条目的 covered 行集（校验见 _load_projection_raw）。"""
+    """读回投影条目的 covered 行集（/2 唯一读回口径；校验见
+    _load_projection_raw——含映射内容/执行证据绑定）。"""
     raw, reason = _load_projection_raw(
         project_root, file_path, tests_glob, binary_kind, identity,
-        current_recipe_pristine=current_recipe_pristine, tests_face=tests_face)
+        current_recipe_pristine=current_recipe_pristine, tests_face=tests_face,
+        current_doc=current_doc)
     if raw is None:
         return None, reason
     lines = raw.get("covered_lines")
@@ -455,45 +443,47 @@ def load_projected_coverage(
 
 def _prefilter_projection_store(
         project_root: str, file_path: str, tests_glob: str,
-        binary_kind, identity: "dict | None",
-        pristine: str) -> "tuple[set[int] | None, set[int] | None, str | None]":
-    """prefilter 解析链第 2 层：see1420-coverage/2 同轮投影缓存条目
-    （绑定包全匹配才可用）。返回 (covered, instrumentable, 失败原因)。"""
-    proj_cov, proj_reason = load_projected_coverage(
+        binary_kind, identity: "dict | None", pristine: str,
+        current_doc: "dict | None" = None,
+        ) -> "tuple[set[int] | None, set[int] | None, str | None]":
+    """prefilter 解析链 store 层：see1420-coverage/2 派生缓存条目（绑定包
+    含映射内容/执行证据指纹，与当前映射全匹配才可用；A05：单次读取同时
+    取 covered 与 instrumentable）。返回 (covered, instrumentable, 原因)；
+    covered 非 None 而 instrumentable 为 None = 条目有效但 face 缺失
+    （消费侧按 instrumentable_face_missing 披露，不过滤）。"""
+    raw, why = _load_projection_raw(
         project_root, file_path, tests_glob, binary_kind, identity,
-        current_recipe_pristine=pristine)
-    if proj_cov is not None:
-        raw, _ = _load_projection_raw(
-            project_root, file_path, tests_glob, binary_kind, identity,
-            current_recipe_pristine=pristine)
-        proj_inst = ({int(l)
-                      for l in (raw or {}).get("instrumentable_lines") or []}
-                     if raw else None)
-        if proj_inst:
-            return proj_cov, proj_inst, None
-        return None, None, "instrumentable face unavailable"
-    return None, None, proj_reason
+        current_recipe_pristine=pristine, current_doc=current_doc)
+    if raw is None:
+        return None, None, why
+    lines = raw.get("covered_lines")
+    if not isinstance(lines, list):
+        return None, None, "coverage cache malformed (covered_lines missing)"
+    cov = {int(l) for l in lines if isinstance(l, (int, float))}
+    inst = {int(l) for l in raw.get("instrumentable_lines") or []
+            if isinstance(l, (int, float))}
+    if not inst:
+        return cov, None, "instrumentable face unavailable"
+    return cov, inst, None
 
 
 def _prefilter_live_projection(
         project_root: str, file_path: str, tests_glob: str,
         scripts: "list[str] | set[str] | None", binary_kind,
-        identity: "dict | None",
-        pristine: str) -> "tuple[set[int] | None, set[int] | None, str | None]":
-    """prefilter 解析链第 3 层：新鲜行级主真值映射现场投影（scripts =
+        identity: "dict | None", pristine: str, *,
+        doc: "dict | None", map_path: "str | None",
+        ) -> "tuple[set[int] | None, set[int] | None, str | None]":
+    """prefilter 解析链 live 层：新鲜行级主真值映射现场投影（scripts =
     本次 tests_glob 承载的测试脚本集；零第二次插桩/零 GUT），落盘为 /2
-    条目供后续复用。返回 (covered, instrumentable, 失败原因)。"""
-    from . import truth_select as _truth
-
-    map_path = _truth.map_path(str(Path(project_root).resolve()))
+    条目供后续复用。doc/map_path 由调用方传入 selection 已解析的映射
+    （A06：本层不重猜默认路径），与 store 层共享同一次加载（A05）。
+    返回 (covered, instrumentable, 失败原因)。"""
     if not map_path:
         return None, None, "no attribution map for live projection"
+    if doc is None:
+        return None, None, "attribution map unusable for live projection"
     if not scripts:
         return None, None, "selection scripts unknown for live projection"
-    try:
-        doc = _truth.load_map(map_path)
-    except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
-        return None, None, f"attribution map unusable: {e}"
     doc_cov, doc_reason = project_coverage_from_map(
         project_root, doc, file_path, scripts, tests_glob,
         binary_kind=binary_kind, identity=identity,
@@ -512,17 +502,22 @@ def resolve_coverage_for_prefilter(
         project_root: str, file_path: str, tests_glob: str | None,
         scripts: "list[str] | set[str] | None" = None,
         binary_kind=None, identity: dict | None = None,
+        map_path: "str | None" = None,
         ) -> tuple[set[int] | None, set[int] | None, str | None, str | None]:
-    """mutation prefilter 统一解析链（SEE-1587 消费面单一出处）。
+    """mutation prefilter 统一解析链（SEE-1587 消费面单一出处；
+    SEE-1594 S2 单真源化）。
 
     返回 (covered, instrumentable, reason, source)：
-    1. `coverage_store`——`gqt measure coverage` 手动 /1 条目（用户显式面
-       优先，既有语义不变）；
-    2. `projection_store`——`see1420-coverage/2` 同轮投影缓存（绑定包全
-       匹配才可用）；
-    3. `projection_live`——新鲜行级主真值映射现场投影（scripts = 本次
+    1. `projection_store`——`see1420-coverage/2` 派生缓存（绑定含映射内容
+       与执行证据指纹，与当前映射全匹配才可用）；
+    2. `projection_live`——新鲜行级主真值映射现场投影（scripts = 本次
        tests_glob 承载的测试脚本集；零第二次插桩/零 GUT），落盘为 /2 条目
        供后续复用。
+
+    map_path（A06）= selection 实际解析的映射路径（executor/planner 传
+    `selection_meta["mapping"]["path"]`）；None（直接调用/测试）回退默认
+    解析。两层共享同一次映射加载（A05 合并读取）。旧 `/1` 手动 store 已
+    退役（A04），盘上残留条目按 schema 分流永不命中。
 
     任一层失败都继续下沉，全部失败原因**逐层保留**（reason 聚合，身份漂移
     /绑定漂移不因下沉而不可见）；全部不可用 → (None, None, 原因,
@@ -530,36 +525,34 @@ def resolve_coverage_for_prefilter(
     不过滤（宁多跑不假过滤）。"""
     if tests_glob is None:
         return None, None, "no tests_glob (full-face audit)", "store_miss"
-    reasons: list[str] = []
-    cov, cov_reason = load_reusable_coverage(
-        project_root, file_path, tests_glob, binary_kind, identity=identity)
-    inst = None
-    if cov is not None:
-        inst, _inst_reason = load_instrumentable_lines(
-            project_root, file_path, tests_glob, binary_kind,
-            identity=identity)
-        if inst is not None:
-            return cov, inst, None, "coverage_store"
-        reasons.append(f"store: instrumentable face unavailable "
-                       f"({_inst_reason})")
-    elif cov_reason:
-        reasons.append(f"store: {cov_reason}")
     from . import truth_select as _truth
 
-    pristine = _truth._fresh_recipe_hash(str(Path(project_root).resolve()))
+    root = str(Path(project_root).resolve())
+    resolved = map_path or _truth.map_path(root)
+    reasons: list[str] = []
+    doc: dict | None = None
+    if resolved:
+        try:
+            doc = _truth.load_map(resolved)
+        except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
+            reasons.append(f"attribution map unusable: {e}")
+    else:
+        reasons.append("no attribution map for projection")
+    pristine = _truth._fresh_recipe_hash(root)
     proj_cov, proj_inst, proj_why = _prefilter_projection_store(
-        project_root, file_path, tests_glob, binary_kind, identity, pristine)
-    if proj_cov is not None:
+        project_root, file_path, tests_glob, binary_kind, identity, pristine,
+        current_doc=doc)
+    if proj_cov is not None and proj_inst is not None:
         return proj_cov, proj_inst, None, "projection_store"
     if proj_why:
         reasons.append(f"projection store: {proj_why}")
     live_cov, live_inst, live_why = _prefilter_live_projection(
         project_root, file_path, tests_glob, scripts, binary_kind, identity,
-        pristine)
+        pristine, doc=doc, map_path=resolved)
     if live_cov is not None:
         return live_cov, live_inst, None, "projection_live"
     if live_why:
         reasons.append(f"live projection: {live_why}")
-    saw_cov = cov is not None or proj_cov is not None
+    saw_cov = proj_cov is not None
     state = "instrumentable_face_missing" if saw_cov else "store_miss"
     return None, None, "; ".join(reasons) or "coverage unavailable", state

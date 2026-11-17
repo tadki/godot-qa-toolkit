@@ -127,7 +127,10 @@ def test_algo_granularity_key_rejects_legacy_attr6_entries(tmp_path):
 
 
 def test_manual_store_and_projection_store_never_impersonate(tmp_path):
-    """/1 手动条目与 /2 投影条目互不冒充：两个消费面按 schema 双向拒绝。"""
+    """SEE-1594 A04：/1 写侧与读链已退役——写侧拒绝无绑定条目，盘上残留
+    /1 schema 条目对投影消费面不可见（schema 分流拒绝）。"""
+    import json as _json
+
     from godot_qa_toolkit.mutation import coverlink
 
     proj = tmp_path / "proj"
@@ -135,13 +138,27 @@ def test_manual_store_and_projection_store_never_impersonate(tmp_path):
     target.parent.mkdir(parents=True)
     target.write_text("func f(a):\n\treturn a\n")
     glob = "res://tests/"
-    assert coverlink.save_coverage({2}, 3, str(proj), str(target), glob,
-                                   instrumentable_lines={1, 2, 3})
-    # /1 对投影消费面不可见
+    # 写侧：无 projection 绑定 = 拒绝（不再产出 /1 形态）
+    try:
+        coverlink.save_coverage({2}, 3, str(proj), str(target), glob,
+                                instrumentable_lines={1, 2, 3})
+        raise AssertionError("save_coverage must require a projection binding")
+    except ValueError as e:
+        assert "projection binding" in str(e)
+    # 盘上手写 /1 残留条目 → 投影消费面 schema 分流拒绝
+    entry = {"schema": coverlink.SCHEMA_COVERAGE, "rel": "a.gd",
+             "tests_glob": glob, "binary_kind": "cold",
+             "source_sha1": __import__("hashlib").sha1(
+                 target.read_bytes()).hexdigest(),
+             "total_lines": 3, "covered_lines": [2],
+             "coverage_percent": 66.67, "recorded_at": 0.0}
+    path = coverlink.coverage_cache_path(str(proj), str(target), glob)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(entry), encoding="utf-8")
     lines, err = coverlink.load_projected_coverage(
-        str(proj), str(target), glob, current_recipe_pristine="p")
+        str(proj), str(target), glob)
     assert lines is None and "manual measurement entry" in err
-    # /2 对旧 prefilter 消费面不可见（fail-safe 不过滤）
+    # /2 写路径受控：无绑定 doc → 投影拒绝（不产出无绑定缓存）
     doc = {"schema_version": "test-attribution/6",
            "recipe_hash_pristine": "p", "file_sha256": {}, "tests_face": {},
            "instrumentable_lines": {}, "arms_state": {}, "arms": {}}
@@ -149,10 +166,6 @@ def test_manual_store_and_projection_store_never_impersonate(tmp_path):
         str(proj), doc, str(target), ["res://tests/t.gd"],
         "res://.gqt-attr-select/x/")
     assert covered is None  # 该 doc 无绑定/面，仅证明写入路径受控
-    # 手动 /1 仍被既有 prefilter 正常消费（兼容面行为不变）
-    reused, rerr = coverlink.load_reusable_coverage(
-        str(proj), str(target), glob)
-    assert reused == {2} and rerr is None
 
 
 # ------------------------------------------------------------ prefilter 单源
@@ -169,10 +182,12 @@ def test_prefilter_consumers_go_through_the_single_chain():
         for legacy in ("load_reusable_coverage", "load_instrumentable_lines"):
             assert legacy not in text, (
                 f"{name} bypasses the unified chain via {legacy}")
-    # 唯一直连 /1 load 的合法位置是 coverlink 自身（统一链第一层）
+    # SEE-1594 A04：/1 读链零消费者——`load_reusable_coverage` /
+    # `load_instrumentable_lines` 在 src/ 无任何残留（含 coverlink 自身）。
     loaders = [path for path, text in _src_texts().items()
-               if "load_reusable_coverage(" in text]
-    assert loaders == ["mutation/coverlink.py"], loaders
+               if "load_reusable_coverage(" in text
+               or "load_instrumentable_lines(" in text]
+    assert loaders == [], loaders
 
 
 def test_measure_coverage_manual_entry_is_the_only_store1_writer():

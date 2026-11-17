@@ -324,17 +324,10 @@ def _auto_increment(project_root: str, path: str, doc: dict,
 
 @lru_cache(maxsize=8)
 def _current_tests_face(project_root: str) -> dict[str, str]:
-    root = Path(project_root)
-    tests = root / "tests"
-    out: dict[str, str] = {}
-    if tests.is_dir():
-        for p in sorted(tests.rglob("*.gd")):
-            try:
-                out[str(p.relative_to(root))] = hashlib.sha256(
-                    p.read_bytes()).hexdigest()
-            except OSError:
-                continue
-    return out
+    """tests-face 指纹（A11 单一实现）：本体在 coverlink.current_tests_face，
+    此处仅保留选面路径的进程内缓存语义。"""
+    from .coverlink import current_tests_face
+    return current_tests_face(project_root)
 
 
 def _tests_face_drift(project_root: str, doc: dict) -> dict[str, list[str]]:

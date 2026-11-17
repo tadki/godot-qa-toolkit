@@ -702,18 +702,29 @@ def test_save_coverage_normalizes_identity_to_cold(tmp_path):
     target.write_text("func add(a, b):\n\treturn a + b\n")
     cold = identity_pack(str(proj), detect_binary_kind())
     worker_ident = {**cold, "exec_scheme": WORKER_SCHEME}
+    # SEE-1594 A04/A05：条目恒为 /2 派生缓存（projection 绑定必填）
+    import hashlib as _hashlib
+    map_doc = {"schema_version": "test-attribution/6",
+               "recipe_hash_pristine": "p",
+               "file_sha256": {"calc.gd": _hashlib.sha256(
+                   target.read_bytes()).hexdigest()},
+               "tests_face": {}, "arms_state": {}}
+    binding = coverlink._projection_binding(map_doc, "calc.gd")
+    assert binding is not None
     assert coverlink.save_coverage(
         {2}, 6, str(proj), str(target), "res://tests/",
-        instrumentable_lines={2, 5}, identity=worker_ident) is True
+        instrumentable_lines={2, 5}, identity=worker_ident,
+        projection=binding) is True
     cache = coverlink.coverage_cache_path(str(proj), str(target),
                                           "res://tests/",
                                           detect_binary_kind())
-    doc = json.loads(cache.read_text(encoding="utf-8"))
-    assert doc["identity"]["exec_scheme"] == COLD_SCHEME
+    entry = json.loads(cache.read_text(encoding="utf-8"))
+    assert entry["identity"]["exec_scheme"] == COLD_SCHEME
     # 读侧以 cold 身份命中（写侧归一的闭环证据）
-    lines, reason = coverlink.load_reusable_coverage(
+    lines, reason = coverlink.load_projected_coverage(
         str(proj), str(target), "res://tests/",
-        binary_kind=detect_binary_kind(), identity=cold)
+        binary_kind=detect_binary_kind(), identity=cold,
+        current_recipe_pristine="p", current_doc=map_doc)
     assert lines == {2} and reason is None
 
 

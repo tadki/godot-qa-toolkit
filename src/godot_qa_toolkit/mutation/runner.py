@@ -428,7 +428,8 @@ def _run_mutation_core(file_path: str,
             tests_glob, binary_kind, resume2_store, mutate_all, retry_ids,
             select_ids, select_lines, reuse_coverage, attention,
             mutant_slice, original_src, identity=identity, clock=clock,
-            tests_scripts=selection_meta.get("tests") or None)
+            tests_scripts=selection_meta.get("tests") or None,
+            map_path=(selection_meta.get("mapping") or {}).get("path"))
 
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。

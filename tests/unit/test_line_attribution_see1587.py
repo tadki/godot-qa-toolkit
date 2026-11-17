@@ -396,10 +396,10 @@ def test_projection_unions_selected_tests_and_persists(tmp_path):
     assert raw["projection"]["source"] == coverlink.PROJECTION_SOURCE
     assert raw["projection"]["map_recipe_pristine"] == "pristine-1"
     assert raw["instrumentable_lines"] == [5, 6, 7, 99]
-    # 读回：绑定全匹配 → 同一行集
+    # 读回：绑定全匹配 → 同一行集（A05：绑定对当前映射内容校验）
     lines, err = coverlink.load_projected_coverage(
         str(project), str(target), "res://.gqt-attr-select/abc/",
-        current_recipe_pristine="pristine-1")
+        current_recipe_pristine="pristine-1", current_doc=doc)
     assert err is None and lines == {5, 6}
     # 双测试并集
     covered2, err = coverlink.project_coverage_from_map(
@@ -491,34 +491,31 @@ def test_projection_read_invalidates_on_drift(tmp_path):
     assert err is None and covered == {5, 7}
     lines, err = coverlink.load_projected_coverage(
         str(project), str(target), glob,
-        current_recipe_pristine="pristine-1")
+        current_recipe_pristine="pristine-1", current_doc=doc2)
     assert err is None and lines == {5, 7}
 
 
 def test_projection_loader_never_consumes_manual_entries(tmp_path):
-    """/1 手动 measure coverage 条目对投影消费面不可见（两态互不冒充）。"""
+    """SEE-1594 A04：已退役 /1 手动 schema 的盘上残留条目对投影消费面
+    不可见（schema 分流拒绝；写侧已不再产出该形态）。"""
     project = tmp_path / "proj"
     (project / "tests").mkdir(parents=True)
     target = project / "src" / "a.gd"
     target.parent.mkdir(parents=True)
     target.write_text(TARGET_SRC)
     glob = "res://tests/"
-    assert coverlink.save_coverage({5}, 3, str(project), str(target), glob)
+    entry = {"schema": coverlink.SCHEMA_COVERAGE, "rel": "src/a.gd",
+             "tests_glob": glob, "binary_kind": "cold",
+             "source_sha1": hashlib.sha1(
+                 target.read_bytes()).hexdigest(),
+             "total_lines": 3, "covered_lines": [5],
+             "coverage_percent": 33.33, "recorded_at": 0.0}
+    path = coverlink.coverage_cache_path(str(project), str(target), glob)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entry), encoding="utf-8")
     lines, err = coverlink.load_projected_coverage(
-        str(project), str(target), glob,
-        current_recipe_pristine="pristine-1")
+        str(project), str(target), glob)
     assert lines is None and "manual measurement entry" in err
-    # 旧 prefilter 消费面读 /2 投影条目 → schema mismatch 不过滤（fail-safe）
-    doc = _write_line_primary_doc(tmp_path, project, "src/a.gd", TARGET_SRC,
-                                  {"a": {5}, "b": {6}})
-    sel_glob = "res://.gqt-attr-select/abc/"
-    covered, err = coverlink.project_coverage_from_map(
-        str(project), doc, str(target), ["res://tests/test_a.gd"], sel_glob,
-        current_recipe_pristine="pristine-1")
-    assert err is None
-    reused, err = coverlink.load_reusable_coverage(
-        str(project), str(target), sel_glob)
-    assert reused is None and "schema mismatch" in err
 
 
 # ------------------------------------------------- 硬化补盲（变异存活点）
@@ -617,7 +614,7 @@ def test_projection_loader_rejects_identity_drift(tmp_path):
     # 同身份命中
     lines, err = coverlink.load_projected_coverage(
         str(project), str(target), glob, identity=ident,
-        current_recipe_pristine="pristine-1")
+        current_recipe_pristine="pristine-1", current_doc=doc)
     assert err is None and lines == {5}
     # 身份漂移（gut_addon_hash 变）→ 显式失效
     lines, err = coverlink.load_projected_coverage(

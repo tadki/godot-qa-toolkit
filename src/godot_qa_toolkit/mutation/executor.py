@@ -24,8 +24,10 @@ from . import cost_priors, shadow
 from .ops import _collect_mutations
 from .reporting import (SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP, _mutant_record,
                         _valid_mutants)
-from .coverlink import (MAP_PATH_UNRESOLVED, resolve_coverage_for_prefilter,
-                        selection_map_path)
+from .coverlink import (COVERAGE_PREFILTER_MISS_STATES,
+                        COVERAGE_PREFILTER_SOURCES,
+                        MAP_PATH_UNRESOLVED, apply_coverage_prefilter,
+                        coverage_prefilter_summary, selection_map_path)
 from .identity import certificate_valid, disclose_superseded, identity_pack
 from .baseline import (_BASELINE_FAILURE_REASONS, _baseline_key,
                        _run_baseline_snapshot)
@@ -626,13 +628,12 @@ def _accumulate_chunk(agg: dict, cr: dict, passthrough_keys: tuple[str, ...]) ->
         cur = agg.get("coverage_prefilter")
         if isinstance(pf, dict):
             if isinstance(cur, dict):
-                agg["coverage_prefilter"] = {
-                    "source": cur.get("source") or pf.get("source"),
-                    "uncovered": (cur.get("uncovered") or 0)
-                                 + (pf.get("uncovered") or 0),
-                    "covered_executed": (cur.get("covered_executed") or 0)
-                                        + (pf.get("covered_executed") or 0),
-                }
+                # A08：聚合同样走唯一 writer（计数求和、source 取首个非空）
+                agg["coverage_prefilter"] = coverage_prefilter_summary(
+                    cur.get("source") or pf.get("source"),
+                    (cur.get("uncovered") or 0) + (pf.get("uncovered") or 0),
+                    (cur.get("covered_executed") or 0)
+                    + (pf.get("covered_executed") or 0))
             else:
                 agg["coverage_prefilter"] = pf
         elif not isinstance(cur, dict):
@@ -1230,26 +1231,12 @@ def _apply_coverage_prefilter(plan, f, project_root, glob, binary_kind,
     D3 修复：过滤锚 = covered ∧ instrumentable——不可插桩行上的位点留在
     执行面（与 planner._apply_coverage_prefilter 同语义）；可插桩集不可得
     = 不过滤（宁多跑不假阴性）。"""
-    if not reuse_coverage:
-        return [], plan.executed
-    cov, inst, cov_reason, source = resolve_coverage_for_prefilter(
-        project_root, f, glob, scripts=tests_scripts,
-        binary_kind=binary_kind, identity=identity, map_path=map_path)
-    if cov is None or inst is None:
-        print(f"mutation: coverage store miss ({cov_reason}) for {f} "
-              f"— running unfiltered", file=sys.stderr)
-        if disclosures is not None:
-            disclosures["coverage_prefilter"] = source or "store_miss"
-        return [], plan.executed
-    if disclosures is not None:
-        disclosures["coverage_prefilter"] = source
-    uncovered = [m for m in plan.executed
-                 if m.line not in cov and m.line in inst]
-    # D3 锚统一（SEE-1420 qa 复验 FAIL 实证）：执行面 = covered ∨ 不可插桩
-    # ——此前本函数 uncovered 行已换新锚、pool 行仍 covered-only，导致不
-    # 可插桩行位点被静默丢弃（不执行也不标记，比修复前更不可见）。
-    return uncovered, [m for m in plan.executed
-                       if m.line in cov or m.line not in inst]
+    # A07（SEE-1594 S3）：应用逻辑单一 helper 在 coverlink，本函数只保留
+    # 形参适配；D3 锚（执行面 = covered ∨ 不可插桩）/miss 披露口径与
+    # planner 路径同源。
+    return apply_coverage_prefilter(
+        plan.executed, f, project_root, glob, tests_scripts, binary_kind,
+        identity, reuse_coverage, disclosures, map_path)
 
 
 def _slice_retry_ids(f, project_root, budget, timeout_s, glob, binary_kind,
@@ -1512,18 +1499,14 @@ def _inject_one(r: dict, ctx: dict) -> None:
                 reasons.get(m.stable_id)
                 or f"line {m.line} not covered by tests (reused coverage "
                    f"prefilter; site never executed)", src=ctx["src"]))
-        pf = {"uncovered": len(uncovered),
-              "covered_executed": len(ctx["executed"])}
-        if pf_source:
-            pf["source"] = pf_source
-        s["coverage_prefilter"] = pf
-    elif isinstance(pf_source, str) and pf_source in (
-            "projection_store", "projection_live"):
+        # A08：summary.coverage_prefilter 唯一 writer（coverlink）
+        s["coverage_prefilter"] = coverage_prefilter_summary(
+            pf_source or None, len(uncovered), len(ctx["executed"]))
+    elif isinstance(pf_source, str) and pf_source in COVERAGE_PREFILTER_SOURCES:
         # SEE-1587：prefilter 成功生效（零 uncovered）也必须披露来源——
         # 「默认路径不再常态 store miss」的证据面；miss 态不在此新增键。
-        s["coverage_prefilter"] = {
-            "source": pf_source, "uncovered": 0,
-            "covered_executed": len(ctx["executed"])}
+        s["coverage_prefilter"] = coverage_prefilter_summary(
+            pf_source, 0, len(ctx["executed"]))
     if plan.diff_active or plan.mutate_all:
         # §SPEC-1420-07（D6）+ O3 键集对齐：差分在场与 --mutate-all 两径披露
         # 同一键集（--mutate-all 全量面也可见：executed == retry_total、

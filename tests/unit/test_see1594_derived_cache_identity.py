@@ -440,6 +440,15 @@ class TestS23Consistency:
             {"source": "runtime_mapping",
              "mapping": {"path": "/tmp/m.json"}}) == "/tmp/m.json"
 
+    def test_selection_map_path_none_mapping_runtime_mapping_is_inconsistent(
+            self, tmp_path):
+        """S3 首项残余：runtime_mapping + mapping=None 同走不一致哨兵——
+        不漏回 explicit-None 文案（ecaf319 上返回 None，RED）。"""
+        from godot_qa_toolkit.mutation import coverlink
+        assert coverlink.selection_map_path(
+            {"source": "runtime_mapping", "mapping": None}) \
+            is coverlink.MAP_PATH_METADATA_INCONSISTENT
+
     def test_resolve_metadata_inconsistent_reason_is_truthful(
             self, tmp_path):
         """不一致哨兵的披露与其真实原因对应——绝不冒充 explicit --tests
@@ -454,3 +463,85 @@ class TestS23Consistency:
         assert state == "store_miss"
         assert "selection metadata inconsistent" in (reason or "")
         assert "explicit --tests" not in (reason or "")
+
+
+class TestS3UnifiedPrefilter:
+    """S3（A07/A08）：prefilter 应用单一 helper（planner/executor 同源
+    parity）；summary.coverage_prefilter 唯一 writer 形状契约。"""
+
+    def _seeded(self, tmp_path):
+        import attribution_fixtures as fx
+        from godot_qa_toolkit.mutation.identity import identity_pack
+        from godot_qa_toolkit.mutation.inject import detect_binary_kind
+        proj = _proj(tmp_path)
+        fx.install_recipe(proj)
+        (proj / "tests" / "unit" / "test_a.gd").write_text(
+            "extends Node\n")
+        from godot_qa_toolkit.mutation import truth_select
+        truth_select._fresh_recipe_hash.cache_clear()
+        fx.seed_projection(
+            proj, Path(proj) / TARGET, {UNIT: {TARGET: [2]}},
+            scripts=[UNIT], instrumentable={TARGET: [2, 3]},
+            identity=identity_pack(str(proj), detect_binary_kind()))
+        return proj
+
+    def test_planner_executor_prefilter_parity(self, tmp_path, monkeypatch):
+        """A07：同一输入下 planner 与 executor 两条包装产出完全一致
+        （uncovered/pool/披露），证明合并后零分叉。"""
+        from types import SimpleNamespace
+
+        from godot_qa_toolkit.mutation import executor, planner
+        proj = self._seeded(tmp_path)
+        target = Path(proj) / TARGET
+        mutants = [SimpleNamespace(line=2, stable_id=f"m{m}")
+                   for m in (1, 2)] + \
+                  [SimpleNamespace(line=3, stable_id=f"m{m}")
+                   for m in (3, 4)]
+        out = {}
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        for name, fn, path_arg in (
+                ("planner", planner._apply_coverage_prefilter, target),
+                ("executor", executor._apply_coverage_prefilter, str(target))):
+            plan = SimpleNamespace(executed=list(mutants))
+            disclosures: dict = {}
+            unc, pool = fn(plan, path_arg, str(proj), "res://tests/unit/",
+                           None, True, disclosures=disclosures,
+                           identity=None, tests_scripts=[UNIT])
+            out[name] = ([u.stable_id for u in unc],
+                         [p.stable_id for p in pool],
+                         dict(disclosures))
+        assert out["planner"][:2] == out["executor"][:2]
+        # source 依调用顺序 live→store（首个 live 落盘 /2，次个命中缓存）
+        # ——两披露同形状同键集，source 均为映射派生来源
+        for _, _, disc in out.values():
+            pf = disc["coverage_prefilter"]
+            assert pf in ("projection_live", "projection_store")
+        unc_ids, pool_ids, disc = out["planner"]
+        assert set(unc_ids) == {"m3", "m4"}   # line 3 未覆盖 → uncovered
+        assert set(pool_ids) == {"m1", "m2"}  # line 2 covered → pool
+
+    def test_no_tests_glob_miss_discloses_and_runs_unfiltered(
+            self, tmp_path, capsys):
+        """A07 反例：no tests_glob（全脸）→ 具名 miss 披露 + 不过滤。"""
+        from types import SimpleNamespace
+
+        from godot_qa_toolkit.mutation import coverlink
+        proj = self._seeded(tmp_path)
+        mutants = [SimpleNamespace(line=2, stable_id="m1")]
+        disclosures: dict = {}
+        unc, pool = coverlink.apply_coverage_prefilter(
+            mutants, str(Path(proj) / TARGET), str(proj), None, [UNIT],
+            None, None, True, disclosures,
+            map_path=coverlink.MAP_PATH_UNRESOLVED)
+        assert unc == [] and pool == mutants
+        assert disclosures["coverage_prefilter"] == "store_miss"
+        assert "no tests_glob (full-face audit)" in capsys.readouterr().err
+
+    def test_summary_writer_shape_contract(self):
+        """A08：唯一 writer 形状契约——键集恒为 source/uncovered/
+        covered_executed。"""
+        from godot_qa_toolkit.mutation import coverlink
+        assert coverlink.coverage_prefilter_summary(
+            "projection_live", 1, 2) == {
+            "source": "projection_live", "uncovered": 1,
+            "covered_executed": 2}

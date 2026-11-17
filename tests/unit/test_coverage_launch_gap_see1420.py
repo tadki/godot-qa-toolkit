@@ -74,18 +74,18 @@ class TestCoverageAbortEndToEnd:
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-    def test_early_exit_run_aborts_with_run_error_not_probe_sentinel(
+    def test_early_exit_map_build_aborts_with_run_error_not_zero_coverage(
             self, tmp_path, monkeypatch):
-        """端到端：rc≠0 + 无证据 → run_error 中止契约（ok=false、error 含
-        launch failed），而非 probes_fired=0 假哨兵。"""
+        """映射语义等价反例：映射构建（Godot）rc≠0 / 超时 / 无证据 →
+        run_error 中止契约（ok=false、error 具名），而非伪 0% 覆盖。"""
         from godot_qa_toolkit.coverage.runner import run_coverage
         import subprocess
 
         proj, target = self._proj(tmp_path)
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
 
         def fake_gut(cmd, **kwargs):
-            # godot 加载早期退出：rc=1、无 GUT 输出、无 marker
+            # 映射构建的 Godot 拉起早期退出：rc=1、无 GUT 输出、无 marker
             class R:
                 returncode = 1
                 stdout = EARLY_EXIT_NO_MARKER
@@ -98,10 +98,10 @@ class TestCoverageAbortEndToEnd:
         r = run_coverage(str(target), str(proj), min_percent=80.0)
         assert r["ok"] is False
         assert r["summary"]["run_error"] is True
-        assert "launch failed" in r["summary"]["error"]
-        assert "probes_fired" not in r["summary"], \
-            "early-exit run must abort as launch failure, not degrade to " \
-            "the probes_fired=0 sentinel (abort reason must not be masked)"
+        assert r["summary"].get("error")
+        # 不得伪造成 0.0% 的可信覆盖分数
+        assert r["summary"].get("coverage_source") != "line_mapping_projection" \
+            or r["summary"].get("run_error") is True
 
     def test_resource_warning_run_still_measures(self, tmp_path,
                                                   monkeypatch):

@@ -503,7 +503,7 @@ def run_shadow_from_paths(
     return report
 
 
-def default_measure(project_root: str, timing_store=None, evidence_out=None):
+def default_measure(project_root: str, evidence_out=None):
     """Real measurement adapter: one coverage run per (file, tests_glob).
 
     PR-C (§SPEC-027): with `evidence_out`, each run produces a

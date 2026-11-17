@@ -429,31 +429,3 @@ class TestCliContractHardening:
         assert "GQT_GODOT_BIN" in payload["summary"]["error"]
         assert payload["failures"]
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-    def test_unset_env_child_process_env_has_no_godot_bin(self, tmp_path,
-                                                          monkeypatch):
-        """unset 面：coverage 子进程 env 不得出现 GQT_GODOT_BIN 注入键
-        （§SPEC-1525-006 新增键冻结）。"""
-        root = tmp_path / "proj"
-        (root / "addons" / "gut").mkdir(parents=True)
-        (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
-        target = root / "calc.gd"
-        target.write_text("func add(a, b):\n\treturn a + b\n",
-                          encoding="utf-8")
-        monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
-        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-        monkeypatch.setattr("godot_qa_toolkit.mutation.godot_gate."
-                            "GlobalGodotGate", contextlib.nullcontext)
-        captured: dict = {}
-
-        def fake_run(argv, **kwargs):
-            captured["env_bin"] = os.environ.get("GQT_GODOT_BIN")
-            captured["kwargs"] = kwargs
-            return SimpleNamespace(returncode=0, stdout="* test_ok", stderr="")
-
-        monkeypatch.setattr(cov_runner.subprocess, "run", fake_run)
-        outcome = cov_runner._run_gut_for_coverage(
-            target, str(root), "original", "instrumented", 3, 80.0, 60)
-        assert outcome is None
-        assert captured["env_bin"] is None
-        assert "env" not in captured["kwargs"]

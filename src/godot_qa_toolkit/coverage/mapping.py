@@ -54,10 +54,41 @@ def project_file_coverage(
     path = Path(anchor_to_project_root(file_path, str(root)))
     if not path.is_file():
         raise FileNotFoundError(f"coverage target not found: {file_path}")
-    rel = path.resolve().relative_to(root).as_posix()
+    try:
+        rel = path.resolve().relative_to(root).as_posix()
+    except ValueError as e:
+        # 非域异常（root-relative 失败）也必须转具名域错误，不能裸 traceback。
+        raise CoverageMappingError(
+            "target_outside_project_root",
+            f"{path} is not under project root {root}") from e
+
+    # vacuous：无可执行行 → 没有行事实可言，无需映射/无需执行即满分 vacuous
+    # （不需要 map，因此不走下方“无法验证新鲜即 fail-loud”路径）。
+    from ..source_io import read_gd_source as _read_source
+    src, read_error = _read_source(str(path))
+    if read_error is None:
+        from .runner import _collect_executable_lines
+        if not _collect_executable_lines(src):
+            return {"file": str(path), "covered_lines": set(),
+                    "instrumentable_lines": set(), "total_lines": 0,
+                    "covered_count": 0, "coverage_percent": 100.0,
+                    "scripts": [], "tests_glob": tests_glob,
+                    "face": tests_glob or "res://tests/", "map_path": None,
+                    "source": "line_mapping_projection", "vacuous": True}
 
     # 映射是唯一真源：缺失时按 mutation 同款路径构建（mode=off 时只读）。
     if truth.mode() != "off":
+        # 映射构建需要真实 Godot：裸名二进制不在 PATH → 具名 fail-loud
+        # （与 spawn_godot 的措辞一致），不进入 measurement 留下备份残留。
+        import shutil as _shutil
+
+        from ..mutation.inject import godot_command
+        _cmd = godot_command()
+        if "/" not in _cmd and "\\" not in _cmd and _shutil.which(_cmd) is None:
+            raise CoverageMappingError(
+                "godot_binary_unusable",
+                f"godot binary not found in PATH: {_cmd} "
+                f"(set GQT_GODOT_BIN or --godot-bin)")
         try:
             truth.ensure_map(str(root), [str(path)], timeout_s=timeout_s)
         except Exception as e:  # noqa: BLE001 — 映射构建失败转具名域错误，
@@ -91,7 +122,15 @@ def project_file_coverage(
     scripts = list(sel.get("tests") or [])
     face = tests_glob or "res://tests/"
     if tests_glob:
-        scripts = [s for s in scripts if str(s).startswith(tests_glob)]
+        # 面过滤按边界匹配：目录必须以 `face/` 为前缀（`res://tests/unit`
+        # 不得扩到 `res://tests/unit_compat/`）；单文件精确相等。
+        prefix = face if face.endswith("/") else face + "/"
+
+        def _in_face(s: str) -> bool:
+            s = str(s)
+            return s == face or s.startswith(prefix)
+
+        scripts = [s for s in scripts if _in_face(s)]
 
     bk = binary_kind or detect_binary_kind()
     covered, reason = project_coverage_from_map(

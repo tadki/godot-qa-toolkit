@@ -1,15 +1,13 @@
-"""Coverage evidence v2: run-record lifecycle, bundle construction, sink
-recovery and explicit pruning (§SPEC-025/026).
+"""Coverage evidence v2: bundle construction and explicit legacy-sink
+pruning (§SPEC-025/026).
 
-- per-run UUID sink: `qa-coverage-hits-{run_uuid}.txt` — same-process,
-  cross-process and CLI/risk-embedded runs are mutually isolated (fixes
-  D-候选-1: the PID-based sink accumulated hits across sequential runs).
-- run record: written atomically BEFORE GUT starts (`status=started`), so a
-  crash leaves the UUID sink + a started record on disk — `--recover` re-reads
-  the sink against the recorded probe manifest without re-running GUT.
-- bundle (`coverage-evidence/2`): written after a complete run, then the
-  sink is deleted (evidence has moved into the bundle). Failure paths keep
-  the sink for recovery.
+SEE-1594 S1：direct coverage 的 sink/`--recover` 执行面已随旧 GUT 路径退役
+（coverage 答案由行级映射投影生成，bundle 由投影合成）；`--prune-sinks`
+仅保留为历史 `qa-coverage-hits-*` 文件的清理，**不再是覆盖来源**。
+
+- bundle (`coverage-evidence/2`)：由 `run_coverage` 从映射投影写入
+  （hits_lines 来自映射行事实；probes_fired 取自映射 `arms_state`），
+  或由失败路径写入失败 bundle（gut_ok=False / run_error=True）。
 - `--prune-sinks` (W1 ruling): explicit cleanup of `qa-coverage-hits-*` files
   older than the retention period (default 7 days). user:// lives under the
   user's HOME — silent automatic sweeps are out of scope by ruling.
@@ -239,135 +237,6 @@ def write_bundle(evidence_dir: Path, bundle: dict,
         json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return out
-
-
-def _recover_record(
-    evidence_dir: Path, record_path: Path,
-    project_root: str | None = None,
-) -> tuple[dict | None, str | None]:
-    """Recover one started-but-unfinished run record into a bundle. Returns
-    (result_row, None) on success, (None, error) on a recoverable-record
-    failure, and (None, None) for records that need no recovery. The sink is
-    kept — recovery only reads it."""
-    # stem of "<uuid>.record.json" still carries the ".record" suffix —
-    # reading by path (not by stem) avoids the double-suffix miss
-    try:
-        record = json.loads(record_path.read_text(encoding="utf-8"))
-    except ValueError:
-        record = None
-    if not isinstance(record, dict):
-        return None, f"unreadable record: {record_path.name}"
-    if record.get("status") == "bundle_written":
-        return None, None
-    run_uuid = record.get("run_uuid")
-    manifest = record.get("probe_manifest") or {}
-    plan_by_id = {p["probe_id"]: p for p in manifest.get("probe_plan", [])}
-    sink = _find_sink(evidence_dir, record, run_uuid, project_root)
-    if sink is None:
-        return None, (
-            f"run {run_uuid}: sink {SINK_PREFIX}{run_uuid}.txt missing — "
-            "cannot recover without hits data"
-        )
-    valid_ids = set(plan_by_id)
-    hits_raw = [
-        int(ln.strip())
-        for ln in Path(sink).read_text(encoding="utf-8").splitlines()
-        if ln.strip().isdigit()
-    ]
-    covered_by_fid: dict[str, list[int]] = {}
-    for pid in hits_raw:
-        if pid in valid_ids:
-            covered_by_fid.setdefault(plan_by_id[pid]["fid"], []).append(
-                plan_by_id[pid]["line"]
-            )
-    per_function = {p["fid"]: p for p in manifest.get("per_function", [])}
-    bundle = {
-        "evidence_version": EVIDENCE_VERSION,
-        "run_uuid": run_uuid,
-        "recovered": True,
-        "target": record.get("target", {}),
-        "recipe": record.get("recipe", {}),
-        "probe_manifest": {
-            "manifest_version": "probe-manifest/2",
-            "inline": manifest,
-        },
-        "T": [
-            {
-                "fid": fid,
-                "t_lines": pf.get("t_lines", 0),
-                "line_ids": pf.get("t_line_ids", []),
-            }
-            for fid, pf in per_function.items()
-        ],
-        "I": [
-            {"fid": fid, "i_lines": pf.get("i_lines", 0)}
-            for fid, pf in per_function.items()
-        ],
-        "C": [
-            {
-                "fid": fid,
-                "covered": len(sorted(set(lines))),
-                "covered_line_ids": sorted(set(lines)),
-            }
-            for fid, lines in covered_by_fid.items()
-        ],
-        "census_gaps": record.get("census_gaps", []),
-        "sentinels": {
-            "probes_fired": len([p for p in hits_raw if p in valid_ids]),
-            "vacuous": False,
-            "run_error": False,
-            "timeout": False,
-            "zero_tests": False,
-            "gut_ok": True,
-            "transport_anomaly": len(
-                [p for p in hits_raw if p not in valid_ids]
-            ),
-        },
-        "entry_states": record.get("entry_states", []),
-        "file_state": "recovered",
-    }
-    out = write_bundle(evidence_dir, bundle)
-    update_run_record(evidence_dir, run_uuid, status="bundle_written")
-    return {"run_uuid": run_uuid, "bundle": str(out)}, None
-
-
-def recover_bundle(evidence_dir: Path,
-                   project_root: str | None = None) -> dict:
-    """Rebuild bundles for started-but-unfinished runs on disk, WITHOUT
-    re-running GUT: the started record carries the probe manifest inline, so
-    the UUID sink's raw probe ids can be re-attributed to fids exactly like
-    the online path. The sink is kept (recovery only reads it)."""
-    recovered: list[dict] = []
-    errors: list[str] = []
-    if not evidence_dir.is_dir():
-        return {"recovered": recovered, "errors": ["evidence dir missing"]}
-
-    for record_path in sorted(evidence_dir.glob("*.record.json")):
-        result, error = _recover_record(evidence_dir, record_path,
-                                        project_root=project_root)
-        if error is not None:
-            errors.append(error)
-        elif result is not None:
-            recovered.append(result)
-    return {"recovered": recovered, "errors": errors}
-
-
-def _find_sink(evidence_dir: Path, record: dict, run_uuid: str,
-               project_root: str | None = None) -> str | None:
-    """Sink candidates, in order: recorded sink_path → evidence-dir sibling →
-    the project's user:// sink dir (where the probes actually wrote; the
-    user:// location is resolved the same way coverage.runner resolves it)."""
-    candidates = [record.get("sink_path"), str(evidence_dir / sink_name_for(run_uuid))]
-    if project_root:
-        from .runner import _resolve_user_sink
-
-        user_sink = _resolve_user_sink(project_root, sink_name_for(run_uuid))
-        if user_sink:
-            candidates.append(user_sink)
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return candidate
-    return None
 
 
 def prune_sinks(project_root: str, retention_days: int = RETENTION_DAYS) -> dict:

@@ -105,51 +105,74 @@ class TestH3BranchLineMapping:
         # 分支行必须是 3/5（return 体首语句），不得是 2/4（if/else 头）
         assert lines == {3, 5}, f"branch lines leaked head lines: {lines}"
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_false_path_does_not_cover_if_branch(self, tmp_path, monkeypatch):
+        """映射投影语义：covered 行集决定分支覆盖——false 路径（else 头行 4 +
+        else 体首行 5）覆盖、if 体首行 3 未覆盖 → if 分支必须 uncovered。
+        （旧 direct 实现用分支头行 2 判定 → if 分支误判 covered 的反例，
+        语义等价保留在映射投影上。）"""
+        import hashlib
+        import json
+
+        import attribution_fixtures as fx
+        from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
         import godot_qa_toolkit.coverage.runner as c
 
         proj, target = _write_project(tmp_path, target_src=self.GD)
+        (proj / "tests").mkdir()
+        (proj / "tests" / "test_x.gd").write_text("extends Node\\n",
+                                                  encoding="utf-8")
+        fx.install_recipe(proj)
+        recipe, error = build_recipe(proj)
+        assert error is None
+        raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+        rel = "target.gd"  # _write_project 的目标名
+        covered = [5]  # false 路径：else 头行 4 + else 体行 5 覆盖；行 3 未覆盖
+        doc = {
+            "schema_version": "test-attribution/6",
+            "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+            "project_root": str(proj), "identity": "test_x.gd::test_a",
+            "causal": {"enabled": False},
+            "file_sha256": {rel: hashlib.sha256(
+                target.read_bytes()).hexdigest()},
+            "target_files": [rel],
+            "tests_face": {"tests/test_x.gd": hashlib.sha256(
+                (proj / "tests" / "test_x.gd").read_bytes()).hexdigest()},
+            "instrumentable_lines": {rel: [2, 3, 4, 5]},
+            "arms": {"gut_full": {
+                "test_to_files": {"test_x.gd::test_a": [rel]},
+                "script_to_files": {}, "tests": 1, "scripts": 1, "files": 1,
+                "pairs": 1, "function_pairs": 0, "test_to_functions": {},
+                "script_to_functions": {},
+                "file_to_tests": {rel: ["test_x.gd::test_a"]},
+                "file_to_scripts": {rel: ["test_x.gd"]},
+                "line_pairs": 1, "script_line_pairs": 1,
+                "test_to_lines": {"test_x.gd::test_a": {rel: covered}},
+                "script_to_lines": {},
+                "line_to_tests": {rel: {str(covered[0]): ["test_x.gd::test_a"]}}},
+            },
+            "arms_state": {"gut_full": {"state": "valid",
+                                        "invalid_reason": None, "bundles": 1,
+                                        "pairs": 1, "probes_fired": 2,
+                                        "vacuous": False}},
+            "notes": []}
+        (proj / ".qa-cache").mkdir()
+        (proj / ".qa-cache" / "attribution-map.json").write_text(
+            json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
         monkeypatch.setattr(
-            c.subprocess, "run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
-        # hits 只含 else 侧（else_branch 头行 4 + 其体首语句行 5 对应的 probe_id）；
-        # if 分支体（return 1，行 3）从未执行 → if 分支必须 uncovered
-        # （旧实现用分支头行 2 做判定：行 2 探针在条件求值时点火 → if 分支误判 covered）。
-        from godot_qa_toolkit.coverage.runner import _collect_executable_lines
-        els = _collect_executable_lines(self.GD)
-        line_to_id = {e.line: i for i, e in enumerate(els)}
-        exec_lines = {e.line for e in els}
-        # 构造 false 路径 hits：if_branch 头行(2，条件求值必点火) + else 头行(4)
-        # + else 体首行(5)；if 体首行(3)不命中
-        false_path_hits = {2, 4, 5} & exec_lines
-        id_hits = [str(line_to_id[l]) for l in sorted(false_path_hits)]
-        captured = {}
-        real_instrument = c._instrument
+            "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+            lambda *a, **k: "linux")
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.identity.identity_pack",
+            lambda *a, **k: {"kind": "linux"})
 
-        def sink_spy(src, sink_name):
-            captured["sink"] = os.path.join(proj, sink_name)
-            return real_instrument(src, sink_name)
-
-        monkeypatch.setattr(c, "_instrument", sink_spy)
-
-        def fake_run(*args, **kwargs):
-            with open(captured["sink"], "w") as f:
-                f.write("\n".join(id_hits) + "\n")
-            class R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-            return R()
-
-        monkeypatch.setattr(c.subprocess, "run", fake_run)
-        result = c.run_coverage(str(target), str(proj))
+        result = c.run_coverage(str(target), str(proj), min_percent=0)
         s = result["summary"]
-        # 2 分支中只有 else 被覆盖（observational 字段但数值必须正确）
+        # 2 分支中只有 else（行 5）被覆盖；行 3（if 体）未覆盖 → if 分支 uncovered
         assert s["branch_total"] == 2
         assert s["branch_covered"] == 1, (
             f"if branch falsely covered via head-line probe: {s}")
+        assert s["hits_lines"] == [5]
 
 
     def test_nested_if_branches_distinguish_layers(self):
@@ -164,48 +187,6 @@ class TestH3BranchLineMapping:
 
 class TestH4StaleSinkPriority:
     """H4: 项目根陈旧 sink（pid 复用）不得遮蔽新鲜 user:// sink（实证已复现）。"""
-
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-    def test_user_sink_wins_over_stale_root_sink(self, tmp_path, monkeypatch):
-        import godot_qa_toolkit.coverage.runner as c
-
-        proj, target = _write_project(
-            tmp_path, target_src="func add(a, b):\n\tvar s = a + b\n\treturn s\n")
-        monkeypatch.setattr(
-            c.subprocess, "run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
-        # 项目根陈旧残留：只命中 id 0（PR-B: 写入 spy 捕获的 UUID sink 名，
-        # 恢复 H4 的 stale-root-vs-fresh-user:// 优先级语义）
-        captured = {}
-        real_instrument = c._instrument
-
-        def sink_spy(src, sink_name):
-            captured["sink"] = os.path.join(proj, sink_name)
-            return real_instrument(src, sink_name)
-
-        monkeypatch.setattr(c, "_instrument", sink_spy)
-        stale_root = proj / "qa-coverage-hits-stale-probe.txt"
-        stale_root.write_text("0\n")
-        # user:// 新鲜 sink：全量命中 id 0、1（_resolve_user_sink stub 惰性
-        # 把 hits 写到 user:// 侧的同一 sink 名——H4 语义：root 陈旧残留不得
-        # 遮蔽新鲜 user:// 数据）
-        user_dir = tmp_path / "fake_user"
-        user_dir.mkdir()
-        written = {"done": False}
-
-        def fake_user_sink(root, name):
-            target_user_sink = user_dir / name
-            if not written["done"] and not target_user_sink.is_file():
-                target_user_sink.write_text("0\n1\n", encoding="utf-8")
-                written["done"] = True
-            return str(target_user_sink)
-
-        monkeypatch.setattr(c, "_resolve_user_sink", fake_user_sink)
-        result = c.run_coverage(str(target), str(proj))
-        assert result["summary"]["covered_lines"] == 2, (
-            f"stale root sink shadowed fresh user:// sink: {result['summary']}")
-
 
 class TestH8RealFileInstrumentation:
     """H8: 真实文件形态——跨行分组表达式与 lambda 实参行绝不插桩（实机实证缺陷）。"""
@@ -357,29 +338,3 @@ class TestH10CoverageGodotPathFix:
         assert _godot_project_path(".") == "."
         assert _godot_project_path("proj") == "proj"
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-    def test_gut_invocation_uses_converted_path(self, tmp_path, monkeypatch):
-        import godot_qa_toolkit.coverage.runner as c
-
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        target = proj / "t.gd"
-        target.write_text("func f():\n\treturn 1\n")
-
-        seen = {}
-
-        def fake_run(args, **kw):
-            seen["args"] = args
-            class R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-            return R()
-
-        monkeypatch.setattr(c.subprocess, "run", fake_run)
-        monkeypatch.setattr(c, "_godot_project_path", lambda p: "WIN:" + p)
-        # sink 不存在 → 哨兵 run_error（本测试只验证调用路径转换，不验证 sink）
-        c.run_coverage(str(target), str(proj))
-        assert seen["args"][3] == "WIN:" + str(proj)

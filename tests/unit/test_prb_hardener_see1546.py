@@ -1,10 +1,13 @@
-"""SEE-1546 WP2 PR-B hardener: evidence lifecycle, sink guards, publicized
-helpers, and the §SPEC-024/029 debt gates. Test-side only.
+"""SEE-1546 WP2 PR-B hardener: evidence lifecycle (map-derived bundles),
+sink-cleanup guards, publicized helpers, and the §SPEC-024/029 debt gates.
 
-Covers the run_coverage evidence hooks offline (mocked GUT): started record →
-bundle lands → sink cleared, abort/no-probe/empty-file/vacuous lanes, the
-reparse-generation guard, --recover corner records, prune-sinks dir edges,
-and the publicized lines/gd_ast_utils helpers.
+SEE-1594 S1：direct coverage 的就地插桩/GUT/sink/`--recover` 执行面已退役；
+coverage 答案与 bundle 由**行级映射投影**生成（无第二次 GUT）。本文件验收：
+- 成功 → 投影 bundle（gut_ok=True，hits_lines=映射 covered）；
+- 失败 → 失败 bundle（gut_ok=False / run_error=True），`measure risk`
+  逐文件降级、不整批中止；
+- vacuous → 无 GUT 直接 vacuous bundle；
+- `--prune-sinks` 仅清理历史 sink 文件（清理错误具名非零）。
 """
 
 from __future__ import annotations
@@ -25,7 +28,6 @@ from godot_qa_toolkit.coverage.evidence import (
     evidence_dir_for,
     make_run_uuid,
     read_run_record,
-    recover_bundle,
     sink_name_for,
     write_run_record,
 )
@@ -53,70 +55,6 @@ def test_read_run_record_corrupt_reports_record_corrupt(tmp_path):
     record = read_run_record(tmp_path, "bad")
     assert record["status"] == "record_corrupt"
     assert record["run_uuid"] == "bad"
-
-
-def test_recover_reports_unreadable_records(tmp_path):
-    """§SPEC-025: --recover never crashes on malformed records — each lands
-    in errors with the unreadable-record reason."""
-    (tmp_path / "bad.record.json").write_text("{not json", encoding="utf-8")
-    (tmp_path / "arr.record.json").write_text("[1, 2]", encoding="utf-8")
-    result = recover_bundle(tmp_path)
-    assert result["recovered"] == []
-    assert len(result["errors"]) == 2
-    assert all(e.startswith("unreadable record:") for e in result["errors"])
-
-
-def test_recover_skips_bundle_written_records(tmp_path):
-    write_run_record(tmp_path, {"run_uuid": "u-done", "status": "bundle_written"})
-    result = recover_bundle(tmp_path)
-    assert result == {"recovered": [], "errors": []}
-
-
-def test_recover_reports_missing_sink(tmp_path):
-    """A started record whose sink is gone cannot be recovered — explicit
-    error naming the sink, never a silent skip."""
-    record = build_run_record(
-        run_uuid="u-nosink", file_path="x.gd", gd_source=GD, tests_glob=None,
-        probe_manifest={"probe_plan": [
-            {"probe_id": 0, "line": 2, "fid": "x.gd::f", "owner_kind": "func"},
-        ], "per_function": [
-            {"fid": "x.gd::f", "t_lines": 1, "i_lines": 0, "t_equal_i": False,
-             "t_line_ids": [2]},
-        ]},
-    )
-    write_run_record(tmp_path, record)
-    result = recover_bundle(tmp_path)
-    assert result["recovered"] == []
-    assert any("sink" in e and "missing" in e for e in result["errors"])
-
-
-def test_recover_bundle_reports_missing_dir():
-    result = recover_bundle(Path("/nonexistent/see1546-ev-dir"))
-    assert result["recovered"] == []
-    assert result["errors"] == ["evidence dir missing"]
-
-
-def test_recover_ignores_invalid_probe_ids_in_sink(tmp_path):
-    """Recovery attributes only plan-valid probe ids; garbage ids in the sink
-    are skipped, never attributed."""
-    uuid = "u-garbage"
-    record = build_run_record(
-        run_uuid=uuid, file_path="x.gd", gd_source=GD, tests_glob=None,
-        probe_manifest={"probe_plan": [
-            {"probe_id": 0, "line": 2, "fid": "x.gd::f", "owner_kind": "func"},
-            {"probe_id": 1, "line": 3, "fid": "x.gd::f", "owner_kind": "func"},
-        ], "per_function": [
-            {"fid": "x.gd::f", "t_lines": 2, "i_lines": 2, "t_equal_i": True,
-             "t_line_ids": [2, 3]},
-        ]},
-    )
-    write_run_record(tmp_path, record)
-    (tmp_path / sink_name_for(uuid)).write_text("0\n999\nnot-a-number\n", encoding="utf-8")
-
-    result = recover_bundle(tmp_path)
-    assert result["errors"] == []
-    bundle = json.loads(Path(result["recovered"][0]["bundle"]).read_text(encoding="utf-8"))
-    assert [c["covered"] for c in bundle["C"]] == [1]
 
 
 def test_prune_sinks_with_user_dir_none_sweeps_project_root(tmp_path, monkeypatch):
@@ -179,42 +117,95 @@ def test_prune_sinks_survives_stat_errors(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out, gut_returns=None):
-    """Drive cmd_measure_coverage in-process with _run_gut_for_coverage mocked so the
-    evidence lifecycle runs without Godot."""
-    from godot_qa_toolkit.coverage import runner as runner_mod
+def _write_raw_map(project_root, instrumentable, covered_lines, probes_fired):
+    """Raw test-attribution/6 doc with full control (probes_fired /
+    instrumentable surface) for sentinel/lane tests."""
+    import hashlib
+
+    import attribution_fixtures as fx
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+
+    fx.install_recipe(project_root)
+    recipe, error = build_recipe(project_root)
+    assert error is None, error
+    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    rel = "utils/calc.gd"
+    ident = "test_x.gd::test_a"
+    arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
+           "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
+           "function_pairs": 0, "test_to_functions": {},
+           "script_to_functions": {}, "file_to_tests": {rel: [ident]},
+           "file_to_scripts": {rel: ["test_x.gd"]},
+           "line_pairs": len(covered_lines),
+           "script_line_pairs": len(covered_lines),
+           "test_to_lines": {ident: {rel: list(covered_lines)}},
+           "script_to_lines": {},
+           "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
+    doc = {
+        "schema_version": "test-attribution/6",
+        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "project_root": str(project_root), "identity": ident,
+        "causal": {"enabled": False},
+        "file_sha256": {rel: hashlib.sha256(
+            (Path(project_root) / rel).read_bytes()).hexdigest()},
+        "target_files": [rel],
+        "tests_face": {"tests/test_x.gd": hashlib.sha256(
+            (project_root / "tests" / "test_x.gd").read_bytes()).hexdigest()},
+        "instrumentable_lines": {rel: list(instrumentable)},
+        "arms": {"gut_full": arm},
+        "arms_state": {"gut_full": {"state": "valid", "invalid_reason": None,
+                                    "bundles": 1, "pairs": 1,
+                                    "probes_fired": probes_fired,
+                                    "vacuous": False}},
+        "notes": [],
+    }
+    out = Path(project_root) / ".qa-cache" / "attribution-map.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    return str(out)
+
+
+def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out,
+                      mode="success"):
+    """Drive cmd_measure_coverage in-process against the line-mapping source.
+
+    mode: success / no_map / no_probes / legacy_residue — no Godot, no GUT
+    (SEE-1594 S1: coverage answers come from the line map)."""
     import io
     from contextlib import redirect_stdout
 
+    import attribution_fixtures as fx
+    from godot_qa_toolkit.coverage import runner as runner_mod
+
     proj = tmp_path / "proj"
-    (proj / "addons" / "gut").mkdir(parents=True, exist_ok=True)
-    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
-    target = proj / "calc.gd"
+    (proj / "utils").mkdir(parents=True, exist_ok=True)
+    target = proj / "utils" / "calc.gd"
     target.write_text(gd_text, encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n", encoding="utf-8")
     ev = tmp_path / "ev"
     ev.mkdir(exist_ok=True)
 
-    if gut_returns == "success":
-        monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", lambda *a, **k: None)
-        monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
-    elif gut_returns == "no_probe":
-        monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", lambda *a, **k: None)
-        monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({}, 0))
-    elif gut_returns == "abort_run_error":
-        def abort(*a, **k):
-            return {
-                "tool": "measure.coverage", "ok": False,
-                "summary": {"file": str(target), "total_lines": 3,
-                            "covered_lines": 0, "coverage_percent": 0.0,
-                            "min_percent": 0, "run_error": True, "timeout": False},
-                "failures": [{"reason": "godot launch failed"}],
-            }
-        monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", abort)
-    elif gut_returns == "bad_reparse":
-        monkeypatch.setattr(runner_mod, "_instrument", lambda src, sink: ("!!!not gd!!!", {}))
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
 
-    args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
-        "--min-percent", "0", "--evidence-out", str(evidence_out),
+    if mode == "success":
+        fx.write_map(proj, {"utils/calc.gd": ["test_x.gd::test_a"]})
+    elif mode == "no_probes":
+        _write_raw_map(proj, [2, 3], covered_lines=[2],
+                       probes_fired=0)
+    elif mode == "legacy_residue":
+        target.write_text(
+            gd_text + "\nstatic func __qa_cov_probe_0():\n\tpass\n",
+            encoding="utf-8")
+
+    args = build_parser().parse_args([
+        "measure", "coverage", str(target), "--project-root", str(proj),
+        "--min-percent", "0", "--evidence-out", str(ev),
     ])
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -222,61 +213,68 @@ def _coverage_via_cli(tmp_path, monkeypatch, gd_text, evidence_out, gut_returns=
     payload = json.loads(buf.getvalue())
     return ev, rc, payload
 
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_lifecycle_success_lands_bundle_and_clears(tmp_path, monkeypatch):
+    """成功：投影 bundle 落盘（gut_ok=True，hits_lines=映射 covered；
+    probes_fired 来自映射 arms_state）——无第二次 GUT/插桩。"""
     ev, rc, payload = _coverage_via_cli(
         tmp_path, monkeypatch, GD, ev := tmp_path / "ev", "success"
     )
     assert rc == 0 and payload["ok"] is True
-    records = sorted(ev.glob("*.record.json"))
-    assert len(records) == 1
-    record = json.loads(records[0].read_text(encoding="utf-8"))
-    assert record["status"] == "bundle_written"
-    assert record["probe_manifest"]
-    assert record["sink_path"]
+    assert payload["summary"]["coverage_source"] == "line_mapping_projection"
     bundles = [q for q in ev.glob("*.json") if not q.name.endswith(".record.json")]
     assert len(bundles) == 1
     bundle = json.loads(bundles[0].read_text(encoding="utf-8"))
     assert bundle["recovered"] is False and bundle["sentinels"]["gut_ok"] is True
+    assert bundle["sentinels"]["probes_fired"] == 640  # 来自夹具 arms_state
+    assert [c["covered"] for c in bundle["C"]] == [1]
 
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_evidence_lifecycle_abort_lands_failure_bundle(tmp_path, monkeypatch):
+    """失败（旧版残留插桩 → fail-loud）：失败 bundle 落盘（gut_ok=False /
+    run_error=True），`measure risk` 逐文件降级、不整批中止（§SPEC-025/027）。"""
     ev, rc, payload = _coverage_via_cli(
-        tmp_path, monkeypatch, GD, tmp_path / "ev", "abort_run_error"
+        tmp_path, monkeypatch, GD, tmp_path / "ev", "legacy_residue"
     )
     assert rc != 0 and payload["ok"] is False
     assert payload["summary"]["run_error"] is True
-    record = json.loads(next(ev.glob("*.record.json")).read_text(encoding="utf-8"))
-    assert record["status"] == "run_error"
-    bundle = json.loads((ev / f"{record['run_uuid']}.json").read_text(encoding="utf-8"))
+    bundles = [q for q in ev.glob("*.json") if not q.name.endswith(".record.json")]
+    assert len(bundles) == 1
+    bundle = json.loads(bundles[0].read_text(encoding="utf-8"))
     assert bundle["sentinels"]["gut_ok"] is False
     assert bundle["sentinels"]["run_error"] is True
     assert bundle["file_state"] == "bundle_only"
 
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-def test_evidence_lifecycle_no_probe_lands_bundle_keeps_sink_lane(tmp_path, monkeypatch):
+def test_evidence_lifecycle_probes_zero_sentinel_lands_failure_bundle(
+        tmp_path, monkeypatch):
+    """执行证据哨兵：映射 probes_fired=0 且存在有效行事实 → 不得产出可信
+    分数；失败 bundle 落盘、run_error 具名（§SPEC-025/027）。"""
     ev, rc, payload = _coverage_via_cli(
-        tmp_path, monkeypatch, GD, tmp_path / "ev", "no_probe"
+        tmp_path, monkeypatch, GD, tmp_path / "ev", "no_probes"
     )
     assert rc != 0 and payload["ok"] is False
-    record = json.loads(next(ev.glob("*.record.json")).read_text(encoding="utf-8"))
-    assert record["status"] == "no_probe"
-    bundle = json.loads((ev / f"{record['run_uuid']}.json").read_text(encoding="utf-8"))
-    assert bundle["sentinels"]["probes_fired"] == 0
+    assert payload["summary"]["run_error"] is True
+    assert payload["summary"]["probes_fired"] == 0
+    assert "probes_fired=0" in payload["summary"]["error"]
+    bundles = [q for q in ev.glob("*.json") if not q.name.endswith(".record.json")]
+    assert len(bundles) == 1
+    bundle = json.loads(bundles[0].read_text(encoding="utf-8"))
+    assert bundle["sentinels"]["gut_ok"] is False
+    assert bundle["sentinels"]["run_error"] is True
 
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-def test_evidence_lifecycle_vacuous_file_lands_bundle_without_gut(tmp_path):
+def test_evidence_lifecycle_vacuous_file_lands_bundle_without_gut(tmp_path, monkeypatch):
     ev = tmp_path / "ev"
     ev.mkdir(exist_ok=True)
-    empty = "extends RefCounted\n"
     proj = tmp_path / "proj"
     proj.mkdir()
     target = proj / "empty.gd"
-    target.write_text(empty, encoding="utf-8")
+    target.write_text("extends RefCounted\n", encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
     args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
         "--min-percent", "0", "--evidence-out", str(ev),
     ])
@@ -288,14 +286,14 @@ def test_evidence_lifecycle_vacuous_file_lands_bundle_without_gut(tmp_path):
         rc = args.func(args)
     payload = json.loads(buf.getvalue())
     assert rc == 0 and payload["ok"] is True
+    assert payload["summary"]["coverage_source"] == "line_mapping_projection"
     bundle = json.loads(next(ev.glob("*.json")).read_text(encoding="utf-8"))
     assert bundle["sentinels"]["vacuous"] is True
     assert bundle["file_state"] == "vacuous"
 
-
 def test_evidence_lifecycle_read_error_is_structural(tmp_path):
     """§SPEC-028: a non-UTF-8 target fails structurally (ok=false, run_error
-    lane), never crashes — even with evidence_out enabled."""
+    lane) and lands a failure bundle — never crashes."""
     ev = tmp_path / "ev"
     ev.mkdir(exist_ok=True)
     proj = tmp_path / "proj"
@@ -314,32 +312,8 @@ def test_evidence_lifecycle_read_error_is_structural(tmp_path):
     payload = json.loads(buf.getvalue())
     assert rc != 0 and payload["ok"] is False
     assert payload["summary"]["run_error"] is True
-    assert ev.glob("*.record.json")
-
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-def test_evidence_reparse_generation_guard_is_structural(tmp_path, monkeypatch):
-    """A corrupted instrumented artifact must fail at generation time
-    (run_error) instead of landing on disk to produce fake 0% data."""
-    ev, rc, payload = _coverage_via_cli(
-        tmp_path, monkeypatch, GD, tmp_path / "ev", "bad_reparse"
-    )
-    assert rc != 0 and payload["ok"] is False
-    assert payload["summary"]["run_error"] is True
-    assert payload["summary"]["error"].startswith(
-        "instrumented source failed to parse:"
-    )
-    assert payload["failures"][0]["reason"].startswith(
-        "instrumentation produced unparseable source"
-    )
-    assert not list(ev.glob("*.record.json"))
-    assert not list(ev.glob("*.json"))
-
-
-# --------------------------------------------------------------------------
-# publicized helpers (§SPEC-029)
-# --------------------------------------------------------------------------
-
+    bundles = [q for q in ev.glob("*.json") if not q.name.endswith(".record.json")]
+    assert len(bundles) == 1  # 失败 bundle 落盘
 
 def test_max_leaf_line_synthetic_no_meta_tree_is_zero():
     from godot_qa_toolkit.gd_ast_utils import max_leaf_line
@@ -408,31 +382,6 @@ def test_resolve_user_sink_dir_returns_parent_when_sink_exists(tmp_path, monkeyp
     monkeypatch.setenv("HOME", str(home))
 
     assert _resolve_user_sink_dir(str(proj)) == str(sink_dir)
-
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-def test_same_process_sequential_runs_get_distinct_sinks(tmp_path, monkeypatch):
-    """§SPEC-025 offline anchor for the D-候选-1 empirical gate: two
-    sequential run_coverage calls in ONE process must use different sink
-    names (the PID sink era made run2 inherit run1's hits)."""
-    from godot_qa_toolkit.coverage import runner as runner_mod
-
-    captured = []
-    real_instrument = runner_mod._instrument
-
-    def spy(src, sink_name):
-        captured.append(sink_name)
-        return real_instrument(src, sink_name)
-
-    monkeypatch.setattr(runner_mod, "_instrument", spy)
-    ev1, rc1, _ = _coverage_via_cli(
-        tmp_path, monkeypatch, GD, tmp_path / "ev1", "success"
-    )
-    ev2, rc2, _ = _coverage_via_cli(
-        tmp_path, monkeypatch, GD, tmp_path / "ev2", "success"
-    )
-    assert rc1 == 0 and rc2 == 0
-    assert len(captured) == 2 and captured[0] != captured[1]
 
 
 def test_prune_sinks_prefix_gate_keeps_old_foreign_files(tmp_path):
@@ -517,116 +466,6 @@ def test_build_bundle_uses_injected_registry_and_manifest(monkeypatch):
     assert calls == {"registry": 0, "manifest": 0}
     f_row = next(s for s in bundle["entry_states"] if s["fid"] == "x.gd::f")
     assert f_row["state"] == "measured"
-
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-def test_runner_evidence_path_builds_registry_once_per_run(tmp_path, monkeypatch):
-    """Three consumption points (run record, abort/success bundles) must share
-    ONE registry build per run — a second build is the doubled lark parse
-    D-性能-1 removed (mutation ②)."""
-    import godot_qa_toolkit.registry.functions as registry_functions
-    import godot_qa_toolkit.registry.manifest as registry_manifest
-    from godot_qa_toolkit import coverage as coverage_pkg
-    from godot_qa_toolkit.coverage import runner as runner_mod
-    import io
-    from contextlib import redirect_stdout
-
-    proj = tmp_path / "proj"
-    (proj / "addons" / "gut").mkdir(parents=True)
-    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
-    target = proj / "calc.gd"
-    target.write_text(GD, encoding="utf-8")
-    ev = tmp_path / "ev"
-    ev.mkdir(exist_ok=True)
-
-    real_build = registry_functions.build_file_registry
-    real_manifest = registry_manifest.build_probe_manifest_v2
-    builds = []
-    manifest_builds = []
-
-    def counting_build(src, file_label):
-        builds.append(1)
-        return real_build(src, file_label=file_label)
-
-    def counting_manifest(src, registry):
-        manifest_builds.append(1)
-        return real_manifest(src, registry)
-
-    # count across BOTH namespaces: runner's direct call and any build_bundle
-    # re-derivation (evidence holds its own module-level binding).
-    # B3: the probe-manifest/2 build is counted the same way — the D-性能-1
-    # contract is ONE parse per run, which covers BOTH builders.
-    monkeypatch.setattr(registry_functions, "build_file_registry", counting_build)
-    monkeypatch.setattr(coverage_pkg.evidence, "build_file_registry", counting_build)
-    monkeypatch.setattr(registry_manifest, "build_probe_manifest_v2", counting_manifest)
-    monkeypatch.setattr(coverage_pkg.evidence, "build_probe_manifest_v2", counting_manifest)
-    monkeypatch.setattr(runner_mod, "_run_gut_for_coverage", lambda *a, **k: None)
-    monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
-
-    args = build_parser().parse_args(["measure", "coverage", str(target), "--project-root", str(proj),
-        "--min-percent", "0", "--evidence-out", str(ev),
-    ])
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        rc = args.func(args)
-    assert rc == 0
-    assert len(builds) == 1
-    assert len(manifest_builds) == 1
-
-
-def test_recover_finds_user_sink_via_project_root(tmp_path, monkeypatch):
-    """D-性能-1 wiring: recovery resolves the run's user:// sink through
-    project_root and rebuilds the probe-manifest/2-shaped attribution (C rows
-    keyed by fid with plan lines) — never a degraded row list (mutation ③)."""
-    from godot_qa_toolkit.coverage.evidence import (
-        build_run_record,
-        recover_bundle,
-        sink_name_for,
-        write_run_record,
-    )
-
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    (proj / "project.godot").write_text(
-        'config/name = "See1546RecoverApp"\n', encoding="utf-8"
-    )
-    home = tmp_path / "home"
-    user_dir = home / ".local" / "share" / "godot" / "app_userdata" / "See1546RecoverApp"
-    user_dir.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
-
-    uuid = "u-user-sink"
-    record = build_run_record(
-        run_uuid=uuid, file_path="x.gd", gd_source=GD, tests_glob=None,
-        probe_manifest={"probe_plan": [
-            {"probe_id": 0, "line": 2, "fid": "x.gd::f", "owner_kind": "func"},
-        ], "per_function": [
-            {"fid": "x.gd::f", "t_lines": 1, "i_lines": 1, "t_equal_i": True,
-             "t_line_ids": [2]},
-        ]},
-    )
-    evidence = tmp_path / "ev"
-    evidence.mkdir()
-    write_run_record(evidence, record)
-    (user_dir / sink_name_for(uuid)).write_text("0\n", encoding="utf-8")
-
-    result = recover_bundle(evidence, project_root=str(proj))
-    assert result["errors"] == []
-    assert len(result["recovered"]) == 1
-    bundle = json.loads(
-        Path(result["recovered"][0]["bundle"]).read_text(encoding="utf-8")
-    )
-    assert bundle["recovered"] is True
-    assert [c["fid"] for c in bundle["C"]] == ["x.gd::f"]
-    assert [c["covered"] for c in bundle["C"]] == [1]
-    assert bundle["probe_manifest"]["inline"]["probe_plan"][0]["fid"] == "x.gd::f"
-
-
-# --------------------------------------------------------------------------
-# B1 (QA FAIL): §SPEC-029 dual-direction debt gate, in-suite anchors.
-# The §SPEC-029 grep gate is machine-proven; these pin the same semantics in
-# the suite so re-introducing EITHER private import direction turns red.
-# --------------------------------------------------------------------------
 
 
 def test_spec029_registry_private_runner_import_gate():

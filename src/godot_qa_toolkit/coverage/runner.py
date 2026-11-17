@@ -736,10 +736,65 @@ def _instrument(src: str, sink_name: str, flags: bool = False,
     return body + _probe_func(sink_name, len(manifest)), manifest
 
 
-def _err_envelope(file: str, message: str) -> dict:
+def _err_envelope(file: str, message: str, *,
+                  min_percent: float = 80.0) -> dict:
+    """失败信封：保留文档化字段（total/covered/pct/min_percent/probes），
+    全部为“无可信数据”的零值 + `run_error=True`，不伪造成功数据
+    （§SPEC-022/025 错误契约）。"""
     return {"tool": "measure.coverage", "ok": False,
-            "summary": {"file": file, "run_error": True, "error": message},
+            "summary": {"file": file, "total_lines": 0, "covered_lines": 0,
+                        "coverage_percent": 0.0, "min_percent": min_percent,
+                        "probes_fired": 0, "probes_source": "none",
+                        "run_error": True, "error": message},
             "failures": [{"reason": message}]}
+
+
+def _map_probes_fired(doc) -> "int | None":
+    return ((doc.get("arms_state") or {}).get("gut_full") or {}).get(
+        "probes_fired")
+
+
+def _write_failure_evidence(evidence_out, file_path, gd_source, tests_glob,
+                            message) -> "str | None":
+    """失败也产出 coverage-evidence/2（gut_ok=False / run_error=True /
+    hits_lines=[]），供 `measure risk` 逐文件降级为 declared `run_error`，
+    不整批中止（§SPEC-025/027）。写失败返回具名原因。"""
+    if not evidence_out:
+        return None
+    try:
+        from .evidence import (build_bundle, evidence_dir_for, make_run_uuid,
+                               write_bundle)
+        d = evidence_dir_for(evidence_out)
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            bundle = build_bundle(
+                run_uuid=make_run_uuid(), file_path=file_path,
+                gd_source=gd_source, tests_glob=tests_glob, hits_lines=[],
+                probes_fired=0, gut_ok=False, run_error=True, timeout=False,
+                zero_tests=False, vacuous=False)
+        except Exception:
+            # gd_source 本身不可读/不可解析（read-error 等）时，退化为最小
+            # 失败 bundle——仍携带 risk 消费所需的 C/I/sentinels/file_state。
+            import hashlib
+            uuid = make_run_uuid()
+            bundle = {
+                "run_uuid": uuid, "file_state": "bundle_only",
+                "recovered": False,
+                "target": {"path": file_path,
+                           "sha256": hashlib.sha256(
+                               (gd_source or "").encode()).hexdigest()},
+                "sentinels": {"gut_ok": False, "run_error": True,
+                              "timeout": False, "zero_tests": False,
+                              "vacuous": False, "probes_fired": 0,
+                              "transport_anomaly": 0},
+                "C": [], "I": [], "T": [], "entry_states": [],
+                "probe_manifest": {"inline": {"probe_plan": [],
+                                              "per_function": []}},
+            }
+        write_bundle(d, bundle)
+        return None
+    except Exception as e:  # noqa: BLE001 — 具名失败，不静默
+        return f"failure-evidence write failed: {type(e).__name__}: {e}"
 
 
 def _write_mapping_evidence(evidence_out, file_path, gd_source, tests_glob,
@@ -778,7 +833,12 @@ def run_coverage(
       绑定这些**真实执行阶段**；新鲜投影不启进程，无执行成本）。
     - 旧 direct 就地插桩 + GUT + sink 执行体已物理退役；`--recover` 不再
       作为覆盖来源（sink-recovery 已退役）。
-    - `probes_fired` 取自映射 `arms_state`（不伪造；缺失即 fail-loud）。
+    - `probes_fired` 取自映射 `arms_state`（不伪造）：缺失 → fail-loud；
+      `probes_fired==0` 且存在有效行事实（非 vacuous）→ 不得产出可信分数，
+      同样 fail-loud。
+    - 任何失败路径（含映射构建超时/Godot 启动失败/投影异常）都产出
+      `run_error` 域 JSON，并在 `--evidence-out` 下落**失败 bundle**，供
+      `measure risk` 逐文件降级、不整批中止。
     输出契约保持 file/total_lines/covered_lines/coverage_percent/min_percent/
     branch_*/hits_lines。
     """
@@ -792,37 +852,103 @@ def run_coverage(
             f"coverage target not found: {file_path} (anchored: {path})")
     src, read_error = read_gd_source(str(path))
     if read_error is not None:
-        return _err_envelope(str(path), read_error)
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    read_error)
+        return _err_envelope(str(path), read_error, min_percent=min_percent)
     if _PROBE_PREFIX in src:
-        return _err_envelope(
-            str(path),
-            f"target source appears already instrumented (contains "
-            f"'{_PROBE_PREFIX}'); restore from version control first "
-            f"(legacy direct residue; new path never writes the real file)")
+        msg = (f"target source appears already instrumented (contains "
+               f"'{_PROBE_PREFIX}'); restore from version control first "
+               f"(legacy direct residue; new path never writes the real file)")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
 
     try:
         proj = project_file_coverage(project_root, str(path), tests_glob,
                                      timeout_s=timeout_s)
     except CoverageMappingError as e:
-        return _err_envelope(str(path), str(e))
-
-    try:
-        doc = _truth.load_map(proj["map_path"])
-    except Exception as e:  # noqa: BLE001
-        return _err_envelope(str(path), f"attribution map unusable: {e}")
-    arms_state = doc.get("arms_state") or {}
-    if not _truth.arms_valid(arms_state):
-        return _err_envelope(
-            str(path), "attribution map execution evidence invalid (arms_state)")
-    probes = (arms_state.get("gut_full") or {}).get("probes_fired")
-    if probes is None:
-        return _err_envelope(
-            str(path), "attribution map lacks execution evidence "
-            "(probes_fired missing); refusing to fabricate")
+        msg = str(e)
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
+    except (ValueError, OSError) as e:
+        msg = f"{type(e).__name__}: {e}"
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
 
     inst = set(proj["instrumentable_lines"])
     covered = (set(proj["covered_lines"]) & inst) if inst else set(proj["covered_lines"])
     total = len(inst)
+
+    # vacuous：无可执行行 → 无行事实可言，无需映射/无需执行即满分 vacuous。
+    if total == 0:
+        summary = {
+            "file": str(path), "total_lines": 0, "covered_lines": 0,
+            "coverage_percent": 100.0, "min_percent": min_percent,
+            "probes_fired": 0, "probes_source": "none",
+            "branch_total": 0, "branch_covered": 0,
+            "branch_coverage_percent": 100.0, "hits_lines": [],
+            "coverage_source": "line_mapping_projection",
+            "attribution_map": proj.get("map_path"),
+            "selection_scripts": 0, "vacuous": True,
+            "note": "no executable lines",
+        }
+        summary.update(explicit_timing_meta())
+        if evidence_out:
+            why = _write_mapping_evidence(evidence_out, str(path), src,
+                                          tests_glob, set(), 0, 0)
+            if why is not None:
+                return _err_envelope(str(path), why, min_percent=min_percent)
+        return {"tool": "measure.coverage", "ok": True, "summary": summary,
+                "failures": []}
+
+    try:
+        doc = _truth.load_map(proj["map_path"])
+    except Exception as e:  # noqa: BLE001
+        msg = f"attribution map unusable: {e}"
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
+    arms_state = doc.get("arms_state") or {}
+    if not _truth.arms_valid(arms_state):
+        msg = ("attribution map execution evidence invalid (arms_state); "
+               "line facts untrustworthy")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
+    probes = _map_probes_fired(doc)
+    if probes is None:
+        msg = ("attribution map lacks execution evidence (probes_fired "
+               "missing); refusing to fabricate a trusted score")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
+    probes = int(probes)
+
+    inst = set(proj["instrumentable_lines"])
+    covered = (set(proj["covered_lines"]) & inst) if inst else set(proj["covered_lines"])
+    total = len(inst)
+
+    # 执行证据哨兵：映射构建期 probes_fired==0 且存在有效行事实 → 行事实
+    # 不可信，不得产出可信分数（fail-loud；非 vacuous 不豁免）。
+    if probes == 0 and total > 0:
+        msg = ("attribution map has probes_fired=0 with a non-empty "
+               "instrumentable surface — mapped line facts are untrustworthy "
+               "(map build timed out or Godot never executed); refusing to "
+               "produce a trusted coverage score")
+        if evidence_out:
+            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
+                                    msg)
+        return _err_envelope(str(path), msg, min_percent=min_percent)
+
     cov = len(covered)
     pct = round(100.0 * cov / total, 2) if total else 100.0
     ok = pct >= min_percent
@@ -842,7 +968,7 @@ def run_coverage(
     summary = {
         "file": str(path), "total_lines": total, "covered_lines": cov,
         "coverage_percent": pct, "min_percent": min_percent,
-        "probes_fired": int(probes), "probes_source": "map_arms_state",
+        "probes_fired": probes, "probes_source": "map_arms_state",
         "branch_total": b_total, "branch_covered": b_cov,
         "branch_coverage_percent": b_pct,
         "hits_lines": sorted(covered),
@@ -857,12 +983,14 @@ def run_coverage(
 
     if evidence_out:
         why = _write_mapping_evidence(evidence_out, str(path), src, tests_glob,
-                                      covered, total, int(probes))
+                                      covered, total, probes)
         if why is not None:
-            return _err_envelope(str(path), why)
+            return _err_envelope(str(path), why, min_percent=min_percent)
 
     return {"tool": "measure.coverage", "ok": ok, "summary": summary,
             "failures": failures}
+
+
 
 def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[set[int], int]:
     """读取命中：user:// sink 优先（探针实际写入侧），项目根仅作非 user:// 环境回退。

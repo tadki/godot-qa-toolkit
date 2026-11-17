@@ -459,7 +459,6 @@ def test_run_shadow_from_paths_static_only(tmp_path: Path):
     assert report["unknown"]["share"] == 1.0  # static-only: everything unknown
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_run_shadow_from_paths_delegates_to_default_measure(
     tmp_path: Path, monkeypatch
 ):
@@ -472,10 +471,10 @@ def test_run_shadow_from_paths_delegates_to_default_measure(
     calls: list[tuple[str, str | None]] = []
     captured_stores: list[object] = []
 
-    def fake_run_coverage(file_path, project_root, min_percent, timeout_s,
-                          timing_store, tests_glob, evidence_out=None):
+    def fake_run_coverage(file_path, project_root, min_percent,
+                          timeout_s=None, tests_glob=None,
+                          evidence_out=None):
         calls.append((file_path, tests_glob))
-        captured_stores.append(timing_store)
         summary = {
             "total_lines": 3,
             "covered_lines": 3,
@@ -521,9 +520,6 @@ def test_run_shadow_from_paths_delegates_to_default_measure(
     )
     # core + full + one same-recipe re-run = exactly three GUT rounds per file
     assert len(calls) == 3
-    # D-M2-1 guard (default direction): with no timing_store passed, the
-    # forward must be None — never an implicit store.
-    assert captured_stores == [None, None, None]
     assert report["performance"]["extra_gut_rounds"] == 0
     assert report["records"]
 
@@ -540,37 +536,6 @@ def test_real_kol_selected_eligible_files_are_eligible():
         src = (Path(KOL_ROOT) / rel).read_text(encoding="utf-8")
         profile = file_profile(src, file_label=rel)
         assert profile["eligible"] is True, (rel, profile)
-
-
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-def test_default_measure_forwards_timing_store(monkeypatch, tmp_path: Path):
-    """D-M2-1: the closure must pass the outer `timing_store` through to
-    run_coverage — a hardcoded None here silently ignores the parameter and
-    any caller wiring the timing store would lose every sample."""
-    from godot_qa_toolkit.risk import shadow as shadow_mod
-
-    captured: dict = {}
-    sentinel = object()
-
-    def fake_run_coverage(**kwargs):
-        captured.update(kwargs)
-        return {"ok": True, "summary": {"hits_lines": []}}
-
-    monkeypatch.setattr(
-        "godot_qa_toolkit.coverage.runner.run_coverage", fake_run_coverage
-    )
-    measure = shadow_mod.default_measure(str(tmp_path), timing_store=sentinel)
-    measure("f.gd", "source", None)
-    assert captured["timing_store"] is sentinel
-
-    bare = shadow_mod.default_measure(str(tmp_path))
-    bare("f.gd", "source", None)
-    assert captured["timing_store"] is None
-
-
-# --------------------------------------------------------------------------
-# §SPEC-027 (PR-C): evidence-bundle consumption and per-entry derivation
-# --------------------------------------------------------------------------
 
 
 def _bundle_for(source: str, hits: list[int], sha: str) -> dict:
@@ -745,69 +710,39 @@ def test_derive_per_entry_signature_helper_exists():
     assert per_entry["x.gd::two"]["covered"] == 3
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_default_measure_consumes_real_bundle_by_snapshot_diff(
-    tmp_path: Path, monkeypatch
+    tmp_path, monkeypatch
 ):
-    """D-WP2C-1 real-path integration: mock only the GUT execution layer —
-    the runner's real evidence path lands the bundle, and default_measure
-    locates it by snapshot diff (summary carries NO run_uuid). RED before the
-    snapshot-diff fix: the adapter looked up None.json and silently dropped
-    the bundle key."""
-    import os
-
-    import godot_qa_toolkit.coverage.runner as c
+    """映射语义：只 mock 掉 godot——runner 真实 evidence 路径由**映射投影**
+    生成 bundle（hits_lines=映射 covered），default_measure 用 snapshot diff
+    定位（summary 不携带 run_uuid）。"""
+    import attribution_fixtures as fx
     from godot_qa_toolkit.risk import shadow as shadow_mod
 
     proj = tmp_path / "proj"
-    (proj / "addons" / "gut").mkdir(parents=True)
-    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-    target = proj / "calc.gd"
-    target.write_text("func add(a, b):\n\treturn a + b\n")
+    (proj / "utils").mkdir(parents=True)
+    target = proj / "utils" / "calc.gd"
+    target.write_text("func add(a, b):\n\tvar c = a + b\n\treturn c\n")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n")
+    fx.write_map(proj, {"utils/calc.gd": ["test_x.gd::test_a"]})
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
     ev = tmp_path / "ev"
     ev.mkdir()
 
-    captured = {}
-    real_instrument = c._instrument
-
-    def sink_spy(src, sink_name):
-        captured["sink"] = os.path.join(str(proj), sink_name)
-        return real_instrument(src, sink_name)
-
-    monkeypatch.setattr(c, "_instrument", sink_spy)
-
-    def fake_gut(*args, **kwargs):
-        # mock ONLY the GUT execution layer: after the runner instruments and
-        # writes the run record, the probes write hits into the real sink —
-        # everything else (run record, bundle, sink cleanup) is the real path
-        with open(captured["sink"], "w") as f:
-            f.write("0\n1\n2\n")
-        class R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return R()
-
-    monkeypatch.setattr(c.subprocess, "run", fake_gut)
-
     measure = shadow_mod.default_measure(str(proj), evidence_out=str(ev))
-    out = measure("calc.gd", target.read_text(encoding="utf-8"),
-                  "res://tests/unit/")
-    assert "bundle" in out, (
-        "bundle key silently dropped — adapter cannot locate the evidence "
-        f"bundle (summary keys: {sorted(out['summary'])})"
-    )
+    out = measure("utils/calc.gd", target.read_text(encoding="utf-8"),
+                  "res://tests/")
+    assert "bundle" in out
     bundle = out["bundle"]
-    assert bundle["evidence_version"] == "coverage-evidence/2"
+    assert bundle["sentinels"]["gut_ok"] is True
     assert bundle["recovered"] is False
-    on_disk = json.loads(
-        next(p for p in ev.glob("*.json") if not p.name.endswith(".record.json"))
-    .read_text(encoding="utf-8"))
-    assert on_disk == bundle
-    # bundle landed → this run's sink was cleared (evidence moved)
-    assert not any(p.name.startswith("qa-coverage-hits-")
-                   for p in proj.iterdir())
-
+    assert [c["covered"] for c in bundle["C"]] == [1]  # covered={2} → fid 行 2
 
 def test_recipe_cli_res_scheme_exclude_survives_colons(tmp_path: Path, monkeypatch):
     """D-W3A-1 real-path pin: `gqt measure suite --exclude

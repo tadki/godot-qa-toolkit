@@ -81,7 +81,7 @@ def project(tmp_path: Path) -> Path:
         {"dirs": ["res://tests/"], "include_subdirs": True,
          "prefix": "test_"}))
     (root / "tests" / "unit").mkdir(parents=True)
-    # §SPEC-079 引用面：TestOwnershipIndex 只认 preload/load(...) 调用
+    # §SPEC-079 引用面：运行时映射归属只认 preload/load(...) 调用
     # 字面量——fixture 以真实 preload 引用 cell.gd，避免 zero-ref 短路在
     # 启动反例中先于真实拉起点返回（mutation 反例须到达 spawn_godot）。
     (root / "tests" / "unit" / "test_game.gd").write_text(

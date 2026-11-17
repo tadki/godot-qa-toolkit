@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -92,6 +94,119 @@ def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | N
             "summary": {"error": str(e)},
             "failures": [{"reason": str(e)}],
         })
+    return None
+
+
+def _resolve_project_root_or_contract(tool: str, args: argparse.Namespace,
+                                      *, target: str | None = None) -> int | None:
+    """§SPEC-019：统一项目根解析（显式优先 → 目标/CWD 向上发现）。
+
+    成功时把解析结果写回 `args.project_root`（后续链路沿用字符串形态），
+    失败时返回已发布的 JSON 错误码（fail-loud）。"""
+    from .projectroot import ProjectRootError, resolve_project_root
+
+    try:
+        root = resolve_project_root(getattr(args, "project_root", None),
+                                    target=target)
+    except ProjectRootError as e:
+        return _emit({"tool": tool, "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    args.project_root = str(root)
+    return None
+
+
+def _bootstrap_import_or_contract(tool: str, args: argparse.Namespace) -> int | None:
+    """零配置：新鲜检出缺 `.godot` 时自动导入一次（失败 fail-loud）。"""
+    from .projectroot import ImportBootstrapError, ensure_import_cache
+
+    try:
+        ensure_import_cache(args.project_root,
+                            godot_bin=getattr(args, "godot_bin", None))
+    except ImportBootstrapError as e:
+        return _emit({"tool": tool, "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    return None
+
+
+# `<file>#<lines>`：行级地址写法（file 必须以 .gd 结尾，spec 为单行/区间/多段）。
+_FILE_LINES_RE = re.compile(r"^(?P<file>.+\.gd)#(?P<spec>[0-9][0-9,\-]*)$")
+
+
+def _git_diff_targets(root: str) -> list[str]:
+    """无位置参数时按 git diff 推导目标（§SPEC-020）。
+
+    基准：HEAD（工作区相对 HEAD 的已跟踪改动，含暂存+未暂存）并上未跟踪的
+    .gd 文件。非 Git 仓库 / git 失败 / 无改动 → ValueError（fail-loud）。"""
+    def _git(*argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", root, *argv],
+                              capture_output=True, text=True)
+
+    top = _git("rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        raise ValueError(
+            f"not a git repository under {root}; no-arg mutation requires git "
+            f"diff (pass files explicitly)")
+    changed = _git("diff", "--name-only", "--diff-filter=ACMR",
+                   "--relative", "HEAD")
+    if changed.returncode != 0:
+        raise ValueError(
+            f"git diff HEAD failed under {root}: {changed.stderr.strip()[:240]}")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    names = [ln.strip() for ln in
+             (changed.stdout + "\n" + untracked.stdout).splitlines() if ln.strip()]
+    files: list[str] = []
+    for name in sorted(dict.fromkeys(names)):
+        if name.endswith(".gd") and (Path(root) / name).is_file() \
+                and name not in files:
+            files.append(name)
+    if not files:
+        raise ValueError(
+            "no changed .gd files from git diff HEAD (nothing to mutate); "
+            "pass files explicitly")
+    return files
+
+
+def _normalize_mutation_targets(args: argparse.Namespace) -> int | None:
+    """把 positionals 归一为单一 `<file>#<lines>` 卡尺或 git diff 目标集。
+
+    - 形如 `<file>.gd#10-20,30` 的位置参数 → 单文件行级卡尺（与 `--lines` 冲突
+      fail-loud；不可与普通文件混用）。
+    - 无位置参数 → git diff 推导。
+    返回 int 表示已发布错误，None 表示 `args.files` 已就绪。"""
+    raw = list(getattr(args, "files", []) or [])
+    addressed: list[tuple[str, str]] = []
+    plain: list[str] = []
+    for token in raw:
+        m = _FILE_LINES_RE.match(token)
+        (addressed.append((m.group("file"), m.group("spec")))
+         if m else plain.append(token))
+    if addressed:
+        if len(addressed) > 1 or plain:
+            msg = ("<file>#<lines> addresses a single file and cannot be mixed "
+                   "with other targets")
+            return _emit({"tool": "mutation", "ok": False,
+                          "summary": {"error": msg},
+                          "failures": [{"reason": msg}]})
+        file_path, spec = addressed[0]
+        if getattr(args, "lines", None) and args.lines != spec:
+            msg = ("conflicting line selection: <file>#<lines> and --lines differ")
+            return _emit({"tool": "mutation", "ok": False,
+                          "summary": {"error": msg},
+                          "failures": [{"reason": msg}]})
+        args.lines = spec
+        args.files = [file_path]
+        return None
+    if plain:
+        args.files = plain
+        return None
+    try:
+        args.files = _git_diff_targets(args.project_root)
+    except ValueError as e:
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     return None
 
 
@@ -295,9 +410,24 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # §SPEC-1525-002 + 修复轮 F-1/F-2：覆盖注入与二进制早验证/重判统一在
     # _apply_godot_bin_or_contract（三子命令同源同形态）——此处取已重钉的
     # 判定结果即可（平台分支与 key 二进制成分共用判定）。
+    # 错误优先级保持既有：显式 godot-bin 非法先于项目根校验报出。
     early = _apply_godot_bin_or_contract("mutation", args)
     if early is not None:
         return early
+
+    # §SPEC-019：再把显式/自动发现的项目根落定；目标锚定与 git diff 发现
+    # 都以它为准（target 供发现时向上找 project.godot）。
+    target_hint = None
+    raw_files = list(getattr(args, "files", []) or [])
+    if raw_files:
+        m = _FILE_LINES_RE.match(raw_files[0])
+        target_hint = m.group("file") if m else raw_files[0]
+    rc = _resolve_project_root_or_contract("mutation", args, target=target_hint)
+    if rc is not None:
+        return rc
+    rc = _normalize_mutation_targets(args)
+    if rc is not None:
+        return rc
     # §SPEC-079 B：入口不做静态启动拦截（mocked 用例/--dry-run 离线路径
     # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
     # 领域 JSON 出口收口。
@@ -312,6 +442,10 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         import os as _os
         _os.environ[_truth.ENV_MODE] = "off"
     if not getattr(args, "dry_run", False):
+        # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
+        rc = _bootstrap_import_or_contract("mutation", args)
+        if rc is not None:
+            return rc
         # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
         try:
             _truth.ensure_map(str(Path(args.project_root)),
@@ -490,7 +624,15 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("measure.risk", args)
     if early is not None:
         return early
-    paths = [Path(p) for p in args.files]
+    rc = _resolve_project_root_or_contract(
+        "measure.risk", args, target=(args.files[0] if args.files else None))
+    if rc is not None:
+        return rc
+    # §SPEC-019/021：与 mutation/coverage 同口径——相对路径锚定项目根，
+    # 不再按调用方 CWD 解析（同一写法在不同 CWD 下结果一致）。
+    root = Path(args.project_root)
+    paths = [(Path(p) if Path(p).is_absolute() else root / p)
+             for p in args.files]
     missing = [str(p) for p in paths if not p.is_file()]
     if missing:
         return _emit(
@@ -515,9 +657,17 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
         performance_input=performance_input,
     )
     report_path = Path(args.report)
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    try:
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+    except OSError as e:
+        # §SPEC-021：可选 JSON 文件报告写入失败必须非零披露（不静默/不裸
+        # traceback）；stdout 契约不变，仅把失败转成统一信封。
+        msg = f"report write failed: {report_path}: {e}"
+        return _emit({"tool": "measure.risk", "ok": False,
+                      "summary": {"error": msg},
+                      "failures": [{"reason": msg}]})
     scored = report["ranking"]["top"]
     return _emit(
         {
@@ -543,6 +693,10 @@ def cmd_measure_parity(args: argparse.Namespace) -> int:
     from .complexity.parity import parity_paths
     from .registry.snapshot import save_snapshot
 
+    rc = _resolve_project_root_or_contract(
+        "measure.parity", args, target=(args.paths[0] if args.paths else None))
+    if rc is not None:
+        return rc
     paths = [Path(p) for p in args.paths]
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
@@ -607,6 +761,9 @@ def cmd_measure_registry_diff(args: argparse.Namespace) -> int:
 def cmd_measure_suite(args: argparse.Namespace) -> int:
     from .measurement.recipe import build_recipe
 
+    rc = _resolve_project_root_or_contract("measure.suite", args)
+    if rc is not None:
+        return rc
     exclusions = []
     for raw in args.exclude:
         # D-W3A-1: entry may contain `://` (res://… schemes) — take scope at
@@ -662,6 +819,10 @@ def cmd_measure_coverage(args: argparse.Namespace) -> int:
     early = _apply_godot_bin_or_contract("measure.coverage", args)
     if early is not None:
         return early
+    rc = _resolve_project_root_or_contract("measure.coverage", args,
+                                           target=getattr(args, "file", None))
+    if rc is not None:
+        return rc
     from .coverage.evidence import prune_sinks as _prune, recover_bundle as _recover
     from pathlib import Path as _P
 
@@ -686,6 +847,13 @@ def cmd_measure_coverage(args: argparse.Namespace) -> int:
     # 静态拦截（recover/prune 离线路径与 mocked 用例不受影响），
     # 拉起点的 BinaryConfigError 由下方领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
+    # 缺 godot 时不在导入引导处掩盖 run_coverage 的「godot binary not found
+    # in PATH」判据；仅二进制可用时才做零配置首次导入。
+    _gcmd, _gok, _greason = _godot_bin_ready(_P(args.project_root))
+    if _gok:
+        rc = _bootstrap_import_or_contract("measure.coverage", args)
+        if rc is not None:
+            return rc
     try:
         result = run_coverage(
             file_path=args.file,
@@ -731,6 +899,11 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
 
     from .measurement.increment import IncrementError, run_attribution_increment
 
+    rc = _resolve_project_root_or_contract(
+        "measure.map-update", args,
+        target=(args.roots[0] if getattr(args, "roots", None) else None))
+    if rc is not None:
+        return rc
     rc = _apply_godot_bin_or_contract("measure.map-update", args)
     if rc is not None:
         return rc
@@ -824,6 +997,11 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
         return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": f"recipe invalid: {reason}"},
                       "failures": [{"reason": f"recipe invalid: {reason}"}]})
+    # §SPEC-019：recipe 校验（输入契约）先于项目根解析，保持既有错误优先级。
+    rc = _resolve_project_root_or_contract(
+        "measure.run", args, target=(args.roots[0] if args.roots else None))
+    if rc is not None:
+        return rc
     roots = [_P(r) for r in args.roots]
     targets = sorted({str(p) for root in roots
                       for p in root.rglob("*.gd") if p.is_file()})
@@ -885,6 +1063,9 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
         return _emit_godot_unavailable("measure.run", godot_cmd, godot_reason)
+    rc = _bootstrap_import_or_contract("measure.run", args)
+    if rc is not None:
+        return rc
     test_attribution, attribution_out, attribution_causal = (
         _attribution_args(args))
     try:
@@ -961,6 +1142,12 @@ def cmd_measure_diagnose(args: argparse.Namespace) -> int:
 
     from .measurement.orchestrator import MeasurementError, run_measurement_diagnose
     from .measurement.recipe import verify_recipe
+
+    rc = _resolve_project_root_or_contract(
+        "measure.diagnose", args,
+        target=(args.roots[0] if getattr(args, "roots", None) else None))
+    if rc is not None:
+        return rc
 
     rc = _apply_godot_bin_or_contract("measure.diagnose", args)
     if rc is not None:
@@ -1079,8 +1266,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- mutation（名称与语义准确，保持一级）---
     m = sub.add_parser("mutation", help="mutation test one or more .gd files")
-    m.add_argument("files", nargs="+", help="the .gd file(s) to mutate")
-    m.add_argument("--project-root", required=True, help="project root containing addons/gut/")
+    m.add_argument("files", nargs="*",
+                   help="the .gd file(s) to mutate, or '<file>.gd#<lines>' "
+                        "line-level address; omitted = derive targets from "
+                        "git diff HEAD (tracked changes + untracked .gd)")
+    m.add_argument("--project-root", default=None,
+                   help="project root containing addons/gut/; omitted = "
+                        "discover the nearest project.godot walking up from "
+                        "the target (or CWD)")
     m.add_argument("--budget", type=int, default=50, help="max mutants (default 50)")
     m.add_argument("--timeout", type=int, default=60, help="GUT timeout seconds (default 60)")
     m.add_argument("--dry-run", action="store_true",
@@ -1182,7 +1375,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="build the measurement suite definition (measurement-suite/2, "
              "read-only, SEE-1546 WP3)",
     )
-    cr.add_argument("--project-root", required=True, help="target Godot project root")
+    cr.add_argument("--project-root", default=None,
+                    help="target Godot project root; omitted = discover from CWD")
     cr.add_argument("--out", default="recipe.json",
                     help="where to write the recipe JSON (default ./recipe.json)")
     cr.add_argument("--exclude", action="append", default=[],
@@ -1193,8 +1387,9 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("roots", nargs="+",
                      help="target .gd roots (recursive glob); arms run the "
                           "full gutconfig face + acceptance suite over them")
-    can.add_argument("--project-root", required=True,
-                     help="Godot project root (addons/gut + .gutconfig.json)")
+    can.add_argument("--project-root", default=None,
+                     help="Godot project root (addons/gut + .gutconfig.json); "
+                          "omitted = discover from roots/CWD")
     can.add_argument("--recipe", required=True,
                      help="measurement-suite/2 JSON (from `gqt measure suite --out`)")
     can.add_argument("--out", required=True,
@@ -1272,8 +1467,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cd.add_argument("roots", nargs="+",
                     help="directories whose .gd files are instrumented")
-    cd.add_argument("--project-root", required=True,
-                    help="target Godot project root")
+    cd.add_argument("--project-root", default=None,
+                    help="target Godot project root; omitted = discover from roots/CWD")
     cd.add_argument("--recipe", required=True,
                     help="measurement suite json (verify + feature lookup)")
     cd.add_argument("--features", required=True,
@@ -1293,7 +1488,8 @@ def build_parser() -> argparse.ArgumentParser:
     inc.add_argument("roots", nargs="+",
                      help="target .gd roots — must be the same universe as "
                           "the baseline artifact")
-    inc.add_argument("--project-root", required=True)
+    inc.add_argument("--project-root", default=None,
+                     help="Godot project root; omitted = discover from roots/CWD")
     inc.add_argument("--recipe", required=True,
                      help="measurement-suite/2 JSON (same content as the "
                           "baseline run)")
@@ -1314,7 +1510,9 @@ def build_parser() -> argparse.ArgumentParser:
     v = mssub.add_parser("coverage", help="line coverage of a single .gd file via GUT")
     v.add_argument("file", nargs="?", default=None,
                    help="the .gd file to measure (required unless --recover/--prune-sinks)")
-    v.add_argument("--project-root", required=True, help="project root containing addons/gut/")
+    v.add_argument("--project-root", default=None,
+                   help="project root containing addons/gut/; omitted = "
+                        "discover from the target file or CWD")
     v.add_argument("--min-percent", type=float, default=80.0,
                    help="min coverage percent (default 80)")
     v.add_argument("--timeout", type=int, default=120, help="GUT timeout seconds (default 120)")
@@ -1354,7 +1552,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="directories or .gd files to scan (same roots as the complexity gate)",
     )
-    p.add_argument("--project-root", required=True, help="project root for relative fids")
+    p.add_argument("--project-root", default=None,
+                   help="project root for relative fids; omitted = discover from paths/CWD")
     p.add_argument(
         "--report",
         default="parity.json",
@@ -1383,7 +1582,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="candidate .gd files (eligible ones are measured; lambda/inner-class/"
         "var-def files route to the measurement-gap lanes)",
     )
-    r.add_argument("--project-root", required=True, help="target Godot project root")
+    r.add_argument("--project-root", default=None,
+                   help="target Godot project root; omitted = discover from "
+                        "the candidate files or CWD")
     r.add_argument(
         "--core-tests",
         default="res://tests/unit/",

@@ -257,3 +257,37 @@ class TestA22CentralFreshness:
         map_file = self._write_map(root)
         import time
         assert _attribution_usable(str(map_file), time.time() - 60) is True
+
+
+class TestS6HarnessSampleSelection:
+    """S6 harness 样本选择逻辑：找不到样本必须 fail-loud（不得当 PASS）。"""
+
+    def test_no_samples_raises(self, tmp_path):
+        import importlib.util
+        empty = tmp_path / "kol"
+        (empty / "utils").mkdir(parents=True)
+        spec = importlib.util.spec_from_file_location(
+            "mapping_perf", Path(__file__).resolve().parents[1]
+            / "integration" / "run_see1594_mapping_perf.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with pytest.raises(RuntimeError, match="sample selection failed"):
+            mod._pick_samples(empty)
+
+    def test_samples_sorted_by_lines_capped(self, tmp_path):
+        import importlib.util
+        kol = tmp_path / "kol"
+        (kol / "utils").mkdir(parents=True)
+        (kol / "utils" / "big.gd").write_text("\n" * 30 + "func a():\n\tpass\n")
+        (kol / "utils" / "small.gd").write_text("func b():\n\tpass\n")
+        (kol / "systems").mkdir(parents=True)
+        (kol / "systems" / "mid.gd").write_text("\n" * 10)
+        spec = importlib.util.spec_from_file_location(
+            "mapping_perf2", Path(__file__).resolve().parents[1]
+            / "integration" / "run_see1594_mapping_perf.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        samples = mod._pick_samples(kol)
+        assert len(samples) == 2, "small.gd(<5 行) 被过滤"
+        assert samples[0].name == "big.gd", "行数降序排序"
+        assert samples[1].name == "mid.gd"

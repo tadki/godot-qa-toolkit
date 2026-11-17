@@ -24,7 +24,6 @@ from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
 from godot_qa_toolkit.mutation.scopemanifest import build_manifest
 from godot_qa_toolkit.timing import project_relative
 import godot_qa_toolkit.mutation.runner as runner_mod
-import godot_qa_toolkit.coverage.runner as coverage_runner_mod
 from godot_qa_toolkit.mutation.executor import run_mutation_files
 from godot_qa_toolkit.mutation.runner import run_mutation
 from godot_qa_toolkit.coverage.runner import run_coverage

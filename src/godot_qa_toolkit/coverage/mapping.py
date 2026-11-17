@@ -149,9 +149,13 @@ def project_file_coverage(
     if covered is None:
         raise CoverageMappingError("projection_unavailable", reason)
 
+    inst_raw = (doc.get("instrumentable_lines") or {}).get(rel)
+    if not isinstance(inst_raw, (list, tuple, set)):
+        raise CoverageMappingError(
+            "attribution_map_malformed",
+            f"instrumentable_lines for {rel} malformed: {inst_raw!r}")
     try:
-        inst = {int(l) for l in
-                ((doc.get("instrumentable_lines") or {}).get(rel) or [])}
+        inst = {int(l) for l in inst_raw}
     except (TypeError, ValueError) as e:
         raise CoverageMappingError(
             "attribution_map_malformed",

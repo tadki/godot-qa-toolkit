@@ -705,9 +705,16 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel
     path = (file_sel.get("mapping") or {}).get("path")
+    if not path:
+        # S2.2：runtime_mapping 必携带 resolved map path——缺失 = selection
+        # 元数据不一致，具名 fail-loud；绝不回退默认路径重猜（与 prefilter
+        # 哨兵语义同源，防第三套漂移）。
+        raise MutationSelectionError(
+            "selection_metadata_inconsistent",
+            "line_group: source=runtime_mapping without a resolved map "
+            "path — refusing to re-guess the default attribution map")
     try:
-        doc = load_map(path) if path else load_map(map_path(root,
-                                                            map_path_override))
+        doc = load_map(path)
         rel = _file_rel(root, target_file)
     except (SelectionError, ValueError) as e:
         raise MutationSelectionError("line_selection_load_failed",
@@ -765,9 +772,16 @@ def resolve_function_selection(project_root: str | Path, target_file: str,
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel                      # 零引用终态 / 不可用（strict 已抛）
     path = (file_sel.get("mapping") or {}).get("path")
+    if not path:
+        # S2.2：runtime_mapping 必携带 resolved map path——缺失 = selection
+        # 元数据不一致，具名 fail-loud；绝不回退默认路径重猜（与 prefilter
+        # 哨兵语义同源，防第三套漂移）。
+        raise MutationSelectionError(
+            "selection_metadata_inconsistent",
+            "function: source=runtime_mapping without a resolved map path "
+            "— refusing to re-guess the default attribution map")
     try:
-        doc = load_map(path) if path else load_map(map_path(root,
-                                                            map_path_override))
+        doc = load_map(path)
         rel = _file_rel(root, target_file)
     except (SelectionError, ValueError) as e:
         raise MutationSelectionError("function_selection_load_failed",

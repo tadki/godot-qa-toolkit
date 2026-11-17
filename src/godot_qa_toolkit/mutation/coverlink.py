@@ -37,8 +37,10 @@ COVERAGE_CACHE_DIRNAME = "gqt-coverage"
 
 # S2.1 MEDIUM-1：map_path 形参哨兵——调用方未解析映射（仅直接调用/旧测试
 # 兼容回退默认解析）；显式 None = selection 已运行但无 mapping（如显式
-# --tests）→ 显式跳过 map 派生层，绝不重猜默认 map。
+# --tests）→ 显式跳过 map 派生层，绝不重猜默认 map。S2.2：公开常量供
+# planner/executor 形参缺省复用（单一哨兵语义，避免第三套漂移）。
 _UNRESOLVED_MAP = object()
+MAP_PATH_UNRESOLVED = _UNRESOLVED_MAP
 
 
 def coverage_identity(identity: dict | None) -> dict | None:
@@ -519,7 +521,7 @@ def resolve_coverage_for_prefilter(
         project_root: str, file_path: str, tests_glob: str | None,
         scripts: "list[str] | set[str] | None" = None,
         binary_kind=None, identity: dict | None = None,
-        map_path: "str | None | object" = _UNRESOLVED_MAP,
+        map_path: "str | None | object" = MAP_PATH_UNRESOLVED,
         ) -> tuple[set[int] | None, set[int] | None, str | None, str | None]:
     """mutation prefilter 统一解析链（SEE-1587 消费面单一出处；
     SEE-1594 S2/S2.1 单真源化）。

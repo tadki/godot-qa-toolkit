@@ -156,15 +156,23 @@ def test_runtime_ownership_rejects_multi_path_script(tmp_path):
     assert owner.owner_of("test_ok") is None
 
 
-def test_ownership_falls_back_when_binding_missing(tmp_path):
-    """映射在但缺 file_sha256 绑定 → 不得产出 runtime 证书（结构性兜底）。"""
+def test_ownership_returns_none_when_binding_missing(tmp_path, capsys):
+    """A09：映射在但缺 file_sha256 绑定 → None（证书不产出，保守重跑）
+    + 具名披露；绝不静态兜底。"""
     proj = _project(tmp_path)
     path = write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     doc["file_sha256"] = {}
     Path(path).write_text(json.dumps(doc), encoding="utf-8")
     owner = truth_select.ownership_for(str(proj), str(proj / "calc.gd"))
-    assert owner.source == "structural_index"
+    assert owner is None
+    err = capsys.readouterr().err
+    # 绑定缺失走 resolve 异常路径（file_binding_missing_or_stale）→
+    # 具名 resolution failed 披露；无映射则走 no-fresh 披露——两者均为
+    # 具名保守披露，绝不静态兜底
+    assert "conservative rerun" in err
+    assert ("no fresh runtime mapping" in err
+            or "resolution failed" in err)
 
 
 def test_function_selection_passes_through_zero_ref(tmp_path):

@@ -37,7 +37,7 @@ EXPECTED_SCENARIO_COUNTS = {
     "see1356_timing": 1,
     "see1400_global_gate": 3,
     "see1400_launch_guard": 2,
-    "see1405_gdself": 4,
+    "see1405_gdself": 2,
     "see1405_keys": 3,
     "see1413_default_parallel": 4,
     # SEE-1468 M5-a：see1288_fork_cli 4 场景自 KOL 收编（pending -> bdd）。
@@ -59,9 +59,9 @@ EXPECTED_SCENARIOS = sum(EXPECTED_SCENARIO_COUNTS.values())
 # 合并账本（rebase SEE-1546 WP 系列后）：base 142/133
 # + SEE-1550 §SPEC-002 see1550_forms（+29 步 / +4 唯一定义，含 §SPEC-017
 #   vendored 显式目标 +3 步）
-# + SEE-1546 WP1b/WP2/WP3（master 侧 +30 步 / +30 定义）→ 201 / 167。
-EXPECTED_STEPS = 201
-EXPECTED_DEFINITIONS = 167
+# + SEE-1546 WP1b/WP2/WP3（master 侧 +30 步 / +30 定义）→ SEE-1594 S4 静态选面场景退役（-6 步/-2 定义）→ 195 / 161。
+EXPECTED_STEPS = 195
+EXPECTED_DEFINITIONS = 161
 CONTRACT_MARKER = '{\n  "tool": "gherkin"'
 
 
@@ -232,7 +232,7 @@ def test_every_step_resolves_to_exactly_one_definition(
         "unique": EXPECTED_STEPS,
         "unmatched": 0,
         "ambiguous": 0,
-    }
+    }, f"step ledger drift: actual={report['summary']}"
     assert len(report["steps"]) == EXPECTED_STEPS
     definitions = set()
     for mapping in report["steps"]:

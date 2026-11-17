@@ -145,15 +145,16 @@ def test_unique_tmp_files_differ(tmp_path):
     Path(b).unlink()
 
 
-def test_ownership_source_runtime_vs_structural(tmp_path):
+def test_ownership_source_runtime_and_none_without_map(tmp_path, capsys):
     proj = _project(tmp_path)
     write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
     owner = truth_select.ownership_for(str(proj), str(proj / "calc.gd"))
     assert owner.source == "runtime_mapping"
     assert owner.owner_of("test_ok") == "res://tests/unit/test_hit.gd"
-    # 无映射 → 结构性兜底（带来源披露），选面仍不碰静态索引
+    # A09：无映射 → None（证书不产出，保守重跑）+ 具名披露；不静态兜底
     truth_select.reset_ledger()
     (proj / ".qa-cache" / "attribution-map.json").unlink()
     owner2 = truth_select.ownership_for(str(proj), str(proj / "calc.gd"))
-    assert owner2.source == "structural_index"
-    assert owner2.owner_of("test_ok") == "res://tests/unit/test_hit.gd"
+    assert owner2 is None
+    err = capsys.readouterr().err
+    assert "no kill certificate" in err and "conservative rerun" in err

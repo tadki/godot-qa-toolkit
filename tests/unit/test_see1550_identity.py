@@ -19,9 +19,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.mutation import identity
 from godot_qa_toolkit.mutation.diffengine import plan_diff
+from godot_qa_toolkit.mutation.truth_select import RuntimeOwnership
+
+
+def _runtime_ownership(proj, idents):
+    """A09：kill 证书归属唯一来源 = 运行时真值映射（手写 /6 文档）。"""
+    arm = {"test_to_files": {}, "script_to_files": {}}
+    for ident, files in idents.items():
+        arm["test_to_files"][ident] = list(files)
+    doc = {"schema_version": "test-attribution/6",
+           "arms": {"gut_full": arm}}
+    return RuntimeOwnership(str(proj), doc)
+
+
 from godot_qa_toolkit.mutation.identity import (
     INJECT_SCHEME,
-    TestOwnershipIndex,
     boot_wiring_hash,
     certificate_valid,
     deps_closure_sha1,
@@ -164,11 +176,15 @@ class TestKillCertificate:
 
     def test_full_failure_set_no_truncation(self, tmp_path):
         proj = self._fixture(tmp_path)
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {"test_x.gd::test_x": ["tests/test_x.gd"]})
         failures = {f"test_k{i}" for i in range(30)}
         (tests := proj / "tests").joinpath("test_k.gd").write_text(
             "".join(f"func test_k{i}():\n\tpass\n\n" for i in range(30)))
-        ownership2 = TestOwnershipIndex(str(proj))
+        # RuntimeOwnership 的 name→path 表经 lru_cache 查 tests 树——
+        # 写入新文件后失效缓存再构建归属
+        from godot_qa_toolkit.mutation import truth_select as _ts
+        _ts._test_scripts_by_name.cache_clear()
+        ownership2 = _runtime_ownership(proj, {f"test_k.gd::test_k{i}": ["tests/test_k.gd"] for i in range(30)})
         cert = killer_certificate(failures, ownership2, str(proj))
         assert cert is not None
         assert len(cert) == 30, "完整失败集——撤除 [:3] 截断"
@@ -176,7 +192,7 @@ class TestKillCertificate:
 
     def test_cert_fields_shape(self, tmp_path):
         proj = self._fixture(tmp_path)
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {"test_x.gd::test_x": ["tests/test_x.gd"]})
         cert = killer_certificate({"test_x"}, ownership, str(proj))
         assert cert is not None and len(cert) == 1
         c = cert[0]
@@ -191,12 +207,14 @@ class TestKillCertificate:
         proj = self._fixture(tmp_path)
         (proj / "tests" / "test_x2.gd").write_text(
             "func test_x():\n\tpass\n")
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {
+            "test_x.gd::test_x": ["tests/test_x.gd"],
+            "test_x2.gd::test_x": ["tests/test_x2.gd"]})
         assert killer_certificate({"test_x"}, ownership, str(proj)) is None
 
     def test_missing_owner_returns_none(self, tmp_path):
         proj = self._fixture(tmp_path)
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {"test_x.gd::test_x": ["tests/test_x.gd"]})
         assert killer_certificate({"test_absent"}, ownership,
                                   str(proj)) is None
 
@@ -221,7 +239,7 @@ class TestKillCertificate:
 
     def test_cert_valid_matrix(self, tmp_path):
         proj = self._fixture(tmp_path)
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {"test_x.gd::test_x": ["tests/test_x.gd"]})
         cert = killer_certificate({"test_x"}, ownership, str(proj))
         assert certificate_valid(cert, str(proj)) is True
         # killer 测试修改 → False
@@ -239,7 +257,7 @@ class TestKillCertificate:
     def test_cert_dep_change_only_invalidates(self, tmp_path):
         """依赖（helper）变化 → 校验失败仅该 entry 重跑（复用规则定向性）。"""
         proj = self._fixture(tmp_path)
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {"test_x.gd::test_x": ["tests/test_x.gd"]})
         cert = killer_certificate({"test_x"}, ownership, str(proj))
         (proj / "helpers" / "h.gd").write_text("extends RefCounted\n# v2\n")
         assert certificate_valid(cert, str(proj)) is False
@@ -247,7 +265,7 @@ class TestKillCertificate:
     def test_new_test_does_not_invalidate_old_killed(self, tmp_path):
         """kill 单调性：新增测试文件不改 killer 自身/闭包 → 证书仍有效。"""
         proj = self._fixture(tmp_path)
-        ownership = TestOwnershipIndex(str(proj))
+        ownership = _runtime_ownership(proj, {"test_x.gd::test_x": ["tests/test_x.gd"]})
         cert = killer_certificate({"test_x"}, ownership, str(proj))
         (proj / "tests" / "test_new.gd").write_text("func test_new():\n\tpass\n")
         assert certificate_valid(cert, str(proj)) is True

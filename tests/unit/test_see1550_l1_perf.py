@@ -53,7 +53,7 @@ def _seed(proj, target, covered, instrumentable, identity=None):
     """SEE-1594 A04/A05：store 层唯一合法种子 = 绑定映射的 /2 派生缓存。"""
     import attribution_fixtures as _fx
     return _fx.seed_projection(
-        proj, target, {"test_x.gd::t1": {"calc.gd": sorted(covered)}},
+        proj, target, {"test_x.gd::test_x": {"calc.gd": sorted(covered)}},
         scripts=["res://tests/test_x.gd"],
         instrumentable={"calc.gd": sorted(instrumentable)},
         identity=identity if identity is not None else _ident(proj))
@@ -84,7 +84,8 @@ class TestWarmPool:
     def test_each_run_single_baseline_via_shared_snapshot(self, tmp_path,
                                                           monkeypatch):
         """确定性门：warm 全复用仅一次 baseline——零执行回退必须注入父层
-        共享 baseline（B 场景 GUT 调用 = 1）。"""
+        共享 baseline（B 场景 GUT 调用 = 1）。A09：证书唯一来源 = 新鲜
+        运行时映射（种子 killer 身份；coverage 过滤关断以隔离证书复用）。"""
         proj, target = _write_project(tmp_path)
         calls = {"gut": 0}
         state = {"n": 0}
@@ -96,13 +97,15 @@ class TestWarmPool:
                 return (0, "* t0\n[passed]")
             return (1, KILL_TAIL)
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
+        _seed(proj, target, {2}, {2, 5})
         r1 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/")
+                          tests_glob="res://tests/", reuse_coverage=False)
         assert r1["summary"]["killed"] == 6
         assert calls["gut"] == 7, "一轮 = 1 baseline + 6 mutant 轮"
         r2 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/")
+                          tests_glob="res://tests/", reuse_coverage=False)
         # 二轮：全 killed 复用 → 仅 baseline 一次（零执行零额外 baseline）
         assert r2["summary"]["resumed"] == 6
         assert calls["gut"] == 8, "二轮只增 1 次 baseline（复用零 GUT）"
@@ -205,7 +208,8 @@ class TestCoveragePrefilterAuto:
 class TestKilledCertExactReuse:
     def test_new_pin_does_not_invalidate_old_killed(self, tmp_path,
                                                     monkeypatch):
-        """killed_by 证书精确复用：加新 pin 不失效旧 killed（零额外重跑）。"""
+        """killed_by 证书精确复用：加新 pin 不失效旧 killed（零额外重跑）。
+        A09：证书 = 新鲜运行时映射（种子 killer 身份）。"""
         proj, target = _write_project(tmp_path)
         state = {"n": 0}
 
@@ -215,9 +219,11 @@ class TestKilledCertExactReuse:
                 return (0, "* t0\n[passed]")
             return (1, KILL_TAIL)
 
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
+        _seed(proj, target, {2}, {2, 5})
         r1 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/")
+                          tests_glob="res://tests/", reuse_coverage=False)
         assert r1["summary"]["killed"] == 6
         assert r1["summary"].get("killed_by_certificates"), \
             "killed 记录必须携带证书"

@@ -278,37 +278,6 @@ class TestSpec001AutoScan:
         assert fake_gut["globs"][0].startswith(
             "res://.gqt-attr-select/")
 
-    def test_zero_hits_falls_back_to_full(self, tmp_path, monkeypatch):
-        proj, files = _write_project(tmp_path)
-        monkeypatch.setattr(
-            runner_mod, "_run_gut_on_project",
-            lambda root, timeout_s=60, tests_glob=None: (0, "pass"))
-        monkeypatch.setattr(
-            "godot_qa_toolkit.mutation.testscan.derive_tests_glob_meta",
-            lambda *a, **k: (None, {}))
-        s = run_mutation(files[0], proj, budget=1)["summary"]
-        assert s["scoped"] is False
-
-
-class TestSpec002ExplicitWins:
-    def test_explicit_tests_glob_not_scanned(self, tmp_path, monkeypatch):
-        proj, files = _write_project(tmp_path)
-        scanned = {"v": False}
-        monkeypatch.setattr(
-            "godot_qa_toolkit.mutation.testscan.derive_tests_glob_meta",
-            lambda *a, **k: scanned.__setitem__("v", True) or
-            ("res://tests/x/", {}))
-        globs = []
-
-        def fake(root, timeout_s=60, tests_glob=None):
-            globs.append(tests_glob)
-            return (0, "pass")
-
-        monkeypatch.setattr(runner_mod, "_run_gut_on_project", fake)
-        run_mutation(files[0], proj, budget=1, tests_glob="res://tests/unit/save/")
-        assert scanned["v"] is False
-        assert all(g == "res://tests/unit/save/" for g in globs)
-        assert len(globs) >= 1
 
 
 class TestSpec013DefensiveSameFile:

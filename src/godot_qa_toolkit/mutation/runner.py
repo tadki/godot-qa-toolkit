@@ -612,8 +612,8 @@ def _auto_scan_tests_glob(file_path: str, project_root: str,
                           select_mode: str = "full") -> str | None:
     """SPEC-001：目标 → 选面 glob（SEE-1581：运行时映射；full=显式全脸）。
 
-    SEE-1405 §SPEC-004：project_root 显式传给 derive_tests_glob——内部
-    换源 gdself 正向索引（间接消费闭包可见）；扫描失败诚实退全量。
+    SEE-1581：自动选面唯一出处委托 _auto_scan_tests_glob_meta（运行时
+    真值映射；A10 后静态强度选面已退役）。
     """
     glob, _meta = _auto_scan_tests_glob_meta(file_path, project_root,
                                              select_mode=select_mode)
@@ -650,7 +650,7 @@ def _auto_scan_tests_glob_meta(file_path: str,
                                project_root: str,
                                select_mode: str = "full"
                                ) -> tuple[str | None, dict]:
-    """SEE-1581：选面改运行时真值映射（静态 TestOwnershipIndex 退出主路径）。
+    """SEE-1581：选面改运行时真值映射（A09 后静态归属/静态选面零消费者）。
 
     - 新鲜映射（recipe_hash + 目标文件 sha256 绑定）→ 精确测试脚本集，
       tests_glob 指向选择目录（`.qa-cache/gqt-attr-select/<id>/`）；
@@ -948,7 +948,9 @@ def _attach_killed_certificate(verdict: dict, tail: str,
     new_failures = _parse_failing_tests(tail) - baseline_failures
     cert = killer_certificate(
         new_failures, owner, project_root,
-        ownership_source=getattr(owner, "source", "structural_index"))
+        ownership_source=getattr(owner, "source", "runtime_mapping"))
+    import sys as _sys
+    _ln = sorted(new_failures)[-1] if new_failures else "?"
     if cert is not None:
         verdict["killed_by"] = cert
 

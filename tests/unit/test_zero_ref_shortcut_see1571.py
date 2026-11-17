@@ -190,12 +190,8 @@ class TestRuntimeTruthBlindSpot:
             "extends GutTest\nfunc test_x() -> void:\n\tpass\n")
         target = proj / "calc.gd"
         target.write_text(GD_TARGET)
-        # 静态面：test_other.gd 不引用 calc.gd（gdself 判零）
-        from godot_qa_toolkit.mutation.testscan import derive_tests_glob_meta
-        static_glob, _meta = derive_tests_glob_meta(
-            "res://calc.gd", proj / "tests", project_root=str(proj))
-        assert static_glob is None, "夹具应复现静态盲点"
-        # 运行时真值：映射说该文件被 test_other.gd 触达
+        # A10：静态选面退役（原 gdself 判零盲点随静态块退役）；运行时
+        # 真值：映射说该文件被 test_other.gd 触达 → 选面照跑
         write_map(proj, {"calc.gd": ["test_other.gd::test_x"]})
         monkeypatch.setattr(executor, "prewarm_import", lambda root: None)
         monkeypatch.setattr(

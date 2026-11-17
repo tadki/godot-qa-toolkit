@@ -356,7 +356,7 @@ def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
                 cert = killer_certificate(
                     new_failures, owner, project_root,
                     ownership_source=getattr(owner, "source",
-                                             "structural_index"))
+                                             "runtime_mapping"))
                 if cert is not None:
                     record["killed_by"] = cert
         return record

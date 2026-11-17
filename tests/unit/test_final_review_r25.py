@@ -1322,12 +1322,13 @@ def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
     assert "import cache" in reason and "godot" in reason, reason
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_coverage_measure_missing_godot_clean_env(project, tmp_path):
+    """SEE-1594 S1：映射缺失 + 无 Godot → 映射构建 fail-loud，域 JSON
+    error 指向缺失的 Godot 二进制（映射构建需要真实 Godot）。"""
     payload = _spawn_clean_env(
         ["measure", "coverage", _mutation_target(project)], project, tmp_path)
     assert payload["tool"] == "measure.coverage"
-    assert "godot binary not found in PATH" in payload["summary"]["error"]
+    assert "godot" in payload["summary"]["error"].lower()
 
 
 # ------------------------- §SPEC-079 R35：伪格式五路领域收口

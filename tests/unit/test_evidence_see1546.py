@@ -16,7 +16,6 @@ from godot_qa_toolkit.coverage.evidence import (
     build_run_record,
     make_run_uuid,
     prune_sinks,
-    recover_bundle,
     sink_name_for,
     write_run_record,
 )
@@ -110,46 +109,6 @@ def test_run_error_and_timeout_bundles_land_without_scores():
         assert "score" not in json.dumps(bundle)
 
 
-def test_recover_matches_online_path_and_marks_recovered(tmp_path: Path):
-    """§SPEC-025: a started record + sink on disk → --recover produces the
-    same bundle the online path would (recovered=true), no GUT re-run."""
-    evidence = tmp_path / "ev"
-    evidence.mkdir()
-    run_uuid = make_run_uuid()
-    record = build_run_record(
-        run_uuid=run_uuid, file_path="x.gd", gd_source=GD,
-        tests_glob=None, probe_manifest={},
-    )
-    write_run_record(evidence, record)
-    # recovery reads the sink from the evidence dir (recorded sink_path or
-    # the sibling file) — simulate a completed-but-unbundled run
-    (evidence / sink_name_for(run_uuid)).write_text("0\n1\n", encoding="utf-8")
-    record = json.loads(
-        (evidence / f"{run_uuid}.record.json").read_text(encoding="utf-8")
-    )
-    record["probe_manifest"] = {"probe_plan": [
-        {"probe_id": 0, "line": 1, "fid": "x.gd::f", "owner_kind": "func"},
-        {"probe_id": 1, "line": 2, "fid": "x.gd::f", "owner_kind": "func"},
-    ], "per_function": [
-        {"fid": "x.gd::f", "t_lines": 2, "i_lines": 2, "t_equal_i": True,
-         "t_line_ids": [1, 2]},
-    ]}
-    write_run_record(evidence, record)
-
-    result = recover_bundle(evidence)
-    assert not result["errors"]
-    assert len(result["recovered"]) == 1
-    bundle = json.loads(
-        Path(result["recovered"][0]["bundle"]).read_text(encoding="utf-8")
-    )
-    assert bundle["recovered"] is True
-    assert [c["covered"] for c in bundle["C"]] == [2]
-    updated = json.loads(
-        (evidence / f"{run_uuid}.record.json").read_text(encoding="utf-8")
-    )
-    assert updated["status"] == "bundle_written"
-
-
 def test_prune_sinks_only_deletes_prefixed_expired(tmp_path: Path):
     """§SPEC-025/W1: --prune-sinks deletes only `qa-coverage-hits-*` files
     past the retention period; fresh sinks and foreign files survive."""
@@ -169,24 +128,30 @@ def test_prune_sinks_only_deletes_prefixed_expired(tmp_path: Path):
     assert fresh_sink.is_file() and foreign.is_file()
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_stdout_contract_frozen_against_011b87d(tmp_path: Path, monkeypatch):
-    """§SPEC-026 stdout freeze: without --evidence-out the summary keys are
-    exactly the 011b87d contract (no evidence keys leak into stdout)."""
+    """§SPEC-026 stdout freeze: without --evidence-out the summary keeps the
+    core contract keys; evidence-lifecycle fields must not leak into stdout
+    (map-derived `coverage_source`/`attribution_map`/`probes_source` are the
+    authorized additions, SEE-1594 S1)."""
     import io
     from contextlib import redirect_stdout
 
+    import attribution_fixtures as fx
     from godot_qa_toolkit.cli import build_parser
 
     proj = tmp_path / "proj"
-    (proj / "addons" / "gut").mkdir(parents=True)
-    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-    target = proj / "calc.gd"
-    target.write_text("func add(a, b):\n\treturn a + b\n")
+    (proj / "utils").mkdir(parents=True)
+    target = proj / "utils" / "calc.gd"
+    target.write_text("func add(a, b):\n\tvar c = a + b\n\treturn c\n")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n")
+    fx.write_map(proj, {"utils/calc.gd": ["test_x.gd::test_a"]})
     monkeypatch.setattr(
-        "godot_qa_toolkit.coverage.runner.subprocess.run",
-        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-    )
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
     argv = ["measure", "coverage", str(target), "--project-root", str(proj),
             "--min-percent", "0"]
     parser = build_parser()
@@ -195,7 +160,7 @@ def test_stdout_contract_frozen_against_011b87d(tmp_path: Path, monkeypatch):
     with redirect_stdout(buf):
         parser.parse_args(argv).func(args)
     payload = json.loads(buf.getvalue())
-    # the 011b87d stdout contract keys — evidence fields must not leak
+    # core contract keys — evidence lifecycle fields must not leak
     assert set(payload["summary"]) >= {
         "file", "total_lines", "covered_lines", "coverage_percent",
     }

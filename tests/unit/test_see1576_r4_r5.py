@@ -200,25 +200,40 @@ def _gut_reached_patch(monkeypatch):
     monkeypatch.setattr(coverage_runner_mod, "_run_gut_for_coverage", _boom)
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_r5_coverage_relative_target_anchored(tmp_path, monkeypatch):
-    """§SPEC-610：coverage/runner.py 同形态检查点保持同一口径（相对路径）。"""
-    proj, _target = _write_project(tmp_path)
-    _gut_reached_patch(monkeypatch)
+    """§SPEC-610：coverage 相对路径锚定到 project_root（映射投影语义）。"""
+    import attribution_fixtures as fx
+
+    proj, target = _write_project(tmp_path)
+    fx.write_map(Path(proj), {"calc.gd": ["test_save.gd::test_a"]})
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
     monkeypatch.chdir(tmp_path)  # CWD != project_root
-    # 通过 is_file 检查即到达 GUT 调用点（修复前抛 FileNotFoundError）
-    with pytest.raises(_GutReached):
-        run_coverage("calc.gd", proj)
+    result = run_coverage("calc.gd", proj)
+    assert result["summary"]["file"] == str(target)
+    assert result["summary"]["coverage_source"] == "line_mapping_projection"
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_r5_coverage_absolute_target_unaffected(tmp_path, monkeypatch):
     """§SPEC-610：coverage 绝对路径直过（锚定只作用于相对路径）。"""
+    import attribution_fixtures as fx
+
     proj, target = _write_project(tmp_path)
-    _gut_reached_patch(monkeypatch)
+    fx.write_map(Path(proj), {"calc.gd": ["test_save.gd::test_a"]})
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(_GutReached):
-        run_coverage(target, proj)
+    result = run_coverage(target, proj)
+    assert result["summary"]["file"] == str(target)
+    assert result["summary"]["coverage_source"] == "line_mapping_projection"
 
 
 def test_r5_absolute_target_unaffected(tmp_path, monkeypatch):

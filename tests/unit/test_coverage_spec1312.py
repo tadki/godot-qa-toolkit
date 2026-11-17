@@ -3,6 +3,7 @@
 TDD 配对：先 RED 再 GREEN。mock GUT 模式沿既有 test_coverage.py 惯例。
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -109,6 +110,140 @@ def _sink_writer_spy(monkeypatch, proj, content: str) -> dict:
     return captured
 
 
+def _mapped_project(tmp_path, gd_text="func add(a, b):\n\tvar c = a + b\n\treturn c\n"):
+    import attribution_fixtures as fx
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    target = proj / "calc.gd"
+    target.write_text(gd_text, encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n", encoding="utf-8")
+    fx.write_map(proj, {"calc.gd": ["test_x.gd::test_a"]})
+    return proj, target
+
+
+def _no_godot(monkeypatch):
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
+
+
+def _write_raw_map(project_root, rel, instrumentable, covered_lines,
+                   probes_fired):
+    """Raw test-attribution/6 doc with full control（哨兵/车道测试用）。"""
+    import hashlib
+
+    import attribution_fixtures as fx
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+
+    fx.install_recipe(project_root)
+    recipe, error = build_recipe(project_root)
+    assert error is None, error
+    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    ident = "test_x.gd::test_a"
+    arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
+           "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
+           "function_pairs": 0, "test_to_functions": {},
+           "script_to_functions": {},
+           "file_to_tests": {rel: [ident]},
+           "file_to_scripts": {rel: ["test_x.gd"]},
+           "line_pairs": len(covered_lines),
+           "script_line_pairs": len(covered_lines),
+           "test_to_lines": {ident: {rel: list(covered_lines)}},
+           "script_to_lines": {},
+           "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
+    doc = {"schema_version": "test-attribution/6",
+           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+           "project_root": str(project_root), "identity": ident,
+           "causal": {"enabled": False},
+           "file_sha256": {rel: hashlib.sha256(
+               (Path(project_root) / rel).read_bytes()).hexdigest()},
+           "target_files": [rel],
+           "tests_face": {"tests/test_x.gd": hashlib.sha256(
+               (Path(project_root) / "tests" / "test_x.gd").read_bytes()).hexdigest()},
+           "instrumentable_lines": {rel: list(instrumentable)},
+           "arms": {"gut_full": arm},
+           "arms_state": {"gut_full": {"state": "valid",
+                                       "invalid_reason": None, "bundles": 1,
+                                       "pairs": len(covered_lines),
+                                       "probes_fired": probes_fired,
+                                       "vacuous": False}},
+           "notes": []}
+    out = Path(project_root) / ".qa-cache" / "attribution-map.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+def _mapped_project(tmp_path, gd_text="func add(a, b):\n\tvar c = a + b\n\treturn c\n"):
+    import attribution_fixtures as fx
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    target = proj / "calc.gd"
+    target.write_text(gd_text, encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n", encoding="utf-8")
+    fx.write_map(proj, {"calc.gd": ["test_x.gd::test_a"]})
+    return proj, target
+
+
+def _no_godot(monkeypatch):
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.inject.detect_binary_kind",
+        lambda *a, **k: "linux")
+    monkeypatch.setattr(
+        "godot_qa_toolkit.mutation.identity.identity_pack",
+        lambda *a, **k: {"kind": "linux"})
+
+
+def _write_raw_map(project_root, rel, instrumentable, covered_lines,
+                   probes_fired):
+    """Raw test-attribution/6 doc with full control（哨兵/车道测试用）。"""
+    import hashlib
+
+    import attribution_fixtures as fx
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+
+    fx.install_recipe(project_root)
+    recipe, error = build_recipe(project_root)
+    assert error is None, error
+    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    ident = "test_x.gd::test_a"
+    arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
+           "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
+           "function_pairs": 0, "test_to_functions": {},
+           "script_to_functions": {},
+           "file_to_tests": {rel: [ident]},
+           "file_to_scripts": {rel: ["test_x.gd"]},
+           "line_pairs": len(covered_lines),
+           "script_line_pairs": len(covered_lines),
+           "test_to_lines": {ident: {rel: list(covered_lines)}},
+           "script_to_lines": {},
+           "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
+    doc = {"schema_version": "test-attribution/6",
+           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+           "project_root": str(project_root), "identity": ident,
+           "causal": {"enabled": False},
+           "file_sha256": {rel: hashlib.sha256(
+               (Path(project_root) / rel).read_bytes()).hexdigest()},
+           "target_files": [rel],
+           "tests_face": {"tests/test_x.gd": hashlib.sha256(
+               (Path(project_root) / "tests" / "test_x.gd").read_bytes()).hexdigest()},
+           "instrumentable_lines": {rel: list(instrumentable)},
+           "arms": {"gut_full": arm},
+           "arms_state": {"gut_full": {"state": "valid",
+                                       "invalid_reason": None, "bundles": 1,
+                                       "pairs": len(covered_lines),
+                                       "probes_fired": probes_fired,
+                                       "vacuous": False}},
+           "notes": []}
+    out = Path(project_root) / ".qa-cache" / "attribution-map.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
 class TestProbeSinkRobustness:
     """SPEC-002: 追加写 + run 唯一 sink + ID-keyed 数据面 + user:// 优先。"""
 
@@ -124,40 +259,6 @@ class TestProbeSinkRobustness:
 
     SINK = "qa-coverage-hits-test.txt"
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
-    def test_sink_path_is_unique_per_run(self, tmp_path, monkeypatch):
-        import godot_qa_toolkit.coverage.runner as c
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        target = proj / "calc.gd"
-        target.write_text("func add(a, b):\n\treturn a + b\n")
-        # 手工放 sink（id 0 命中）避免 probes_fired 哨兵中止
-        captured = {}
-        real_instrument = c._instrument
-
-        def spy(src, sink_name):
-            captured["sink"] = sink_name
-            return real_instrument(src, sink_name)
-
-        monkeypatch.setattr(c, "_instrument", spy)
-        monkeypatch.setattr(
-            c.subprocess, "run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
-        c.run_coverage(str(target), str(proj))
-        # PR-B sink 名必须含 run 唯一性成分（per-run UUID），不能是固定名，
-        # 也不能只靠进程 id（同进程顺序 run 会互相污染——D-候选-1）
-        assert "qa-coverage-hits" in captured["sink"]
-        sink_id = captured["sink"][len("qa-coverage-hits-"):-len(".txt")]
-        import uuid as uuid_mod
-        uuid_mod.UUID(sink_id)  # raises if not a valid UUID
-        first_sink = captured["sink"]
-        captured.clear()
-        c.run_coverage(str(target), str(proj))
-        assert captured["sink"] != first_sink
-
     def test_probe_writes_ids_not_paths(self):
         # ID-keyed 数据面：探针写整数 probe_id，路径信息不进数据面
         from godot_qa_toolkit.coverage import runner as c
@@ -165,27 +266,13 @@ class TestProbeSinkRobustness:
         # 探针调用传整数 id
         assert "__qa_cov_probe_(0)" in instrumented or "__qa_cov_probe_0(" in instrumented
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_id_keyed_hits_decoded_back_to_lines(self, tmp_path, monkeypatch):
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        target = proj / "calc.gd"
-        target.write_text("func add(a, b):\n\tvar c = a + b\n\treturn c\n")
-
-        # runner 必须把 probe_id 映射回行号（manifest），并对乱序/重复 id 幂等
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
-        # 模拟 sink 文件（PR-B per-run UUID 名——spy 在 _instrument 时写入）：
-        # id 0 两次 + id 1 一次
-        spy = _sink_writer_spy(monkeypatch, proj, "0\n0\n1\n")
+        """映射行事实（covered=[2]）解码回行号集合：hits_lines 与 covered 一致。"""
+        proj, target = _mapped_project(tmp_path)
+        _no_godot(monkeypatch)
         result = run_coverage(str(target), str(proj))
-        assert spy["written"], "spy never saw the sink name"
-        assert result["summary"]["covered_lines"] == 2  # 两个不同 id，重复去重
-
+        assert result["summary"]["hits_lines"] == [2]
+        assert result["summary"]["covered_lines"] == 1
 
 class TestSentinels:
     """SPEC-003: probes_fired / vacuous 哨兵——静默 0% 根除。"""
@@ -201,33 +288,26 @@ class TestSentinels:
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_zero_probes_fired_is_run_error(self, tmp_path, monkeypatch):
-        # GUT rc=0 但 sink 不存在 → 探针从未点火 ≠ 真实 0% 覆盖
-        proj, target = self._write_project(tmp_path)
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
+        """执行证据哨兵：映射 probes_fired=0 且存在有效行事实 → run_error，
+        不得产出可信 0% 覆盖分数（§SPEC-025/027）。"""
+        proj, target = _mapped_project(tmp_path)
+        _no_godot(monkeypatch)
+        _write_raw_map(proj, "calc.gd", [2, 3], covered_lines=[2],
+                       probes_fired=0)
         result = run_coverage(str(target), str(proj))
         assert result["ok"] is False
         assert result["summary"].get("run_error") is True
-        assert "probe" in result["failures"][0]["reason"].lower()
+        assert "probes_fired=0" in result["summary"]["error"]
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_probes_fired_reported_in_summary(self, tmp_path, monkeypatch):
-        proj, target = self._write_project(tmp_path)
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
-        # 手工放 sink：id 0 命中一次（PR-B UUID 名——spy 在 _instrument 时写入）
-        spy = _sink_writer_spy(monkeypatch, proj, "0\n")
+        proj, target = _mapped_project(tmp_path)
+        _no_godot(monkeypatch)
         result = run_coverage(str(target), str(proj))
-        assert spy["written"], "spy never saw the sink name"
-        assert result["summary"].get("probes_fired") == 1
+        # probes_fired 来自映射 arms_state（不伪造）
+        assert result["summary"].get("probes_fired") == 640
+        assert result["summary"].get("probes_source") == "map_arms_state"
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_no_executable_lines_is_vacuous(self, tmp_path, monkeypatch):
         proj = tmp_path / "proj"
         proj.mkdir()
@@ -272,21 +352,16 @@ func f(x):
         branches = _derive_branches(src)
         assert branches.total == 2
 
-    @pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
     def test_branch_fields_in_summary(self, tmp_path, monkeypatch):
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        target = proj / "br.gd"
-        target.write_text("func f(x):\n\tif x:\n\t\treturn 1\n\treturn 2\n")
-        monkeypatch.setattr(
-            "godot_qa_toolkit.coverage.runner.subprocess.run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-        )
-        spy = _sink_writer_spy(monkeypatch, proj, "0\n1\n")
+        proj, target = _mapped_project(
+            tmp_path,
+            gd_text="func f(x):\n\tif x:\n\t\treturn 1\n\treturn 2\n")
+        _no_godot(monkeypatch)
         result = run_coverage(str(target), str(proj))
-        assert spy["written"], "spy never saw the sink name"
         s = result["summary"]
         # observational：字段必须在，且不影响 ok 判定
         assert "branch_coverage_percent" in s
+        # 无 else → 仅 if 一个分支（行 3）；covered={2} 不含行 3
+        assert s["branch_total"] == 1
+        assert s["branch_covered"] == 0
+

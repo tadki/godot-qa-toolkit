@@ -604,55 +604,52 @@ def test_partition_sources_routes_unreadable_files(tmp_path):
     assert negatives["bad.gd"] == ""
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
 def test_default_measure_fails_loud_when_bundle_count_is_zero(
     tmp_path, monkeypatch
 ):
-    """D-WP2C-1 fail-loud: if this run produced NO new bundle (evidence lost),
-    measure raises RuntimeError with context instead of returning a result
-    whose evidence vanished."""
+    """D-WP2C-1 fail-loud（映射语义）：本 run 未产出任何新 bundle（evidence
+    写入被抑制）→ measure 抛 RuntimeError（evidence 丢失不静默）。"""
+    import attribution_fixtures as fx
     import godot_qa_toolkit.coverage.evidence as evidence_mod
-    from godot_qa_toolkit.coverage import runner as runner_mod
     from godot_qa_toolkit.risk import shadow as shadow_mod
 
     proj = tmp_path / "proj"
-    (proj / "addons" / "gut").mkdir(parents=True)
-    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
-    target = proj / "calc.gd"
-    target.write_text("func add(a, b):\n\treturn a + b\n")
+    (proj / "utils").mkdir(parents=True)
+    target = proj / "utils" / "calc.gd"
+    target.write_text("func add(a, b):\n\tvar c = a + b\n\treturn c\n")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n")
+    fx.write_map(proj, {"utils/calc.gd": ["test_x.gd::test_a"]})
     ev = tmp_path / "ev"
     ev.mkdir()
 
-    monkeypatch.setattr(runner_mod, "_run_gut_for_coverage",
-                        lambda *a, **k: None)
-    monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
-    # the runner writes its bundle, but the evidence layer loses it (write
-    # suppressed) — the snapshot diff finds zero new bundles
+    # 投影本身成功，但 evidence 层把 bundle 写入抑制 → snapshot diff 找到
+    # 零个新 bundle → fail-loud（evidence 丢失不静默）。
     monkeypatch.setattr(evidence_mod, "write_bundle", lambda *a, **k: None)
 
     measure = shadow_mod.default_measure(str(proj), evidence_out=str(ev))
     with pytest.raises(RuntimeError, match="expected exactly 1 new bundle"):
-        measure("calc.gd", target.read_text(encoding="utf-8"),
+        measure("utils/calc.gd", target.read_text(encoding="utf-8"),
                 "res://tests/unit/")
 
 
-@pytest.mark.skip(reason="obsolete: direct coverage GUT/probe/sink path retired in SEE-1594 S1 (line-mapping projection is the single source; see test_see1594_incremental_coverage)")
+
+
 def test_default_measure_snapshot_excludes_preexisting_bundles(
     tmp_path, monkeypatch
 ):
-    """D-WP2C-1 snapshot-diff guard: pre-existing bundle files in the
-    evidence dir (stale or from earlier runs) must be EXCLUDED from the
-    diff, so a run into a shared evidence dir still locates exactly its own
-    bundle (SN1: bundles_before pinned to set() would count them as new and
-    fail loud spuriously)."""
-    import godot_qa_toolkit.coverage.runner as runner_mod
+    """D-WP2C-1 snapshot-diff guard（映射语义）：共享 evidence dir 里的历史
+    bundle 不得计入本次 run 的 diff——每次 run 都定位到自己的 bundle。"""
+    import attribution_fixtures as fx
     from godot_qa_toolkit.risk import shadow as shadow_mod
 
     proj = tmp_path / "proj"
-    (proj / "addons" / "gut").mkdir(parents=True)
-    (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
-    target = proj / "calc.gd"
-    target.write_text("func add(a, b):\n\treturn a + b\n")
+    (proj / "utils").mkdir(parents=True)
+    target = proj / "utils" / "calc.gd"
+    target.write_text("func add(a, b):\n\tvar c = a + b\n\treturn c\n")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_x.gd").write_text("extends Node\n")
+    fx.write_map(proj, {"utils/calc.gd": ["test_x.gd::test_a"]})
     ev = tmp_path / "ev"
     ev.mkdir()
     (ev / "00000000-dead-beef-0000-000000000000.json").write_text(
@@ -664,17 +661,14 @@ def test_default_measure_snapshot_excludes_preexisting_bundles(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(runner_mod, "_run_gut_for_coverage",
-                        lambda *a, **k: None)
-    monkeypatch.setattr(runner_mod, "_read_hits", lambda *a, **k: ({2}, 1))
-
     measure = shadow_mod.default_measure(str(proj), evidence_out=str(ev))
-    out = measure("calc.gd", target.read_text(encoding="utf-8"),
+    out = measure("utils/calc.gd", target.read_text(encoding="utf-8"),
                   "res://tests/unit/")
     assert "bundle" in out
     assert out["bundle"]["run_uuid"] != "dead-beef"
 
-    out2 = measure("calc.gd", target.read_text(encoding="utf-8"),
+    out2 = measure("utils/calc.gd", target.read_text(encoding="utf-8"),
                    "res://tests/unit/")
     assert "bundle" in out2
     assert out2["bundle"]["run_uuid"] != out["bundle"]["run_uuid"]
+

@@ -267,6 +267,12 @@ def _eval_expect(res: dict, expect: dict, checks: "Checks", cid: str) -> None:
         if got is _MISSING or got not in allowed:
             fails.append(f"summary.{path}={got!r} not in {allowed}")
 
+    if "summary_file_contains" in expect:
+        f = summary.get("file") or (doc or {}).get("file")
+        if not f or expect["summary_file_contains"] not in str(f):
+            fails.append(f"summary.file {f!r} does not contain "
+                         f"{expect['summary_file_contains']!r}")
+
     for rgx in expect.get("failures_reason_regex", []):
         reasons = " ".join(str(f.get("reason", ""))
                            for f in (doc or {}).get("failures") or [])
@@ -516,9 +522,35 @@ def _probe_envelopes(ctx: dict, want: dict):
         "second": second}
 
 
+def _probe_git_diff(ctx: dict, want: dict):
+    """真实 KOL 副本上验证无参 git diff 推导（§SPEC-020 正向面）。
+
+    在副本内新建一个未跟踪 .gd，断言推导把它纳入，且不含工具产物
+    （.qa-cache/.gqt-attr-select/隐藏目录）或 vendored addons。"""
+    from godot_qa_toolkit.cli import _git_diff_targets
+    kol = Path(ctx["kol"])
+    rel = f"{ctx['target'].split('/', 1)[0]}/see1594_tmp_probe.gd"
+    probe = kol / rel
+    probe.write_text("extends Node\n\nfunc f(a):\n\tif a > 0:\n\t\t"
+                     "return 1\n\treturn 0\n", encoding="utf-8")
+    try:
+        got = _git_diff_targets(str(kol))
+    finally:
+        probe.unlink(missing_ok=True)
+    bad = [n for n in got
+           if any(part.startswith(".") for part in n.split("/"))
+           or n.split("/", 1)[0] == "addons"]
+    ok = rel in got and not bad
+    return ok, (f"git diff derived {len(got)} in-scope target(s); "
+                f"untracked probe present={rel in got}; noise={len(bad)}"), {
+        "targets_sample": got[:15], "count": len(got),
+        "probe_present": rel in got, "noise": bad[:8]}
+
+
 _PROBES = {
     "suggested_action": _probe_suggested_action,
     "envelopes": _probe_envelopes,
+    "git_diff": _probe_git_diff,
 }
 
 

@@ -1,0 +1,592 @@
+{
+  "tool": "check_see1594_shape",
+  "ok": false,
+  "areas": [
+    "mutation",
+    "risk",
+    "coverage",
+    "measurement"
+  ],
+  "max_file_lines": 800,
+  "max_function_lines": 50,
+  "per_area": {
+    "mutation": {
+      "files": 29,
+      "max_file_lines": 1529,
+      "functions_over_limit": 30
+    },
+    "risk": {
+      "files": 5,
+      "max_file_lines": 571,
+      "functions_over_limit": 7
+    },
+    "coverage": {
+      "files": 5,
+      "max_file_lines": 1151,
+      "functions_over_limit": 7
+    },
+    "measurement": {
+      "files": 6,
+      "max_file_lines": 3431,
+      "functions_over_limit": 21
+    }
+  },
+  "violations": [
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/channel_router.py",
+      "name": "build_reference_graph",
+      "lines": 54,
+      "lineno": 114,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/coverlink.py",
+      "name": "save_coverage",
+      "lines": 64,
+      "lineno": 74,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/coverlink.py",
+      "name": "project_coverage_from_map",
+      "lines": 107,
+      "lineno": 226,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/coverlink.py",
+      "name": "resolve_coverage_for_prefilter",
+      "lines": 76,
+      "lineno": 576,
+      "limit": 50
+    },
+    {
+      "kind": "file_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "lines": 1529,
+      "limit": 800
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_single_file_serial_gate",
+      "lines": 74,
+      "lineno": 303,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_run_mutation_files_impl",
+      "lines": 113,
+      "lineno": 379,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_accumulate_chunk",
+      "lines": 52,
+      "lineno": 604,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_merge_results",
+      "lines": 53,
+      "lineno": 658,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_plan_file_chunks",
+      "lines": 173,
+      "lineno": 858,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_line_group_chunks",
+      "lines": 85,
+      "lineno": 1096,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_precompute_baselines",
+      "lines": 67,
+      "lineno": 1276,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/executor.py",
+      "name": "_inject_one",
+      "lines": 53,
+      "lineno": 1475,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/inject.py",
+      "name": "_shebang_interpreter_issue",
+      "lines": 55,
+      "lineno": 223,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/prewarm_proof.py",
+      "name": "_locked_flow",
+      "lines": 80,
+      "lineno": 587,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/reporting.py",
+      "name": "_mutation_report",
+      "lines": 69,
+      "lineno": 199,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/reporting.py",
+      "name": "classify_worker_leg",
+      "lines": 58,
+      "lineno": 314,
+      "limit": 50
+    },
+    {
+      "kind": "file_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "lines": 1038,
+      "limit": 800
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "_run_gut_on_project",
+      "lines": 61,
+      "lineno": 104,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "run_mutation",
+      "lines": 55,
+      "lineno": 191,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "_run_mutation_core",
+      "lines": 206,
+      "lineno": 248,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "_execute_planned",
+      "lines": 93,
+      "lineno": 483,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "_run_mutant_loop",
+      "lines": 135,
+      "lineno": 760,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "_run_single_mutant",
+      "lines": 77,
+      "lineno": 954,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/shadowpool.py",
+      "name": "_acquire_warm",
+      "lines": 135,
+      "lineno": 440,
+      "limit": 50
+    },
+    {
+      "kind": "file_lines",
+      "path": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "lines": 920,
+      "limit": 800
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "name": "ensure_map",
+      "lines": 69,
+      "lineno": 217,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "name": "_auto_increment",
+      "lines": 57,
+      "lineno": 288,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "name": "resolve_selection",
+      "lines": 70,
+      "lineno": 540,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "name": "resolve_line_group_selection",
+      "lines": 56,
+      "lineno": 712,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "name": "resolve_function_selection",
+      "lines": 51,
+      "lineno": 770,
+      "limit": 50
+    },
+    {
+      "kind": "file_lines",
+      "path": "src/godot_qa_toolkit/mutation/worker_channel.py",
+      "lines": 1013,
+      "limit": 800
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/worker_channel.py",
+      "name": "run_worker_legs",
+      "lines": 141,
+      "lineno": 811,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/worker_channel.py",
+      "name": "execute_worker_branch",
+      "lines": 59,
+      "lineno": 954,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/contract.py",
+      "name": "build_shadow_record",
+      "lines": 66,
+      "lineno": 67,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/identity.py",
+      "name": "file_profile",
+      "lines": 77,
+      "lineno": 128,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/shadow.py",
+      "name": "_derive_per_entry",
+      "lines": 54,
+      "lineno": 127,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/shadow.py",
+      "name": "_measure_eligible_file",
+      "lines": 84,
+      "lineno": 183,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/shadow.py",
+      "name": "_report_document",
+      "lines": 72,
+      "lineno": 269,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/shadow.py",
+      "name": "run_shadow",
+      "lines": 53,
+      "lineno": 343,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/shadow.py",
+      "name": "default_measure",
+      "lines": 54,
+      "lineno": 507,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/evidence.py",
+      "name": "build_bundle",
+      "lines": 115,
+      "lineno": 114,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/mapping.py",
+      "name": "project_file_coverage",
+      "lines": 166,
+      "lineno": 31,
+      "limit": 50
+    },
+    {
+      "kind": "file_lines",
+      "path": "src/godot_qa_toolkit/coverage/runner.py",
+      "lines": 1151,
+      "limit": 800
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/runner.py",
+      "name": "_derive_branches",
+      "lines": 55,
+      "lineno": 193,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/runner.py",
+      "name": "_rewrite_call_sites",
+      "lines": 62,
+      "lineno": 336,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/runner.py",
+      "name": "_flag_probe_block",
+      "lines": 93,
+      "lineno": 514,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/runner.py",
+      "name": "run_coverage",
+      "lines": 196,
+      "lineno": 817,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/coverage/union.py",
+      "name": "union_file",
+      "lines": 66,
+      "lineno": 61,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/increment.py",
+      "name": "_merge_arm",
+      "lines": 58,
+      "lineno": 199,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/increment.py",
+      "name": "run_attribution_increment",
+      "lines": 70,
+      "lineno": 259,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/increment_runner.py",
+      "name": "prepare_attr_templates",
+      "lines": 52,
+      "lineno": 36,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/increment_runner.py",
+      "name": "execute_rerun_scripts",
+      "lines": 55,
+      "lineno": 90,
+      "limit": 50
+    },
+    {
+      "kind": "file_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "lines": 3431,
+      "limit": 800
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_recover_stale_backups",
+      "lines": 116,
+      "lineno": 503,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_prepare_shadow",
+      "lines": 67,
+      "lineno": 692,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_deref_shadow_symlink",
+      "lines": 66,
+      "lineno": 761,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_derive_views_from_line_facts",
+      "lines": 53,
+      "lineno": 1043,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_attribution_payload",
+      "lines": 67,
+      "lineno": 1177,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "build_attribution_map",
+      "lines": 71,
+      "lineno": 1246,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_attribution_section",
+      "lines": 83,
+      "lineno": 1454,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_instrument_pair",
+      "lines": 51,
+      "lineno": 1624,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_prepare_target_file",
+      "lines": 63,
+      "lineno": 1714,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "run_measurement",
+      "lines": 866,
+      "lineno": 1779,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_load_baseline_report",
+      "lines": 132,
+      "lineno": 2990,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "run_measurement_diagnose",
+      "lines": 69,
+      "lineno": 3349,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_arm",
+      "lines": 444,
+      "lineno": 1960,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "_run_shard",
+      "lines": 65,
+      "lineno": 2061,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/prepcache.py",
+      "name": "load_entry",
+      "lines": 51,
+      "lineno": 151,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/recipe.py",
+      "name": "build_recipe",
+      "lines": 95,
+      "lineno": 115,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/recipe.py",
+      "name": "verify_recipe",
+      "lines": 91,
+      "lineno": 222,
+      "limit": 50
+    }
+  ]
+}

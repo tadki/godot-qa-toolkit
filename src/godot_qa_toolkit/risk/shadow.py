@@ -380,6 +380,22 @@ def _shadow_collect(eligible_sources: dict[str, str], measure,
     return ranking, unknown, core_full, noise, per_file
 
 
+def _shadow_negatives(negative_sources: dict[str, str]) -> list[dict]:
+    """负例 → 测量缺口车道行（gap_lane/eligible/reason 披露）。"""
+    negatives = []
+    for label, source in negative_sources.items():
+        profile = file_profile(source, file_label=label)
+        negatives.append(
+            {
+                "file": label,
+                "gap_lane": profile["gap_lane"],
+                "eligible": profile["eligible"],
+                "reason": profile["gap_lane"],
+            }
+        )
+    return negatives
+
+
 def run_shadow(
     *,
     eligible_sources: dict[str, str],
@@ -395,12 +411,12 @@ def run_shadow(
     `default_measure`); tests inject deterministic fakes. """
     ranking, unknown, core_full, noise, per_file = _shadow_collect(
         eligible_sources, measure, core_tests, full_tests)
+    negatives = _shadow_negatives(negative_sources)
     return _report_document(
         ranking=ranking, unknown=unknown, core_full=core_full, noise=noise,
-        negatives=negative_sources, per_file=per_file,
+        negatives=negatives, per_file=per_file,
         sample_files=len(eligible_sources),
         negative_files=len(negative_sources))
-
 def partition_sources(
     paths: list[Path], project_root: str | None = None
 ) -> tuple[dict[str, str], dict[str, str]]:

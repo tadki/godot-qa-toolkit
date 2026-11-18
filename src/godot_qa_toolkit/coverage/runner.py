@@ -366,6 +366,24 @@ def _cov_report_build(path, src, tests_glob, evidence_out, min_percent,
             "failures": failures}
 
 
+def _cov_project(path, project_root, tests_glob, timeout_s, src,
+                 evidence_out, min_percent) -> tuple:
+    """映射投影（CoverageMappingError/ValueError/OSError → 具名失败出口）。
+    返回 (proj, None) 或 (None, err_envelope)。"""
+    from .mapping import CoverageMappingError, project_file_coverage
+
+    try:
+        proj = project_file_coverage(project_root, str(path), tests_glob,
+                                     timeout_s=timeout_s)
+    except CoverageMappingError as e:
+        return None, _cov_fail(path, src, tests_glob, evidence_out, str(e),
+                               min_percent)
+    except (ValueError, OSError) as e:
+        return None, _cov_fail(path, src, tests_glob, evidence_out,
+                               f"{type(e).__name__}: {e}", min_percent)
+    return proj, None
+
+
 def run_coverage(
     file_path: str,
     project_root: str,
@@ -374,29 +392,17 @@ def run_coverage(
     tests_glob: str | None = None,
     evidence_out: str | None = None,
 ) -> dict:
-    """单文件行覆盖——由行级归属映射投影（§SPEC-025 唯一真源），零 GUT。
-
-    新鲜映射亚秒投影；缺失/失效自动构建。probes_fired 取自映射
-    arms_state（不伪造）；任何失败路径产出 run_error 域 JSON + 失败
-    bundle（`measure risk` 逐文件降级）。输出契约保持 file/total_lines/
-    covered_lines/coverage_percent/min_percent/branch_*/hits_lines。
-    """
-    from .mapping import CoverageMappingError, project_file_coverage
-
+    """单文件行覆盖——行级归属映射投影（§SPEC-025 唯一真源），零 GUT。
+    probes_fired 取自映射 arms_state（不伪造）；任何失败路径产出
+    run_error 域 JSON + 失败 bundle（`measure risk` 逐文件降级）。"""
     path, src = _cov_precheck(file_path, project_root, tests_glob,
                               evidence_out, min_percent)
     if path is None:
         return src
-    try:
-        proj = project_file_coverage(project_root, str(path), tests_glob,
-                                     timeout_s=timeout_s)
-    except CoverageMappingError as e:
-        return _cov_fail(path, src, tests_glob, evidence_out, str(e),
-                         min_percent)
-    except (ValueError, OSError) as e:
-        return _cov_fail(path, src, tests_glob, evidence_out,
-                         f"{type(e).__name__}: {e}", min_percent)
-
+    proj, err = _cov_project(path, project_root, tests_glob, timeout_s, src,
+                             evidence_out, min_percent)
+    if proj is None:
+        return err
     inst = set(proj["instrumentable_lines"])
     covered = (set(proj["covered_lines"]) & inst) if inst \
         else set(proj["covered_lines"])
@@ -422,7 +428,6 @@ def run_coverage(
     total = len(inst)
     return _cov_report_build(path, src, tests_glob, evidence_out,
                              min_percent, proj, probes, inst, covered, total)
-
 
 def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[set[int], int]:
     """读取命中：user:// sink 优先（探针实际写入侧），项目根仅作非 user:// 环境回退。

@@ -102,24 +102,12 @@ def _crap_line_block(cc: int, covered, total, coverage, score, status: str,
     }
 
 
-def build_shadow_record(
-    *,
-    function_id: str,
-    name: str,
-    lex_path: str,
-    start_line: int,
-    end_line: int,
-    cc: int,
-    covered: int | None,
-    total: int | None,
-    cov_source: str,
-    state: str = "scored",
-    recipe: dict | None = None,
-    provenance: dict | None = None,
-    blind_spots: list[str] | None = None,
-    lambda_gap: int = 0,
-    coverage_semantics: str = "statement_start_line",
-) -> dict:
+def build_shadow_record(*, function_id: str, name: str, lex_path: str,
+    start_line: int, end_line: int, cc: int, covered: int | None,
+    total: int | None, cov_source: str, state: str = "scored",
+    recipe: dict | None = None, provenance: dict | None = None,
+    blind_spots: list[str] | None = None, lambda_gap: int = 0,
+    coverage_semantics: str = "statement_start_line") -> dict:
     coverage = None
     if total is not None and total > 0 and covered is not None:
         coverage = covered / total

@@ -474,9 +474,8 @@ def _proof_guard_or_rebuild(project_root: str, pool: dict, slot: MutationSlot,
 def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlot,
                      wiring_hash: str, now: float,
                      required_globs: "list[str] | None") -> MutationSlot:
-    """复用候选槽的分层新鲜度门：树缺失 / 哨兵+census / generated dirs /
-    proof 双绑定——任何歧义整槽重建（终案纪律）。返回可用槽或抛
-    SlotProvisionError（重建后仍缺 required selection dirs）。"""
+    """复用候选槽分层新鲜度门（树/哨兵+census/generated/proof）；任何
+    歧义整槽重建（终案纪律）。仍缺 required dirs → SlotProvisionError。"""
     if not rec.get("path") or not Path(slot.root).is_dir():
         # D-1（hardener P6 实证）：标死记录 path="" 经 Path("")→'.' 使
         # is_dir() 恒真——空 path 必须显式走重建通道。

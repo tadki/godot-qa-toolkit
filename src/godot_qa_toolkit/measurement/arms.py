@@ -452,8 +452,7 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
                test_attribution: bool, attribution_causal: bool,
                shadow_instrument: bool, shard_width: int,
                acceptance, acceptance_repeats: int) -> tuple:
-    """臂前置：uuid/备份/装载/pg 检查/created 清单/started.json/分片计划/
-    reps/钩子文本。返回 run 期共享元组。"""
+    """臂前置：uuid/备份/装载/pg 检查/created 清单/分片计划/钩子文本。"""
     from . import prepcache  # noqa: F401 — 占位消费面保持
     from .instrument import _hook_templates
     from .probe_templates import (
@@ -504,9 +503,7 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
 def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
                  timeout_s: int, adaptive_reps: bool, shard_log_dir: str | None,
                  stage: dict) -> tuple:
-    """执行段：根树注入（非 shadow）→ 分片扇出 → XDG 异步清理 → 失败扫描。
-    返回 (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
-    arm_failures, arm_fail_pairs)。"""
+    """执行段：根树注入 → 分片扇出 → XDG 异步清理 → 失败扫描。"""
     run_uuid = stage["run_uuid"]
     backup_dir = stage["backup_dir"]
     started = stage["started"]
@@ -573,13 +570,8 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             declared_bare: "set[str] | None" = None,
             arms_parallel: bool = False,
             evidence_dir=None) -> dict:
-    """一条批式臂（§SPEC-052 并行分片）：复用全集插桩 → 按目录/feature
-    组并行扇出 N 个 GUT 进程（每进程独立 XDG user:// 隔离 + 运行时
-    PID sink）→ 合并逐文件 sink 读回 → bundle → 恢复/清理。零可执行行
-    文件进显式 vacuous 车道（§SPEC-042）。
-
-    shadow_instrument=True（P2 双臂并行）；adaptive_reps=True（P1）。
-    分解函数族 _arm_stage/_arm_execute/_arm_result 承载阶段语义。"""
+    """一条批式臂（§SPEC-052 并行分片）：装载 → 分片扇出 → 门控 → 读回
+    → vacuous 车道。shadow_instrument/adaptive_reps 语义见各分解函数。"""
     stage = _arm_stage(
         name, root=root, prepared=prepared, recipe=recipe,
         test_attribution=test_attribution,
@@ -640,7 +632,7 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
                 plans: list, sink_by_rel: dict, manifest_by_rel: dict,
                 xdg_homes: list[str], vacuous_rels: list) -> dict:
     """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
-    vacuous 车道 → 结果文档组装。"""
+    vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
     convergence = None
     attribution = None
     bundles: dict[str, dict] = {}

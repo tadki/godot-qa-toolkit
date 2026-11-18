@@ -314,8 +314,8 @@ def _report_document(
     sample_files: int,
     negative_files: int,
 ) -> dict:
-    """Freeze the §SPEC-010 report document. Key order and every literal here
-    are the report JSON contract — consumers (jq gates, QA) pin them."""
+    """Freeze the §SPEC-010 report document. Key order and every literal
+    here are the report JSON contract — consumers (jq gates, QA) pin them."""
     scored, total_records, unknown_count = _report_ranking_blocks(ranking)
     return {
         "report": "shadow-report",

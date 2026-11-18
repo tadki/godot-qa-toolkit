@@ -125,22 +125,10 @@ GAP_LANE_INNER = "partial_instrumentation"
 GAP_LANE_VAR_DEF = "sanitized_ir_projection"
 
 
-def file_profile(gd_source: str, file_label: str) -> dict:
-    """Aggregate registry + probe-manifest/2 facts into the risk eligibility
-    profile (§SPEC-024). File-level `t_equal_i`/`owners_complete` degrade to
-    per-entry aggregation; lambda and inner-class registry entries surface in
-    the profile as incremental disclosure (§SPEC-024 disclosure gate)."""
-    registry = build_file_registry(gd_source, file_label)
-    manifest = build_probe_manifest_v2(gd_source, registry)
-    census = manifest["census"]
-    per_function = manifest["per_function"]
-
-    rows = _probe_rows(manifest)
-
-    func_entries = [e for e in registry["entries"] if e["kind"] == "func_def"]
-    lambda_entries = [e for e in registry["entries"] if e["kind"] == "lambda"]
-
-    functions = [
+def _profile_functions(func_entries: list) -> list[dict]:
+    """函数行（§SPEC-027 derivation input: host lambda_gap > 0 →
+    cc_unmeasured）。"""
+    return [
         {
             "function_id": e["fid"],
             "name": e["name"],
@@ -150,12 +138,36 @@ def file_profile(gd_source: str, file_label: str) -> dict:
             "cc": e["cc_oracle"],
             "kind": e["kind"],
             "body_hash": e["body_hash"],
-            # §SPEC-027 derivation input: host lambda_gap > 0 → cc_unmeasured
             "lambda_gap": e["lambda_gap"],
         }
         for e in func_entries
     ]
 
+
+def _profile_gap_lane(gd_source, lambda_entries, registry) -> "str | None":
+    """gap 车道判定（lambda / inner_class / sanitized var-def）。"""
+    if bool(lambda_entries):
+        return GAP_LANE_LAMBDA
+    if bool(registry.get("inner_classes")):
+        return GAP_LANE_INNER
+    if _uses_sanitized_projection(gd_source):
+        return GAP_LANE_VAR_DEF
+    return None
+
+
+def file_profile(gd_source: str, file_label: str) -> dict:
+    """Aggregate registry + probe-manifest/2 facts into the risk eligibility
+    profile (§SPEC-024). File-level `t_equal_i`/`owners_complete` degrade to
+    per-entry aggregation; lambda and inner-class registry entries surface in
+    the profile as incremental disclosure (§SPEC-024 disclosure gate)."""
+    registry = build_file_registry(gd_source, file_label)
+    manifest = build_probe_manifest_v2(gd_source, registry)
+    census = manifest["census"]
+    per_function = manifest["per_function"]
+    rows = _probe_rows(manifest)
+    func_entries = [e for e in registry["entries"] if e["kind"] == "func_def"]
+    lambda_entries = [e for e in registry["entries"] if e["kind"] == "lambda"]
+    functions = _profile_functions(func_entries)
     # per-entry aggregation (§SPEC-024: file-level facts degrade to entries);
     # inner-class rows keep t_equal_i=False, so a partial-instrumentation
     # file stays ineligible by construction. Ambiguous ownership is an
@@ -166,18 +178,7 @@ def file_profile(gd_source: str, file_label: str) -> dict:
         "unowned"
     )
     owners_complete = census["owners_complete"]
-
-    has_lambda = bool(lambda_entries)
-    has_inner_class = bool(registry.get("inner_classes"))
-
-    gap_lane = None
-    if has_lambda:
-        gap_lane = GAP_LANE_LAMBDA
-    elif has_inner_class:
-        gap_lane = GAP_LANE_INNER
-    elif _uses_sanitized_projection(gd_source):
-        gap_lane = GAP_LANE_VAR_DEF
-
+    gap_lane = _profile_gap_lane(gd_source, lambda_entries, registry)
     eligible = (
         gap_lane is None
         and bool(func_entries)
@@ -197,8 +198,8 @@ def file_profile(gd_source: str, file_label: str) -> dict:
         "i_total": i_total,
         "t_equal_i": t_equal_i,
         "owners_complete": owners_complete,
-        "has_lambda": has_lambda,
-        "has_inner_class": has_inner_class,
+        "has_lambda": bool(lambda_entries),
+        "has_inner_class": bool(registry.get("inner_classes")),
         "eligible": eligible,
         "gap_lane": gap_lane,
     }

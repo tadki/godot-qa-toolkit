@@ -1,0 +1,19 @@
+{
+  "tests": [
+    {
+      "name": "test_inf_bookmark_and_share_signals_are_noops",
+      "script": "res://tests/regression/test_see1067_qa.gd",
+      "reason": "source-text assertion: contains() exact multi-line literal against res://scenes/ui/infi/infi_post_visual.gd source_code — probe line insertion inside the placeholder no-op body breaks the literal; instrumentation is semantics-preserving but not text-preserving"
+    },
+    {
+      "name": "test_rot_container_utils_rotation_wraps_negative_and_out_of_range",
+      "script": "res://tests/regression/test_see1067_qa.gd",
+      "reason": "source-text assertion: contains('if d < 0:\\n\\t\\td += 360') exact two-line literal against res://utils/container_utils.gd — block-entry probe line inserted between the if-line and its body breaks the sequence"
+    },
+    {
+      "name": "test_key_bindings_use_same_signal_as_buttons",
+      "script": "res://tests/e2e/test_see838_ui_fixes_e2e.gd",
+      "reason": "source-text assertion: 200-char substr window over res://scenes/ui/ui_framework.gd source_code — probe lines inserted between the .connect statement and the INVENTORY_VISUAL/PanelAction.TOGGLE tokens push them out of the fixed window"
+    }
+  ]
+}

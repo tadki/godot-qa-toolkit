@@ -1,0 +1,51 @@
+{
+  "tool": "see1594.s82.instrumentation_fidelity",
+  "kol_commit": "ac6a7282",
+  "baseline_16_pairs_root_cause": {
+    "finding": "16 对全部来自 res://tests/unit/test_mcp_lease_controller.gd 的 8 个测试（+Run Summary 回显）——addons/godot_mcp 是 git submodule（ac6a7282 钉 4f907e81），archive/clone 副本未初始化子模块 → lease_controller.gd 加载为 null → 8 测试全挂",
+    "kol_green_truth": "工作区主检出的子模块已初始化且 HEAD=4f907e81 与钉完全一致；忠实副本（archive+子模块内容）上产品面无插桩跑 = **RC=0 零失败**——「KOL 全绿」属实，无 KOL 侧问题需上报"
+  },
+  "three_new_failures_classification": {
+    "class": "探针行插入改变源码文本 → 源码文本逐字断言失配（Atlas 类别 1：探针插入；非时序/非sink/非autoload/非flake）",
+    "flake_check": "两测试文件无插桩 -gselect 各 3 轮 = 6/6 全过（零 flake）",
+    "causal_isolation": {
+      "instrument utils/ (12 文件含 container_utils.gd)": "新增失败 = test_rot_container_utils_rotation_wraps_negative_and_out_of_range",
+      "instrument scenes/ui/infi/ (infi_post_visual.gd)": "新增失败 = test_inf_bookmark_and_share_signals_are_noops",
+      "instrument scenes/ui/ (ui_framework.gd + infi_post_visual.gd)": "新增失败 = test_key_bindings_use_same_signal_as_buttons + test_inf_bookmark…（后者源文件同在 scenes/ui 下被一并插桩）"
+    },
+    "assertion_shapes": {
+      "test_inf_bookmark": "contains('func _on_bookmark_pressed() -> void:\\n\\t# SEE-1067 #3…\\n\\tpass') 多行字面量（infi_post_visual.gd）",
+      "test_key_bindings": "200 字符 substr 窗口 contains('INVENTORY_VISUAL'/'PanelAction.TOGGLE')（ui_framework.gd source_code）",
+      "test_rot": "contains('if d < 0:\\n\\t\\td += 360') 两行字面量（container_utils.gd）——低层验证：_instrument 后 __qa_cov_probe_53() 恰插在 if 行与 d += 360 行之间"
+    },
+    "mechanism": "测试经 load(path).source_code / preload().source_code 读取**插桩后**的生产源码做逐字文本断言；探针行插入为语义保持但非文本保持"
+  },
+  "disposition": {
+    "chosen": "具名声明机制（--intolerant-tests，§SPEC-061b 既有语义）：3 个 (script, name) scoped 声明 + 逐条源码文本断言理由；门控旁路 + 逐名披露 + 覆盖盲点声明（intolerant: 3）",
+    "why_not_probe_fix": "探针行为正确（语义保持）；测试隐含假设「源码文本逐字不变」与任何源码级插桩（含 Stryker/PIT/mutmut 同类机制）物理冲突——无法既插桩又保文本",
+    "kol_suggestion_for_owner": "建议 KOL 侧长期将此类「源码文本断言」测试迁移为运行时行为断言或按文件排除出插桩敏感面（不改 KOL，仅建议）",
+    "declaration_file": "evidence/see1594-s82/intolerant-declaration.json"
+  },
+  "final_fullrepo_cold": {
+    "kol_commit": "ac6a7282",
+    "universe": "182 生产文件（systems/autoload/utils/scenes/resources）",
+    "gut_full_state": "valid",
+    "baseline_pairs": 0,
+    "new_failures": 0,
+    "intolerant_bypassed": 3,
+    "acceptance": "invalid/177 可见（裁定不变）",
+    "segments_s": {
+      "import_cold": 11.26,
+      "gut_full_6_shards_wall": 64.9,
+      "acceptance_wall": 8.9,
+      "lazy_baseline_gut": 83.1,
+      "total_wall": 144.5
+    },
+    "report": "evidence/see1594-s82/fullrepo-valid-report.json"
+  },
+  "causal_evidence_files": [
+    "evidence/see1594-s82/causal-utils.json",
+    "evidence/see1594-s82/causal-scenes-ui-infi.json",
+    "evidence/see1594-s82/causal-scenes-ui.json"
+  ]
+}

@@ -19,7 +19,6 @@ from .identity import file_profile
 
 PERFORMANCE_FIELDS = ("complexity", "coverage", "risk_static", "extra_gut_rounds")
 
-
 def build_performance_block(
     *,
     complexity_runs: dict,
@@ -44,7 +43,6 @@ def build_performance_block(
         "extra_gut_rounds": extra_gut_rounds,
     }
 
-
 def _function_stats(profile: dict, hits: set[int]) -> list[dict]:
     """Per-function probe totals/hits from the identity manifest."""
     by_function: dict[str, dict] = {}
@@ -61,7 +59,6 @@ def _function_stats(profile: dict, hits: set[int]) -> list[dict]:
         for fid, b in by_function.items()
     ]
 
-
 def _file_state(run: dict) -> str:
     summary = run.get("summary", {})
     return classify_file_state(
@@ -73,7 +70,6 @@ def _file_state(run: dict) -> str:
         timeout=bool(summary.get("timeout")),
         zero_tests=bool(summary.get("zero_tests")),
     )
-
 
 def _records_for_file(
     profile: dict,
@@ -123,7 +119,6 @@ def _records_for_file(
         )
     return records
 
-
 def _per_entry_state(c_row: dict, i_row: dict, lambda_gap: int,
                      stale: bool) -> dict:
     """§8-4 车道链：stale → lambda_gap(cc_unmeasured) → total>0 scored →
@@ -138,7 +133,6 @@ def _per_entry_state(c_row: dict, i_row: dict, lambda_gap: int,
     if total > 0:
         return {"covered": covered, "total": total, "state": "scored"}
     return {"covered": None, "total": None, "state": "unknown"}
-
 
 def _derive_per_entry(
     bundle: dict,
@@ -186,7 +180,6 @@ def _measure_measurements(label: str, source: str, measure,
     rerun = measure(label, source, full_tests)
     return profile, core, full, rerun
 
-
 def _measure_records_lane(profile: dict, full, state: str,
                           source: str) -> list[dict]:
     """记录车道（§SPEC-027 PR-C）：bundle 在场消费 per-entry T/I/C 并派生
@@ -205,7 +198,6 @@ def _measure_records_lane(profile: dict, full, state: str,
     return _records_for_file(
         profile, full_hits, cov_source="gut_full", state=state
     )
-
 
 def _measure_core_full_block(profile: dict, label: str, core, full) -> dict:
     """core_full 报告块（覆盖行数/墙钟/逐函数 core−full 差）。"""
@@ -231,7 +223,6 @@ def _measure_core_full_block(profile: dict, label: str, core, full) -> dict:
             for s in per_block
         ],
     }
-
 
 def _measure_eligible_file(
     label: str,
@@ -284,7 +275,6 @@ def _report_ranking_blocks(ranking: list[dict]) -> tuple:
     unknown_count = sum(1 for r in ranking if r["score_status"] != "scored")
     return scored, total_records, unknown_count
 
-
 def _report_ranking_block(scored: list[dict]) -> dict:
     """ranking 报告块（top 投影 + 手动命名占位 + 外推警告）。"""
     return {
@@ -302,7 +292,6 @@ def _report_ranking_block(scored: list[dict]) -> dict:
         "note": "2-3 files only; never extrapolate to the whole repo",
     }
 
-
 def _report_document(
     *,
     ranking: list[dict],
@@ -314,8 +303,7 @@ def _report_document(
     sample_files: int,
     negative_files: int,
 ) -> dict:
-    """Freeze the §SPEC-010 report document. Key order and every literal
-    here are the report JSON contract — consumers (jq gates, QA) pin them."""
+    """Freeze the §SPEC-010 report document (key order = JSON contract)."""
     scored, total_records, unknown_count = _report_ranking_blocks(ranking)
     return {
         "report": "shadow-report",
@@ -379,7 +367,6 @@ def _shadow_collect(eligible_sources: dict[str, str], measure,
         per_file.append(outcome["file"])
     return ranking, unknown, core_full, noise, per_file
 
-
 def _shadow_negatives(negative_sources: dict[str, str]) -> list[dict]:
     """负例 → 测量缺口车道行（gap_lane/eligible/reason 披露）。"""
     negatives = []
@@ -394,7 +381,6 @@ def _shadow_negatives(negative_sources: dict[str, str]) -> list[dict]:
             }
         )
     return negatives
-
 
 def run_shadow(
     *,
@@ -461,7 +447,6 @@ def partition_sources(
         negatives.setdefault(label, "")
     return eligible, negatives
 
-
 def _risk_static_block(report: dict) -> dict:
     """§SPEC-014 static-layer budget: per-file static seconds vs the measured
     (core+full) wall clock, both read from the assembled report's own rows."""
@@ -481,7 +466,6 @@ def _risk_static_block(report: dict) -> dict:
             else 0.0
         ),
     }
-
 
 def run_shadow_from_paths(
     *,
@@ -525,7 +509,6 @@ def run_shadow_from_paths(
         report["acceptance_cost"].update(perf_in["acceptance_cost"])
     return report
 
-
 def _measure_once(label: str, source: str, tests_glob: "str | None",
                   project_root: str, evidence_dir, evidence_out) -> dict:
     """单次 coverage run + wall_s 入账 + bundle 快照差定位（fail-loud：
@@ -568,7 +551,6 @@ def _measure_once(label: str, source: str, tests_glob: "str | None",
                 f"run_error={summary.get('run_error')})"
             )
     return out
-
 
 def default_measure(project_root: str, evidence_out=None):
     """Real measurement adapter: one coverage run per (file, tests_glob).

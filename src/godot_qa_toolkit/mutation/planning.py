@@ -268,6 +268,27 @@ def _plan_serial_fallback(f, project_root, budget, timeout_s, glob,
         worker_channel)]
 
 
+def _plan_dispatch(f, project_root, select_mode, glob, binary_kind,
+                   executed_list, src, baseline, timeout_factor, timeout_s,
+                   budget, mutate_all, attention, jobs, run_id, identity,
+                   worker_channel, selection_meta, raw_total, ctx) -> tuple:
+    """分片派发：line/fn 运行时映射 → 分组分片；否则 retry 位点保序分片。"""
+    if select_mode in ("line", "fn") and glob is not None \
+            and selection_meta.get("source") == "runtime_mapping":
+        return _plan_grouped_chunks(
+            f, project_root, select_mode, glob, binary_kind, executed_list,
+            src, baseline, timeout_factor, timeout_s, budget, mutate_all,
+            attention, run_id, identity, worker_channel, selection_meta,
+            raw_total, ctx)
+    chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
+                              binary_kind, [m.stable_id for m in executed_list],
+                              baseline, timeout_factor, raw_total, attention,
+                              jobs, run_id=run_id, identity=identity,
+                              worker_channel=worker_channel,
+                              select_mode=select_mode)
+    return chunks, ctx, None
+
+
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
@@ -277,7 +298,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       clock: StageClock | None = None,
                       auto_selection: dict | None = None,
                       select_mode: str = "full"):
-    """单文件规划（收集→差分→prefilter→budget→分片；返回 chunks, ctx, settled）。"""
+    """单文件规划（收集→差分→prefilter→budget→分片）。"""
     clock = clock or StageClock()
     src, collected, raw_total, settled = _plan_collect(f)
     if settled is not None:
@@ -309,20 +330,13 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                          scope_hashes, store2, src, mutants,
                          uncovered_mutants, selection_meta, select_mode,
                          jobs, prefilter_disclosures)
-    if select_mode in ("line", "fn") and glob is not None \
-            and selection_meta.get("source") == "runtime_mapping":
-        return _plan_grouped_chunks(
-            f, project_root, select_mode, glob, binary_kind, executed_list,
-            src, baseline, timeout_factor, timeout_s, budget, mutate_all,
-            attention, run_id, identity, worker_channel, selection_meta,
-            raw_total, ctx)
-    chunks = _slice_retry_ids(f, project_root, budget, timeout_s, glob,
-                              binary_kind, [m.stable_id for m in executed_list],
-                              baseline, timeout_factor, raw_total, attention,
-                              jobs, run_id=run_id, identity=identity,
-                              worker_channel=worker_channel,
-                              select_mode=select_mode)
-    return chunks, ctx, None
+    return _plan_dispatch(f, project_root, select_mode, glob, binary_kind,
+                          executed_list, src, baseline, timeout_factor,
+                          timeout_s, budget, mutate_all, attention, jobs,
+                          run_id, identity, worker_channel, selection_meta,
+                          raw_total, ctx)
+
+
 def _fid_of_line(registry: dict, line: int) -> str | None:
     for entry in (registry or {}).get("entries") or []:
         if not entry.get("instrumentable"):

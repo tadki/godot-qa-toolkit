@@ -60,7 +60,6 @@ _GODOT_LAUNCH_ERROR_MARKERS = (
 _GUT_RUN_EVIDENCE = re.compile(
     r"(?mi)^[*-]\s+test_\S+|\[(?:passed|failed|pending|risky)\]")
 
-
 def _looks_like_godot_launch_failure(output: str) -> bool:
     """coverage 侧中止判定（§SPEC-1420-21 收紧）。
 
@@ -72,14 +71,12 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
     """
     return _GUT_RUN_EVIDENCE.search(output) is None
 
-
 def _godot_project_path(project_root: str) -> str:
     """--path 语义随 detect_binary_kind() 同源（§SPEC-1525-002）：委托
     inject.godot_project_path 统一原语——win64 通道保留既有 /mnt/→Windows
     转换（af728f5 行为逐字节不变）、linux 通道原生不转换；与 mutation
     runner 共用同一份转换原语，勿在此模块再分叉。"""
     return _unified_godot_project_path(project_root)
-
 
 # user:// 优先：win64@WSL 下项目 res:// 走 UNC 映射（//wsl.localhost/...），
 # FileAccess 对该路径的写入可见性/时序脆弱。user:// 是 Godot 管理的应用数据
@@ -94,25 +91,19 @@ _PROBE_PREFIX = "__qa_cov_probe_"
 # 的插桩文件（硬化 反例实证：含 else 的文件 coverage 全体 run_error）。
 # 分支执行语义由 _derive_branches 的体首语句行锚定承担。
 
-
 @dataclass(frozen=True)
 class ExecutableLine:
     line: int
     node: str  # node.data（行所属结构，便于诊断）
 
-
 @dataclass(frozen=True)
 class BranchItem:
     line: int | None  # 分支体首条可执行语句行（映射到行探针 id）
-
 
 @dataclass(frozen=True)
 class BranchSet:
     total: int
     items: tuple[BranchItem, ...] = field(default_factory=tuple)
-
-
-
 
 from .instrument import (
     _attr_probe_block_text,
@@ -151,7 +142,6 @@ def _err_envelope(file: str, message: str, *,
                         "probes_fired": 0, "probes_source": "none",
                         "run_error": True, "error": message},
             "failures": [{"reason": message}]}
-
 
 def _write_failure_evidence(evidence_out, file_path, gd_source, tests_glob,
                             message) -> "str | None":
@@ -195,7 +185,6 @@ def _write_failure_evidence(evidence_out, file_path, gd_source, tests_glob,
     except Exception as e:  # noqa: BLE001 — 具名失败，不静默
         return f"failure-evidence write failed: {type(e).__name__}: {e}"
 
-
 def _write_mapping_evidence(evidence_out, file_path, gd_source, tests_glob,
                             covered, total, probes) -> "str | None":
     """由行级映射投影生成 coverage-evidence/2（§SPEC-025/027 A15）。
@@ -217,14 +206,12 @@ def _write_mapping_evidence(evidence_out, file_path, gd_source, tests_glob,
     except Exception as e:  # noqa: BLE001 — 具名失败，不静默
         return f"evidence write failed: {type(e).__name__}: {e}"
 
-
 def _cov_fail(path, src, tests_glob, evidence_out, msg,
               min_percent: float) -> dict:
     """统一失败出口：失败 bundle 落盘 + run_error 域 JSON。"""
     if evidence_out:
         _write_failure_evidence(evidence_out, str(path), src, tests_glob, msg)
     return _err_envelope(str(path), msg, min_percent=min_percent)
-
 
 def _cov_precheck(file_path: str, project_root: str, tests_glob,
                   evidence_out, min_percent: float) -> tuple:
@@ -247,7 +234,6 @@ def _cov_precheck(file_path: str, project_root: str, tests_glob,
         return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
                                min_percent)
     return path, src
-
 
 def _cov_vacuous(path, src, tests_glob, evidence_out, min_percent: float,
                  proj: dict) -> dict:
@@ -272,7 +258,6 @@ def _cov_vacuous(path, src, tests_glob, evidence_out, min_percent: float,
                              min_percent)
     return {"tool": "measure.coverage", "ok": True, "summary": summary,
             "failures": []}
-
 
 def _cov_probes_evidence(path, src, tests_glob, evidence_out, min_percent,
                          proj: dict) -> tuple:
@@ -312,7 +297,6 @@ def _cov_probes_evidence(path, src, tests_glob, evidence_out, min_percent,
         return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
                                min_percent)
     return (arms_ok, probes), None
-
 
 def _cov_report_build(path, src, tests_glob, evidence_out, min_percent,
                       proj: dict, probes: int, inst: set, covered: set,
@@ -365,7 +349,6 @@ def _cov_report_build(path, src, tests_glob, evidence_out, min_percent,
     return {"tool": "measure.coverage", "ok": ok, "summary": summary,
             "failures": failures}
 
-
 def _cov_project(path, project_root, tests_glob, timeout_s, src,
                  evidence_out, min_percent) -> tuple:
     """映射投影（CoverageMappingError/ValueError/OSError → 具名失败出口）。
@@ -383,7 +366,6 @@ def _cov_project(path, project_root, tests_glob, timeout_s, src,
                                f"{type(e).__name__}: {e}", min_percent)
     return proj, None
 
-
 def run_coverage(
     file_path: str,
     project_root: str,
@@ -392,9 +374,7 @@ def run_coverage(
     tests_glob: str | None = None,
     evidence_out: str | None = None,
 ) -> dict:
-    """单文件行覆盖——行级归属映射投影（§SPEC-025 唯一真源），零 GUT。
-    probes_fired 取自映射 arms_state（不伪造）；任何失败路径产出
-    run_error 域 JSON + 失败 bundle（`measure risk` 逐文件降级）。"""
+    """单文件行覆盖——映射投影（§SPEC-025 唯一真源），零 GUT。"""
     path, src = _cov_precheck(file_path, project_root, tests_glob,
                               evidence_out, min_percent)
     if path is None:
@@ -454,7 +434,6 @@ def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[
     hits = {manifest[pid] for pid in hits_raw if pid in valid_ids}
     return hits, sum(1 for pid in hits_raw if pid in valid_ids)
 
-
 def _coverage_report(file: str, original_src: str, executable_lines, hits: set[int],
                      probes_fired: int, min_percent: float,
                      timing_meta: dict | None = None) -> dict:
@@ -505,7 +484,6 @@ def _coverage_report(file: str, original_src: str, executable_lines, hits: set[i
         "failures": failures,
     }
 
-
 def _windows_appdata_from_wsl() -> str | None:
     """WSL 下探测 Windows APPDATA 挂载点（win64 godot 的 user:// 落点）。
 
@@ -524,7 +502,6 @@ def _windows_appdata_from_wsl() -> str | None:
             return str(users[0] / "AppData" / "Roaming")
     return None
 
-
 def _resolve_user_sink_dir(project_root: str) -> str | None:
     """user:// sink DIRECTORY for the project (prune-sinks sweeps here)."""
     sink = _resolve_user_sink(project_root, "qa-coverage-hits-probe.txt")
@@ -532,7 +509,6 @@ def _resolve_user_sink_dir(project_root: str) -> str | None:
         from pathlib import Path as _P
         return str(_P(sink).parent)
     return None
-
 
 def _resolve_user_sink(project_root: str, sink_name: str) -> str | None:
     """定位 user:// sink 的 OS 路径（win64/Linux 两侧均可靠）。

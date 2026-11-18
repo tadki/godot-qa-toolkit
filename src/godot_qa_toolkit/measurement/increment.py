@@ -279,6 +279,32 @@ def _increment_decision(root: Path, recipe: dict, baseline: dict,
                               rerun_full_face_ratio)
     return raw_recipe, classes, invalidation, rerun, reason
 
+def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
+                    classes: dict, rerun: set, invalidation: dict,
+                    arm_exec_s, t0: float) -> dict:
+    """产物落盘（父目录自建）+ 增量报告组装（provenance/merged_stats）。"""
+    out_p = Path(out_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    out_p.write_text(json.dumps(artifact, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+    return {
+        "mode": "incremental",
+        "artifact": str(out_p),
+        "changed": classes,
+        "rerun_scripts": sorted(rerun),
+        "dropped": sorted(invalidation["dropped"]),
+        "rerun_sources": {k: v for k, v in
+                          invalidation["sources"].items()
+                          if k in set(rerun)},
+        "merged_stats": {k: merged[k] for k in
+                         ("tests", "scripts", "files", "pairs",
+                          "function_pairs")},
+        "event_counts_stale": True,
+        "wall_s": round(time.monotonic() - t0, 3),
+        "arm_exec_s": arm_exec_s,
+    }
+
+
 def run_attribution_increment(project_root: str | Path,
                               target_files: list[str], recipe: dict,
                               baseline_path: str | Path,
@@ -314,27 +340,8 @@ def run_attribution_increment(project_root: str | Path,
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
         executions)
-    out_p = Path(out_path)
-    out_p.parent.mkdir(parents=True, exist_ok=True)
-    out_p.write_text(json.dumps(artifact, ensure_ascii=False, indent=2),
-                     encoding="utf-8")
-    return {
-        "mode": "incremental",
-        "artifact": str(out_p),
-        "changed": classes,
-        "rerun_scripts": sorted(rerun),
-        "dropped": sorted(invalidation["dropped"]),
-        "rerun_sources": {k: v for k, v in
-                          invalidation["sources"].items()
-                          if k in set(rerun)},
-        "merged_stats": {k: merged[k] for k in
-                         ("tests", "scripts", "files", "pairs",
-                          "function_pairs")},
-        "event_counts_stale": True,
-        "wall_s": round(time.monotonic() - t0, 3),
-        "arm_exec_s": arm_exec_s,
-    }
-
+    return _increment_emit(root, out_path, artifact, merged, classes, rerun,
+                           invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
                      calibration_every: int, ratio: float,
                      ratio_cap: float) -> str:

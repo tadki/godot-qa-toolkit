@@ -26,9 +26,11 @@ from godot_qa_toolkit.measurement.attribution import (
     ATTRIBUTION_SCHEMA,
     build_attribution_map,
 )
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.instrument import (
     _algo_used,
     _instrument_pair,
+)
+from godot_qa_toolkit.measurement.orchestrator import (
     file_key8,
     run_measurement,
 )

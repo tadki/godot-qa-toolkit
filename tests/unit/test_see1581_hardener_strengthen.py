@@ -17,10 +17,12 @@ from attribution_fixtures import write_map
 from godot_qa_toolkit.measurement import increment as inc_mod
 from godot_qa_toolkit.measurement import increment_runner as runner_mod
 from godot_qa_toolkit.measurement import prepcache
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.shadowio import (
     _accumulate_attr_lines,
-    _arms_state,
     _new_attr_rec,
+)
+from godot_qa_toolkit.measurement.orchestrator import (
+    _arms_state,
     _tests_face_map,
     build_attribution_map,
 )

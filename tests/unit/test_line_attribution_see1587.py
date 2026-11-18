@@ -19,11 +19,13 @@ import pytest
 
 from godot_qa_toolkit.coverage.runner import _instrument_blocks
 from godot_qa_toolkit.measurement import prepcache
+from godot_qa_toolkit.measurement.shadowio import (
+    _read_attr_merged,
+)
 from godot_qa_toolkit.measurement.orchestrator import (
     ATTRIBUTION_SCHEMA,
     _algo_used,
     _instrument_pair,
-    _read_attr_merged,
     build_attribution_map,
     file_key8,
     run_measurement,

@@ -477,7 +477,8 @@ def test_canonical_diagnose_shape_and_restore(project: Path,
     """§SPEC-048：诊断模式逐 feature 输出基线/插桩两腿墙钟、wait 步数与
     归因；运行后树零残留（插桩与 finalizer 全部恢复）。"""
     from godot_qa_toolkit.measurement.orchestrator import (
-        run_measurement_diagnose)
+    run_measurement_diagnose,
+)
 
     recipe, _ = _recipe(project, tmp_path)
     fake = FakeGodot(project)

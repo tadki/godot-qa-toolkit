@@ -22,6 +22,7 @@ function_pairs/line_pairs 由合并后的行事实精确重算）。行为耦合
 """
 
 from __future__ import annotations
+from ..digest import sha256_file
 
 import hashlib
 import json
@@ -430,7 +431,7 @@ def _merged_tests_face(root: Path, baseline: dict,
     for rel in classes.get("test_changed", []) + classes.get("test_new", []):
         p = Path(root) / rel
         if p.is_file():
-            face[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            face[rel] = sha256_file(p)
     for rel in classes.get("test_removed", []):
         face.pop(rel, None)
     return face
@@ -443,7 +444,7 @@ def _merged_file_sha(root: Path, baseline: dict,
     for rel in classes.get("prod_changed", []) + classes.get("prod_new", []):
         p = Path(root) / rel
         if p.is_file():
-            shas[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            shas[rel] = sha256_file(p)
     return shas
 
 

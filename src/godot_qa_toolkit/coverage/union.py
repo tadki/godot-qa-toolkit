@@ -13,12 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 
+from ..digest import canonical_json, canonical_sha256
+
 UNION_VERSION = "coverage-union/1"
 
 
 def _canonical_json(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"))
+    return canonical_json(obj)
 
 
 def arm_record_from_bundle(bundle: dict, *, recipe_hash: str,

@@ -1,0 +1,51 @@
+{
+  "tool": "see1594.governance",
+  "mode": "duplicates",
+  "ok": true,
+  "idioms": {
+    "file_sha256_read_bytes": {
+      "owner": "src/godot_qa_toolkit/digest.py",
+      "semantics": "文件内容 sha256 唯一实现 = digest.sha256_file（read_bytes 等价）",
+      "hits": []
+    },
+    "sha256_text_encode": {
+      "owner": "src/godot_qa_toolkit/digest.py",
+      "semantics": "文本 sha256 唯一实现 = digest.sha256_text",
+      "hits": [
+        {
+          "file": "src/godot_qa_toolkit/digest.py",
+          "line": 26
+        }
+      ]
+    }
+  },
+  "excluded_distinct_semantics": {
+    "indent_json_output": {
+      "why": "indent 化的可读 JSON 落盘（格式输出，非摘要序列化）",
+      "hits": [
+        {
+          "file": "src/godot_qa_toolkit/gherkin/compile.py",
+          "line": 373
+        },
+        {
+          "file": "src/godot_qa_toolkit/gherkin/compile.py",
+          "line": 430
+        },
+        {
+          "file": "src/godot_qa_toolkit/mutation/prewarm_proof.py",
+          "line": 460
+        }
+      ]
+    },
+    "sha1_file_binding": {
+      "why": "source_sha1 绑定（sha1 域，非 sha256 语义）",
+      "hits": [
+        {
+          "file": "src/godot_qa_toolkit/mutation/shadow.py",
+          "line": 68
+        }
+      ]
+    }
+  },
+  "failures": []
+}

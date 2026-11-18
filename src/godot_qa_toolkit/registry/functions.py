@@ -24,6 +24,7 @@ the WP1a oracle constants — the probe-plan side lives in registry.manifest.
 """
 
 from __future__ import annotations
+from ..digest import sha256_text
 
 import hashlib
 
@@ -144,7 +145,7 @@ def build_file_registry(gd_source: str, file_label: str) -> dict:
     snapshot: dict = {
         "registry_version": REGISTRY_VERSION,
         "file": file_label,
-        "sha256": hashlib.sha256(gd_source.encode("utf-8")).hexdigest(),
+        "sha256": sha256_text(gd_source),
         "parse": "ok",
         "entries": [],
     }

@@ -19,6 +19,7 @@ performance.acceptance_probe 记录。
 """
 
 from __future__ import annotations
+from ..digest import sha256_file
 
 import hashlib
 import json
@@ -148,7 +149,7 @@ def _snapshot_main(root: Path) -> dict[str, str]:
             rel = p.relative_to(root).as_posix()
             if ".gqt-run-" in rel:
                 continue
-            snap[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            snap[rel] = sha256_file(p)
     return snap
 
 

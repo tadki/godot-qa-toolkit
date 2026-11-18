@@ -1,0 +1,73 @@
+{
+  "tool": "see1594.spec010_dispositions",
+  "machine_evidence": {
+    "semantics_mode": {
+      "ok": true,
+      "retired_violations": 0,
+      "single_point_violations": 0,
+      "dual_truth_violations": 0
+    },
+    "mutation_parser_surface": [
+      "--project-root",
+      "--budget",
+      "--timeout",
+      "--dry-run",
+      "--tests",
+      "--jobs",
+      "--select",
+      "--attribution-map",
+      "--no-attribution-auto",
+      "--mutation-warning",
+      "--timeout-factor",
+      "--mutate-all",
+      "--mutation",
+      "--lines",
+      "--no-reuse-coverage",
+      "--worker-channel",
+      "--godot-bin"
+    ],
+    "note": "parser 实测（build_parser 枚举）：无 --resume / --reuse-coverage 注册、无别名、无隐藏旧拼写"
+  },
+  "items": [
+    {
+      "topic": "--resume / --reuse-coverage 兼容面",
+      "disposition": "retire（已完成，A13/SEE-1594 S5）",
+      "reason": "旧 flag 物理未注册，传参即 argparse exit 2；无别名、无静默等价旗标",
+      "consumer_migration": "差分复用改默认自动（v2 manifest 在场即复用）；prefilter 无旗标默认开、--no-reuse-coverage 为唯一关断开关",
+      "schema_ops_version_impact": "无（CLI 面）",
+      "evidence": "governance --mode semantics 0 违规；TestA13 pins"
+    },
+    {
+      "topic": "无参数 git diff 推导",
+      "disposition": "keep（单实现，无重合旧写法）",
+      "reason": "_git_diff_targets 是唯一实现（tracked 改动 + untracked .gd）；_normalize_positionals 单点分派；矩阵 A2-git-diff-* 三 case 钉 rc/失败原因",
+      "consumer_migration": "n/a",
+      "schema_ops_version_impact": "无",
+      "evidence": "acceptance-matrix A2-git-diff-positive-untracked / -no-arg / -non-git 全 PASS"
+    },
+    {
+      "topic": "<file>#<lines> 行级地址",
+      "disposition": "keep（契约面，与 --lines 并存非别名）",
+      "reason": "两者是不同寻址形态且均被矩阵钉住：位置参数 file#lines=单文件卡尺；--lines=显式卡尺（可配合多文件）。冲突组合 fail-loud（'conflicting line selection'），无静默回退",
+      "consumer_migration": "n/a",
+      "schema_ops_version_impact": "无",
+      "evidence": "cli.py:184-206 单点归一化；矩阵 A0-file-lines-address / A0-dryrun-lines-caliper 全 PASS"
+    },
+    {
+      "topic": "无价值别名 / 静默 fallback",
+      "disposition": "retire（保持零容忍）",
+      "reason": "语义扫描 0 违规；prefilter miss=stderr 披露+不过滤、selection 不可用=fail-loud——两者均为显式披露面而非静默回退",
+      "consumer_migration": "n/a",
+      "schema_ops_version_impact": "无",
+      "evidence": "governance semantics + contract 双臂/选面条款"
+    },
+    {
+      "topic": "schema / OPS / version 影响",
+      "disposition": "无变更",
+      "reason": "BCODE 仅结构治理（死代码删除/摘要单点）；test-attribution/6、see1550/3、measurement-report/2、coverage-union/1、crap-line/1 全部原样",
+      "consumer_migration": "n/a",
+      "schema_ops_version_impact": "none",
+      "evidence": "git diff 范围仅内部模块 + digest.py 新增"
+    }
+  ]
+}

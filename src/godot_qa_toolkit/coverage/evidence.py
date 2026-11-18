@@ -14,6 +14,7 @@ SEE-1594 S1：direct coverage 的 sink/`--recover` 执行面已随旧 GUT 路径
 """
 
 from __future__ import annotations
+from ..digest import sha256_text as _digest_text
 
 import hashlib
 import json
@@ -38,7 +39,7 @@ def sink_name_for(run_uuid: str) -> str:
 
 
 def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return _digest_text(text)
 
 
 def evidence_dir_for(evidence_out: str | None) -> Path:

@@ -1,3 +1,4 @@
+
 """§SPEC-054 measurement 静态准备缓存。
 
 按 源码 sha256 / recipe_hash（含 toolchain 注入）/ probe 算法版本 绑定的
@@ -19,6 +20,7 @@ sha256 校验（§SPEC-060c：篡改即 quarantine + fresh 重建）；fresh 生
 """
 
 from __future__ import annotations
+from ..digest import canonical_sha256, sha256_text
 
 import hashlib
 import json
@@ -95,9 +97,7 @@ def _sha256_obj(obj) -> str:
             return [canon(x) for x in o]
         return o
 
-    return hashlib.sha256(json.dumps(
-        canon(obj), ensure_ascii=False, sort_keys=True,
-        separators=(",", ":")).encode("utf-8")).hexdigest()
+    return canonical_sha256(canon(obj))
 
 
 def _normalize_block_map(block_map) -> dict:
@@ -139,7 +139,7 @@ def _semantic_integrity_ok(entry: dict) -> bool:
 
 def _template_ok(entry: dict, tpl: str, probe_lines: list) -> bool:
     """模板完整性：sha256 校验 + vacuous/占位符形态。"""
-    if hashlib.sha256(tpl.encode("utf-8")).hexdigest() != entry.get(
+    if sha256_text(tpl) != entry.get(
             "template_sha256"):
         return False
     if not probe_lines:
@@ -227,8 +227,7 @@ def store_entry(project_root: str | os.PathLike, *, rel: str,
         "rel": rel,
         "src_sha256": src_sha256,
         "recipe_hash": recipe_hash,
-        "template_sha256": hashlib.sha256(
-            instrumented_template.encode("utf-8")).hexdigest(),
+        "template_sha256": sha256_text(instrumented_template),
         "registry_sha256": _sha256_obj(registry),
         "probe_manifest_sha256": _sha256_obj(probe_manifest),
         "block_map_sha256": _sha256_obj(block_map),

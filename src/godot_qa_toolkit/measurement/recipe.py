@@ -15,16 +15,18 @@ import hashlib
 import json
 from pathlib import Path
 
+from ..digest import canonical_sha256, sha256_file, sha256_text
+
 RECIPE_VERSION = "measurement-suite/2"
 _GUTCONFIG = ".gutconfig.json"
 
 
 def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_text(text)
 
 
 def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return sha256_file(path)
 
 
 def load_gutconfig(project_root: Path) -> tuple[dict | None, str | None]:
@@ -218,10 +220,7 @@ def recipe_hash(recipe: dict) -> str:
     measurement verification for loaded/recovered recipes."""
     basis = {k: v for k, v in recipe.items()
              if k not in ("recipe_hash", "project_root")}
-    return _sha256_text(
-        json.dumps(basis, ensure_ascii=False, sort_keys=True,
-                   separators=(",", ":"))
-    )
+    return canonical_sha256(basis)
 
 
 def verify_recipe(recipe: dict) -> tuple[bool, str | None]:

@@ -1,0 +1,1351 @@
+{
+  "ok": true,
+  "profile": "final-e2e",
+  "kol_root": "/tmp/s81b-kol",
+  "target": "utils/csv_tmap_parser.gd",
+  "matrix": "/home/jerry/multica_workspaces/seed-478690824e46/see-1594-16847c200105/workdir/godot-qa-toolkit/tests/integration/mutation_acceptance_matrix.json",
+  "cases_run": 36,
+  "cases_total": 36,
+  "godot_bin": "/home/jerry/gqt-probe-bin/godot",
+  "checks": [
+    {
+      "id": "ctx-map",
+      "status": "PASS",
+      "detail": "usable attribution map built",
+      "evidence": {}
+    },
+    {
+      "id": "A0-argparse-bad-select",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--select",
+          "bogus",
+          "--dry-run"
+        ],
+        "rc": 2,
+        "wall_s": 0.048,
+        "parse_error": "empty stdout",
+        "summary_keys": [],
+        "stderr_tail": [
+          "                    [--mutation ID] [--lines SPEC] [--no-reuse-coverage]",
+          "                    [--worker-channel] [--godot-bin GODOT_BIN]",
+          "                    [files ...]",
+          "gqt mutation: error: argument --select: invalid choice: 'bogus' (choose from 'line', 'fn', 'file', 'full')"
+        ]
+      }
+    },
+    {
+      "id": "A0-argparse-bad-budget",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--budget",
+          "abc",
+          "--dry-run"
+        ],
+        "rc": 2,
+        "wall_s": 0.043,
+        "parse_error": "empty stdout",
+        "summary_keys": [],
+        "stderr_tail": [
+          "                    [--mutation ID] [--lines SPEC] [--no-reuse-coverage]",
+          "                    [--worker-channel] [--godot-bin GODOT_BIN]",
+          "                    [files ...]",
+          "gqt mutation: error: argument --budget: invalid int value: 'abc'"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-flat-envelope",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--budget",
+          "2"
+        ],
+        "rc": 0,
+        "wall_s": 1.092,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-select-full",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--select",
+          "full",
+          "--dry-run",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 0.93,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A0-dryrun-select-line-default",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 1.101,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-budget-truncation",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--budget",
+          "1",
+          "--mutation-warning",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 0.986,
+        "parse_error": null,
+        "summary_keys": [
+          "attention",
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)",
+          "mutation-warning: 18 mutation sites exceed --mutation-warning 1 — consider splitting this file in /tmp/s81b-kol/utils/csv_tmap_parser.gd"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-lines-caliper",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--lines",
+          "13",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 1.146,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "lines_selection",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-mutation-id",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--mutation",
+          "/tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 1.035,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)"
+        ]
+      }
+    },
+    {
+      "id": "A0-dryrun-explicit-tests",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--tests",
+          "res://tests/unit/shadow_console/",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 1.171,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A0-file-lines-address",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd#13",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 1.095,
+        "parse_error": null,
+        "summary_keys": [
+          "diff_available",
+          "dry_run",
+          "executed_estimate",
+          "file",
+          "jobs",
+          "kinds",
+          "lines_selection",
+          "mutants",
+          "retry_estimate",
+          "scoped",
+          "selection_mode",
+          "test_selection",
+          "total_sites"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-jobs1-flat",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--jobs",
+          "1",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 0,
+        "wall_s": 7.965,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "coverage_prefilter",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation",
+          "stage_timings",
+          "survived",
+          "survivors",
+          "suspect",
+          "test_selection"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)",
+          "[1/1] killed L13 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1 2.8s"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-lines-caliper",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--lines",
+          "13",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 0,
+        "wall_s": 7.389,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "lines_selection",
+          "mutants",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selected",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation",
+          "stage_timings",
+          "survived",
+          "survivors",
+          "suspect",
+          "test_selection"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)",
+          "[1/1] killed L13 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1 3.1s"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-mutation-caliper",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--mutation",
+          "/tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1",
+          "--budget",
+          "1"
+        ],
+        "rc": 0,
+        "wall_s": 7.759,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selected",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation",
+          "stage_timings",
+          "survived",
+          "survivors",
+          "suspect",
+          "test_selection",
+          "timeout"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)",
+          "[1/1] killed L13 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1 3.4s"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-worker-channel",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--worker-channel",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 0,
+        "wall_s": 14.594,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "coverage_prefilter",
+          "diff_skipped",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "jobs_limit_reason",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "prewarm",
+          "retry_total",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_groups",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation"
+        ],
+        "stderr_tail": [
+          "prewarm: re-import (no usable proof: no proof file)",
+          "prewarm: no cert (first import failed: import error output: ERROR: Attempt to open script 'res://addons/godot_mcp/game_bridge/mcp_game_bridge.gd' resulted in error 'File not found')",
+          "mutation: baseline double-binding inactive (guard inactive (no usable proof: no proof file))",
+          "[1/1] killed L13 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1 3.0s worker=line:1"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-stage-timings",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--jobs",
+          "1",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 0,
+        "wall_s": 7.821,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "coverage_prefilter",
+          "diff_skipped",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "resumed",
+          "retry_total",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation",
+          "stage_timings",
+          "survived"
+        ],
+        "stderr_tail": [
+          "mutation: runtime-mapping selection for /tmp/s81b-kol/utils/csv_tmap_parser.gd -> 6 test script(s)",
+          "[1/1] killed L18 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#2 3.0s"
+        ]
+      }
+    },
+    {
+      "id": "A1-exec-no-reuse-coverage",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--no-reuse-coverage",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 0,
+        "wall_s": 14.234,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "diff_skipped",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "jobs_limit_reason",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "prewarm",
+          "retry_total",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_groups",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation",
+          "stage_timings"
+        ],
+        "stderr_tail": [
+          "prewarm: re-import (no usable proof: no proof file)",
+          "prewarm: no cert (first import failed: import error output: ERROR: Attempt to open script 'res://addons/godot_mcp/game_bridge/mcp_game_bridge.gd' resulted in error 'File not found')",
+          "mutation: baseline double-binding inactive (guard inactive (no usable proof: no proof file))",
+          "[1/1] killed L13 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1 2.9s worker=line:1"
+        ]
+      }
+    },
+    {
+      "id": "A1-measure-suite",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "measure",
+          "suite",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--out",
+          "/tmp/s81b-kol/.qa-cache/acc-recipe.json"
+        ],
+        "rc": 0,
+        "wall_s": 0.065,
+        "parse_error": null,
+        "summary_keys": [
+          "acceptance_features",
+          "exclusions",
+          "gut_dirs",
+          "out",
+          "recipe_hash",
+          "recipe_version"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A1-measure-complexity",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "measure",
+          "complexity",
+          "/tmp/s81b-kol/utils/csv_tmap_parser.gd"
+        ],
+        "rc": 0,
+        "wall_s": 0.366,
+        "parse_error": null,
+        "summary_keys": [
+          "functions",
+          "max_seen",
+          "unparseable",
+          "violations",
+          "warnings"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A1-measure-risk-anchored",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "measure",
+          "risk",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--skip-measure",
+          "--report",
+          "/tmp/s81b-kol/.qa-cache/acc-risk.json"
+        ],
+        "rc": 0,
+        "wall_s": 0.602,
+        "parse_error": null,
+        "summary_keys": [
+          "diagnostic_only",
+          "dynamic_cache",
+          "eligible_files",
+          "evidence_level",
+          "negative_files",
+          "records",
+          "report",
+          "scored",
+          "unknown_share"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A1-measure-coverage",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "measure",
+          "coverage",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--timeout",
+          "120"
+        ],
+        "rc": 0,
+        "wall_s": 0.733,
+        "parse_error": null,
+        "summary_keys": [
+          "attribution_map",
+          "baseline_p90",
+          "branch_coverage_percent",
+          "branch_covered",
+          "branch_total",
+          "coverage_percent",
+          "coverage_source",
+          "covered_lines",
+          "file",
+          "hits_lines",
+          "min_percent",
+          "probes_fired",
+          "probes_source",
+          "samples_n",
+          "selection_scripts",
+          "timing_source",
+          "total_lines",
+          "vacuous"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A2-git-diff-positive-untracked",
+      "status": "PASS",
+      "detail": "git diff derived 1 in-scope target(s); untracked probe present=True; noise=0",
+      "evidence": {
+        "targets_sample": [
+          "utils/see1594_tmp_probe.gd"
+        ],
+        "count": 1,
+        "probe_present": true,
+        "noise": []
+      }
+    },
+    {
+      "id": "A2-git-diff-no-arg",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--budget",
+          "1"
+        ],
+        "rc": 1,
+        "wall_s": 0.069,
+        "parse_error": null,
+        "summary_keys": [
+          "error"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "A2-git-diff-non-git",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "--project-root",
+          "/tmp/see1594-not-a-repo",
+          "--dry-run"
+        ],
+        "rc": 1,
+        "wall_s": 0.054,
+        "parse_error": null,
+        "summary_keys": [
+          "error"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "OC-probe-suggested-action",
+      "status": "PASS",
+      "detail": "at/below cap actionable and non-contradictory",
+      "evidence": {
+        "below": {
+          "kind": "raise_timeout",
+          "action": "rerun with --timeout 600"
+        },
+        "cap": {
+          "kind": "narrow_face",
+          "action": "full-face baseline exceeded the 600s budget cap: --select full runs the project's whole GUT suite, which does not fit this budget on real-scale projects; rerun with --select line|fn (default line) or a caliper face (--lines/--mutation), or reduce the project's .gutconfig.json dirs"
+        }
+      }
+    },
+    {
+      "id": "OC-probe-envelopes",
+      "status": "PASS",
+      "detail": "single flat / multi envelope split correct",
+      "evidence": {
+        "single_keys": [
+          "failures",
+          "ok",
+          "summary",
+          "tool"
+        ],
+        "multi_keys": [
+          "jobs",
+          "ok",
+          "results",
+          "tool"
+        ],
+        "second": "utils/cell_utils.gd"
+      }
+    },
+    {
+      "id": "FI-bad-root",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/nonexistent-see1594",
+          "--dry-run"
+        ],
+        "rc": 1,
+        "wall_s": 0.045,
+        "parse_error": null,
+        "summary_keys": [
+          "error"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "FI-bad-godot",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 1,
+        "wall_s": 0.045,
+        "parse_error": null,
+        "summary_keys": [
+          "error"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "FI-missing-gut",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 1,
+        "wall_s": 6.938,
+        "parse_error": null,
+        "summary_keys": [
+          "error",
+          "files"
+        ],
+        "stderr_tail": [
+          "prewarm: re-import (no usable proof: no proof file)",
+          "prewarm: no cert (first import failed: import error output: ERROR: Attempt to open script 'res://addons/godot_mcp/game_bridge/mcp_game_bridge.gd' resulted in error 'File not found')",
+          "mutation: baseline double-binding inactive (guard inactive (no usable proof: no proof file))",
+          "mutation: baseline snapshot failed for /tmp/s81b-kol/utils/csv_tmap_parser.gd: FileNotFoundError: GUT runner not found: /tmp/s81b-kol/addons/gut/gut_cmdln.gd — this file falls back to serial single-worker execution (continuing)"
+        ]
+      }
+    },
+    {
+      "id": "FI-bad-explicit-map",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--no-attribution-auto",
+          "--dry-run",
+          "--budget",
+          "1"
+        ],
+        "rc": 1,
+        "wall_s": 0.241,
+        "parse_error": null,
+        "summary_keys": [
+          "error",
+          "selection_error",
+          "selection_reason"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "FI-missing-tests-glob",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--tests",
+          "res://see1594_absent_dir/",
+          "--budget",
+          "1",
+          "--mutate-all"
+        ],
+        "rc": 1,
+        "wall_s": 11.993,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "diff_skipped",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "kill_rate",
+          "killed",
+          "mutants",
+          "prewarm",
+          "retry_total",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_mode",
+          "slot_mode",
+          "stage_reconciliation",
+          "stage_timings",
+          "survived",
+          "suspect",
+          "test_selection"
+        ],
+        "stderr_tail": [
+          "prewarm: no cert (first import failed: import error output: ERROR: Attempt to open script 'res://addons/godot_mcp/game_bridge/mcp_game_bridge.gd' resulted in error 'File not found')",
+          "mutation: baseline double-binding inactive (guard inactive (no usable proof: no proof file))",
+          "mutation: coverage store miss (selection resolved no attribution map (explicit --tests override) — map-derived coverage prefilter skipped; projection store: no projected coverage for this (file, tests_glob); live projection: no attribution map for live projection) for /tmp/s81b-kol/utils/csv_tmap_parser.gd — running unfiltered",
+          "[1/1] run_error L13 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#1 1.9s worker=w0"
+        ]
+      }
+    },
+    {
+      "id": "FI-perm-target",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd",
+          "--project-root",
+          "/tmp/s81b-kol",
+          "--dry-run",
+          "--budget",
+          "1"
+        ],
+        "rc": 1,
+        "wall_s": 2.707,
+        "parse_error": null,
+        "summary_keys": [
+          "error",
+          "selection_error",
+          "selection_reason"
+        ],
+        "stderr_tail": []
+      }
+    },
+    {
+      "id": "ZC-default-no-project-root",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd"
+        ],
+        "rc": 1,
+        "wall_s": 55.715,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "coverage_prefilter",
+          "diff_skipped",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "jobs_limit_reason",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "prewarm",
+          "resumed",
+          "retry_total",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_groups",
+          "selection_mode",
+          "slot_mode"
+        ],
+        "stderr_tail": [
+          "[9/16] killed L45 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#6 2.8s worker=line:2",
+          "[10/16] killed L45 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#7 3.1s worker=line:2",
+          "[11/16] killed L46 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#8 3.2s worker=line:2",
+          "[12/16] survived L46 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#9 3.1s worker=line:2"
+        ]
+      }
+    },
+    {
+      "id": "ZC-warm-rerun-no-project-root",
+      "status": "PASS",
+      "detail": "ok",
+      "evidence": {
+        "cmd": [
+          "mutation",
+          "utils/csv_tmap_parser.gd"
+        ],
+        "rc": 1,
+        "wall_s": 26.484,
+        "parse_error": null,
+        "summary_keys": [
+          "adaptive_timeout_s",
+          "baseline_p90",
+          "baseline_reused",
+          "budget",
+          "coverage_prefilter",
+          "diff_skipped",
+          "disk_delta_bytes",
+          "exec_scheme",
+          "executed",
+          "farm",
+          "file",
+          "freshness",
+          "inject_scheme",
+          "invalid_mutants",
+          "jobs",
+          "jobs_limit_reason",
+          "kill_rate",
+          "killed",
+          "killed_by_certificates",
+          "mutants",
+          "prewarm",
+          "resumed",
+          "retry_total",
+          "rss_peak_mb",
+          "run_errors",
+          "samples_n",
+          "scoped",
+          "selection_groups",
+          "selection_mode",
+          "slot_mode"
+        ],
+        "stderr_tail": [
+          "[2/8] survived L43 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#4 3.2s worker=line:2",
+          "[4/8] survived L24 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_tmap#9 2.1s worker=line:1",
+          "[3/8] survived L43 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#5 3.0s worker=line:2",
+          "[4/8] survived L46 /tmp/s81b-kol/utils/csv_tmap_parser.gd#func:parse_waypoints#9 2.8s worker=line:2"
+        ]
+      }
+    },
+    {
+      "id": "EQ-default-vs-mutate-all",
+      "status": "PASS",
+      "detail": "face totals + failure ids identical, no verdict flip",
+      "evidence": {
+        "totals": {
+          "mutants": 18,
+          "killed": 13,
+          "survived": 5,
+          "timeout": 0,
+          "run_errors": 0,
+          "suspect": 0,
+          "invalid_mutants": 0
+        },
+        "diffs": [],
+        "runs": [
+          {
+            "label": "default",
+            "rc": 1,
+            "totals": {
+              "mutants": 18,
+              "killed": 13,
+              "survived": 5,
+              "timeout": 0,
+              "run_errors": 0,
+              "suspect": 0,
+              "invalid_mutants": 0
+            },
+            "diff_skipped": 10
+          },
+          {
+            "label": "mutate-all",
+            "rc": 1,
+            "totals": {
+              "mutants": 18,
+              "killed": 13,
+              "survived": 5,
+              "timeout": 0,
+              "run_errors": 0,
+              "suspect": 0,
+              "invalid_mutants": 0
+            },
+            "diff_skipped": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "EQ-cold-vs-worker",
+      "status": "PASS",
+      "detail": "face totals + failure ids identical, no verdict flip",
+      "evidence": {
+        "totals": {
+          "mutants": 18,
+          "killed": 13,
+          "survived": 5,
+          "timeout": 0,
+          "run_errors": 0,
+          "suspect": 0,
+          "invalid_mutants": 0
+        },
+        "diffs": [],
+        "runs": [
+          {
+            "label": "cold",
+            "rc": 1,
+            "totals": {
+              "mutants": 18,
+              "killed": 13,
+              "survived": 5,
+              "timeout": 0,
+              "run_errors": 0,
+              "suspect": 0,
+              "invalid_mutants": 0
+            },
+            "diff_skipped": 0
+          },
+          {
+            "label": "worker",
+            "rc": 1,
+            "totals": {
+              "mutants": 18,
+              "killed": 13,
+              "survived": 5,
+              "timeout": 0,
+              "run_errors": 0,
+              "suspect": 0,
+              "invalid_mutants": 0
+            },
+            "diff_skipped": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "EQ-fresh-vs-diff",
+      "status": "PASS",
+      "detail": "face totals + failure ids identical, no verdict flip",
+      "evidence": {
+        "totals": {
+          "mutants": 18,
+          "killed": 13,
+          "survived": 5,
+          "timeout": 0,
+          "run_errors": 0,
+          "suspect": 0,
+          "invalid_mutants": 0
+        },
+        "diffs": [],
+        "runs": [
+          {
+            "label": "fresh-mutate-all",
+            "rc": 1,
+            "totals": {
+              "mutants": 18,
+              "killed": 13,
+              "survived": 5,
+              "timeout": 0,
+              "run_errors": 0,
+              "suspect": 0,
+              "invalid_mutants": 0
+            },
+            "diff_skipped": 0
+          },
+          {
+            "label": "diff-reuse",
+            "rc": 1,
+            "totals": {
+              "mutants": 18,
+              "killed": 13,
+              "survived": 5,
+              "timeout": 0,
+              "run_errors": 0,
+              "suspect": 0,
+              "invalid_mutants": 0
+            },
+            "diff_skipped": 10
+          }
+        ]
+      }
+    }
+  ]
+}

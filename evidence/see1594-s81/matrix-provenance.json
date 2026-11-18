@@ -1,0 +1,11 @@
+{
+  "tool": "see1594.s81.matrix_provenance",
+  "kol_commit": "ac6a7282eba4a5d4332f30a0ac2f005a10c10336",
+  "kol_commit_short": "ac6a7282",
+  "copy_method": "git clone --shared of workspace KOL checkout + checkout ac6a7282 (independent .git; rev-parse HEAD verified == ac6a7282)",
+  "eq_fixture_fix": {
+    "original": "EQ runs used {budget} = --budget 2 (truncated: mutate-all executed 2 sites; diff-reuse totals included 10 reused verdicts → 12 vs 2)",
+    "corrected": "{eq_budget} = max(--budget, 20) >= target site count (csv_tmap_parser.gd: 18 sites); assertions unchanged"
+  },
+  "matrix_ok": true
+}

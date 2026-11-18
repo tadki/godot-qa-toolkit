@@ -20,9 +20,11 @@ from pathlib import Path
 
 import pytest
 
+from godot_qa_toolkit.measurement.crapbuild import (
+    _load_baseline_report,
+)
 from godot_qa_toolkit.measurement.orchestrator import (
     MeasurementError,
-    _load_baseline_report,
     run_measurement,
 )
 from godot_qa_toolkit.measurement.recipe import (

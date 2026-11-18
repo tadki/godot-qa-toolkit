@@ -476,7 +476,7 @@ def test_canonical_diagnose_shape_and_restore(project: Path,
                                               tmp_path: Path):
     """§SPEC-048：诊断模式逐 feature 输出基线/插桩两腿墙钟、wait 步数与
     归因；运行后树零残留（插桩与 finalizer 全部恢复）。"""
-    from godot_qa_toolkit.measurement.orchestrator import (
+    from godot_qa_toolkit.measurement.diagnose import (
     run_measurement_diagnose,
 )
 
@@ -1660,7 +1660,7 @@ def test_spec066_stability_baseline_illegal_shapes_domain_errors(
     import io
     from contextlib import redirect_stdout
 
-    from godot_qa_toolkit.measurement.orchestrator import _load_baseline_report
+    from godot_qa_toolkit.measurement.crapbuild import _load_baseline_report
     from godot_qa_toolkit.cli import build_parser
 
     # §SPEC-075：CI 纯净环境无 godot——CLI 前置校验需可解析到存在且

@@ -1174,7 +1174,7 @@ def cmd_measure_diagnose(args: argparse.Namespace) -> int:
 
     from pathlib import Path as _P
 
-    from .measurement.orchestrator import MeasurementError, run_measurement_diagnose
+    from .measurement.diagnose import MeasurementError, run_measurement_diagnose
     from .measurement.recipe import verify_recipe
 
     rc = _resolve_project_root_or_contract(

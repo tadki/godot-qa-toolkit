@@ -29,8 +29,10 @@ from godot_qa_toolkit.measurement.backup import (
     _recover_stale_backups,
     _rel_within_root,
 )
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.crapbuild import (
     _load_baseline_report,
+)
+from godot_qa_toolkit.measurement.orchestrator import (
     run_measurement,
 )
 
@@ -619,7 +621,7 @@ def test_ghost_replay_semantics_reconciled_with_current_form():
     """§SPEC-071 L2：ghost 回放 record/crap_line 的 coverage_semantics 与
     本轮该文件实测形态对账；rel 不在本轮测量面时保留 baseline 原值并
     显式标注 carried。"""
-    from godot_qa_toolkit.measurement.orchestrator import (
+    from godot_qa_toolkit.measurement.crapbuild import (
     _crap_replay_vanished_baseline,
     _SEM_BLOCK,
     _SEM_STATEMENT,
@@ -664,7 +666,7 @@ def test_ghost_replay_semantics_reconciled_with_current_form():
 def test_docs_and_negative_line_ids_aligned():
     """§SPEC-071 L3：docs 与 orchestrator docstring 均为 per-uid 私有
     备份根；负整数/负整值浮点行号一律 False（与 docstring 对齐）。"""
-    from godot_qa_toolkit.measurement.orchestrator import _is_baseline_line_id
+    from godot_qa_toolkit.measurement.crapbuild import _is_baseline_line_id
     assert _is_baseline_line_id(-1) is False
     assert _is_baseline_line_id(-2.0) is False
     assert _is_baseline_line_id(0) is True

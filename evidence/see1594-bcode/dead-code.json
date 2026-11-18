@@ -1,7 +1,7 @@
 {
   "tool": "see1594.governance",
   "mode": "dead-code",
-  "ok": false,
+  "ok": true,
   "domains": [
     "mutation",
     "risk",
@@ -106,9 +106,9 @@
       "file": "src/godot_qa_toolkit/coverage/evidence.py",
       "line": 41,
       "domain": "coverage",
-      "ast_refs_src": 18,
+      "ast_refs_src": 16,
       "ast_refs_tests": 5,
-      "grep_refs_src": 20,
+      "grep_refs_src": 18,
       "grep_refs_tests": 8,
       "classification": "alive",
       "deferred_reason": null
@@ -2920,25 +2920,10 @@
       "deferred_reason": null
     },
     {
-      "name": "_sha256_text",
-      "kind": "function",
-      "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 24,
-      "domain": "measurement",
-      "ast_refs_src": 0,
-      "ast_refs_tests": 0,
-      "grep_refs_src": 0,
-      "grep_refs_tests": 0,
-      "classification": "dead_candidate",
-      "deferred_reason": null,
-      "ast_ref_files_src": [],
-      "grep_sample": []
-    },
-    {
       "name": "_sha256_file",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 28,
+      "line": 24,
       "domain": "measurement",
       "ast_refs_src": 7,
       "ast_refs_tests": 1,
@@ -2951,7 +2936,7 @@
       "name": "load_gutconfig",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 32,
+      "line": 28,
       "domain": "measurement",
       "ast_refs_src": 1,
       "ast_refs_tests": 3,
@@ -2964,7 +2949,7 @@
       "name": "scan_acceptance_features",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 46,
+      "line": 42,
       "domain": "measurement",
       "ast_refs_src": 1,
       "ast_refs_tests": 0,
@@ -2977,7 +2962,7 @@
       "name": "LEGAL_SCOPES",
       "kind": "constant",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 67,
+      "line": 63,
       "domain": "measurement",
       "ast_refs_src": 4,
       "ast_refs_tests": 0,
@@ -2990,7 +2975,7 @@
       "name": "_legal_exclusions",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 70,
+      "line": 66,
       "domain": "measurement",
       "ast_refs_src": 1,
       "ast_refs_tests": 0,
@@ -3003,7 +2988,7 @@
       "name": "build_recipe",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 119,
+      "line": 115,
       "domain": "measurement",
       "ast_refs_src": 12,
       "ast_refs_tests": 105,
@@ -3016,7 +3001,7 @@
       "name": "recipe_hash",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 216,
+      "line": 212,
       "domain": "measurement",
       "ast_refs_src": 35,
       "ast_refs_tests": 37,
@@ -3029,7 +3014,7 @@
       "name": "verify_recipe",
       "kind": "function",
       "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 226,
+      "line": 222,
       "domain": "measurement",
       "ast_refs_src": 7,
       "ast_refs_tests": 22,
@@ -11329,23 +11314,7 @@
       "deferred_reason": null
     }
   ],
-  "dead_candidates": [
-    {
-      "name": "_sha256_text",
-      "kind": "function",
-      "file": "src/godot_qa_toolkit/measurement/recipe.py",
-      "line": 24,
-      "domain": "measurement",
-      "ast_refs_src": 0,
-      "ast_refs_tests": 0,
-      "grep_refs_src": 0,
-      "grep_refs_tests": 0,
-      "classification": "dead_candidate",
-      "deferred_reason": null,
-      "ast_ref_files_src": [],
-      "grep_sample": []
-    }
-  ],
+  "dead_candidates": [],
   "test_only_reference": [
     {
       "name": "sink_name_for",
@@ -11872,9 +11841,5 @@
       ]
     }
   ],
-  "failures": [
-    {
-      "reason": "dead candidate: src/godot_qa_toolkit/measurement/recipe.py:24 function _sha256_text"
-    }
-  ]
+  "failures": []
 }

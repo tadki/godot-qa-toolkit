@@ -15,14 +15,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..digest import canonical_sha256, sha256_file, sha256_text
+from ..digest import canonical_sha256, sha256_file
 
 RECIPE_VERSION = "measurement-suite/2"
 _GUTCONFIG = ".gutconfig.json"
-
-
-def _sha256_text(text: str) -> str:
-    return sha256_text(text)
 
 
 def _sha256_file(path: Path) -> str:

@@ -585,40 +585,14 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
         _arm_restore(root, started, backup_dir)
     return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
             arm_failures, arm_fail_pairs)
-def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
-            acceptance: dict | None = None,
-            shadow_instrument: bool = False,
-            adaptive_reps: bool = False,
-            test_attribution: bool = False,
-            attribution_causal: bool = False,
-            shard_width: int = 6, shard_log_dir: str | None = None,
-            timeout_s: int = 180, acceptance_repeats: int = 3,
-            baseline_failures: "set[tuple[str, str]] | None" = None,
-            baseline_pairs: "set[tuple[str, str]] | None" = None,
-            declared_scoped: "set[tuple[str, str]] | None" = None,
-            declared_bare: "set[str] | None" = None,
-            arms_parallel: bool = False,
-            evidence_dir=None) -> dict:
-    """一条批式臂（§SPEC-052 并行分片）：装载 → 分片扇出 → 门控 → 读回
-    → vacuous 车道。shadow_instrument/adaptive_reps 语义见各分解函数。"""
-    stage = _arm_stage(
-        name, root=root, prepared=prepared, recipe=recipe,
-        test_attribution=test_attribution,
-        attribution_causal=attribution_causal,
-        shadow_instrument=shadow_instrument, shard_width=shard_width,
-        acceptance=acceptance, acceptance_repeats=acceptance_repeats)
-    run_uuid = stage["run_uuid"]
-    plans = stage["plans"]
-    reps = stage["reps"]
-    sink_by_rel = stage["sink_by_rel"]
-    manifest_by_rel = stage["manifest_by_rel"]
-    vacuous_rels = stage["vacuous_rels"]
-    (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
-     arm_failures, arm_fail_pairs) = _arm_execute(
-        name, root=root, shadow_instrument=shadow_instrument,
-        timeout_s=timeout_s, adaptive_reps=adaptive_reps,
-        shard_log_dir=shard_log_dir, stage=stage)
-    # §SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）
+def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
+              baseline_failures, baseline_pairs, declared_scoped,
+              declared_bare, arm_fail_pairs, gut_ok, acceptance,
+              results, run_error) -> tuple:
+    """§SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）：
+    新增失败门控 + 具名排除按 (script, test) 身份吸收 + reconcile。
+    返回 (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
+    reconciliation, arm_valid, invalid_reason)。"""
     declared_scoped = declared_scoped or set()
     declared_bare = declared_bare or set()
     baseline_pairs = baseline_pairs or set()
@@ -635,22 +609,59 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
     (reconciliation, arm_valid, invalid_reason, gut_ok_delta,
      run_error) = _arm_reconcile(root, acceptance, results, run_error)
     gut_ok = gut_ok and not gut_ok_delta
-    return _arm_result(name, root=root, prepared=prepared, acceptance=acceptance,
-                       arms_parallel=arms_parallel, evidence_dir=evidence_dir,
-                       shard_log_dir=shard_log_dir, timeout_s=timeout_s,
-                       adaptive_reps=adaptive_reps and acceptance is not None,
-                       test_attribution=test_attribution,
-                       results=results, run_uuid=run_uuid, wall_s=wall_s,
-                       gut_ok=gut_ok, run_error=run_error,
-                       timed_out=timed_out, arm_failures=arm_failures,
-                       arm_fail_pairs=arm_fail_pairs, new_pairs=new_pairs,
-                       exempt_pairs=exempt_pairs, baseline_meta=baseline_meta,
-                       reconciliation=reconciliation, arm_valid=arm_valid,
-                       invalid_reason=invalid_reason, reps=reps, plans=plans,
-                       sink_by_rel=sink_by_rel,
-                       manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
-                       vacuous_rels=vacuous_rels)
+    return (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
+            reconciliation, arm_valid, invalid_reason)
 
+
+def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
+            acceptance: dict | None = None, shadow_instrument: bool = False,
+            adaptive_reps: bool = False, test_attribution: bool = False,
+            attribution_causal: bool = False, shard_width: int = 6,
+            shard_log_dir: str | None = None, timeout_s: int = 180,
+            acceptance_repeats: int = 3,
+            baseline_failures: "set[tuple[str, str]] | None" = None,
+            baseline_pairs: "set[tuple[str, str]] | None" = None,
+            declared_scoped: "set[tuple[str, str]] | None" = None,
+            declared_bare: "set[str] | None" = None,
+            arms_parallel: bool = False, evidence_dir=None) -> dict:
+    """一条批式臂（§SPEC-052 并行分片）：装载 → 分片扇出 → 门控 → 读回
+    → vacuous 车道。shadow_instrument/adaptive_reps 语义见各分解函数。"""
+    stage = _arm_stage(
+        name, root=root, prepared=prepared, recipe=recipe,
+        test_attribution=test_attribution,
+        attribution_causal=attribution_causal,
+        shadow_instrument=shadow_instrument, shard_width=shard_width,
+        acceptance=acceptance, acceptance_repeats=acceptance_repeats)
+    run_uuid, plans, reps = stage["run_uuid"], stage["plans"], stage["reps"]
+    sink_by_rel, manifest_by_rel = stage["sink_by_rel"], stage["manifest_by_rel"]
+    vacuous_rels = stage["vacuous_rels"]
+    (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
+     arm_failures, arm_fail_pairs) = _arm_execute(
+        name, root=root, shadow_instrument=shadow_instrument,
+        timeout_s=timeout_s, adaptive_reps=adaptive_reps,
+        shard_log_dir=shard_log_dir, stage=stage)
+    (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
+     reconciliation, arm_valid, invalid_reason) = _arm_gate(
+        name, root=root, recipe=recipe, timeout_s=timeout_s,
+        baseline_failures=baseline_failures, baseline_pairs=baseline_pairs,
+        declared_scoped=declared_scoped, declared_bare=declared_bare,
+        arm_fail_pairs=arm_fail_pairs, gut_ok=gut_ok,
+        acceptance=acceptance, results=results, run_error=run_error)
+    return _arm_result(
+        name, root=root, prepared=prepared, acceptance=acceptance,
+        arms_parallel=arms_parallel, evidence_dir=evidence_dir,
+        shard_log_dir=shard_log_dir, timeout_s=timeout_s,
+        adaptive_reps=adaptive_reps and acceptance is not None,
+        test_attribution=test_attribution, results=results,
+        run_uuid=run_uuid, wall_s=wall_s, gut_ok=gut_ok,
+        run_error=run_error, timed_out=timed_out,
+        arm_failures=arm_failures, arm_fail_pairs=arm_fail_pairs,
+        new_pairs=new_pairs, exempt_pairs=exempt_pairs,
+        baseline_meta=baseline_meta, reconciliation=reconciliation,
+        arm_valid=arm_valid, invalid_reason=invalid_reason, reps=reps,
+        plans=plans, sink_by_rel=sink_by_rel,
+        manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
+        vacuous_rels=vacuous_rels)
 def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
                 arms_parallel: bool, evidence_dir, shard_log_dir: str | None,
                 timeout_s: int, adaptive_reps: bool, test_attribution: bool,

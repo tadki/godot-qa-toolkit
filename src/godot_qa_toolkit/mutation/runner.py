@@ -388,6 +388,7 @@ def _run_mutation_core(file_path: str,
         return setup_error
     path, original_src = c["path"], c["original_src"]
     tests_glob, selection_meta = c["tests_glob"], c["selection_meta"]
+    identity = c["identity"]
     scoped = tests_glob is not None
     backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
     # SEE-1587：卡尺行级测试面（--mutation/--lines 默认 line 模式）。

@@ -147,6 +147,40 @@ def _recipe_acceptance_face(features: list, feature_count: int,
         "harness": harness,
     }
 
+def _recipe_inputs(root: Path, exclusions: "list[dict] | None"
+                   ) -> tuple:
+    """输入校验：exclusions 合法性 → gutconfig → dirs 非空 → features 非空。
+    返回 (normalized_exclusions, gutconfig, dirs, features, feature_count,
+    error)；error 非 None 时调用方返回 (None, error)。"""
+    # §SPEC-066：只有 None 归缺省；其余非 list 交给 _legal_exclusions
+    # 显式拒绝（falsy 值不得静默降级为空面）
+    if exclusions is None:
+        exclusions = []
+    normalized_exclusions, error = _legal_exclusions(exclusions)
+    if error is not None:
+        return None, None, None, None, None, error
+    gutconfig, error = load_gutconfig(root)
+    if error is not None:
+        return normalized_exclusions, None, None, None, None, error
+    dirs = gutconfig.get("dirs", [])
+    # §SPEC-068：与 verify 同一规则——dirs 必须是非空字符串列表。
+    if not isinstance(dirs, list) or not all(
+            isinstance(d, str) and d.strip() for d in dirs):
+        return (normalized_exclusions, gutconfig, None, None, None,
+                "gutconfig 'dirs' must be a list of non-empty strings")
+    if not dirs:
+        return (normalized_exclusions, gutconfig, None, None, None,
+                "gutconfig has no dirs — empty GUT face is not a valid "
+                "measurement suite")
+    features, feature_count, error = scan_acceptance_features(root)
+    if error is not None:
+        return (normalized_exclusions, gutconfig, dirs, None, None, error)
+    if feature_count == 0:
+        return (normalized_exclusions, gutconfig, dirs, None, None,
+                "acceptance/features has no .feature files")
+    return normalized_exclusions, gutconfig, dirs, features, feature_count, None
+
+
 def build_recipe(
     project_root: str | Path,
     exclusions: list[dict] | None = None,
@@ -159,28 +193,10 @@ def build_recipe(
     """Build the measurement-suite/2 dict; returns (recipe, None) or
     (None, reason) on illegal layout/exclusion."""
     root = Path(project_root)
-    # §SPEC-066：只有 None 归缺省；其余非 list 交给 _legal_exclusions
-    # 显式拒绝（falsy 值不得静默降级为空面）
-    if exclusions is None:
-        exclusions = []
-    normalized_exclusions, error = _legal_exclusions(exclusions)
+    (normalized_exclusions, gutconfig, dirs, features, feature_count,
+     error) = _recipe_inputs(root, exclusions)
     if error is not None:
         return None, error
-    gutconfig, error = load_gutconfig(root)
-    if error is not None:
-        return None, error
-    dirs = gutconfig.get("dirs", [])
-    # §SPEC-068：与 verify 同一规则——dirs 必须是非空字符串列表。
-    if not isinstance(dirs, list) or not all(
-            isinstance(d, str) and d.strip() for d in dirs):
-        return None, "gutconfig 'dirs' must be a list of non-empty strings"
-    if not dirs:
-        return None, "gutconfig has no dirs — empty GUT face is not a valid measurement suite"
-    features, feature_count, error = scan_acceptance_features(root)
-    if error is not None:
-        return None, error
-    if feature_count == 0:
-        return None, "acceptance/features has no .feature files"
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "project_root": str(root),
@@ -200,7 +216,6 @@ def build_recipe(
     # separators give "same input, same hash, any byte change changes it"
     recipe["recipe_hash"] = recipe_hash(recipe)
     return recipe, None
-
 def recipe_hash(recipe: dict) -> str:
     """Recompute the hash over the recipe minus its own recipe_hash AND
     project_root — the checkout path is provenance, not a measured face

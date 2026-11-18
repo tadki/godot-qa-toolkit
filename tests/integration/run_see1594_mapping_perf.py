@@ -123,27 +123,29 @@ def _recipe_or_fail(kol_root: Path) -> dict:
 
 
 def _verify_baseline(kol_root: Path, recipe: dict, timeout: int,
-                     select: str | None = None) -> "tuple[set, dict]":
+                     gut_args: list[str] | None = None
+                     ) -> "tuple[set, dict]":
     """证据验证用基线获取——复用测量层产品 helper（`_acquire_lazy_baseline`
-    共享实现，零第二套解析/GUT 通道）。`-gselect` 形态仅用于受影响面
-    复跑证明（证据验证，非映射构建路径）。
+    共享实现，零第二套解析/GUT 通道）。`gut_args` 覆盖仅用于受影响面
+    复跑证明（证据验证，非映射构建路径）；缺省 = 产品同面参数。
 
-    瞬时空流（rc=0 且无运行流——插桩还原后引擎缓存竞态，实测出现过一次）
-    允许**一次**具名重试；重试仍失败 → RuntimeError（fail-loud）。产品
-    门控路径不做重试（fail-loud 语义不因重试弱化）。"""
+    空流失败允许**一次**具名重试（实测出现过一次瞬态）；重试仍失败 →
+    RuntimeError（fail-loud）。产品门控路径不做重试（fail-loud 语义
+    不因重试弱化）。注意：GUT `-gselect` 是**单名字符串匹配**，逗号
+    列表必零命中（rc=0 无运行流）——多脚本形态必须走 `-gdir` 逗号
+    列表（optparse 支持的多值形态）。"""
     import time as _t
     from godot_qa_toolkit.measurement.orchestrator import (
         _acquire_lazy_baseline, _gutconfig_face_args)
-    gut_args = ([f"-gselect={select}"] if select
-                else _gutconfig_face_args(recipe))
+    args_override = gut_args or _gutconfig_face_args(recipe)
     try:
-        return _acquire_lazy_baseline(kol_root, gut_args, timeout)
+        return _acquire_lazy_baseline(kol_root, args_override, timeout)
     except Exception as first:  # noqa: BLE001 — 证据验证具名重试一次
         print(f"[harness] verification baseline first attempt failed "
               f"({first}) — retrying once after 3s", file=sys.stderr)
         _t.sleep(3)
         try:
-            return _acquire_lazy_baseline(kol_root, gut_args, timeout)
+            return _acquire_lazy_baseline(kol_root, args_override, timeout)
         except Exception as e:  # noqa: BLE001 — fail-loud 具名
             raise RuntimeError(
                 f"verification baseline failed (retry also failed; "
@@ -313,12 +315,17 @@ def main(argv: list[str] | None = None) -> int:
                         or {}).get("test_to_lines", {}).items()
                        if by_rel.get(touch_rel)})
     if affected:
-        # test_to_lines 身份 = <GUT 裸名>.gd::<test>（A12）；-gselect 按
-        # 脚本名匹配（实测锚定：裸名精确命中唯一脚本）
-        sel = ",".join(affected)
+        # 受影响脚本所在目录 → -gdir 逗号列表（GUT -gdir 多值逗号分隔为
+        # 受支持形态；-gselect 是单名字符串匹配，逗号列表必零命中 →
+        # rc=0 无运行流）。test_to_lines 身份 = <GUT 裸名>.gd::<test>（A12）。
+        face_dirs = sorted({Path(rel).parent.as_posix()
+                            for rel in (doc.get("tests_face") or {})
+                            if Path(rel).name in set(affected)})
+        sel_args = ([f"-gdir=" + ",".join(f"res://{d}" for d in face_dirs)]
+                    if face_dirs else None)
         try:
             post_pairs, _post_meta = _verify_baseline(
-                kol_root, recipe, args.timeout, select=sel)
+                kol_root, recipe, args.timeout, gut_args=sel_args)
         except RuntimeError as e:
             return _fail(str(e))
         fresh_pairs = {tuple(p) for p in inc_meta["pairs"]}

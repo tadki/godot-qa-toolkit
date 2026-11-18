@@ -135,6 +135,24 @@ def _script_names(doc: dict) -> set[str]:
             for i in (arm.get("test_to_files") or {})}
 
 
+def _build_gate_fail_reason(doc: dict) -> str | None:
+    """S6.3 构建侧臂可用门（§SPEC-060a）：生成/增量的产物要求 gut_full
+    臂 state==valid——方案 A 后基线吸收使 state 成为「既有失败已吸收、
+    零新增」的权威判据；新增失败仍 invalid → 拒绝交付该产物。
+
+    消费侧 `arms_valid`（执行完整性证据）保持原语义不动——SEE-1587 D3
+    回归防护与旧产物可用性不因本门收紧。"""
+    states = doc.get("arms_state") or {}
+    if not arms_valid(states):
+        return "no execution evidence (arms_valid)"
+    gut = states.get("gut_full") or {}
+    if gut.get("state") != "valid":
+        return (f"gut_full arm invalid (state={gut.get('state')!r}, "
+                f"reason={gut.get('invalid_reason')!r}) — new failures "
+                f"gate the build (§SPEC-060a)")
+    return None
+
+
 def validate_refresh(before: dict, after: dict) -> None:
     """刷新产物守恒校验：失效即 fail-loud（不得静默交付失真映射）。
 
@@ -143,8 +161,9 @@ def validate_refresh(before: dict, after: dict) -> None:
     无串行化；修复后并发刷新实测零身份丢失）在此显式拒绝。"""
     if after.get("schema_version") != SCHEMA_VERSION:
         raise MutationSelectionError("refresh_schema_mismatch")
-    if not arms_valid(after.get("arms_state") or {}):
-        raise MutationSelectionError("refresh_arms_invalid")
+    gate = _build_gate_fail_reason(after)
+    if gate is not None:
+        raise MutationSelectionError("refresh_arms_invalid", gate)
     inc = after.get("increment") or {}
     rerun = {str(x) for x in (inc.get("rerun_scripts") or [])}
     dropped = {str(x) for x in (inc.get("dropped_scripts") or [])}
@@ -237,10 +256,11 @@ def ensure_map(project_root: str | Path, files: list[str],
                               **({"timeout_s": int(timeout_s)}
                                  if timeout_s is not None else {}))
                 doc = load_map(tmp)
-                if not arms_valid(doc.get("arms_state") or {}):
+                gate = _build_gate_fail_reason(doc)
+                if gate is not None:
                     raise MutationSelectionError(
                         "generated mapping has invalid arms "
-                        "(measurement failed)")
+                        f"({gate})")
                 os.replace(tmp, out)
             finally:
                 Path(tmp).unlink(missing_ok=True)

@@ -923,12 +923,17 @@ def test_xdg_tmp_dirs_cleaned_on_sink_read_exception(project: Path,
 
 class FailingConfigFaceGodot(FakeGodot):
     """H-1 反例注入：gut_full 臂（无 .gqt-run-）的 GUT 输出带一个普通
-    测试失败（rc=1 + Run Summary 段 [Failed] 形态，非启动失败）。"""
+    测试失败（rc=1 + Run Summary 段 [Failed] 形态，非启动失败）。
+
+    S6.3 §SPEC-060a：失败只注入**插桩**运行（-gpre_run_script 在场），
+    无插桩懒基线运行保持绿——该失败相对基线是**真新增**，门控语义
+    按新口径成立。"""
 
     def __call__(self, *a, **k):
         r = super().__call__(*a, **k)
         cmd = " ".join(a[0])
-        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+        if ("gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd
+                and "-gpre_run_script=" in cmd):
             r.returncode = 1
             r.stderr = ("- test_font_row_height\n"
                         "  [Failed] Expected row height 12 got 13\n")
@@ -1279,12 +1284,16 @@ def test_reconciliation_failure_invalidates_union_and_scores(
 
 class CrossScriptDuplicateGodot(FakeGodot):
     """§SPEC-063c 反例注入：gut_full 臂两个脚本同名失败 test_duplicate
-    （脚本头 + `* test_duplicate` + [Failed] 双段）。"""
+    （脚本头 + `* test_duplicate` + [Failed] 双段）。
+
+    S6.3 §SPEC-060a：失败只注入**插桩**运行——懒基线运行保持绿，
+    两个同名失败相对基线都是真新增，身份豁免语义按新口径成立。"""
 
     def __call__(self, *a, **k):
         r = super().__call__(*a, **k)
         cmd = " ".join(a[0])
-        if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
+        if ("gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd
+                and "-gpre_run_script=" in cmd):
             r.returncode = 1
             r.stderr = (
                 "res://tests/unit/test_game.gd\n"

@@ -395,7 +395,7 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 
 同源码 sha256、同 probe manifest 哈希、两臂 run_uuid 不同、两臂 bundle 均 valid（run_error/timeout/zero_tests/vacuous/no_probe 任一 → 臂 invalid）、两臂臂名不同（整臂替换禁拼接）、**禁平均**（`coverage=|∪C|/total`，行集并集）；任一不满足 → `valid=false` + `invalid_reason`，union=null 不出分。`comparable` 仅在两臂 recipe_hash 一致且等于 canonical recipe_hash 时 true（子集配方 false）。
 
-**臂级新增失败门控（§SPEC-060a/064b）**：`baseline_failures` 传入既有（未插桩）运行的失败 `(script, test)` 身份对集合——臂失败对逐对披露后仅**新增**失败对判臂 run_error → invalid；缺省（None）按空基线处理，任何失败即新增（fail-closed）。未归因对仅匹配未归因、同名跨脚本不互相吸收；Run Summary 段未归因回显在其归因实例被基线吸收时随同覆盖（§SPEC-064a）。带 `--test-attribution` 的归属产物可附 `baseline_failures_meta` 披露键（method/face/count/sha256/wall_s/gating），描述该基线获取方式并随增量刷新携带；键只加不改、消费者不读。
+**臂级新增失败门控（§SPEC-060a/064b）**：`baseline_failures` 传入既有（未插桩）运行的失败 `(script, test)` 身份对集合——臂失败对逐对披露后仅**新增**失败对判臂 run_error → invalid；未归因对仅匹配未归因、同名跨脚本不互相吸收；Run Summary 段未归因回显在其归因实例被基线吸收时随同覆盖（§SPEC-064a）。**产品路径懒获取**（缺省 None 时，gut_full 臂专属）：仅当插桩臂观测到失败才现场跑一次同面无插桩 GUT 取既有失败基线并复核（绿臂零额外 GUT；acceptance 臂不取基线——其失败保持可见，债归独立 issue）；显式提供优先；获取失败 fail-loud（具名 stderr + 臂保持 invalid）；现场获取不跨 run 缓存。生效基线（显式或懒获取）披露在归属产物 `baseline_failures_meta`（method/face/count/sha256/wall_s，随增量刷新携带；键只加不改、消费者不读）；映射生成/增量交付门要求 gut_full 臂 state==valid（新增失败产物拒绝交付）。
 
 ### 13.3 性能门（§SPEC-039）
 

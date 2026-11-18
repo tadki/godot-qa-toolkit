@@ -26,6 +26,7 @@ import re
 import shutil
 import stat as stat_module
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -1419,11 +1420,16 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
                           tests_face: "dict[str, str] | None",
                           arms: tuple[dict, ...], arms_attr: dict,
                           notes: list[str],
-                          instrumentable_lines: "dict[str, list[int]] | None" = None
+                          instrumentable_lines: "dict[str, list[int]] | None" = None,
+                          baseline_meta: "dict | None" = None
                           ) -> dict:
     """归属产物正文：行级主真值 + 派生视图 + 臂有效性 + 新鲜绑定
-    （recipe/文件/测试面）+ 探针面（可插桩行全集）。"""
-    return {
+    （recipe/文件/测试面）+ 探针面（可插桩行全集）。
+
+    baseline_meta：本构建生效的基线失败集披露（§SPEC-060a——显式提供或
+    懒获取的方式/对数/内容哈希/耗时）；无基线构建（绿臂零额外 GUT）为
+    None，键不出场。增量刷新经 increment 产物携带（消费者不读不改语义）。"""
+    doc = {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe_hash,
         # SEE-1581：pristine recipe hash（注入 toolchain 之前）——消费方
@@ -1445,6 +1451,9 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         "arms_state": _arms_state(arms),
         "notes": notes,
     }
+    if baseline_meta is not None:
+        doc["baseline_failures_meta"] = baseline_meta
+    return doc
 
 
 def _attribution_section(enabled: bool, arms: tuple[dict, ...],
@@ -1456,7 +1465,8 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          target_files: "list[str] | None" = None,
                          recipe_pristine_hash: str | None = None,
                          tests_face: "dict[str, str] | None" = None,
-                         prepared: "dict[str, dict] | None" = None) -> dict:
+                         prepared: "dict[str, dict] | None" = None,
+                         baseline_meta: "dict | None" = None) -> dict:
     """§SPEC-083：measurement 报告的 test_attribution 节（归属产物在
     attribution_out 非空时落盘，与报告共用同一 notes 列表）。
 
@@ -1507,7 +1517,8 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
     artifact = _attribution_artifact(
         recipe_hash, recipe_pristine_hash, project_root, causal_meta,
         file_sha256, target_files, tests_face, arms, arms_attr, notes,
-        instrumentable_lines=_instrumentable_lines_from_prepared(prepared))
+        instrumentable_lines=_instrumentable_lines_from_prepared(prepared),
+        baseline_meta=baseline_meta)
     artifact_path = None
     if attribution_out:
         out_p = Path(attribution_out)
@@ -1796,7 +1807,11 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     **新增失败对**即门控：臂 run_error → union invalid → ok=false/
     comparable=false，臂不出分。同名跨脚本不互相吸收、未归因仅匹配
     未归因；裸名字符串身份歧义 → MeasurementError（fail-closed）。
-    缺省（None）按空基线处理：任何失败都是新增（fail-closed）。
+    缺省（None）时**懒获取**：仅当 gut_full 插桩臂观测到失败，才现场
+    跑一次同面无插桩 GUT 取既有失败基线并复核（绿臂零额外 GUT；获取
+    失败 fail-loud，臂保持 invalid 具名；acceptance 臂不取基线——其
+    失败应保持可见）；显式提供优先，不做懒获取。生效基线（含懒获取
+    与显式两种方式）披露在归属产物 `baseline_failures_meta`。
 
     intolerant_config（§SPEC-061b/c）：{"tests": [{name, reason}],
     "coverage_limitations": [{file, reason}]}——声明「插桩不容忍」测试
@@ -2026,7 +2041,6 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         output = ""
         results: list[dict] = []
         xdg_homes: list[str] = []
-        arm_new_failures: list[str] = []
         # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
         reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
 
@@ -2164,40 +2178,75 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                             run_error = True
             output = "\n".join(
                 rep["out"] for r in results for rep in r["reps"])
-            # §SPEC-060a/061b/063c：新增失败门控；具名排除按 (script, test)
-            # 身份匹配（无 script 声明仅豁免未归因失败；同名跨脚本不得合并
-            # 豁免），基线按既有失败名吸收
-            def _exempt(p: tuple[str, str]) -> bool:
-                if p in declared_scoped:
-                    return True
-                return p[0] == "" and p[1] in declared_bare
-
-            # §SPEC-064a：Summary 段 ("", t) 是同 run 内已归因失败 (s, t)
-            # 的回显（同一失败的第二种披露形态）——其归因实例已被基线吸收
-            # 或声明豁免时随同覆盖；无已覆盖归因实例的未归因失败仍为新增
-            # （N-M-3 防护不弱化）
-            covered_attributed_names = {
-                t for (s, t) in arm_fail_pairs
-                if s and ((s, t) in baseline_pairs
-                          or (s, t) in declared_scoped)}
-
-            def _covered(p: tuple[str, str]) -> bool:
-                if _exempt(p) or p in baseline_pairs:
-                    return True
-                return p[0] == "" and p[1] in covered_attributed_names
-
-            new_pairs = {p for p in arm_fail_pairs if not _covered(p)}
-            exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
-            arm_new_failures = sorted({t for (_s, t) in new_pairs})
-            if new_pairs:
-                gut_ok = False
-                run_error = True
+            # §SPEC-060a 门控在树还原后统一执行（见下方）——此处只解析
+            # 失败身份对与不可归因失败（懒基线获取需要无插桩树）
         finally:
             for abs_path, original in started["files"].items():
                 Path(abs_path).write_text(original, encoding="utf-8")
             for created in started.get("created", []):
                 Path(created).unlink(missing_ok=True)
             shutil.rmtree(backup_dir, ignore_errors=True)
+
+        # §SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）：
+        # 新增失败门控；具名排除按 (script, test) 身份匹配（无 script 声明
+        # 仅豁免未归因失败；同名跨脚本不得合并豁免），基线按既有失败对吸收
+        def _exempt(p: tuple[str, str]) -> bool:
+            if p in declared_scoped:
+                return True
+            return p[0] == "" and p[1] in declared_bare
+
+        # 臂内生效基线 = 显式参数（或空）；懒获取只合并进本臂副本——
+        # acceptance 臂不得继承 gut_full 的懒基线（其失败保持可见）
+        effective_baseline = set(baseline_pairs)
+        baseline_meta: dict | None = None
+        if baseline_failures is not None:
+            baseline_meta = {"method": "explicit_param",
+                             "count": len(effective_baseline),
+                             "pairs": sorted([list(p) for p in effective_baseline]),
+                             "sha256": _pairs_sha256(effective_baseline)}
+        # §SPEC-064a：Summary 段 ("", t) 是同 run 内已归因失败 (s, t)
+        # 的回显（同一失败的第二种披露形态）——其归因实例已被基线吸收
+        # 或声明豁免时随同覆盖；无已覆盖归因实例的未归因失败仍为新增
+        # （N-M-3 防护不弱化）
+        covered_attributed_names = {
+            t for (s, t) in arm_fail_pairs
+            if s and ((s, t) in effective_baseline
+                      or (s, t) in declared_scoped)}
+
+        def _covered(p: tuple[str, str]) -> bool:
+            if _exempt(p) or p in effective_baseline:
+                return True
+            return p[0] == "" and p[1] in covered_attributed_names
+
+        new_pairs = {p for p in arm_fail_pairs if not _covered(p)}
+        exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
+        if (name == "gut_full" and new_pairs
+                and baseline_failures is None):
+            # 懒获取（成本裁定）：绿臂零额外 GUT；观测到失败且未显式提供
+            # 基线时才跑一次同面无插桩 GUT 取基线并复核。获取失败 → 具名
+            # stderr + 臂保持 invalid（fail-loud，不按空基线静默转绿）。
+            try:
+                lazy_pairs, baseline_meta = _acquire_lazy_baseline(
+                    root, _gutconfig_face_args(recipe), timeout_s)
+            except MeasurementError as e:
+                print(f"measure: {e} — observed failures stay unabsorbed; "
+                      f"arm {name} invalid (fail-loud)", file=sys.stderr)
+                baseline_meta = None
+            else:
+                effective_baseline = effective_baseline | set(lazy_pairs)
+                covered_attributed_names = {
+                    t for (s, t) in arm_fail_pairs
+                    if s and ((s, t) in effective_baseline
+                              or (s, t) in declared_scoped)}
+                new_pairs = {p for p in arm_fail_pairs if not _covered(p)}
+                print(f"measure: lazy baseline {baseline_meta['count']} "
+                      f"failing pairs acquired uninstrumented "
+                      f"({baseline_meta['wall_s']}s) — only NEW failures "
+                      f"gate the arm", file=sys.stderr)
+        arm_new_failures = sorted({t for (_s, t) in new_pairs})
+        if new_pairs:
+            gut_ok = False
+            run_error = True
 
         reconciliation = None
         arm_valid = not run_error
@@ -2315,6 +2364,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             "gut_ok": gut_ok, "timed_out": timed_out,
             "state": ("valid" if arm_valid else "invalid"),
             "invalid_reason": invalid_reason,
+            "baseline_failures_meta": baseline_meta,
             "test_failures": {"observed": sorted(arm_failures),
                               "observed_pairs": sorted(
                                   f"{s}::{t}" for (s, t) in arm_fail_pairs),
@@ -2458,7 +2508,9 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         target_files=sorted(prepared.keys()),
         recipe_pristine_hash=pristine_recipe_hash,
         tests_face=_tests_face_map(root),
-        prepared=prepared)
+        prepared=prepared,
+        baseline_meta=(arm_a.get("baseline_failures_meta")
+                       or arm_b.get("baseline_failures_meta")))
     report = {
         "report_version": REPORT_VERSION,
         "project_root": str(root),
@@ -2469,9 +2521,11 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             for arm in (arm_a, arm_b)
         ],
         "unions": unions,
-        # §SPEC-060a：双臂失败集逐名披露（observed 全集 + new 相对基线）
+        # §SPEC-060a：双臂失败集逐名披露（observed 全集 + new 相对基线）；
+        # baseline_count = gut_full 臂生效基线（显式提供或懒获取）
         "failures": {
-            "baseline_count": len(baseline_pairs),
+            "baseline_count": ((arm_a.get("baseline_failures_meta") or {})
+                               .get("count") or 0),
             "gated": any(v["new"] for v in gated_arms.values()),
             "arms": gated_arms,
         },
@@ -2758,6 +2812,52 @@ def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
         if "[Failed]" in line and current_test:
             pairs.add((current_script, current_test))
     return pairs
+
+
+def _pairs_sha256(pairs: "set[tuple[str, str]] | list") -> str:
+    """基线失败对内容哈希（披露用；排序后序列化，跨 run 可比）。"""
+    norm = sorted([list(p) for p in pairs])
+    return hashlib.sha256(
+        json.dumps(norm, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _gutconfig_face_args(recipe: dict) -> list[str]:
+    """gut_full 臂的同面无插桩参数：与分片计划同源（recipe gut_face
+    dirs 的并集）；空 dirs = GUT 读 .gutconfig 缺省面（不传 -gdir）。"""
+    dirs = list((recipe.get("gut_face") or {}).get("dirs") or [])
+    return [("-gdir=" + ",".join(dirs))] if dirs else []
+
+
+def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],
+                           timeout_s: int) -> tuple[set, dict]:
+    """§SPEC-060a/064b 懒基线获取（产品路径唯一实现——ensure_map 的
+    归属构建与 measure run --test-attribution 都经 run_measurement 门控
+    消费，harness 复用同一 helper 不另设第二套）。
+
+    触发条件在门控侧：仅当 gut_full 插桩臂观测到失败且调用方未显式
+    提供基线时，跑一次**同面、无插桩** GUT 取既有失败 (script, test)
+    对（共享 _run_one_gut 通道，零探针零钩子；现场获取，不跨 run
+    缓存）。无运行流 / 启动失败 → MeasurementError（fail-loud，绝不
+    按空基线静默继续）。"""
+    t0 = time.monotonic()
+    r, _w = _run_one_gut(project_root, list(gut_args), timeout_s)
+    out = (r.stdout or "") + "\n" + (r.stderr or "")
+    if _looks_like_godot_launch_failure(out) or (
+            "Run Summary" not in out and "[Failed]" not in out
+            and "[Passed]" not in out):
+        raise MeasurementError(
+            "lazy baseline acquisition failed: uninstrumented GUT run "
+            f"has no run stream (rc={r.returncode}) — refusing empty "
+            "baseline (§SPEC-060a fail-loud)")
+    pairs = _parse_failing_pairs(out)
+    face = "gutconfig_default"
+    if gut_args and gut_args[0].startswith("-gdir="):
+        face = gut_args[0].split("=", 1)[1]
+    meta = {"method": "uninstrumented_run", "lazy": True, "face": face,
+            "pairs": sorted([list(p) for p in pairs]),
+            "count": len(pairs), "sha256": _pairs_sha256(pairs),
+            "wall_s": round(time.monotonic() - t0, 3)}
+    return pairs, meta
 
 
 def _acceptance_convergence(root: Path, run_uuid: str, sink_by_rel: dict,

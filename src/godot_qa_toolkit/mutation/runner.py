@@ -334,44 +334,14 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
         }
     return estimate
 
-def _run_mutation_core(file_path: str,
-    project_root: str,
-    budget: int = 50,
-    timeout_s: int = 60,
-    dry_run: bool = False,
-    tests_glob: str | None = None,
-    precomputed_baseline: dict | None = None,
-    mutant_slice: tuple[int, int] | None = None,
-    timing_store=None,
-    binary_kind: str | None = None,
-    mutation_warning: int | None = None,
-    timeout_factor: float | None = None,
-    mutate_all: bool = False,
-    retry_ids: list[str] | None = None,
-    resume2_store=None,
-    select_ids: list[str] | None = None,
-    select_lines: list[int] | None = None,
-    reuse_coverage: bool = True,
-    progress: dict | None = None,
-    identity: dict | None = None,
-    worker_channel: bool | None = None,
-    select_mode: str = "full",
-    selection_meta: dict | None = None,
-) -> dict:
-    """对单个 .gd 文件做变异测试并出统一 JSON 契约。分解见 _core_setup/
-    _core_select_and_early_out/_core_plan_phase + _execute_planned。"""
-    _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
-    clock = StageClock()
-    setup_error, c = _core_setup(
-        file_path, project_root, tests_glob, binary_kind, worker_channel,
-        identity, selection_meta, select_mode, clock, mutation_warning)
-    if setup_error is not None:
-        return setup_error
-    path, original_src = c["path"], c["original_src"]
-    tests_glob, selection_meta = c["tests_glob"], c["selection_meta"]
-    identity = c["identity"]
-    scoped = tests_glob is not None
-    backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
+def _core_caliper_and_early(c: dict, project_root: str, path: Path, *,
+                            select_ids, select_lines, select_mode, dry_run,
+                            budget, binary_kind, resume2_store, mutate_all,
+                            identity) -> tuple:
+    """卡尺选面 + dry-run / 零位点两个早退出口。返回 (early_or_None,
+    tests_glob, selection_meta)。"""
+    tests_glob = c["tests_glob"]
+    selection_meta = c["selection_meta"]
     # SEE-1587：卡尺行级测试面（--mutation/--lines 默认 line 模式）。
     selection_meta, tests_glob = _core_caliper(
         project_root, path, mutants=c["mutants"], select_ids=select_ids,
@@ -379,16 +349,27 @@ def _run_mutation_core(file_path: str,
         selection_meta=selection_meta, tests_glob=tests_glob)
     scoped = tests_glob is not None
     if dry_run:
-        return _core_dry_run(
+        return (_core_dry_run(
             path, c["mutants"], budget, scoped, c["total_sites"],
             project_root, tests_glob, binary_kind, resume2_store, mutate_all,
             c["header_hash"], c["scope_hashes"], c["attention"], identity,
-            selection_meta, select_ids, select_lines, select_mode)
+            selection_meta, select_ids, select_lines, select_mode),
+            tests_glob, selection_meta)
     if not c["mutants"]:
-        return _no_sites_result(str(path), scoped,
-                                zero_ref=bool(selection_meta.get("zero_ref")))
-    # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行
-    # retry_ids；显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分。
+        return (_no_sites_result(str(path), scoped,
+                                 zero_ref=bool(selection_meta.get("zero_ref"))),
+                tests_glob, selection_meta)
+    return None, tests_glob, selection_meta
+
+
+def _core_plan(c: dict, path: Path, project_root: str, original_src: str, *,
+               tests_glob, budget, binary_kind, resume2_store, mutate_all,
+               retry_ids, select_ids, select_lines, reuse_coverage,
+               mutant_slice, identity, clock, selection_meta) -> "tuple | None":
+    """P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行
+    retry_ids；显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分。
+    返回 (store2, prior_entries, reused, untouched, disclosures,
+    executed_list, results_uncovered)；零执行且零复用 → None（零 GUT）。"""
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
         project_root, str(path), tests_glob, binary_kind=binary_kind,
         identity=identity)
@@ -404,7 +385,7 @@ def _run_mutation_core(file_path: str,
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
     if not executed_list and not reused:
-        return _no_sites_result(str(path), scoped)
+        return None
     from .testscan import selection_disclosure
     # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
     disclosures.update(selection_disclosure(selection_meta))
@@ -413,15 +394,60 @@ def _run_mutation_core(file_path: str,
         # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid
         # 预检后以 actually_executed 覆写（实际执行语义的唯一出处）。
         disclosures.setdefault("executed", len(executed_list))
-    return _execute_planned(
-        path, project_root, original_src, backup, c["mutants"], executed_list,
-        reused, results_uncovered, prior_entries, c["scope_hashes"],
-        disclosures, budget, tests_glob, timing_store, timeout_s,
-        precomputed_baseline, store2, timeout_factor, c["header_hash"],
-        retry_ids, scoped, c["total_sites"], progress=progress,
-        identity=identity, targeted_only=bool(select_ids or select_lines),
-        worker_channel=worker_channel, clock=clock)
+    return (store2, prior_entries, reused, untouched, disclosures,
+            executed_list, results_uncovered)
 
+
+def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
+    timeout_s: int = 60, dry_run: bool = False,
+    tests_glob: str | None = None,
+    precomputed_baseline: dict | None = None,
+    mutant_slice: tuple[int, int] | None = None, timing_store=None,
+    binary_kind: str | None = None, mutation_warning: int | None = None,
+    timeout_factor: float | None = None, mutate_all: bool = False,
+    retry_ids: list[str] | None = None, resume2_store=None,
+    select_ids: list[str] | None = None, select_lines: list[int] | None = None,
+    reuse_coverage: bool = True, progress: dict | None = None,
+    identity: dict | None = None, worker_channel: bool | None = None,
+    select_mode: str = "full", selection_meta: dict | None = None) -> dict:
+    """对单个 .gd 文件做变异测试并出统一 JSON 契约。分解见 _core_setup/
+    _core_caliper_and_early/_core_plan + _execute_planned。"""
+    _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
+    clock = StageClock()
+    setup_error, c = _core_setup(
+        file_path, project_root, tests_glob, binary_kind, worker_channel,
+        identity, selection_meta, select_mode, clock, mutation_warning)
+    if setup_error is not None:
+        return setup_error
+    path, original_src, identity = c["path"], c["original_src"], c["identity"]
+    early, tests_glob, selection_meta = _core_caliper_and_early(
+        c, project_root, path, select_ids=select_ids,
+        select_lines=select_lines, select_mode=select_mode, dry_run=dry_run,
+        budget=budget, binary_kind=binary_kind, resume2_store=resume2_store,
+        mutate_all=mutate_all, identity=identity)
+    if early is not None:
+        return early
+    scoped = tests_glob is not None
+    plan = _core_plan(
+        c, path, project_root, original_src, tests_glob=tests_glob,
+        budget=budget, binary_kind=binary_kind, resume2_store=resume2_store,
+        mutate_all=mutate_all, retry_ids=retry_ids, select_ids=select_ids,
+        select_lines=select_lines, reuse_coverage=reuse_coverage,
+        mutant_slice=mutant_slice, identity=identity, clock=clock,
+        selection_meta=selection_meta)
+    if plan is None:
+        return _no_sites_result(str(path), scoped)
+    (store2, prior_entries, reused, untouched, disclosures, executed_list,
+     results_uncovered) = plan
+    return _execute_planned(
+        path, project_root, original_src, original_src, c["mutants"],
+        executed_list, reused, results_uncovered, prior_entries,
+        c["scope_hashes"], disclosures, budget, tests_glob, timing_store,
+        timeout_s, precomputed_baseline, store2, timeout_factor,
+        c["header_hash"], retry_ids, scoped, c["total_sites"],
+        progress=progress, identity=identity,
+        targeted_only=bool(select_ids or select_lines),
+        worker_channel=worker_channel, clock=clock)
 def _execute_planned(path, project_root, original_src, backup, mutants,
                      executed_list, reused, results_uncovered, prior_entries,
                      scope_hashes, disclosures, budget, tests_glob,

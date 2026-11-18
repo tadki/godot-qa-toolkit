@@ -21,11 +21,6 @@ from pathlib import Path
 _RES_REF_PATTERN = re.compile(r'\b(?:preload|load)\s*\(\s*"([^"]+)"\s*\)')
 
 # 判定“测试目录”的候选 glob 起点——扫描只在这棵树内做，误扫到 src/ 会命中自身
-_TESTS_DIR_NAME = "tests"
-
-
-def _res_canonical(res_path: str) -> str:
-    return res_path.strip().casefold()
 
 
 def scan_test_refs(target_res_path: str, tests_dir: Path) -> list[str]:

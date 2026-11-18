@@ -42,8 +42,6 @@ GATE_CLOSURE_FRESHNESS = "closure_freshness_gate"
 # 先刷、承载者后刷；本模型以「引用者深度」的逆序 + 路径全序做确定性排序
 # （同 Harti J3 的 stable-id 对应口径，顺序门只要求确定且全 rc=0）。
 ORDER_OK = 0
-ERR_PARSE = 43
-ERR_ALREADY_IN_USE = 22
 
 
 @dataclass
@@ -100,15 +98,6 @@ class ResetProtocolModel:
         **不**触碰 cache——污染态响应不得依赖它（J3 [1]≠[6] 实证）。"""
         self.instances = set()
         self.init_count = 0
-
-
-class GateViolation(Exception):
-    """门 fire 的模型化载体（fields = 违约明细）。"""
-
-    def __init__(self, gate: str, detail: dict):
-        self.gate = gate
-        self.detail = detail
-        super().__init__(f"{gate} fired: {detail}")
 
 
 def static_hash_gate(model: ResetProtocolModel) -> dict:

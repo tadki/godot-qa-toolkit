@@ -323,8 +323,165 @@ def scan_dual_truth(repo_root: Path) -> tuple[dict, list[dict]]:
     return evidence, evidence["violations"]
 
 
+# §SPEC-009 死代码扫描域（四域）与契约登记的 deferred 豁免。
+DEAD_CODE_DOMAINS = ("mutation", "risk", "coverage", "measurement")
+DEFERRED_MODULES = {
+    "src/godot_qa_toolkit/fsprobe.py": (
+        "contract.md §8 deferred 登记（SEE-1463 §SPEC-004）：生产零调用方、"
+        "未接线进任何判据——deferred 模块不得误删"),
+}
+_IMPORT_NOISE = {"__all__", "__version__", "__name__", "__main__"}
+
+
+def _defs_and_refs(files: list[Path]) -> tuple[list[dict], dict]:
+    """AST 定义收集 + 名称引用索引（Name load / Attribute / ImportFrom）。
+
+    返回 (definitions, refs)；refs[name] = [{file,line}]（全量，含定义行，
+    统计时按 (file,line) 去重排除定义自身）。"""
+    import ast
+    defs: list[dict] = []
+    refs: dict[str, list[dict]] = {}
+
+    def _add(name: str, rel: str, line: int) -> None:
+        refs.setdefault(name, []).append({"file": rel, "line": line})
+
+    def walk(node, rel: str) -> None:
+        import ast as _ast
+        for child in _ast.walk(node):
+            if isinstance(child, _ast.Name) and isinstance(
+                    child.ctx, _ast.Load):
+                _add(child.id, rel, child.lineno)
+            elif isinstance(child, _ast.Attribute) and isinstance(
+                    child.ctx, _ast.Load):
+                _add(child.attr, rel, child.lineno)
+            elif isinstance(child, _ast.ImportFrom):
+                for a in child.names:
+                    _add(a.name, rel, child.lineno)
+            elif isinstance(child, _ast.Import):
+                for a in child.names:
+                    book = a.asname or a.name.split(".")[0]
+                    _add(book, rel, child.lineno)
+
+    for py in files:
+        rel = py.relative_to(REPO_ROOT).as_posix() if REPO_ROOT in py.parents \
+            else str(py)
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs.append({"name": node.name, "file": rel,
+                             "line": node.lineno, "kind": "function"})
+            elif isinstance(node, ast.ClassDef):
+                defs.append({"name": node.name, "file": rel,
+                             "line": node.lineno, "kind": "class"})
+            elif isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name) and \
+                            tgt.id.isupper() and tgt.id not in _IMPORT_NOISE:
+                        defs.append({"name": tgt.id, "file": rel,
+                                     "line": node.lineno, "kind": "constant"})
+        walk(tree, rel)
+    return defs, refs
+
+
+def scan_dead_code(repo_root: Path) -> dict:
+    """§SPEC-009：四域死代码清单（AST 语义引用 + grep 文本引用双证）。
+
+    classification:
+    - deferred_keep：契约登记 deferred 模块（不删）；
+    - dead_candidate：src 与 tests 均零引用（可物理删除）；
+    - test_only_reference：src 零引用、tests 有引用（pin/夹具依赖，逐项裁定）；
+    - alive：src 有引用。
+    ok 条件 = 无 dead_candidate（清单随报告落盘）。"""
+    src_root = repo_root / "src" / "godot_qa_toolkit"
+    domain_files = sorted(
+        p for d in DEAD_CODE_DOMAINS
+        for p in (src_root / d).rglob("*.py") if p.is_file())
+    all_src = sorted(p for p in src_root.rglob("*.py") if p.is_file())
+    test_files = sorted(p for p in (repo_root / "tests").rglob("*.py")
+                        if p.is_file())
+
+    defs, src_refs = _defs_and_refs(all_src)
+    _td, test_refs = _defs_and_refs(test_files)
+
+    items: list[dict] = []
+    dead: list[dict] = []
+    test_only: list[dict] = []
+    for d in defs:
+        rel = d["file"]
+        if not rel.startswith("src/godot_qa_toolkit/"):
+            continue
+        domain = rel.split("/")[2]
+        if domain not in DEAD_CODE_DOMAINS:
+            continue
+        # AST 引用（排除定义自身那一行）
+        ast_src = [r for r in src_refs.get(d["name"], [])
+                   if not (r["file"] == rel and r["line"] == d["line"])]
+        ast_tests = test_refs.get(d["name"], [])
+        # grep 双证：词边界文本引用（含字符串/动态引用面）
+        import re as _re
+        pat = _re.compile(rf"\b{_re.escape(d['name'])}\b")
+        grep_src = 0
+        for p in all_src:
+            try:
+                for no, line in enumerate(
+                        p.read_text(encoding="utf-8").splitlines(), 1):
+                    if pat.search(line) and not (
+                            p.as_posix().endswith(rel)
+                            and no == d["line"]):
+                        grep_src += 1
+            except (OSError, UnicodeDecodeError):
+                continue
+        grep_tests = 0
+        for p in test_files:
+            try:
+                grep_tests += len(pat.findall(p.read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                continue
+        if rel in DEFERRED_MODULES:
+            cls = "deferred_keep"
+        elif not ast_src and not grep_src:
+            cls = "dead_candidate" if grep_tests == 0 else "test_only_reference"
+        else:
+            cls = "alive"
+        item = {"name": d["name"], "kind": d["kind"], "file": rel,
+                "line": d["line"], "domain": domain,
+                "ast_refs_src": len(ast_src),
+                "ast_refs_tests": len(ast_tests),
+                "grep_refs_src": grep_src, "grep_refs_tests": grep_tests,
+                "classification": cls,
+                "deferred_reason": DEFERRED_MODULES.get(rel)}
+        if cls in ("dead_candidate", "test_only_reference"):
+            item["ast_ref_files_src"] = sorted(
+                {r["file"] for r in ast_src})
+            item["grep_sample"] = [
+                {"file": r["file"], "line": r["line"]}
+                for r in (ast_src + ast_tests)[:5]]
+        items.append(item)
+        if cls == "dead_candidate":
+            dead.append(item)
+        elif cls == "test_only_reference":
+            test_only.append(item)
+    return {
+        "tool": "see1594.governance",
+        "mode": "dead-code",
+        "ok": not dead,
+        "domains": list(DEAD_CODE_DOMAINS),
+        "deferred_modules": DEFERRED_MODULES,
+        "items": items,
+        "dead_candidates": dead,
+        "test_only_reference": test_only,
+        "failures": [{"reason": f"dead candidate: {i['file']}:{i['line']} "
+                                f"{i['kind']} {i['name']}"} for i in dead],
+    }
+
+
 def run(mode: str, repo_root: Path | None = None) -> dict:
     root = repo_root or REPO_ROOT
+    if mode == "dead-code":
+        return scan_dead_code(root)
     if mode != "semantics":
         return {"tool": "see1594.governance", "ok": False,
                 "failures": [{"reason": f"unknown mode: {mode}"}]}
@@ -358,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="SEE-1594 §SPEC-027 governance scan")
     parser.add_argument("--mode", default="semantics",
-                        choices=["semantics"])
+                        choices=["semantics", "dead-code"])
     parser.add_argument("--out", required=True, help="JSON 报告输出路径")
     parser.add_argument("--repo-root", default=None,
                         help="仓库根（缺省=本脚本所在仓库）")

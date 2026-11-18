@@ -67,9 +67,6 @@ _OUTPUT_SUBTREE = ".godot"
 _GUT_CONFIG = ".gutconfig.json"
 _JUNIT_KEY = "junit_xml_file"
 
-_TREE_AMBIGUITY = "tree-ambiguity"
-
-
 class TreeAmbiguity(Exception):
     """扫描/解析歧义（fail-closed：本轮不得签发、不得跳过）。"""
 

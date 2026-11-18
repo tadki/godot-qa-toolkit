@@ -159,30 +159,6 @@ def _pairs_sha256(pairs: "set[tuple[str, str]] | list") -> str:
     return hashlib.sha256(
         json.dumps(norm, ensure_ascii=False).encode("utf-8")).hexdigest()
 
-def _acceptance_convergence(root: Path, run_uuid: str, sink_by_rel: dict,
-                            manifest_by_rel: dict, results: list,
-                            reps: int) -> dict:
-    """§SPEC-062C：验收臂逐轮行集并集收敛——min k s.t. ∪(1..k) ==
-    ∪(1..N)。k<N 即收敛（其后轮零新增）；k==N 如实报告未收敛与上界。"""
-    n_reps = min(reps, min(len(r["reps"]) for r in results) if results else 0)
-    worst = 0
-    for rel in sink_by_rel:
-        manifest = manifest_by_rel[rel]
-        cum: set[int] = set()
-        cum_seq: list[frozenset] = []
-        for i in range(n_reps):
-            rep_xdgs = [r["reps"][i]["xdg"] for r in results]
-            hits, _ = _read_hits_merged(root, run_uuid, rel, manifest,
-                                        rep_xdgs, consume=False)
-            cum |= set(hits)
-            cum_seq.append(frozenset(cum))
-        final = cum_seq[-1] if cum_seq else frozenset()
-        k = next((i + 1 for i, s in enumerate(cum_seq) if s == final),
-                 n_reps)
-        worst = max(worst, k)
-    return {"rounds_used": worst, "bound": reps, "converged": worst < reps}
-
-
 def _attach_limitation_reasons(records: list, limitations: list) -> None:
     """§SPEC-061c：unstable 记录命中声明的覆盖限制文件 → 具名理由写入
     provenance.stability_reason（不得静默、不得伪造确定性）。"""

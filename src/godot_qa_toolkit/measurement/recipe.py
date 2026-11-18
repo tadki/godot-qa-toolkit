@@ -112,6 +112,49 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
     return normalized, None
 
 
+def _recipe_gut_face(gutconfig: dict, dirs: list[str],
+                     normalized_exclusions: list[dict], root: Path) -> dict:
+    """gut_face 块组装（gutconfig 原文整体入 hash——换 recipe 是显式来源事件）。"""
+    return {
+        "config_source": _GUTCONFIG,
+        "config_sha256": _sha256_file(root / _GUTCONFIG),
+        "gutconfig_raw": gutconfig,
+        "dirs": dirs,
+        "include_subdirs": bool(gutconfig.get("include_subdirs", False)),
+        "prefix": gutconfig.get("prefix", "test_"),
+        "excluded": [
+            {"pattern": x["entry"], "reason": x["reason"]}
+            for x in normalized_exclusions
+            if x["scope"] == "gut_dir"
+        ],
+    }
+
+
+def _recipe_acceptance_face(features: list, feature_count: int,
+                            normalized_exclusions: list[dict],
+                            root: Path, ops_version: str) -> dict:
+    """acceptance_face 块组装（harness wiring sha256 缺文件 → "missing"）。"""
+    harness = {
+        "worker": "generated/accept_worker.gd",
+        "ops_version": ops_version,
+        "wiring_sha256": _sha256_file(
+            root / "acceptance" / "harness" / "harness.gd"
+        )
+        if (root / "acceptance" / "harness" / "harness.gd").is_file()
+        else "missing",
+    }
+    return {
+        "features": features,
+        "count": feature_count,
+        "excluded": [
+            {"key": x["entry"], "reason": x["reason"]}
+            for x in normalized_exclusions
+            if x["scope"] == "acceptance_feature"
+        ],
+        "harness": harness,
+    }
+
+
 def build_recipe(
     project_root: str | Path,
     exclusions: list[dict] | None = None,
@@ -131,70 +174,28 @@ def build_recipe(
     normalized_exclusions, error = _legal_exclusions(exclusions)
     if error is not None:
         return None, error
-
     gutconfig, error = load_gutconfig(root)
     if error is not None:
         return None, error
-
     dirs = gutconfig.get("dirs", [])
-    # §SPEC-068：与 verify 同一规则——dirs 必须是非空字符串列表，否则
-    # build 会产出被自家 measurement 校验拒绝的 recipe
+    # §SPEC-068：与 verify 同一规则——dirs 必须是非空字符串列表。
     if not isinstance(dirs, list) or not all(
             isinstance(d, str) and d.strip() for d in dirs):
         return None, "gutconfig 'dirs' must be a list of non-empty strings"
     if not dirs:
         return None, "gutconfig has no dirs — empty GUT face is not a valid measurement suite"
-
     features, feature_count, error = scan_acceptance_features(root)
     if error is not None:
         return None, error
     if feature_count == 0:
         return None, "acceptance/features has no .feature files"
-
-    harness = {
-        "worker": "generated/accept_worker.gd",
-        "ops_version": ops_version,
-        "wiring_sha256": _sha256_file(
-            root / "acceptance" / "harness" / "harness.gd"
-        )
-        if (root / "acceptance" / "harness" / "harness.gd").is_file()
-        else "missing",
-    }
-
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "project_root": str(root),
-        "gut_face": {
-            "config_source": _GUTCONFIG,
-            "config_sha256": _sha256_file(root / _GUTCONFIG),
-            # the whole gutconfig (scan keys + exclusions原文) hashes into the
-            # recipe — "换 recipe" is an explicit provenance event
-            "gutconfig_raw": gutconfig,
-            "dirs": dirs,
-            "include_subdirs": bool(gutconfig.get("include_subdirs", False)),
-            "prefix": gutconfig.get("prefix", "test_"),
-            "excluded": [
-                {
-                    "pattern": x["entry"],
-                    "reason": x["reason"],
-                }
-                for x in normalized_exclusions
-                if x["scope"] == "gut_dir"
-            ],
-        },
-        "acceptance_face": {
-            "features": features,
-            "count": feature_count,
-            "excluded": [
-                {
-                    "key": x["entry"],
-                    "reason": x["reason"],
-                }
-                for x in normalized_exclusions
-                if x["scope"] == "acceptance_feature"
-            ],
-            "harness": harness,
-        },
+        "gut_face": _recipe_gut_face(gutconfig, dirs, normalized_exclusions,
+                                     root),
+        "acceptance_face": _recipe_acceptance_face(
+            features, feature_count, normalized_exclusions, root, ops_version),
         "toolchain": {
             "gqt_version": gqt_version,
             "ops_version": ops_version,
@@ -208,7 +209,6 @@ def build_recipe(
     recipe["recipe_hash"] = recipe_hash(recipe)
     return recipe, None
 
-
 def recipe_hash(recipe: dict) -> str:
     """Recompute the hash over the recipe minus its own recipe_hash AND
     project_root — the checkout path is provenance, not a measured face
@@ -219,21 +219,49 @@ def recipe_hash(recipe: dict) -> str:
     return canonical_sha256(basis)
 
 
-def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
-    """Verify a loaded recipe: version tag, exclusion legality, consumed
-    face shapes, hash match.
+def _verify_hash(recipe: dict) -> "tuple[bool, str | None]":
+    """recipe_hash 现算对照（§SPEC-041 L2 同内容同 hash）。"""
+    if recipe.get("recipe_hash") != recipe_hash(recipe):
+        return False, "recipe_hash mismatch — recipe was modified after hashing"
+    return True, None
 
-    §SPEC-066/067：recipe 是外部 JSON 输入——根、exclusions、
-    gut_face / acceptance_face / features / key / toolchain 等**全部下游
-    直接消费字段**必须在启动编排/注入前完成系统校验（而非在下游异常点
-    逐个兜底）；非法形状一律 not-ok + reason（上层编排器转
-    MeasurementError、CLI 转 tool JSON ok=false），绝不泄漏
-    AttributeError/TypeError/KeyError。"""
-    if not isinstance(recipe, dict):
-        return False, (f"recipe must be a JSON object, "
-                       f"got {type(recipe).__name__} (§SPEC-066)")
-    if recipe.get("recipe_version") != RECIPE_VERSION:
-        return False, f"recipe_version mismatch: {recipe.get('recipe_version')}"
+
+def _verify_faces(recipe: dict) -> "tuple[list, list] | tuple[None, str]":
+    """双 face 结构校验（§SPEC-067）+ dirs 非空 strip 规则（§SPEC-068/R23）。
+    返回 (dirs, features) 或 (None, 原因)。"""
+    gut_face = recipe.get("gut_face")
+    if not isinstance(gut_face, dict):
+        return None, (f"recipe 'gut_face' must be an object, "
+                      f"got {gut_face!r} (§SPEC-067)")
+    dirs = gut_face.get("dirs")
+    # §SPEC-068/R23：与 build 侧同一 strip 非空规则——纯空白元素
+    # （如 "   "）不得因 truthy 而被放行
+    if not isinstance(dirs, list) or not all(
+            isinstance(d, str) and d.strip() for d in dirs):
+        return None, (f"recipe 'gut_face.dirs' must be a list of "
+                      f"non-empty strings, got {dirs!r} (§SPEC-067)")
+    acceptance_face = recipe.get("acceptance_face")
+    if not isinstance(acceptance_face, dict):
+        return None, (f"recipe 'acceptance_face' must be an object, "
+                      f"got {acceptance_face!r} (§SPEC-067)")
+    features = acceptance_face.get("features")
+    if not isinstance(features, list):
+        return None, (f"recipe 'acceptance_face.features' must be a list, "
+                      f"got {features!r} (§SPEC-067)")
+    for feature in features:
+        if not isinstance(feature, dict):
+            return None, (f"recipe acceptance feature must be an object, "
+                          f"got {feature!r} (§SPEC-067)")
+        key = feature.get("key")
+        if not isinstance(key, str) or not key.strip():
+            return None, (f"recipe acceptance feature 'key' must be a "
+                          f"non-empty string, got {key!r} (§SPEC-067)")
+    return dirs, features
+
+
+def _verify_exclusions(recipe: dict) -> "tuple[bool, str | None]":
+    """exclusions 行校验（§SPEC-066/067）：scope/entry/reason 与 build 侧
+    同规则——缺失、空白、非 str、非法 scope 一律拒绝。"""
     rows = recipe.get("exclusions", [])
     if not isinstance(rows, list):
         return False, (f"recipe 'exclusions' must be a list, "
@@ -242,8 +270,6 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         if not isinstance(row, dict):
             return False, (f"exclusion row must be an object, "
                            f"got {row!r} (§SPEC-066)")
-        # §SPEC-067：scope/entry 与 build 侧同规则——缺失、空白、非 str、
-        # 非法 scope 一律拒绝（原 verify 只查 reason，hash 合法即可静默放行）
         scope = row.get("scope")
         if not isinstance(scope, str) or not scope:
             return False, (f"exclusion scope must be a non-empty string, "
@@ -261,6 +287,25 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
                            f"got {reason!r} (§SPEC-066)")
         if not reason.strip():
             return False, f"exclusion without reason: {row!r}"
+    return True, None
+
+
+def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
+    """Verify a loaded recipe: version tag, exclusion legality, consumed
+    face shapes, hash match.
+
+    §SPEC-066/067：recipe 是外部 JSON 输入——全部下游直接消费字段必须在
+    启动编排/注入前完成系统校验；非法形状一律 not-ok + reason（上层编排器
+    转 MeasurementError、CLI 转 tool JSON ok=false），绝不泄漏
+    AttributeError/TypeError/KeyError。"""
+    if not isinstance(recipe, dict):
+        return False, (f"recipe must be a JSON object, "
+                       f"got {type(recipe).__name__} (§SPEC-066)")
+    if recipe.get("recipe_version") != RECIPE_VERSION:
+        return False, f"recipe_version mismatch: {recipe.get('recipe_version')}"
+    ok, reason = _verify_exclusions(recipe)
+    if not ok:
+        return False, reason
     try:
         current_hash = recipe_hash(recipe)
     except (TypeError, ValueError) as e:
@@ -269,36 +314,11 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
     if recipe.get("recipe_hash") != current_hash:
         return False, "recipe_hash mismatch — recipe was modified after hashing"
     # §SPEC-067：编排/分片/feature key 展开的下游直接消费面
-    gut_face = recipe.get("gut_face")
-    if not isinstance(gut_face, dict):
-        return False, (f"recipe 'gut_face' must be an object, "
-                       f"got {gut_face!r} (§SPEC-067)")
-    dirs = gut_face.get("dirs")
-    # §SPEC-068/R23：与 build 侧同一 strip 非空规则——纯空白元素
-    # （如 "   "）不得因 truthy 而被放行
-    if not isinstance(dirs, list) or not all(
-            isinstance(d, str) and d.strip() for d in dirs):
-        return False, (f"recipe 'gut_face.dirs' must be a list of "
-                       f"non-empty strings, got {dirs!r} (§SPEC-067)")
-    acceptance_face = recipe.get("acceptance_face")
-    if not isinstance(acceptance_face, dict):
-        return False, (f"recipe 'acceptance_face' must be an object, "
-                       f"got {acceptance_face!r} (§SPEC-067)")
-    features = acceptance_face.get("features")
-    if not isinstance(features, list):
-        return False, (f"recipe 'acceptance_face.features' must be a list, "
-                       f"got {features!r} (§SPEC-067)")
-    for feature in features:
-        if not isinstance(feature, dict):
-            return False, (f"recipe acceptance feature must be an object, "
-                           f"got {feature!r} (§SPEC-067)")
-        key = feature.get("key")
-        if not isinstance(key, str) or not key.strip():
-            return False, (f"recipe acceptance feature 'key' must be a "
-                           f"non-empty string, got {key!r} (§SPEC-067)")
+    dirs, features = _verify_faces(recipe)
+    if dirs is None:
+        return False, features
     # §SPEC-068：空 features/dirs 拒绝（与 build 侧非空要求一致）。空性
-    # 检查排在面结构检查之后——调用方优先拿到最具体的结构错误（face
-    # 类型错不被另一面的空列表抢先）
+    # 检查排在面结构检查之后——调用方优先拿到最具体的结构错误。
     if not dirs:
         return False, (f"recipe 'gut_face.dirs' must be a non-empty list "
                        f"of non-empty strings, got {dirs!r} (§SPEC-068)")

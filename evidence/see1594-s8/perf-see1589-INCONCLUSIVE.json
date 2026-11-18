@@ -1,0 +1,23 @@
+{
+  "tool": "see1594.spec008_perf",
+  "status": "INCONCLUSIVE",
+  "verdict_rule": "无法执行/噪声过大记 INCONCLUSIVE，不得写成改善（Atlas S8 派单口径）",
+  "kol_commit": "79265a5e",
+  "protocol_attempted": "run_see1589_benchmark.py --targets utils systems --rounds 3 --budget 4（A/A 冷 ≥3 + 交错 cold/worker ≥3，--timeout-s 2400）",
+  "outcome": "全部轮次在 map 构建/刷新阶段 fail-loud 中止——未产生任何真实 mutation 执行计时",
+  "deterministic_failures": [
+    {
+      "file": "systems_container_data_source.gd__aa__2.json",
+      "wall_s": 387.732,
+      "rc": 1,
+      "ok": false,
+      "error_head": "generated mapping has invalid arms (gut_full arm invalid (state='invalid', reason='run_error') — new failures gate the build (§SPE"
+    }
+  ],
+  "root_cause": "KOL 79265a5e（pre-SEE-1599）在 utils+systems 插桩面下，插桩臂观测到超出懒基线（2 对）的新失败 → §SPEC-060a 新增失败门控判臂 invalid → ensure_map 拒绝交付 → mutation fail-loud。两次独立尝试（541.9s / 387.7s 调用）同型失败 = 确定性，非噪声。",
+  "context": "SEE-1599 已在 KOL master（ac6a7282, PR #700）清零 53 条存量失败——更新 KOL 后懒基线自然为空集，该面构建应可通过；是否在更新后的 KOL master 上重跑性能，归 Leader 裁定。",
+  "harness_fixes_in_this_round": [
+    "run_one 900s 固定超时不可配置且 TimeoutExpired 直接炸掉整个 benchmark → 现 --timeout-s 可配 + 超时轮具名记录继续（不中断协议）",
+    "fresh 副本首轮含 map 全量构建（懒基线+插桩 ~200s+），900s 不够（实测 541.9s 仅到构建段即失败）"
+  ]
+}

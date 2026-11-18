@@ -749,11 +749,6 @@ def _err_envelope(file: str, message: str, *,
             "failures": [{"reason": message}]}
 
 
-def _map_probes_fired(doc) -> "int | None":
-    return ((doc.get("arms_state") or {}).get("gut_full") or {}).get(
-        "probes_fired")
-
-
 def _write_failure_evidence(evidence_out, file_path, gd_source, tests_glob,
                             message) -> "str | None":
     """失败也产出 coverage-evidence/2（gut_ok=False / run_error=True /

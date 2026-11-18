@@ -255,14 +255,6 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
     }
 
 
-def _invert(m: dict) -> dict[str, list[str]]:
-    inv: dict[str, set[str]] = {}
-    for k, vals in m.items():
-        for v in vals:
-            inv.setdefault(v, set()).add(k)
-    return {k: sorted(v) for k, v in sorted(inv.items())}
-
-
 def run_attribution_increment(project_root: str | Path,
                               target_files: list[str], recipe: dict,
                               baseline_path: str | Path,

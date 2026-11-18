@@ -765,17 +765,6 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
             "tests": scripts, "tests_glob": sel_dir}
 
 
-def resolve_line_selection(project_root: str | Path, target_file: str,
-                           line: int,
-                           file_selection: dict | None = None,
-                           map_path_override: str | None = None,
-                           strict: bool = True) -> dict:
-    """单行行级选面（resolve_line_group_selection 的单行入口）。"""
-    return resolve_line_group_selection(
-        project_root, target_file, {int(line)}, file_selection,
-        map_path_override, strict)
-
-
 def resolve_function_selection(project_root: str | Path, target_file: str,
                                fid: str,
                                file_selection: dict | None = None,
@@ -870,16 +859,6 @@ def materialize_selection(project_root: str, scripts: list[str]) -> str:
             wrapper.write_text(
                 f'extends "{res_path}"\n', encoding="utf-8")
     return f"res://{SELECT_ROOT}/{sel_id}/"
-
-
-def cleanup_stale_selections(project_root: str, keep: set[str] | None = None) -> None:
-    """清理不再被引用的选择目录（保留 keep 中的 sel-id）。"""
-    base = Path(project_root) / SELECT_ROOT
-    if not base.is_dir():
-        return
-    for d in base.iterdir():
-        if d.is_dir() and (keep is None or d.name not in keep):
-            shutil.rmtree(d, ignore_errors=True)
 
 
 class RuntimeOwnership:

@@ -124,6 +124,22 @@ def _records_for_file(
     return records
 
 
+def _per_entry_state(c_row: dict, i_row: dict, lambda_gap: int,
+                     stale: bool) -> dict:
+    """§8-4 车道链：stale → lambda_gap(cc_unmeasured) → total>0 scored →
+    else unknown（无分母不臆造分数）。"""
+    if stale:
+        return {"covered": None, "total": None, "state": "stale"}
+    covered = c_row.get("covered", 0)
+    total = i_row.get("i_lines", 0)
+    if lambda_gap > 0:
+        # §8-4: 带分支 lambda 宿主的出分车道维持 cc_unmeasured（WP1c 前）
+        return {"covered": None, "total": None, "state": "cc_unmeasured"}
+    if total > 0:
+        return {"covered": covered, "total": total, "state": "scored"}
+    return {"covered": None, "total": None, "state": "unknown"}
+
+
 def _derive_per_entry(
     bundle: dict,
     profile_functions: list[dict],
@@ -136,11 +152,8 @@ def _derive_per_entry(
     lambda_gap > 0 (WP1c 前出分车道不变). Returns (per_entry, stale).
 
     `registry` is only the fallback function list when `profile_functions` is
-    empty; `probe_manifest` is accepted for callers that precompute it, but
-    the derivation itself reads only the bundle's C/I rows and the host
+    empty; the derivation reads only the bundle's C/I rows and the host
     lambda_gap — no manifest walk is needed here."""
-    import hashlib
-
     from ..registry.functions import build_file_registry
 
     current_sha = sha256_text(source)
@@ -158,26 +171,66 @@ def _derive_per_entry(
         ]
     for fn in profile_functions:
         fid = fn["function_id"]
-        if stale:
-            per_entry[fid] = {"covered": None, "total": None,
-                              "state": "stale"}
-            continue
-        c_row = c_by_fid.get(fid, {})
-        i_row = i_by_fid.get(fid, {})
-        covered = c_row.get("covered", 0)
-        total = i_row.get("i_lines", 0)
         lambda_gap = fn.get("lambda_gap", 0)
-        if lambda_gap > 0:
-            # §8-4: 带分支 lambda 宿主的出分车道维持 cc_unmeasured（WP1c 前）
-            per_entry[fid] = {"covered": None, "total": None,
-                              "state": "cc_unmeasured"}
-        elif total > 0:
-            per_entry[fid] = {"covered": covered, "total": total,
-                              "state": "scored"}
-        else:
-            per_entry[fid] = {"covered": None, "total": None,
-                              "state": "unknown"}
+        per_entry[fid] = _per_entry_state(
+            c_by_fid.get(fid, {}), i_by_fid.get(fid, {}), lambda_gap, stale)
     return per_entry, stale
+
+def _measure_measurements(label: str, source: str, measure,
+                          core_tests: str, full_tests: "str | None") -> tuple:
+    """§SPEC-009 配方三连测：core / full / 同配方复跑。返回 (profile,
+    core, full, rerun)。"""
+    profile = file_profile(source, file_label=label)
+    core = measure(label, source, core_tests)
+    full = measure(label, source, full_tests)
+    rerun = measure(label, source, full_tests)
+    return profile, core, full, rerun
+
+
+def _measure_records_lane(profile: dict, full, state: str,
+                          source: str) -> list[dict]:
+    """记录车道（§SPEC-027 PR-C）：bundle 在场消费 per-entry T/I/C 并派生
+    score_status（stale/cc_unmeasured，见 _derive_per_entry），否则
+    hits_lines 聚合回退。"""
+    full_hits = set(full["summary"].get("hits_lines", ()))
+    bundle = full.get("bundle")
+    if bundle is not None:
+        per_entry, _ = _derive_per_entry(
+            bundle, profile["functions"], source
+        )
+        return _records_for_file(
+            profile, full_hits, cov_source="gut_full", state=state,
+            per_entry=per_entry,
+        )
+    return _records_for_file(
+        profile, full_hits, cov_source="gut_full", state=state
+    )
+
+
+def _measure_core_full_block(profile: dict, label: str, core, full) -> dict:
+    """core_full 报告块（覆盖行数/墙钟/逐函数 core−full 差）。"""
+    core_hits = set(core["summary"].get("hits_lines", ()))
+    full_hits = set(full["summary"].get("hits_lines", ()))
+    per_block = _function_stats(profile, full_hits)
+    core_block = {s["function_id"]: s
+                  for s in _function_stats(profile, core_hits)}
+    return {
+        "file": label,
+        "core_covered_lines": len(core_hits),
+        "full_covered_lines": len(full_hits),
+        "core_wall_s": core["summary"].get("wall_s"),
+        "full_wall_s": full["summary"].get("wall_s"),
+        "per_function_core_minus_full": [
+            {
+                "function_id": s["function_id"],
+                "core_covered": core_block.get(s["function_id"], {}).get(
+                    "covered", 0
+                ),
+                "full_covered": s["covered"],
+            }
+            for s in per_block
+        ],
+    }
 
 
 def _measure_eligible_file(
@@ -191,40 +244,14 @@ def _measure_eligible_file(
     same-recipe re-run) and produce its records plus every report block it
     contributes. The caller owns all report accumulators."""
     static_t0 = time.monotonic()
-    profile = file_profile(source, file_label=label)
+    profile, core, full, rerun = _measure_measurements(
+        label, source, measure, core_tests, full_tests)
     static_seconds = time.monotonic() - static_t0
 
-    core = measure(label, source, core_tests)
-    full = measure(label, source, full_tests)
-    rerun = measure(label, source, full_tests)
-
-    core_hits = set(core["summary"].get("hits_lines", ()))
     full_hits = set(full["summary"].get("hits_lines", ()))
     rerun_hits = set(rerun["summary"].get("hits_lines", ()))
-
     state = _file_state(full)
-
-    # §SPEC-027 (PR-C): consume the evidence bundle's per-entry T/I/C when the
-    # measure adapter produced one; derive per-entry score_status from it
-    # (stale = target sha mismatch, cc_unmeasured = host lambda_gap > 0),
-    # replacing the hits_lines aggregation for the records lane.
-    bundle = full.get("bundle")
-    per_entry = None
-    if bundle is not None:
-        per_entry, _ = _derive_per_entry(
-            bundle, profile["functions"], source
-        )
-        records = _records_for_file(
-            profile, full_hits, cov_source="gut_full", state=state,
-            per_entry=per_entry,
-        )
-    else:
-        records = _records_for_file(
-            profile, full_hits, cov_source="gut_full", state=state
-        )
-
-    per_block = _function_stats(profile, full_hits)
-    core_block = {s["function_id"]: s for s in _function_stats(profile, core_hits)}
+    records = _measure_records_lane(profile, full, state, source)
     rerun_identical = full_hits == rerun_hits
     return {
         "records": records,
@@ -233,23 +260,7 @@ def _measure_eligible_file(
             if state != "scored"
             else None
         ),
-        "core_full": {
-            "file": label,
-            "core_covered_lines": len(core_hits),
-            "full_covered_lines": len(full_hits),
-            "core_wall_s": core["summary"].get("wall_s"),
-            "full_wall_s": full["summary"].get("wall_s"),
-            "per_function_core_minus_full": [
-                {
-                    "function_id": s["function_id"],
-                    "core_covered": core_block.get(s["function_id"], {}).get(
-                        "covered", 0
-                    ),
-                    "full_covered": s["covered"],
-                }
-                for s in per_block
-            ],
-        },
+        "core_full": _measure_core_full_block(profile, label, core, full),
         "noise": {
             "file": label,
             "rerun_identical": rerun_identical,
@@ -263,6 +274,32 @@ def _measure_eligible_file(
             "static_seconds": static_seconds,
             "state": state,
         },
+    }
+
+def _report_ranking_blocks(ranking: list[dict]) -> tuple:
+    """排序切片 + unknown 统计（score 降序为报告契约）。"""
+    scored = [r for r in ranking if r["score_status"] == "scored"]
+    scored.sort(key=lambda r: (r["crap_line"]["score"] or 0.0), reverse=True)
+    total_records = len(ranking)
+    unknown_count = sum(1 for r in ranking if r["score_status"] != "scored")
+    return scored, total_records, unknown_count
+
+
+def _report_ranking_block(scored: list[dict]) -> dict:
+    """ranking 报告块（top 投影 + 手动命名占位 + 外推警告）。"""
+    return {
+        "top": [
+            {
+                "function_id": r["function_id"],
+                "score": r["crap_line"]["score"],
+                "score_status": r["score_status"],
+                "cc": r["cc"],
+                "coverage": r["coverage"],
+            }
+            for r in scored
+        ],
+        "manual_named": [],
+        "note": "2-3 files only; never extrapolate to the whole repo",
     }
 
 
@@ -279,12 +316,7 @@ def _report_document(
 ) -> dict:
     """Freeze the §SPEC-010 report document. Key order and every literal here
     are the report JSON contract — consumers (jq gates, QA) pin them."""
-    scored = [r for r in ranking if r["score_status"] == "scored"]
-    scored.sort(
-        key=lambda r: (r["crap_line"]["score"] or 0.0), reverse=True
-    )
-    total_records = len(ranking)
-    unknown_count = sum(1 for r in ranking if r["score_status"] != "scored")
+    scored, total_records, unknown_count = _report_ranking_blocks(ranking)
     return {
         "report": "shadow-report",
         "version": "shadow/1",
@@ -299,20 +331,7 @@ def _report_document(
             "share": (unknown_count / total_records) if total_records else 0.0,
             "reasons": unknown,
         },
-        "ranking": {
-            "top": [
-                {
-                    "function_id": r["function_id"],
-                    "score": r["crap_line"]["score"],
-                    "score_status": r["score_status"],
-                    "cc": r["cc"],
-                    "coverage": r["coverage"],
-                }
-                for r in scored
-            ],
-            "manual_named": [],
-            "note": "2-3 files only; never extrapolate to the whole repo",
-        },
+        "ranking": _report_ranking_block(scored),
         "core_full": core_full,
         "noise": noise,
         "acceptance_cost": {
@@ -339,6 +358,27 @@ def _report_document(
         "records": ranking,
     }
 
+def _shadow_collect(eligible_sources: dict[str, str], measure,
+                    core_tests: str,
+                    full_tests: "str | None") -> tuple:
+    """逐 eligible 文件跑 §SPEC-009 配方并聚合各报告块。"""
+    ranking: list[dict] = []
+    unknown: list[dict] = []
+    core_full: list[dict] = []
+    noise: list[dict] = []
+    per_file: list[dict] = []
+    for label, source in eligible_sources.items():
+        outcome = _measure_eligible_file(
+            label, source, measure, core_tests, full_tests
+        )
+        ranking.extend(outcome["records"])
+        if outcome["unknown"] is not None:
+            unknown.append(outcome["unknown"])
+        core_full.append(outcome["core_full"])
+        noise.append(outcome["noise"])
+        per_file.append(outcome["file"])
+    return ranking, unknown, core_full, noise, per_file
+
 
 def run_shadow(
     *,
@@ -352,48 +392,14 @@ def run_shadow(
 
     `measure(file_label, source, tests_glob) -> dict` returns the coverage
     runner contract plus a "hits_lines" set under summary (see
-    `default_measure`); tests inject deterministic fakes.
-    """
-    ranking: list[dict] = []
-    unknown: list[dict] = []
-    core_full: list[dict] = []
-    noise: list[dict] = []
-    per_file: list[dict] = []
-
-    for label, source in eligible_sources.items():
-        outcome = _measure_eligible_file(
-            label, source, measure, core_tests, full_tests
-        )
-        ranking.extend(outcome["records"])
-        if outcome["unknown"] is not None:
-            unknown.append(outcome["unknown"])
-        core_full.append(outcome["core_full"])
-        noise.append(outcome["noise"])
-        per_file.append(outcome["file"])
-
-    negatives = []
-    for label, source in negative_sources.items():
-        profile = file_profile(source, file_label=label)
-        negatives.append(
-            {
-                "file": label,
-                "gap_lane": profile["gap_lane"],
-                "eligible": profile["eligible"],
-                "reason": profile["gap_lane"],
-            }
-        )
-
+    `default_measure`); tests inject deterministic fakes. """
+    ranking, unknown, core_full, noise, per_file = _shadow_collect(
+        eligible_sources, measure, core_tests, full_tests)
     return _report_document(
-        ranking=ranking,
-        unknown=unknown,
-        core_full=core_full,
-        noise=noise,
-        negatives=negatives,
-        per_file=per_file,
+        ranking=ranking, unknown=unknown, core_full=core_full, noise=noise,
+        negatives=negative_sources, per_file=per_file,
         sample_files=len(eligible_sources),
-        negative_files=len(negative_sources),
-    )
-
+        negative_files=len(negative_sources))
 
 def partition_sources(
     paths: list[Path], project_root: str | None = None
@@ -504,6 +510,50 @@ def run_shadow_from_paths(
     return report
 
 
+def _measure_once(label: str, source: str, tests_glob: "str | None",
+                  project_root: str, evidence_dir, evidence_out) -> dict:
+    """单次 coverage run + wall_s 入账 + bundle 快照差定位（fail-loud：
+    evidence 消失/多义绝不返回无证据 measure 结果，D-WP2C-1 裁决）。"""
+    from ..coverage.runner import run_coverage
+
+    # §SPEC-030 / D-WP2C-1: snapshot the evidence dir's bundle set before
+    # the run — summary carries no run_uuid (§SPEC-026 stdout freeze), so
+    # the adapter locates this run's bundle by snapshot diff instead.
+    bundles_before = _evidence_bundle_names(evidence_dir)
+    start = time.monotonic()
+    result = run_coverage(
+        file_path=str(Path(project_root) / label),
+        project_root=project_root,
+        min_percent=0.0,
+        tests_glob=tests_glob,
+        evidence_out=evidence_out,
+    )
+    wall = time.monotonic() - start
+    summary = dict(result.get("summary", {}))
+    summary["wall_s"] = round(wall, 3)
+    out = {"ok": result.get("ok"), "summary": summary}
+    if evidence_dir is not None:
+        new_bundles = sorted(
+            _evidence_bundle_names(evidence_dir) - bundles_before
+        )
+        if len(new_bundles) == 1:
+            bundle_path = evidence_dir / new_bundles[0]
+            out["bundle"] = json.loads(
+                bundle_path.read_text(encoding="utf-8")
+            )
+        else:
+            # fail-loud (D-WP2C-1 ruling): silent bundle loss is exactly
+            # the defect class this fix eliminates — never return a
+            # measure result whose evidence vanished or is ambiguous
+            raise RuntimeError(
+                f"evidence bundle for {label!r}: expected exactly 1 new "
+                f"bundle in {evidence_dir}, found {len(new_bundles)} "
+                f"(new: {sorted(new_bundles)}; run ok={out['ok']}, "
+                f"run_error={summary.get('run_error')})"
+            )
+    return out
+
+
 def default_measure(project_root: str, evidence_out=None):
     """Real measurement adapter: one coverage run per (file, tests_glob).
 
@@ -517,48 +567,11 @@ def default_measure(project_root: str, evidence_out=None):
         evidence_dir.mkdir(parents=True, exist_ok=True)
 
     def measure(label: str, source: str, tests_glob: str | None) -> dict:
-        from ..coverage.runner import run_coverage
-
-        # §SPEC-030 / D-WP2C-1: snapshot the evidence dir's bundle set before
-        # the run — summary carries no run_uuid (§SPEC-026 stdout freeze), so
-        # the adapter locates this run's bundle by snapshot diff instead.
-        bundles_before = _evidence_bundle_names(evidence_dir)
-
-        start = time.monotonic()
-        result = run_coverage(
-            file_path=str(Path(project_root) / label),
-            project_root=project_root,
-            min_percent=0.0,
-            tests_glob=tests_glob,
-            evidence_out=str(evidence_dir) if evidence_dir else None,
-        )
-        wall = time.monotonic() - start
-        summary = dict(result.get("summary", {}))
-        summary["wall_s"] = round(wall, 3)
-        out = {"ok": result.get("ok"), "summary": summary}
-        if evidence_dir is not None:
-            new_bundles = sorted(
-                _evidence_bundle_names(evidence_dir) - bundles_before
-            )
-            if len(new_bundles) == 1:
-                bundle_path = evidence_dir / new_bundles[0]
-                out["bundle"] = json.loads(
-                    bundle_path.read_text(encoding="utf-8")
-                )
-            else:
-                # fail-loud (D-WP2C-1 ruling): silent bundle loss is exactly
-                # the defect class this fix eliminates — never return a
-                # measure result whose evidence vanished or is ambiguous
-                raise RuntimeError(
-                    f"evidence bundle for {label!r}: expected exactly 1 new "
-                    f"bundle in {evidence_dir}, found {len(new_bundles)} "
-                    f"(new: {sorted(new_bundles)}; run ok={out['ok']}, "
-                    f"run_error={summary.get('run_error')})"
-                )
-        return out
+        return _measure_once(label, source, tests_glob, project_root,
+                             evidence_dir,
+                             str(evidence_dir) if evidence_dir else None)
 
     return measure
-
 
 def _evidence_bundle_names(evidence_dir: Path | None) -> set[str]:
     """Names of bundle files (coverage-evidence/2) in the evidence dir —

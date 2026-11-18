@@ -1,0 +1,72 @@
+{
+  "tool": "see1594.spec023_equivalence_memo",
+  "spec": "§SPEC-023 coverage 性能硬门（Owner 裁定 2026-11-17：候选相对当前实现中位耗时 ≤ 1.0× + A/A 噪声带，fresh/warm 与 full coverage 均须报告绝对秒数）",
+  "original_command": "python tests/integration/run_see1594_coverage_perf.py --baseline 5beeb4b --candidate <head> --kol-root <副本> --rounds 3 --out <json>",
+  "executability": {
+    "script_exists_at_head": false,
+    "script_exists_at_5beeb4b": false,
+    "script_ever_existed": false,
+    "note": "git log --all -- tests/integration/run_see1594_coverage_perf.py 为空——该 harness 从未构建，A0 台账 §SPEC-023 因此记 failed（基准测量未跑完不得放行）",
+    "semantics": "旧 direct 覆盖执行面已随 SEE-1594 S1 退役（measure coverage 答案面改为 /6 map 构建/增量/投影）——A/B 双方的『同一直接执行面』不复存在，原口径不可按字面执行"
+  },
+  "baseline_5beeb4b_one_shot": {
+    "commit": "5beeb4b",
+    "commit_subject": "fix(cli): git-diff no-arg ignores submodules and tool artifacts (SEE-1594 §SPEC-020)",
+    "method": "git worktree @5beeb4b + fresh KOL copy (79265a5e) + 旧 measure coverage（位置参数 file，direct 全面 GUT+探针）逐文件实测；一次性、有界",
+    "kol_commit": "79265a5e",
+    "godot": "4.6.2-stable (gqt-probe-bin)",
+    "samples": [
+      {
+        "file": "systems/player/command_handlers.gd",
+        "wall_s": 667.19,
+        "ok": false,
+        "coverage_percent": 0.0,
+        "run_error": true,
+        "error_head": "godot launch failed — coverage data untrustworthy"
+      },
+      {
+        "file": "autoload/player_session.gd",
+        "wall_s": 669.95,
+        "ok": false,
+        "coverage_percent": 0.0,
+        "run_error": true,
+        "error_head": "godot launch failed — coverage data untrustworthy"
+      },
+      {
+        "file": "systems/infi/infi_service.gd",
+        "wall_s": 671.45,
+        "ok": false,
+        "coverage_percent": 0.0,
+        "run_error": true,
+        "error_head": "godot launch failed — coverage data untrustworthy"
+      }
+    ],
+    "total_wall_s": 2008.59,
+    "trustworthy_answers": 0,
+    "note": "旧 direct 路径在同一 KOL 面（post-SEE-1599 主副本含 KOL UI 运行时错误）逐文件全面直跑：每文件 ~11 分钟且全部以 run_error 收场、零可信覆盖答案"
+  },
+  "candidate_head_64bfdf6": {
+    "source": "SEE-1594 S6.3 绿证据 evidence/see1594-s6/mapping-perf.json（head 64bfdf6 干净树，同 KOL 副本 79265a5e，同机）",
+    "instrumented_build_s": 118.925,
+    "baseline_wall_s": 70.0,
+    "full_build_total_s": 188.925,
+    "incremental_s": 59.894,
+    "projection_aggregate_s": 1.67,
+    "projection_files": 3,
+    "trustworthy_answers": 3,
+    "parity": "3/3 + percent_parity"
+  },
+  "comparison": {
+    "per_run_equivalent_task": "3 个样本文件的覆盖答案",
+    "old_direct": "2008.59s（3 文件串行直跑），0/3 可信答案（全部 run_error）",
+    "new_path": "188.925s 一次性 map 全量构建（含懒基线）+ 1.67s 三文件投影 = 190.6s，3/3 可信答案 + parity 3/3",
+    "delta": "新路径 ~10.5× 快于旧 direct 串行面，且在旧路径无法给出可信答案的同一仓库上给出 parity 验证过的答案"
+  },
+  "conclusion_for_review": "证据倾向：新路径相对 5beeb4b 旧 direct 面无性能回退（数量级改善）且答案可信度更高；§SPEC-023 的 PASS/FAIL 判定权在 Leader——请按本备忘复核后定状态。",
+  "provenance": {
+    "baseline_raw_files": [
+      "/tmp 临时目录（跑后清理）——本 JSON 内嵌全部数字"
+    ],
+    "candidate_evidence_sha_head": "evidence/see1594-s6/mapping-perf.json @4c5b926"
+  }
+}

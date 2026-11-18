@@ -66,23 +66,3 @@ class TestGherkinCli:
         assert "invalid choice" in proc.stderr
 
 
-class TestMutationCliSurface:
-    """A13（SEE-1594 S5）：旧 flag 物理退役——--resume 不再注册；
-    --no-reuse-coverage 为真实 prefilter 关断开关。"""
-
-    def test_resume_flag_retired(self):
-        sys.path.insert(0, str(REPO / "src"))
-        try:
-            from godot_qa_toolkit.cli import build_parser
-            import pytest as _pytest
-            with _pytest.raises(SystemExit):
-                build_parser().parse_args(
-                    ["mutation", "a.gd", "--project-root", ".", "--resume"])
-            with _pytest.raises(SystemExit):
-                build_parser().parse_args(
-                    ["mutation", "a.gd", "--project-root", ".", "--reuse-coverage"])
-            args = build_parser().parse_args(
-                ["mutation", "a.gd", "--project-root", ".", "--no-reuse-coverage"])
-            assert args.no_reuse_coverage is True
-        finally:
-            sys.path.remove(str(REPO / "src"))

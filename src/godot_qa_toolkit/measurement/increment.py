@@ -190,32 +190,6 @@ def compute_invalidation(root: Path, baseline: dict,
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
             "explicit_rerun": explicit_rerun}
 
-def _merge_arm_lines(arm: dict, fresh: dict, dropped: set[str]) -> tuple:
-    """行事实合并：test/script 双车道 + line_to_tests 反查（fresh 脚本的
-    行集整并；dropped 脚本的行整删）。"""
-    test_to_lines = {k: {r: set(ls) for r, ls in v.items()}
-                     for k, v in (arm.get("test_to_lines") or {}).items()}
-    script_to_lines = {k: {r: set(ls) for r, ls in v.items()}
-                       for k, v in (arm.get("script_to_lines") or {}).items()}
-    for ident, by_rel in (fresh.get("test_to_lines") or {}).items():
-        slot = test_to_lines.setdefault(ident, {})
-        for rel, lines in by_rel.items():
-            slot[rel] = set(lines)
-    for ident, by_rel in (fresh.get("script_to_lines") or {}).items():
-        slot = script_to_lines.setdefault(ident, {})
-        for rel, lines in by_rel.items():
-            slot[rel] = set(lines)
-    for dropped_name in dropped:
-        test_to_lines.pop(dropped_name, None)
-        script_to_lines.pop(dropped_name, None)
-    line_to_tests: dict[str, dict[int, set[str]]] = {}
-    for ident, by_rel in test_to_lines.items():
-        for rel, lines in by_rel.items():
-            slot = line_to_tests.setdefault(rel, {})
-            for ln in lines:
-                slot.setdefault(ln, set()).add(ident)
-    return test_to_lines, script_to_lines, line_to_tests
-
 def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
                        replace_names: set[str], name_of) -> dict:
     """同语义合并：dropped 删边 + replace_names 整体替换 + 其余身份原样

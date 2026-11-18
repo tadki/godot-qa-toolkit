@@ -210,12 +210,6 @@ def recipe_hash(recipe: dict) -> str:
              if k not in ("recipe_hash", "project_root")}
     return canonical_sha256(basis)
 
-def _verify_hash(recipe: dict) -> "tuple[bool, str | None]":
-    """recipe_hash 现算对照（§SPEC-041 L2 同内容同 hash）。"""
-    if recipe.get("recipe_hash") != recipe_hash(recipe):
-        return False, "recipe_hash mismatch — recipe was modified after hashing"
-    return True, None
-
 def _verify_faces(recipe: dict) -> "tuple[list, list] | tuple[None, str]":
     """双 face 结构校验（§SPEC-067）+ dirs 非空 strip 规则（§SPEC-068/R23）。
     返回 (dirs, features) 或 (None, 原因)。"""

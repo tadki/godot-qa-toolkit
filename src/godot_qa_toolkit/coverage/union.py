@@ -58,20 +58,15 @@ def arm_record_from_bundle(bundle: dict, *, recipe_hash: str,
     }
 
 
-def union_file(arm_a: dict, arm_b: dict, *,
-               canonical_recipe_hash: str | None = None) -> dict:
-    """两臂并集。invalid 时 union=null + invalid_reason（不出分）。"""
+def _union_rec(arm_a: dict, canonical_recipe_hash: str | None) -> dict:
+    """union 记录骨架 + arms meta。"""
     arms_meta = [
         {"arm": arm_a["arm"], "run_uuid": arm_a["run_uuid"],
          "state": arm_a["state"], "covered": sum(len(v) for v in
                                                  arm_a["C"].values()),
          "wall_s": arm_a["wall_s"]},
-        {"arm": arm_b["arm"], "run_uuid": arm_b["run_uuid"],
-         "state": arm_b["state"], "covered": sum(len(v) for v in
-                                                 arm_b["C"].values()),
-         "wall_s": arm_b["wall_s"]},
     ]
-    rec: dict = {
+    return {
         "union_version": UNION_VERSION,
         "file": arm_a["file"],
         "target_sha256": arm_a["target_sha256"],
@@ -80,13 +75,23 @@ def union_file(arm_a: dict, arm_b: dict, *,
         "comparable": (
             canonical_recipe_hash is not None
             and arm_a["recipe_hash"] == canonical_recipe_hash
-            and arm_b["recipe_hash"] == canonical_recipe_hash
         ),
         "arms": arms_meta,
         "union": None,
         "valid": False,
         "invalid_reason": None,
     }
+
+
+def union_file(arm_a: dict, arm_b: dict, *,
+               canonical_recipe_hash: str | None = None) -> dict:
+    """两臂并集。invalid 时 union=null + invalid_reason（不出分）。"""
+    rec = _union_rec(arm_a, canonical_recipe_hash)
+    rec["arms"].append(
+        {"arm": arm_b["arm"], "run_uuid": arm_b["run_uuid"],
+         "state": arm_b["state"], "covered": sum(len(v) for v in
+                                                 arm_b["C"].values()),
+         "wall_s": arm_b["wall_s"]})
 
     def invalid(reason: str) -> dict:
         rec["invalid_reason"] = reason

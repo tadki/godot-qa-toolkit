@@ -106,7 +106,7 @@ def test_algo_granularity_key_rejects_legacy_attr6_entries(tmp_path):
     """旧 `attr/6` 条目与 hit 级新键（attr-line/1）绝不互相命中——粒度
     编码进 algo 键（SEE-1585 原型教训的回归守卫）。"""
     from godot_qa_toolkit.measurement import prepcache
-    from godot_qa_toolkit.measurement.orchestrator import _algo_used
+    from godot_qa_toolkit.measurement.instrument import _algo_used
 
     root = str(tmp_path)
     kwargs = dict(rel="x.gd", src_sha256="s", recipe_hash="r",

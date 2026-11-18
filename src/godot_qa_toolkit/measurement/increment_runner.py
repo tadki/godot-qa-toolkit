@@ -15,7 +15,9 @@ import tempfile
 from pathlib import Path
 
 from . import prepcache
-from .orchestrator import (
+from .instrument import _instrument_pair
+from .orchestrator import _run_one_gut
+from .probe_templates import (
     _ATTR_CTX_GD,
     _ATTR_CTX_RELPATH,
     _ATTR_FLUSHER_GD,
@@ -23,13 +25,11 @@ from .orchestrator import (
     _ATTR_RUN_UUID_PLACEHOLDER,
     _FLUSHER_RELPATH,
     _PRE_HOOK_RELPATH,
-    _instrument_pair,
-    _run_one_gut,
 )
 
 
 def _algo_for(causal: bool) -> str:
-    from .orchestrator import _algo_used
+    from .instrument import _algo_used
     return _algo_used(prepcache.PROBE_ALGO_VERSION, True, causal)
 
 

@@ -73,9 +73,9 @@ def test_retired_increment_fresh_builder_absent():
 def test_hit_level_probe_surface_is_the_attribution_shape():
     """hit 级探针面在位：attr 模板由全部块入口 probe 携带归属块（若回归
     fn 入口限制，行事实退化为函数入口行——此处直接报警）。"""
-    orch = (SRC / "measurement" / "orchestrator.py").read_text(
+    inst = (SRC / "measurement" / "instrument.py").read_text(
         encoding="utf-8")
-    assert "frozenset(range(len(probe_lines)))" in orch, (
+    assert "frozenset(range(len(probe_lines)))" in inst, (
         "hit-level attribution surface regressed: _instrument_pair no "
         "longer carries attribution blocks on every block-entry probe")
 
@@ -86,9 +86,9 @@ def test_hit_level_probe_surface_is_the_attribution_shape():
 def test_schema_constants_aligned_line_primary():
     from godot_qa_toolkit.measurement import increment as inc_mod
     from godot_qa_toolkit.measurement.attribution import (
-    ATTRIBUTION_ALGO_TAG,
-    ATTRIBUTION_SCHEMA,
-)
+        ATTRIBUTION_ALGO_TAG,
+        ATTRIBUTION_SCHEMA,
+    )
     from godot_qa_toolkit.mutation import coverlink, truth_select
 
     assert ATTRIBUTION_SCHEMA == "test-attribution/6"

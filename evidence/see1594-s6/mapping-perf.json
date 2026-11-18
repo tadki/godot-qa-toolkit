@@ -2,12 +2,15 @@
   "tool": "see1594.mapping_perf",
   "ok": true,
   "env": {
-    "head_commit": "38e7a72d7a7516d0dff42e44a9ea3c44414af997",
+    "head_commit": "64bfdf68afc0f5031b0a7f7479f6dabe116fc0d6",
+    "head_describe": "v0.3.0-51-g64bfdf6",
+    "head_tree": "803b85d1d2f19f9fe866c8fd95714174f996237f",
+    "dirty": false,
     "kol_commit": "79265a5e7e056cea9611365c473270c7bf519a37",
     "godot_version": "4.6.2.stable.official.71f334935",
     "python_version": "3.12.3",
     "host": "DESKTOP-INVD2QR",
-    "command": "python tests/integration/run_see1594_mapping_perf.py --kol-root /tmp/see1594-s62-kol --out evidence/see1594-s6/mapping-perf.json",
+    "command": "python tests/integration/run_see1594_mapping_perf.py --kol-root /tmp/see1594-s63-kol --out evidence/see1594-s6/mapping-perf.json",
     "gqt_package": "/home/jerry/multica_workspaces/seed-478690824e46/see-1594-16847c200105/workdir/godot-qa-toolkit/src"
   },
   "samples": [
@@ -17,24 +20,37 @@
   ],
   "baseline_failures": {
     "method": "uninstrumented_run",
-    "face": "res://tests",
-    "count": 105,
-    "sha256": "2678d8af4bd3c9d665c6cc296bcc6b76394d5aa35617121cc3c1853becc60fd3",
-    "wall_s": 702.377,
-    "gating": "new failures only (baseline-absorbed failures keep the arm valid)",
+    "lazy": true,
+    "face": "res://tests/unit/,res://tests/integration/,res://tests/e2e/,res://tests/regression/,res://tests/performance/,res://tests/infi/,res://tests/abtest/,res://tests/aidomain/,res://tests/world/",
+    "pairs": [
+      [
+        "",
+        "test_owner_tweak_tag_font_is_double_height"
+      ],
+      [
+        "res://tests/integration/ui/test_see1316_ui_hardening.gd",
+        "test_owner_tweak_tag_font_is_double_height"
+      ]
+    ],
+    "count": 2,
+    "sha256": "a14db4e77f27adeb6fb346c02c86a868858b1202e054b7fd88637c1e7d3557f1",
+    "wall_s": 70.0,
     "refresh": {
       "face": "affected",
-      "count": 105,
-      "sha256": "2678d8af4bd3c9d665c6cc296bcc6b76394d5aa35617121cc3c1853becc60fd3"
+      "count": 2,
+      "sha256": "a14db4e77f27adeb6fb346c02c86a868858b1202e054b7fd88637c1e7d3557f1",
+      "wall_s": 69.329
     }
   },
-  "full_build_s": 57.467,
-  "incremental_s": 61.507,
+  "instrumented_build_s": 118.925,
+  "baseline_wall_s": 70.0,
+  "full_build_total_s": 188.925,
+  "incremental_s": 59.894,
   "projection_s": {
     "per_file": [
       {
         "file": "systems/player/command_handlers.gd",
-        "s": 0.466,
+        "s": 0.396,
         "covered_lines": [
           23,
           27,
@@ -421,7 +437,7 @@
       },
       {
         "file": "autoload/player_session.gd",
-        "s": 0.775,
+        "s": 0.672,
         "covered_lines": [
           85,
           86,
@@ -698,7 +714,7 @@
       },
       {
         "file": "systems/infi/infi_service.gd",
-        "s": 0.672,
+        "s": 0.6,
         "covered_lines": [
           60,
           65,
@@ -987,7 +1003,7 @@
         "coverage_percent": 87.62
       }
     ],
-    "aggregate_s": 1.916
+    "aggregate_s": 1.67
   },
   "parity": {
     "rows": [
@@ -2894,5 +2910,5 @@
     "percent_parity": true,
     "error_semantics": "fail-loud on stale/incomplete/unreadable copy; no legacy direct-timing fallback"
   },
-  "wall_s": 1535.676
+  "wall_s": 283.396
 }

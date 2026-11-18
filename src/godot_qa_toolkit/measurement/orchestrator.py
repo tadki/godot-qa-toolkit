@@ -2845,10 +2845,11 @@ def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],
     if _looks_like_godot_launch_failure(out) or (
             "Run Summary" not in out and "[Failed]" not in out
             and "[Passed]" not in out):
+        tail = " | ".join(s for s in out.splitlines() if s.strip())[-400:]
         raise MeasurementError(
             "lazy baseline acquisition failed: uninstrumented GUT run "
             f"has no run stream (rc={r.returncode}) — refusing empty "
-            "baseline (§SPEC-060a fail-loud)")
+            f"baseline (§SPEC-060a fail-loud); gut output tail: {tail!r}")
     pairs = _parse_failing_pairs(out)
     face = "gutconfig_default"
     if gut_args and gut_args[0].startswith("-gdir="):

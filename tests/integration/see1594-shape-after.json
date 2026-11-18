@@ -1,0 +1,116 @@
+{
+  "tool": "check_see1594_shape",
+  "ok": false,
+  "areas": [
+    "mutation",
+    "risk",
+    "coverage",
+    "measurement"
+  ],
+  "max_file_lines": 800,
+  "max_function_lines": 50,
+  "per_area": {
+    "mutation": {
+      "files": 34,
+      "max_file_lines": 800,
+      "functions_over_limit": 2
+    },
+    "risk": {
+      "files": 5,
+      "max_file_lines": 584,
+      "functions_over_limit": 1
+    },
+    "coverage": {
+      "files": 6,
+      "max_file_lines": 636,
+      "functions_over_limit": 0
+    },
+    "measurement": {
+      "files": 14,
+      "max_file_lines": 784,
+      "functions_over_limit": 7
+    }
+  },
+  "violations": [
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/runner.py",
+      "name": "_run_mutation_core",
+      "lines": 87,
+      "lineno": 337,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/mutation/shadowpool.py",
+      "name": "_reuse_candidate",
+      "lines": 52,
+      "lineno": 451,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/risk/shadow.py",
+      "name": "_report_document",
+      "lines": 53,
+      "lineno": 295,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/arms.py",
+      "name": "_arm_stage",
+      "lines": 51,
+      "lineno": 451,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/arms.py",
+      "name": "_arm_execute",
+      "lines": 55,
+      "lineno": 503,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/arms.py",
+      "name": "run_arm",
+      "lines": 65,
+      "lineno": 559,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/arms.py",
+      "name": "_arm_result",
+      "lines": 92,
+      "lineno": 625,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/increment.py",
+      "name": "run_attribution_increment",
+      "lines": 55,
+      "lineno": 282,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/orchestrator.py",
+      "name": "run_measurement",
+      "lines": 121,
+      "lineno": 470,
+      "limit": 50
+    },
+    {
+      "kind": "function_lines",
+      "path": "src/godot_qa_toolkit/measurement/recipe.py",
+      "name": "build_recipe",
+      "lines": 53,
+      "lineno": 150,
+      "limit": 50
+    }
+  ]
+}

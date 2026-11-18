@@ -211,7 +211,9 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
     cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
                                        auto_name)
     register_temp(cfg_path)
-    user_dir = make_user_dir()
+    from godot_qa_toolkit.mutation import runner as _r
+
+    user_dir = _r.make_user_dir()
     env_extra, _ = mutant_env(str(cfg_path), user_dir)
     return mutated_src, cfg_path, user_dir
 
@@ -369,12 +371,17 @@ def _loop_slot(project_root, path, kind, identity, tests_glob,
                worker_channel, targeted_only, clock) -> tuple:
     """身份包/影子槽获取/路由解析与机制披露。返回 (slot, idpack, auto_name,
     target_rel, target_res, exec_scheme, slot_info, t_slot)。"""
+    # patch seam：resolve_exec_scheme / time 被测试钉在 runner.*（原闭包经
+    # run_measurement/run_mutation 模块全局解析）——运行时经 runner 命名
+    # 空间解析，补丁点调用链不变。
+    from godot_qa_toolkit.mutation import runner as _r
+
     idpack = identity if identity is not None else \
         identity_pack(project_root, kind)
     target_rel = project_relative(project_root, str(path))
     target_res = _res_path_of(str(path), str(Path(project_root)))
     auto_name = beacon.autoload_name_for(project_root, target_res)
-    t_slot = time.monotonic()
+    t_slot = _r.time.monotonic()
     with clock.stage("farm_provision"):
         slot = shadowpool.acquire_slot(
             project_root, kind, [target_rel],
@@ -384,7 +391,7 @@ def _loop_slot(project_root, path, kind, identity, tests_glob,
     # R-DW6 默认启用实测轮：身份与执行同源解析——store file_key 与实际
     # 执行通道一致，杜绝 scheme 漂移性 store-miss。
     with clock.stage("route_scan"):
-        exec_scheme_resolved, route_resolved = resolve_exec_scheme(
+        exec_scheme_resolved, route_resolved = _r.resolve_exec_scheme(
             project_root, target_res, worker_channel)
     slot_info: dict = {}
     slot_info["exec_scheme"] = exec_scheme_resolved

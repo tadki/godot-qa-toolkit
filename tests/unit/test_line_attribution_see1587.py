@@ -22,11 +22,13 @@ from godot_qa_toolkit.measurement import prepcache
 from godot_qa_toolkit.measurement.shadowio import (
     _read_attr_merged,
 )
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.attribution import (
     ATTRIBUTION_SCHEMA,
+    build_attribution_map,
+)
+from godot_qa_toolkit.measurement.orchestrator import (
     _algo_used,
     _instrument_pair,
-    build_attribution_map,
     file_key8,
     run_measurement,
 )

@@ -88,7 +88,8 @@ class TestS62LazyAcquireBaseline:
     def test_parser_parity_with_arm_observation(self):
         """基线解析与臂观测同一解析器（§SPEC-063c/064a 混合形态逐对可比）。"""
         from godot_qa_toolkit.measurement.orchestrator import (
-            _parse_failing_pairs)
+    _parse_failing_pairs,
+)
         pairs = _parse_failing_pairs(_GUT_OK_OUTPUT)
         assert ("res://tests/unit/test_game.gd", "test_already_red") in pairs
         assert ("", "test_already_red") in pairs
@@ -96,7 +97,8 @@ class TestS62LazyAcquireBaseline:
     def test_gutconfig_face_args_merged(self):
         """同面参数 = recipe gut_face dirs 并集（与分片计划同源）。"""
         from godot_qa_toolkit.measurement.orchestrator import (
-            _gutconfig_face_args)
+    _gutconfig_face_args,
+)
         assert _gutconfig_face_args(
             {"gut_face": {"dirs": ["res://tests/a", "res://tests/b"]}}) \
             == ["-gdir=res://tests/a,res://tests/b"]

@@ -192,7 +192,7 @@ def _projection_map_reject(
     """行事实投影的前置校验链（写侧，逐项顺序与原因文案保持稳定）：
     map schema / 臂有效性 / 目标文件 sha / recipe pristine / 测试面摘要 /
     探针面。任一失配返回拒绝原因——消费侧回退不过滤；通过返回 None。"""
-    from ..measurement.orchestrator import ATTRIBUTION_SCHEMA
+    from ..measurement.attribution import ATTRIBUTION_SCHEMA
     from .truth_select import arms_valid
 
     if doc.get("schema_version") != ATTRIBUTION_SCHEMA:

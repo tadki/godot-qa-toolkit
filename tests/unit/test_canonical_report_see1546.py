@@ -236,7 +236,7 @@ def test_tree_restored_and_no_residue(project: Path, tmp_path: Path):
         assert p.read_bytes() == data  # 在树插桩恢复零残留
     assert not list(project.glob("qa-coverage-hits-*.txt"))  # sink 落盘即清
     import glob as g
-    from godot_qa_toolkit.measurement.orchestrator import _backup_base
+    from godot_qa_toolkit.measurement.backup import _backup_base
     assert g.glob(str(_backup_base() / "*")) == []  # 备份目录已清
 
 
@@ -462,7 +462,7 @@ def test_flag_drain_io_bounded_by_files_not_events():
     """§SPEC-046：统一落盘只在 finalizer 的 _exit_tree 单循环里进行——
     FileAccess 每 sink 恰好一次 open（主+回退两形态）、一次写循环；写入
     次数由文件数决定，不随命中事件数增长。"""
-    from godot_qa_toolkit.measurement.orchestrator import _FLUSHER_GD
+    from godot_qa_toolkit.measurement.probe_templates import _FLUSHER_GD
     assert _FLUSHER_GD.count("FileAccess.open") == 2  # 主 + 回退
     assert _FLUSHER_GD.count("store_line") == 1
     assert _FLUSHER_GD.count("func _notification") == 1  # §SPEC-062A PREDELETE

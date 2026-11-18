@@ -34,17 +34,21 @@ from .increment_runner import (
     execute_rerun_scripts,
     prepare_attr_templates,
 )
-from .orchestrator import (
+from .attribution import (
     ATTRIBUTION_SCHEMA,
     _derive_views_from_line_facts,
     _fid_by_line_from_registry,
     _line_facts_views,
     _line_pair_counts,
     _probe_surface_lines,
-    _inject_toolchain,
+    build_attribution_map,
+)
+from .shadowio import (
     _read_attr_merged,
     _read_registries,
-    build_attribution_map,
+)
+from .orchestrator import (
+    _inject_toolchain,
     make_run_uuid,
     run_measurement,
 )

@@ -126,15 +126,28 @@ def _verify_baseline(kol_root: Path, recipe: dict, timeout: int,
                      select: str | None = None) -> "tuple[set, dict]":
     """证据验证用基线获取——复用测量层产品 helper（`_acquire_lazy_baseline`
     共享实现，零第二套解析/GUT 通道）。`-gselect` 形态仅用于受影响面
-    复跑证明（证据验证，非映射构建路径）。失败 → RuntimeError（fail-loud）。"""
+    复跑证明（证据验证，非映射构建路径）。
+
+    瞬时空流（rc=0 且无运行流——插桩还原后引擎缓存竞态，实测出现过一次）
+    允许**一次**具名重试；重试仍失败 → RuntimeError（fail-loud）。产品
+    门控路径不做重试（fail-loud 语义不因重试弱化）。"""
+    import time as _t
     from godot_qa_toolkit.measurement.orchestrator import (
         _acquire_lazy_baseline, _gutconfig_face_args)
     gut_args = ([f"-gselect={select}"] if select
                 else _gutconfig_face_args(recipe))
     try:
         return _acquire_lazy_baseline(kol_root, gut_args, timeout)
-    except Exception as e:  # noqa: BLE001 — 证据验证 fail-loud 具名
-        raise RuntimeError(f"verification baseline failed: {e}") from e
+    except Exception as first:  # noqa: BLE001 — 证据验证具名重试一次
+        print(f"[harness] verification baseline first attempt failed "
+              f"({first}) — retrying once after 3s", file=sys.stderr)
+        _t.sleep(3)
+        try:
+            return _acquire_lazy_baseline(kol_root, gut_args, timeout)
+        except Exception as e:  # noqa: BLE001 — fail-loud 具名
+            raise RuntimeError(
+                f"verification baseline failed (retry also failed; "
+                f"first: {first}; second: {e})") from e
 
 
 def _repo_state() -> dict:

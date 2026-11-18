@@ -662,17 +662,14 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         plans=plans, sink_by_rel=sink_by_rel,
         manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
         vacuous_rels=vacuous_rels)
-def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
-                arms_parallel: bool, evidence_dir, shard_log_dir: str | None,
-                timeout_s: int, adaptive_reps: bool, test_attribution: bool,
-                results, run_uuid: str, wall_s: float, gut_ok: bool,
-                run_error: bool, timed_out: bool, arm_failures,
-                arm_fail_pairs, new_pairs, exempt_pairs, baseline_meta,
-                reconciliation, arm_valid: bool, invalid_reason, reps: int,
-                plans: list, sink_by_rel: dict, manifest_by_rel: dict,
-                xdg_homes: list[str], vacuous_rels: list) -> dict:
+def _arm_readback(name: str, *, root: Path, prepared: dict, acceptance,
+                  test_attribution: bool, results, run_uuid: str, reps: int,
+                  sink_by_rel: dict, manifest_by_rel: dict,
+                  xdg_homes: list[str], gut_ok: bool, run_error: bool,
+                  timed_out: bool, vacuous_rels: list, evidence_dir,
+                  shard_log_dir: str | None) -> tuple:
     """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
-    vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
+    vacuous 车道并入。返回 (convergence, attribution, bundles)。"""
     convergence = None
     attribution = None
     bundles: dict[str, dict] = {}
@@ -698,9 +695,16 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
     bundles.update(_arm_vacuous_bundles(
         name, prepared, vacuous_rels, run_uuid, gut_ok, run_error,
         timed_out, evidence_dir))
-    print(f"measure: arm={name} done state="
-          f"{'valid' if arm_valid else 'invalid'} "
-          f"wall_s={round(wall_s, 1)}", file=sys.stderr)
+    return convergence, attribution, bundles
+
+
+def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
+             timed_out: bool, arm_valid: bool, invalid_reason, run_error: bool,
+             baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
+             exempt_pairs, reps: int, convergence, adaptive_rounds_used,
+             arms_parallel: bool, attribution, bundles: dict,
+             reconciliation, plans: list, results) -> dict:
+    """结果文档组装（键序 = 结果 JSON 契约）。"""
     return {
         "arm": name, "run_uuid": run_uuid, "wall_s": round(wall_s, 3),
         "gut_ok": gut_ok, "timed_out": timed_out,
@@ -721,9 +725,7 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
         # §SPEC-062C：验收臂 N 次重复与收敛披露（gut_full 恒单轮）
         "repeats": reps,
         "convergence": convergence,
-        "adaptive_rounds_used": max(
-            (len(r["reps"]) for r in results), default=0)
-        if adaptive_reps else None,
+        "adaptive_rounds_used": adaptive_rounds_used,
         "arms_parallel": arms_parallel,
         "attribution": attribution,
         "bundles": len(bundles), "bundles_data": bundles,
@@ -740,21 +742,36 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
                     "dangling_links_removed", 0) for r in results),
         },
     }
-    return _arm_result(
-        name, root=root, prepared=prepared, acceptance=acceptance,
-        arms_parallel=arms_parallel, evidence_dir=evidence_dir,
-        shard_log_dir=shard_log_dir, timeout_s=timeout_s,
-        adaptive_reps=adaptive_reps and acceptance is not None,
-        test_attribution=test_attribution,
-        results=results, run_uuid=run_uuid, wall_s=wall_s,
-        gut_ok=gut_ok, run_error=run_error, timed_out=timed_out,
-        arm_failures=arm_failures, arm_fail_pairs=arm_fail_pairs,
-        new_pairs=new_pairs, exempt_pairs=exempt_pairs,
-        baseline_meta=baseline_meta, reconciliation=reconciliation,
-        arm_valid=arm_valid, invalid_reason=invalid_reason, reps=reps,
-        plans=plans, sink_by_rel=sink_by_rel, manifest_by_rel=manifest_by_rel,
-        xdg_homes=xdg_homes, vacuous_rels=vacuous_rels)
 
+
+def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
+                arms_parallel: bool, evidence_dir, shard_log_dir: str | None,
+                timeout_s: int, adaptive_reps: bool, test_attribution: bool,
+                results, run_uuid: str, wall_s: float, gut_ok: bool,
+                run_error: bool, timed_out: bool, arm_failures,
+                arm_fail_pairs, new_pairs, exempt_pairs, baseline_meta,
+                reconciliation, arm_valid: bool, invalid_reason, reps: int,
+                plans: list, sink_by_rel: dict, manifest_by_rel: dict,
+                xdg_homes: list[str], vacuous_rels: list) -> dict:
+    """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
+    vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
+    convergence, attribution, bundles = _arm_readback(
+        name, root=root, prepared=prepared, acceptance=acceptance,
+        test_attribution=test_attribution, results=results,
+        run_uuid=run_uuid, reps=reps, sink_by_rel=sink_by_rel,
+        manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes, gut_ok=gut_ok,
+        run_error=run_error, timed_out=timed_out, vacuous_rels=vacuous_rels,
+        evidence_dir=evidence_dir, shard_log_dir=shard_log_dir)
+    print(f"measure: arm={name} done state="
+          f"{'valid' if arm_valid else 'invalid'} "
+          f"wall_s={round(wall_s, 1)}", file=sys.stderr)
+    adaptive_rounds_used = max(
+        (len(r["reps"]) for r in results), default=0) if adaptive_reps else None
+    return _arm_doc(
+        name, run_uuid, wall_s, gut_ok, timed_out, arm_valid, invalid_reason,
+        run_error, baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
+        exempt_pairs, reps, convergence, adaptive_rounds_used, arms_parallel,
+        attribution, bundles, reconciliation, plans, results)
 def run_acceptance_flow(*, root: Path, recipe: dict,
                         acceptance_keys: list[str] | None,
                         acceptance_shards: int,

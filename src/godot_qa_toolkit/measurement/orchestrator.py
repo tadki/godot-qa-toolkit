@@ -467,37 +467,10 @@ def _assemble_report(root: Path, recipe_hash: str, arm_a: dict, arm_b: dict,
         "ok": bool(unions) and all(u["valid"] for u in unions),
     }
 
-def run_measurement(project_root: str | Path, target_files: list[str],
-                  recipe: dict, *, acceptance_keys: list[str] | None = None,
-                  probe_keys: list[str] | None = None, timeout_s: int = 180,
-                  evidence_out: str | None = None,
-                  inject_toolchain: bool = True,
-                  scope_roots: list[str] | None = None,
-                  block_compress: bool = True,
-                  shard_width: int = 6,
-                  acceptance_shards: int = 4,
-                  shard_log_dir: str | None = None,
-                  stability_baseline: str | None = None,
-                  baseline_failures: "set[tuple[str, str]] | None" = None,
-                  intolerant_config: dict | None = None,
-                  acceptance_repeats: int = 3,
-                  test_attribution: bool = False,
-                  attribution_out: str | None = None,
-                  attribution_causal: bool = False,
-                  arms_parallel: bool = False,
-                  acceptance_adaptive: bool = False) -> dict:
-    """measurement 双源批式编排，产出 measurement-report/2。
-
-    baseline_failures（§SPEC-060a/064b）：既有（未插桩）运行的失败
-    (script, test) 身份对集合——双臂失败对逐对披露后，相对该基线的
-    **新增失败对**即门控：臂 run_error → union invalid → ok=false/
-    comparable=false，臂不出分。缺省（None）时**懒获取**：仅当 gut_full
-    插桩臂观测到失败，才现场跑一次同面无插桩 GUT 取既有失败基线并复核
-    （绿臂零额外 GUT；获取失败 fail-loud）；显式提供优先。生效基线披露
-    在归属产物 `baseline_failures_meta`。
-
-    intolerant_config（§SPEC-061b/c）与 acceptance_repeats（§SPEC-062C）
-    语义见各分解函数；臂执行细节见 arms.run_arm / execute_arms。"""
+def _measure_inputs(project_root, target_files, recipe, baseline_failures,
+                    intolerant_config, inject_toolchain) -> dict:
+    """输入校验与就绪态：baseline pairs / intolerant 解析 / recipe 校验 +
+    pristine hash / 注入。"""
     t_command = time.monotonic()
     root = Path(project_root).resolve()
     baseline_pairs = _parse_baseline_failures(baseline_failures)
@@ -513,7 +486,21 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         {k: v for k, v in recipe.items() if k != "recipe_hash"})
     if inject_toolchain:
         recipe = _inject_toolchain(root, recipe)
-    recipe_hash = recipe["recipe_hash"]
+    return {
+        "t_command": t_command, "root": root,
+        "baseline_pairs": baseline_pairs,
+        "intolerant_tests": intolerant_tests,
+        "declared_scoped": declared_scoped, "declared_bare": declared_bare,
+        "coverage_limitations": coverage_limitations,
+        "recipe": recipe, "recipe_hash": recipe["recipe_hash"],
+        "pristine_recipe_hash": pristine_recipe_hash,
+    }
+
+
+def _measure_stage(root, target_files, recipe_hash, block_compress,
+                   test_attribution, attribution_causal, evidence_out,
+                   scope_roots) -> dict:
+    """测量舞台：evidence dir / algo / 目标准备 / scope 完整性 / 陈旧恢复。"""
     t_gated = time.monotonic()
     evidence_dir = evidence_dir_for(evidence_out) if evidence_out else None
     if evidence_dir is not None:
@@ -528,11 +515,24 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         algo_used=algo_used, block_compress=block_compress,
         test_attribution=test_attribution,
         attribution_causal=attribution_causal)
-    prepared = targets["prepared"]
-    unmeasured = targets["unmeasured"]
-    causal_sites = targets["causal_sites"]
-    complete = _scope_complete(scope_roots, target_files)
-    recovered = _recover_stale_backups(root)
+    return {
+        "t_gated": t_gated, "evidence_dir": evidence_dir,
+        "base_algo": base_algo, "algo_used": algo_used, "targets": targets,
+        "prepared": targets["prepared"],
+        "unmeasured": targets["unmeasured"],
+        "causal_sites": targets["causal_sites"],
+        "complete": _scope_complete(scope_roots, target_files),
+        "recovered": _recover_stale_backups(root),
+    }
+
+
+def _measure_arms(root, recipe, prepared, *, timeout_s, test_attribution,
+                  attribution_causal, shard_width, shard_log_dir,
+                  acceptance_repeats, baseline_failures, baseline_pairs,
+                  declared_scoped, declared_bare, arms_parallel, evidence_dir,
+                  acceptance_keys, acceptance_shards,
+                  acceptance_adaptive) -> tuple:
+    """双臂执行（arm_kwargs 装配 + execute_arms）。"""
     arm_kwargs = dict(
         prepared=prepared, timeout_s=timeout_s,
         test_attribution=test_attribution,
@@ -543,13 +543,16 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         baseline_pairs=baseline_pairs, declared_scoped=declared_scoped,
         declared_bare=declared_bare, arms_parallel=arms_parallel,
         evidence_dir=evidence_dir)
-    arm_a, arm_b = execute_arms(
+    return execute_arms(
         root=root, recipe=recipe, arms_parallel=arms_parallel,
         acceptance_keys=acceptance_keys, acceptance_shards=acceptance_shards,
         acceptance_adaptive=acceptance_adaptive, arm_kwargs=arm_kwargs)
-    unions = _build_unions(arm_a, arm_b, recipe_hash)
-    gated_arms, comparable_reason = _gate_comparable(
-        unions, arm_a, arm_b, complete)
+
+
+def _measure_crap(unions, prepared, recipe_hash, stability_baseline,
+                  coverage_limitations) -> dict:
+    """CRAP 记录/车道 + stability baseline + 覆盖限制 provenance +
+    measurable 统计。"""
     baseline_lines, baseline_records = (
         _load_baseline_report(stability_baseline)
         if stability_baseline else ({}, {}))
@@ -562,14 +565,30 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     _attach_limitation_reasons(crap_records, coverage_limitations)
     unmeasurable, measurable_files, measurable_valid = _measurable_stats(
         unions)
-    # §SPEC-039 门量：插桩 + 两臂 GUT + union（recipe 构建与 W4 探针不计）
+    return {
+        "records": crap_records, "lanes": crap_lanes, "version": crap_version,
+        "unmeasurable": unmeasurable, "measurable_files": measurable_files,
+        "measurable_valid": measurable_valid,
+    }
+
+
+def _measure_perf(root, probe_keys, timeout_s, t_gated, t_command) -> dict:
+    """性能块（§SPEC-039 门量：插桩 + 两臂 GUT + union）。"""
     gated_core_s = round(time.monotonic() - t_gated, 3)
     perf = _performance(root, probe_keys, timeout_s)
     perf["gated_core_s"] = gated_core_s
     perf["command_total_s"] = round(time.monotonic() - t_command, 3)
+    return perf
+
+
+def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
+                         recipe_hash, root, attribution_out,
+                         attribution_causal, causal_sites,
+                         pristine_recipe_hash) -> dict:
+    """归属节（file_sha256 派生 + _attribution_section）。"""
     _file_sha = {rel: sha256_text(item["src"])
                  for rel, item in prepared.items()}
-    attr_section = _attribution_section(
+    return _attribution_section(
         test_attribution, (arm_a, arm_b), recipe_hash, root, attribution_out,
         causal=attribution_causal, causal_sites=causal_sites,
         file_sha256=_file_sha,
@@ -579,16 +598,75 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         prepared=prepared,
         baseline_meta=(arm_a.get("baseline_failures_meta")
                        or arm_b.get("baseline_failures_meta")))
+
+
+def _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
+                  comparable_reason, crap, stability_baseline, perf,
+                  attr_section) -> dict:
+    """报告装配 + 归属节合并（_assemble_report 参数序见其签名）。"""
     report = _assemble_report(
-        root, recipe_hash, arm_a, arm_b, unions, gated_arms,
-        comparable_reason, complete, crap_records, crap_lanes, crap_version,
-        stability_baseline, intolerant_tests, coverage_limitations,
-        unmeasurable, measurable_files, measurable_valid,
-        targets["cache_hits"], targets["cache_misses"], algo_used, prepared,
-        unmeasured, recovered, perf)
+        root, inp["recipe_hash"], arm_a, arm_b, unions, gated_arms,
+        comparable_reason, st["complete"], crap["records"], crap["lanes"],
+        crap["version"], stability_baseline, inp["intolerant_tests"],
+        inp["coverage_limitations"], crap["unmeasurable"],
+        crap["measurable_files"], crap["measurable_valid"],
+        st["targets"]["cache_hits"], st["targets"]["cache_misses"],
+        st["algo_used"], st["prepared"], st["unmeasured"], st["recovered"],
+        perf)
     report.update(attr_section)
     return report
 
+
+def run_measurement(project_root: str | Path, target_files: list[str],
+                  recipe: dict, *, acceptance_keys: list[str] | None = None,
+                  probe_keys: list[str] | None = None, timeout_s: int = 180,
+                  evidence_out: str | None = None, inject_toolchain: bool = True,
+                  scope_roots: list[str] | None = None, block_compress: bool = True,
+                  shard_width: int = 6, acceptance_shards: int = 4,
+                  shard_log_dir: str | None = None,
+                  stability_baseline: str | None = None,
+                  baseline_failures: "set[tuple[str, str]] | None" = None,
+                  intolerant_config: dict | None = None,
+                  acceptance_repeats: int = 3, test_attribution: bool = False,
+                  attribution_out: str | None = None,
+                  attribution_causal: bool = False, arms_parallel: bool = False,
+                  acceptance_adaptive: bool = False) -> dict:
+    """measurement 双源批式编排，产出 measurement-report/2（分解见
+    _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
+    inp = _measure_inputs(project_root, target_files, recipe,
+                          baseline_failures, intolerant_config,
+                          inject_toolchain)
+    root = inp["root"]
+    st = _measure_stage(
+        root, target_files, inp["recipe_hash"], block_compress,
+        test_attribution, attribution_causal, evidence_out, scope_roots)
+    arm_a, arm_b = _measure_arms(
+        root, inp["recipe"], st["prepared"], timeout_s=timeout_s,
+        test_attribution=test_attribution,
+        attribution_causal=attribution_causal, shard_width=shard_width,
+        shard_log_dir=shard_log_dir, acceptance_repeats=acceptance_repeats,
+        baseline_failures=baseline_failures,
+        baseline_pairs=inp["baseline_pairs"],
+        declared_scoped=inp["declared_scoped"],
+        declared_bare=inp["declared_bare"], arms_parallel=arms_parallel,
+        evidence_dir=st["evidence_dir"], acceptance_keys=acceptance_keys,
+        acceptance_shards=acceptance_shards,
+        acceptance_adaptive=acceptance_adaptive)
+    unions = _build_unions(arm_a, arm_b, inp["recipe_hash"])
+    gated_arms, comparable_reason = _gate_comparable(
+        unions, arm_a, arm_b, st["complete"])
+    crap = _measure_crap(unions, st["prepared"], inp["recipe_hash"],
+                         stability_baseline, inp["coverage_limitations"])
+    perf = _measure_perf(root, probe_keys, timeout_s, st["t_gated"], inp["t_command"])
+    attr_section = _measure_attribution(
+        arm_a, arm_b, st["prepared"], test_attribution=test_attribution,
+        recipe_hash=inp["recipe_hash"], root=root,
+        attribution_out=attribution_out, attribution_causal=attribution_causal,
+        causal_sites=st["causal_sites"],
+        pristine_recipe_hash=inp["pristine_recipe_hash"])
+    return _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
+                         comparable_reason, crap, stability_baseline, perf,
+                         attr_section)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")
 

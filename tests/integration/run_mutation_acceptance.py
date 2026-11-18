@@ -607,7 +607,11 @@ def main(argv=None) -> int:
     env_base.setdefault("GQT_E2E_TRACE", "1")
 
     ctx: dict = {"kol": str(kol), "target": args.target,
-                 "budget": str(args.budget), "map": "", "stable": "",
+                 "budget": str(args.budget),
+                 # S8.1 夹具修正（Atlas 批准）：等价 case 的预算必须 ≥ 目标位
+                 # 点数——budget 截断会让 mutate-all（截到 budget）与 diff 轮
+                 # （totals 含复用 verdict）测量面不同构；断言期望不变。
+                 "eq_budget": str(max(args.budget, 20)), "map": "", "stable": "",
                  "line": "", "testdir": "", "zero_ref": "", "worker_target": "",
                  "face": args.target.split("/", 1)[0]}
     # fault-injection 与 zero-config 都必须从「无 map / 原始状态」出发，预构建

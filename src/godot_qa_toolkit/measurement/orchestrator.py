@@ -2064,6 +2064,9 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             rep_records: list[dict] = []
             shadow = None
             shadow_disclosure: dict = {}
+            _t_shard = time.monotonic()
+            print(f"measure: arm={name} shard={idx + 1}/{len(plans)} "
+                  f"rep=0/{reps} start", file=sys.stderr)
             try:
                 # §SPEC-056：分片独立 project shadow（rep 间复用）
                 shadow, shadow_disclosure = _prepare_shadow(
@@ -2114,6 +2117,9 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             finally:
                 _cleanup_shadow(shadow)
             # §SPEC-071 H1：shadow symlink 消解行为显式披露（解引用/悬空移除）
+            print(f"measure: arm={name} shard={idx + 1}/{len(plans)} "
+                  f"done s={round(time.monotonic() - _t_shard, 1)}",
+                  file=sys.stderr)
             return {"plan": plan, "reps": rep_records,
                     "shadow_disclosure": shadow_disclosure}
 
@@ -2137,6 +2143,8 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                     abs_p.parent.mkdir(parents=True, exist_ok=True)
                     abs_p.write_text(text, encoding="utf-8")
             t_arm = time.monotonic()
+            print(f"measure: arm={name} start shards={len(plans)} "
+                  f"reps={reps}", file=sys.stderr)
             try:
                 with ThreadPoolExecutor(
                         max_workers=max(1, len(plans))) as ex:
@@ -2353,6 +2361,9 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                 write_bundle(evidence_dir, bundle, name_suffix=suffix)
                 update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
                                   status="bundle_written")
+        print(f"measure: arm={name} done state="
+              f"{'valid' if arm_valid else 'invalid'} "
+              f"wall_s={round(wall_s, 1)}", file=sys.stderr)
         return {
             "arm": name, "run_uuid": run_uuid, "wall_s": round(wall_s, 3),
             "gut_ok": gut_ok, "timed_out": timed_out,

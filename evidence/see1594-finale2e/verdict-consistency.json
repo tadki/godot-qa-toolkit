@@ -1,0 +1,68 @@
+{
+  "worker data_source": {
+    "e55": {
+      "file": "/tmp/fe-kol-v1/systems/container/data_source.gd",
+      "mutants": 4,
+      "killed": 4,
+      "survived": 0,
+      "timeout": 0,
+      "run_errors": 0,
+      "suspect": 0,
+      "invalid_mutants": 0,
+      "executed": 4
+    },
+    "final": {
+      "file": "/tmp/fe-kol-v2/systems/container/data_source.gd",
+      "mutants": 4,
+      "killed": 4,
+      "survived": 0,
+      "timeout": 0,
+      "run_errors": 0,
+      "suspect": 0,
+      "invalid_mutants": 0,
+      "executed": 4
+    },
+    "totals_equal": false,
+    "failure_equal": true,
+    "failures_e55": {},
+    "failures_final": {},
+    "ok_e55": true,
+    "ok_final": true,
+    "totals_equal_excluding_path": true
+  },
+  "cold occupancy_map": {
+    "e55": {
+      "file": "/tmp/fe-kol-v1/systems/world/occupancy_map.gd",
+      "mutants": 9,
+      "killed": 8,
+      "survived": 1,
+      "timeout": 0,
+      "run_errors": 0,
+      "suspect": 0,
+      "invalid_mutants": 0,
+      "executed": 9
+    },
+    "final": {
+      "file": "/tmp/fe-kol-v2/systems/world/occupancy_map.gd",
+      "mutants": 9,
+      "killed": 8,
+      "survived": 1,
+      "timeout": 0,
+      "run_errors": 0,
+      "suspect": 0,
+      "invalid_mutants": 0,
+      "executed": 9
+    },
+    "totals_equal": false,
+    "failure_equal": true,
+    "failures_e55": {
+      "func:release_anchor#3": "survived"
+    },
+    "failures_final": {
+      "func:release_anchor#3": "survived"
+    },
+    "ok_e55": false,
+    "ok_final": false,
+    "totals_equal_excluding_path": true
+  }
+}

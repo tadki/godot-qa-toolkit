@@ -1,0 +1,36 @@
+{
+  "tool": "see1594.finale2e.provenance",
+  "gqt_head": "33ddfdc4a43ebd3838747067ee0b54906dd0a8f3",
+  "kol_commit": "ac6a7282eba4a5d4332f30a0ac2f005a10c10336",
+  "kol_copy": "git clone --shared + checkout ac6a7282 (rev-parse verified) + addons/godot_mcp submodule content copied from workspace checkout (HEAD==pin 4f907e81)",
+  "matrix": {
+    "ok": true,
+    "cases": "36/36",
+    "checks": "37/37 PASS",
+    "fixture": "eq_budget=max(--budget,20) per S8.1 approved fix"
+  },
+  "verdict_consistency": {
+    "method": "same target+budget(20, --mutate-all)+shared explicit map, independent KOL copies, per-stable-id verdict comparison",
+    "heads": {
+      "baseline": "e55e78b (BCODE head)",
+      "final": "33ddfdc"
+    },
+    "targets": [
+      "systems/container/data_source.gd (worker channel, 4 sites)",
+      "systems/world/occupancy_map.gd (static cold route, 9 sites)"
+    ],
+    "result": "identical mutants/killed/survived/executed and identical failure id->verdict maps on both heads for both targets (path field differs only by copy root)"
+  },
+  "fullrepo_cold": {
+    "gut_full": "valid",
+    "baseline_pairs": 0,
+    "new_failures": 0,
+    "intolerant_bypassed": 3,
+    "map_files": 182,
+    "total_wall_s": 138.97,
+    "s8_2_reference_s": 144.5,
+    "delta_pct": -3.8,
+    "within_30pct": true
+  },
+  "kol_main_porcelain": "empty (zero modification)"
+}

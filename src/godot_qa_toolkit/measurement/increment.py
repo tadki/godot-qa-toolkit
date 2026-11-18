@@ -200,6 +200,47 @@ def compute_invalidation(root: Path, baseline: dict,
             "explicit_rerun": explicit_rerun}
 
 
+def _merge_arm_lines(arm: dict, fresh: dict, dropped: set[str]) -> tuple:
+    """行事实合并：test/script 双车道 + line_to_tests 反查（fresh 脚本的
+    行集整并；dropped 脚本的行整删）。"""
+    test_to_lines = {k: {r: set(ls) for r, ls in v.items()}
+                     for k, v in (arm.get("test_to_lines") or {}).items()}
+    script_to_lines = {k: {r: set(ls) for r, ls in v.items()}
+                       for k, v in (arm.get("script_to_lines") or {}).items()}
+    for ident, by_rel in (fresh.get("test_to_lines") or {}).items():
+        slot = test_to_lines.setdefault(ident, {})
+        for rel, lines in by_rel.items():
+            slot[rel] = set(lines)
+    for ident, by_rel in (fresh.get("script_to_lines") or {}).items():
+        slot = script_to_lines.setdefault(ident, {})
+        for rel, lines in by_rel.items():
+            slot[rel] = set(lines)
+    for dropped_name in dropped:
+        test_to_lines.pop(dropped_name, None)
+        script_to_lines.pop(dropped_name, None)
+    line_to_tests: dict[str, dict[int, set[str]]] = {}
+    for ident, by_rel in test_to_lines.items():
+        for rel, lines in by_rel.items():
+            slot = line_to_tests.setdefault(rel, {})
+            for ln in lines:
+                slot.setdefault(ln, set()).add(ident)
+    return test_to_lines, script_to_lines, line_to_tests
+
+
+def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
+                       replace_names: set[str], name_of) -> dict:
+    """同语义合并：dropped 删边 + replace_names 整体替换 + 其余身份原样
+    保留 + fresh 注入。"""
+    base = {}
+    for identity, value in (arm.get(key) or {}).items():
+        if name_of(identity) in dropped or name_of(identity) in replace_names:
+            continue
+        base[identity] = value
+    for identity, value in (fresh.get(key) or {}).items():
+        base[identity] = value
+    return base
+
+
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None
                ) -> dict:
@@ -210,19 +251,11 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
     replace_names = {_script_name_of(i) for i in
                      (fresh.get("test_to_files") or {})}
     replace_names |= set(fresh.get("script_to_files") or {})
-
-    def _merged(key: str, name_of) -> dict:
-        base = {}
-        for identity, value in (arm.get(key) or {}).items():
-            if name_of(identity) in dropped or name_of(identity) in replace_names:
-                continue
-            base[identity] = value
-        for identity, value in (fresh.get(key) or {}).items():
-            base[identity] = value
-        return base
-
-    test_to_lines = _merged("test_to_lines", lambda i: i.split("::", 1)[0])
-    script_to_lines = _merged("script_to_lines", lambda i: i)
+    test_to_lines = _merged_identities(
+        "test_to_lines", arm, fresh, dropped, replace_names,
+        lambda i: i.split("::", 1)[0])
+    script_to_lines = _merged_identities(
+        "script_to_lines", arm, fresh, dropped, replace_names, lambda i: i)
     # file/function 边不再独立合并：从合并后行事实派生（行事实是主真值）。
     derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
                                             fid_by_line_by_rel)
@@ -258,6 +291,31 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                             for k, v in sorted(file_to_scripts.items())},
         **_line_facts_views(test_to_lines, script_to_lines, line_to_tests),
     }
+def _increment_decision(root: Path, recipe: dict, baseline: dict,
+                        changed_files: list[str], since_full: int,
+                        calibration_every: int,
+                        rerun_full_face_ratio: float) -> tuple:
+    """增量资格判定：hash 守恒 + 变更分类 + 失效计算 + fallback 仲裁。
+    返回 (raw_recipe, classes, invalidation, rerun, reason)。"""
+    raw_recipe = dict(recipe)
+    classes = classify_changes(root, changed_files, baseline)
+    invalidation = {"rerun": set(), "dropped": set(), "sources": {}}
+    hash_ok = (baseline.get("report_recipe_hash")
+               == recipe["recipe_hash"])
+    if hash_ok and not classes["prod_new"]:
+        from ..mutation.gdself import build_index
+        invalidation = compute_invalidation(
+            root, baseline, classes, build_index(str(root)))
+    known = _baseline_script_names(baseline)
+    # 分类来源（改/增测试脚本）不过 known 闸——新脚本天然不在基线；
+    # 静态候选（可能指向基线外的脚本）必须过滤，防止凭空圈定
+    explicit = set(invalidation.get("explicit_rerun") or ())
+    rerun = explicit | {n for n in invalidation["rerun"] if n in known}
+    ratio = (len(rerun & known) / len(known)) if known else 0.0
+    reason = _fallback_reason(hash_ok, classes, since_full,
+                              calibration_every, ratio,
+                              rerun_full_face_ratio)
+    return raw_recipe, classes, invalidation, rerun, reason
 
 
 def run_attribution_increment(project_root: str | Path,
@@ -274,27 +332,12 @@ def run_attribution_increment(project_root: str | Path,
     t0 = time.monotonic()
     root = Path(project_root).resolve()
     baseline = load_baseline(baseline_path)
-    raw_recipe = dict(recipe)
     recipe = _inject_toolchain(root, dict(recipe))
     prev = baseline.get("increment") or {}
     since_full = int(prev.get("increments_since_full") or 0)
-    hash_ok = (baseline.get("report_recipe_hash")
-               == recipe["recipe_hash"])
-    classes = classify_changes(root, changed_files, baseline)
-    invalidation = {"rerun": set(), "dropped": set(), "sources": {}}
-    if hash_ok and not classes["prod_new"]:
-        from ..mutation.gdself import build_index
-        invalidation = compute_invalidation(
-            root, baseline, classes, build_index(str(root)))
-    known = _baseline_script_names(baseline)
-    # 分类来源（改/增测试脚本）不过 known 闸——新脚本天然不在基线；
-    # 静态候选（可能指向基线外的脚本）必须过滤，防止凭空圈定
-    explicit = set(invalidation.get("explicit_rerun") or ())
-    rerun = explicit | {n for n in invalidation["rerun"] if n in known}
-    ratio = (len(rerun & known) / len(known)) if known else 0.0
-    reason = _fallback_reason(hash_ok, classes, since_full,
-                              calibration_every, ratio,
-                              rerun_full_face_ratio)
+    raw_recipe, classes, invalidation, rerun, reason = _increment_decision(
+        root, recipe, baseline, changed_files, since_full, calibration_every,
+        rerun_full_face_ratio)
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
@@ -330,7 +373,6 @@ def run_attribution_increment(project_root: str | Path,
         "wall_s": round(time.monotonic() - t0, 3),
         "arm_exec_s": arm_exec_s,
     }
-
 
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
                      calibration_every: int, ratio: float,

@@ -148,15 +148,8 @@ def _template_ok(entry: dict, tpl: str, probe_lines: list) -> bool:
     return SINK_UUID_PLACEHOLDER in tpl
 
 
-def load_entry(project_root: str | os.PathLike, *, rel: str,
-               src_sha256: str, recipe_hash: str,
-               algo: str = PROBE_ALGO_VERSION) -> dict | None:
-    """命中返回 {registry, probe_manifest, instrumented_template}；任何不
-    匹配/损坏/含动态键 → None（caller 重建）。保证不抛异常吞错：损坏文件
-    显式落盘 .bad 后缀供排查。"""
-    rid = root_id(project_root)
-    path = _entry_path(project_root, prep_key(rel, src_sha256, recipe_hash,
-                                              algo))
+def _load_entry_bytes(path) -> "dict | None":
+    """读入 + JSON/根类型守卫（损坏 → quarantine + None）。"""
     if not os.path.isfile(path):
         return None
     try:
@@ -170,6 +163,13 @@ def load_entry(project_root: str | os.PathLike, *, rel: str,
         # quarantine + fresh 重建，不得 AttributeError
         _quarantine(path)
         return None
+    return entry
+
+
+def _load_entry_validate(entry: dict, rid, rel, src_sha256, recipe_hash,
+                         algo, path) -> "dict | None":
+    """语义校验链（meta → 动态键 → 模板 → probe_lines → 完整性 → 模板
+    形态 → block_map 反归一）；任一失败 quarantine + None。"""
     if not _entry_meta_ok(entry, rid, rel, src_sha256, recipe_hash, algo):
         return None
     if _has_forbidden_keys(entry):
@@ -200,6 +200,21 @@ def load_entry(project_root: str | os.PathLike, *, rel: str,
             "probe_lines": probe_lines,
             "block_map": block_map}
 
+
+def load_entry(project_root: str | os.PathLike, *, rel: str,
+               src_sha256: str, recipe_hash: str,
+               algo: str = PROBE_ALGO_VERSION) -> dict | None:
+    """命中返回 {registry, probe_manifest, instrumented_template}；任何不
+    匹配/损坏/含动态键 → None（caller 重建）。保证不抛异常吞错：损坏文件
+    显式落盘 .bad 后缀供排查。"""
+    rid = root_id(project_root)
+    path = _entry_path(project_root, prep_key(rel, src_sha256, recipe_hash,
+                                              algo))
+    entry = _load_entry_bytes(path)
+    if entry is None:
+        return None
+    return _load_entry_validate(entry, rid, rel, src_sha256, recipe_hash,
+                                algo, path)
 
 def store_entry(project_root: str | os.PathLike, *, rel: str,
                 src_sha256: str, recipe_hash: str, registry: dict,

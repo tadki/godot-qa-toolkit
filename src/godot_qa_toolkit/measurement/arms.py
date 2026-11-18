@@ -512,6 +512,43 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
             "vacuous_rels": vacuous_rels, "plans": plans, "reps": reps,
             "shadow_hook_files": shadow_hook_files,
             "attribution_causal": attribution_causal}
+def _arm_fanout(name: str, *, root: Path, run_uuid: str, plans: list,
+                reps: int, timeout_s: int, adaptive_reps: bool,
+                sink_by_rel: dict, manifest_by_rel: dict,
+                shadow_instrument: bool, inst_by_rel: dict,
+                shadow_hook_files: list, shard_log_dir: str | None,
+                xdg_homes: list[str]) -> list[dict]:
+    """分片并行扇出（ThreadPoolExecutor：每分片独立进程 + XDG 隔离）。
+
+    §SPEC-060e：worker 生命周期异常终止（如 shadow 构建失败）→ 已创建的
+    XDG 立即清理；with-block 退出已等待全部在飞分片，闭包注册表在此刻
+    已完整。"""
+    results: list[dict] = []
+    try:
+        with ThreadPoolExecutor(
+                max_workers=max(1, len(plans))) as ex:
+            results = list(ex.map(
+                lambda ip: _run_shard_leg(
+                    ip, name=name, plans=plans,
+                    root=root, run_uuid=run_uuid,
+                    reps=reps, timeout_s=timeout_s,
+                    adaptive_reps=adaptive_reps, prev_union=None,
+                    sink_by_rel=sink_by_rel,
+                    manifest_by_rel=manifest_by_rel,
+                    shadow_instrument=shadow_instrument,
+                    inst_by_rel=inst_by_rel,
+                    shadow_hook_files=shadow_hook_files,
+                    shard_log_dir=shard_log_dir,
+                    xdg_homes=xdg_homes),
+                enumerate(plans)))
+    except BaseException:
+        for xdg in xdg_homes:
+            shutil.rmtree(xdg, ignore_errors=True)
+        xdg_homes.clear()
+        raise
+    return results
+
+
 def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
                  timeout_s: int, adaptive_reps: bool, shard_log_dir: str | None,
                  stage: dict) -> tuple:
@@ -534,32 +571,13 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
                              shadow_hook_files, causal, name)
         print(f"measure: arm={name} start shards={len(plans)} "
               f"reps={reps}", file=sys.stderr)
-        results: list[dict] = []
-        try:
-            with ThreadPoolExecutor(
-                    max_workers=max(1, len(plans))) as ex:
-                results = list(ex.map(
-                    lambda ip: _run_shard_leg(
-                        ip, name=name, plans=plans,
-                        root=root, run_uuid=run_uuid,
-                        reps=reps, timeout_s=timeout_s,
-                        adaptive_reps=adaptive_reps, prev_union=None,
-                        sink_by_rel=sink_by_rel,
-                        manifest_by_rel=manifest_by_rel,
-                        shadow_instrument=shadow_instrument,
-                        inst_by_rel=inst_by_rel,
-                        shadow_hook_files=shadow_hook_files,
-                        shard_log_dir=shard_log_dir,
-                        xdg_homes=xdg_homes),
-                    enumerate(plans)))
-        except BaseException:
-            # §SPEC-060e：worker 生命周期异常终止（如 shadow 构建失败）
-            # → 已创建的 XDG 立即清理；with-block 退出已等待全部在飞
-            # 分片，闭包注册表在此刻已完整
-            for xdg in xdg_homes:
-                shutil.rmtree(xdg, ignore_errors=True)
-            xdg_homes.clear()
-            raise
+        results = _arm_fanout(
+            name, root=root, run_uuid=run_uuid, plans=plans, reps=reps,
+            timeout_s=timeout_s, adaptive_reps=adaptive_reps,
+            sink_by_rel=sink_by_rel, manifest_by_rel=manifest_by_rel,
+            shadow_instrument=shadow_instrument, inst_by_rel=inst_by_rel,
+            shadow_hook_files=shadow_hook_files,
+            shard_log_dir=shard_log_dir, xdg_homes=xdg_homes)
         wall_s = time.monotonic() - t_arm
         gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs = \
             _arm_fail_scan(results)
@@ -567,7 +585,6 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
         _arm_restore(root, started, backup_dir)
     return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
             arm_failures, arm_fail_pairs)
-
 def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             acceptance: dict | None = None,
             shadow_instrument: bool = False,

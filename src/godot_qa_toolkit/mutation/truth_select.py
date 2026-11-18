@@ -261,14 +261,9 @@ def _ensure_generate(root: str, out: str, files: list[str],
 
 def ensure_map(project_root: str | Path, files: list[str],
                timeout_s: int | None = None) -> str | None:
-    """默认自动生成/重建：约定默认位置缺失或不可用（旧 schema/无效状态）
-    且 mode=auto → `gqt measure run --test-attribution` 一次（原子写、
-    `<map>.lock` 串行化）。
-
-    显式 `--attribution-map`（ENV 指定）只读透传，绝不重建/删除——schema
-    不符由 resolve_selection fail-loud（Owner 约束）。失败 → 台账记录并
-    raise `MutationSelectionError`（fail-loud；全脸仅显式 `--select full`
-    审计开关）。"""
+    """默认自动生成/重建（mode=auto，原子写 + `<map>.lock` 串行化）；
+    显式 `--attribution-map` 只读透传绝不重建；失败台账记录后
+    fail-loud（全脸仅显式 `--select full` 审计开关）。"""
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
@@ -605,11 +600,9 @@ def resolve_selection(project_root: str | Path, target_file: str,
                       map_path_override: str | None = None,
                       strict: bool = True,
                       timeout_s: int | None = None) -> dict:
-    """目标 → 文件级选面决策（严格模式不可用即 fail-loud）。
-
-    mode=auto：映射过期 → 自动增量/重建一次后重判（台账披露）；仍不可用
-    → MutationSelectionError（Owner 定稿：取消自动全脸）。strict=False 供
-    证书归属等只读旁路使用（返回 full_face 描述，不抛）。"""
+    """目标 → 文件级选面决策（严格模式不可用即 fail-loud）。mode=auto：
+    映射过期自动增量/重建一次后重判（台账披露）；strict=False 供证书
+    归属等只读旁路（返回 full_face 描述，不抛）。"""
     root = str(Path(project_root).resolve())
     base = {"source": "full_face", "reason": None, "tests": [],
             "tests_glob": None, "zero_ref": False, "mapping": None,

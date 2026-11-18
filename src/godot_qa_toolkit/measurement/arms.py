@@ -465,29 +465,13 @@ def _arm_vacuous_bundles(name: str, prepared: dict, vacuous_rels: list[str],
     return bundles
 
 
-def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
-            acceptance: dict | None = None,
-            shadow_instrument: bool = False,
-            adaptive_reps: bool = False,
-            test_attribution: bool = False,
-            attribution_causal: bool = False,
-            shard_width: int = 6, shard_log_dir: str | None = None,
-            timeout_s: int = 180, acceptance_repeats: int = 3,
-            baseline_failures: "set[tuple[str, str]] | None" = None,
-            baseline_pairs: "set[tuple[str, str]] | None" = None,
-            declared_scoped: "set[tuple[str, str]] | None" = None,
-            declared_bare: "set[str] | None" = None,
-            arms_parallel: bool = False,
-            evidence_dir=None) -> dict:
-    """一条批式臂（§SPEC-052 并行分片）：复用全集插桩 → 按目录/feature
-    组并行扇出 N 个 GUT 进程（每进程独立 XDG user:// 隔离 + 运行时
-    PID sink）→ 合并逐文件 sink 读回 → bundle → 恢复/清理。零可执行行
-    文件进显式 vacuous 车道（§SPEC-042）。
-
-    shadow_instrument=True（P2 双臂并行）：插桩写入分片 shadow 而非
-    项目根——两臂可并发执行而不互踩 uuid。adaptive_reps=True（P1）：
-    acceptance 臂逐轮执行、并集稳定即提前锁定（上限仍为 reps）。"""
-    from . import prepcache
+def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
+               test_attribution: bool, attribution_causal: bool,
+               shadow_instrument: bool, shard_width: int,
+               acceptance, acceptance_repeats: int) -> tuple:
+    """臂前置：uuid/备份/装载/pg 检查/created 清单/started.json/分片计划/
+    reps/钩子文本。返回 run 期共享元组。"""
+    from . import prepcache  # noqa: F401 — 占位消费面保持
     from .instrument import _hook_templates
     from .probe_templates import (
         _ATTR_CTX_GD,
@@ -527,15 +511,36 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
                          (_PRE_HOOK_RELPATH, pre_hook_gd)]
     if attribution_causal and name == "gut_full":
         shadow_hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
+    return {"run_uuid": run_uuid, "backup_dir": backup_dir, "started": started,
+            "sink_by_rel": sink_by_rel, "manifest_by_rel": manifest_by_rel,
+            "instrumented_files": instrumented_files, "inst_by_rel": inst_by_rel,
+            "vacuous_rels": vacuous_rels, "plans": plans, "reps": reps,
+            "shadow_hook_files": shadow_hook_files,
+            "attribution_causal": attribution_causal}
+
+
+def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
+                 timeout_s: int, adaptive_reps: bool, shard_log_dir: str | None,
+                 stage: dict) -> tuple:
+    """执行段：根树注入（非 shadow）→ 分片扇出 → XDG 异步清理 → 失败扫描。
+    返回 (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
+    arm_failures, arm_fail_pairs)。"""
+    run_uuid = stage["run_uuid"]
+    backup_dir = stage["backup_dir"]
+    started = stage["started"]
+    sink_by_rel = stage["sink_by_rel"]
+    manifest_by_rel = stage["manifest_by_rel"]
+    inst_by_rel = stage["inst_by_rel"]
+    plans = stage["plans"]
+    reps = stage["reps"]
+    shadow_hook_files = stage["shadow_hook_files"]
+    causal = stage["attribution_causal"]
     xdg_homes: list[str] = []
-    gut_ok = True
-    run_error = False
-    timed_out = False
     t_arm = time.monotonic()
     try:
         if not shadow_instrument:
-            _arm_inject_root(root, instrumented_files, shadow_hook_files,
-                             attribution_causal, name)
+            _arm_inject_root(root, stage["instrumented_files"],
+                             shadow_hook_files, causal, name)
         print(f"measure: arm={name} start shards={len(plans)} "
               f"reps={reps}", file=sys.stderr)
         results: list[dict] = []
@@ -569,10 +574,49 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             _arm_fail_scan(results)
     finally:
         _arm_restore(root, started, backup_dir)
+    return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
+            arm_failures, arm_fail_pairs)
 
-    # §SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）：
-    # 新增失败门控；具名排除按 (script, test) 身份匹配（无 script 声明
-    # 仅豁免未归因失败；同名跨脚本不得合并豁免），基线按既有失败对吸收
+
+def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
+            acceptance: dict | None = None,
+            shadow_instrument: bool = False,
+            adaptive_reps: bool = False,
+            test_attribution: bool = False,
+            attribution_causal: bool = False,
+            shard_width: int = 6, shard_log_dir: str | None = None,
+            timeout_s: int = 180, acceptance_repeats: int = 3,
+            baseline_failures: "set[tuple[str, str]] | None" = None,
+            baseline_pairs: "set[tuple[str, str]] | None" = None,
+            declared_scoped: "set[tuple[str, str]] | None" = None,
+            declared_bare: "set[str] | None" = None,
+            arms_parallel: bool = False,
+            evidence_dir=None) -> dict:
+    """一条批式臂（§SPEC-052 并行分片）：复用全集插桩 → 按目录/feature
+    组并行扇出 N 个 GUT 进程（每进程独立 XDG user:// 隔离 + 运行时
+    PID sink）→ 合并逐文件 sink 读回 → bundle → 恢复/清理。零可执行行
+    文件进显式 vacuous 车道（§SPEC-042）。
+
+    shadow_instrument=True（P2 双臂并行）；adaptive_reps=True（P1）。
+    分解函数族 _arm_stage/_arm_execute/_arm_gate 等承载阶段语义。"""
+    stage = _arm_stage(
+        name, root=root, prepared=prepared, recipe=recipe,
+        test_attribution=test_attribution,
+        attribution_causal=attribution_causal,
+        shadow_instrument=shadow_instrument, shard_width=shard_width,
+        acceptance=acceptance, acceptance_repeats=acceptance_repeats)
+    run_uuid = stage["run_uuid"]
+    plans = stage["plans"]
+    reps = stage["reps"]
+    sink_by_rel = stage["sink_by_rel"]
+    manifest_by_rel = stage["manifest_by_rel"]
+    vacuous_rels = stage["vacuous_rels"]
+    (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
+     arm_failures, arm_fail_pairs) = _arm_execute(
+        name, root=root, shadow_instrument=shadow_instrument,
+        timeout_s=timeout_s, adaptive_reps=adaptive_reps,
+        shard_log_dir=shard_log_dir, stage=stage)
+    # §SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）
     declared_scoped = declared_scoped or set()
     declared_bare = declared_bare or set()
     baseline_pairs = baseline_pairs or set()
@@ -583,15 +627,39 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         name, root, recipe, timeout_s, arm_fail_pairs, declared_scoped,
         effective_baseline, new_pairs, baseline_failures,
         baseline_meta)
-    arm_new_failures = sorted({t for (_s, t) in new_pairs})
     if new_pairs:
         gut_ok = False
         run_error = True
-
     (reconciliation, arm_valid, invalid_reason, gut_ok_delta,
      run_error) = _arm_reconcile(root, acceptance, results, run_error)
     gut_ok = gut_ok and not gut_ok_delta
+    return _arm_result(name, root=root, prepared=prepared, acceptance=acceptance,
+                       arms_parallel=arms_parallel, evidence_dir=evidence_dir,
+                       shard_log_dir=shard_log_dir, timeout_s=timeout_s,
+                       adaptive_reps=adaptive_reps and acceptance is not None,
+                       test_attribution=test_attribution,
+                       results=results, run_uuid=run_uuid, wall_s=wall_s,
+                       gut_ok=gut_ok, run_error=run_error,
+                       timed_out=timed_out, arm_failures=arm_failures,
+                       arm_fail_pairs=arm_fail_pairs, new_pairs=new_pairs,
+                       exempt_pairs=exempt_pairs, baseline_meta=baseline_meta,
+                       reconciliation=reconciliation, arm_valid=arm_valid,
+                       invalid_reason=invalid_reason, reps=reps, plans=plans,
+                       sink_by_rel=sink_by_rel,
+                       manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
+                       vacuous_rels=vacuous_rels)
 
+def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
+                arms_parallel: bool, evidence_dir, shard_log_dir: str | None,
+                timeout_s: int, adaptive_reps: bool, test_attribution: bool,
+                results, run_uuid: str, wall_s: float, gut_ok: bool,
+                run_error: bool, timed_out: bool, arm_failures,
+                arm_fail_pairs, new_pairs, exempt_pairs, baseline_meta,
+                reconciliation, arm_valid: bool, invalid_reason, reps: int,
+                plans: list, sink_by_rel: dict, manifest_by_rel: dict,
+                xdg_homes: list[str], vacuous_rels: list) -> dict:
+    """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
+    vacuous 车道 → 结果文档组装。"""
     convergence = None
     attribution = None
     bundles: dict[str, dict] = {}
@@ -632,7 +700,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         "test_failures": {"observed": sorted(arm_failures),
                           "observed_pairs": sorted(
                               f"{s}::{t}" for (s, t) in arm_fail_pairs),
-                          "new": arm_new_failures,
+                          "new": sorted({t for (_s, t) in new_pairs}),
                           "new_pairs": sorted(
                               f"{s}::{t}" for (s, t) in new_pairs),
                           "instrumentation_intolerant": sorted(
@@ -642,7 +710,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         "convergence": convergence,
         "adaptive_rounds_used": max(
             (len(r["reps"]) for r in results), default=0)
-        if (adaptive_reps and acceptance is not None) else None,
+        if adaptive_reps else None,
         "arms_parallel": arms_parallel,
         "attribution": attribution,
         "bundles": len(bundles), "bundles_data": bundles,
@@ -659,6 +727,20 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
                     "dangling_links_removed", 0) for r in results),
         },
     }
+    return _arm_result(
+        name, root=root, prepared=prepared, acceptance=acceptance,
+        arms_parallel=arms_parallel, evidence_dir=evidence_dir,
+        shard_log_dir=shard_log_dir, timeout_s=timeout_s,
+        adaptive_reps=adaptive_reps and acceptance is not None,
+        test_attribution=test_attribution,
+        results=results, run_uuid=run_uuid, wall_s=wall_s,
+        gut_ok=gut_ok, run_error=run_error, timed_out=timed_out,
+        arm_failures=arm_failures, arm_fail_pairs=arm_fail_pairs,
+        new_pairs=new_pairs, exempt_pairs=exempt_pairs,
+        baseline_meta=baseline_meta, reconciliation=reconciliation,
+        arm_valid=arm_valid, invalid_reason=invalid_reason, reps=reps,
+        plans=plans, sink_by_rel=sink_by_rel, manifest_by_rel=manifest_by_rel,
+        xdg_homes=xdg_homes, vacuous_rels=vacuous_rels)
 
 
 def run_acceptance_flow(*, root: Path, recipe: dict,

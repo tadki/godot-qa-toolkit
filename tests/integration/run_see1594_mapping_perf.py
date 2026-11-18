@@ -130,6 +130,62 @@ def _recipe_or_fail(kol_root: Path) -> dict:
     return recipe
 
 
+
+
+def _run_uninstr_gut(kol_root: Path, timeout: int,
+                     select: str | None = None) -> tuple[int, str]:
+    """无插桩 GUT 运行（全 face 或 -gselect 指定脚本）。"""
+    import os
+    godot_bin = os.environ.get("GQT_GODOT_BIN") or "godot"
+    cmd = [godot_bin, "--headless", "--path", str(kol_root),
+           "-s", "res://addons/gut/gut_cmdln.gd"]
+    if select:
+        cmd += [f"-gselect={select}"]
+    else:
+        cmd += ["-gdir=res://tests", "-ginclude_subdirs"]
+    cmd += ["-gexit"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout + r.stderr
+
+
+def _pairs_from_output(out: str) -> set[tuple[str, str]]:
+    """GUT 输出 → (script, test) 身份对——复用测量侧同一解析器
+    （§SPEC-063c/064a 混合形态；与臂观测逐对可比，§SPEC-064b）。"""
+    from godot_qa_toolkit.measurement.orchestrator import _parse_failing_pairs
+    return _parse_failing_pairs(out)
+
+
+def _acquire_baseline(kol_root: Path, timeout: int,
+                      face: str = "res://tests",
+                      select: str | None = None,
+                      ) -> "tuple[set, dict | str]":
+    """现场获取基线（无插桩 GUT 一次）：返回 (pairs, meta) 或 (set(), 错误串)。
+
+    fail-loud：启动失败 / 无 GUT 运行流（不得按空基线静默继续）。
+    基线仅当次现场获取，不跨 run 缓存；身份对歧义由 (script, test)
+    对身份原生消解（§SPEC-064b：未归因仅匹配未归因，同名跨脚本不
+    互相吸收）。"""
+    import hashlib
+    from godot_qa_toolkit.mutation.gutrun import _looks_like_godot_launch_failure
+    t0 = time.monotonic()
+    rc, out = _run_uninstr_gut(kol_root, timeout, select=select)
+    if _looks_like_godot_launch_failure(out) or (
+            "Run Summary" not in out and "[Failed]" not in out
+            and "[Passed]" not in out):
+        return set(), ("baseline acquisition failed: uninstrumented GUT "
+                       f"run has no run stream (rc={rc}) — refusing "
+                       f"empty baseline (fail-loud)")
+    pairs = _pairs_from_output(out)
+    meta = {"method": "uninstrumented_run", "face": face,
+            "pairs": sorted([list(p) for p in pairs]), "count": len(pairs),
+            "sha256": hashlib.sha256(json.dumps(
+                sorted([list(p) for p in pairs]),
+                ensure_ascii=False).encode("utf-8")).hexdigest(),
+            "wall_s": round(time.monotonic() - t0, 3)}
+    return pairs, meta
+
+
+
 def main(argv: list[str] | None = None) -> int:
     t0 = time.monotonic()
     parser = argparse.ArgumentParser(
@@ -174,6 +230,18 @@ def main(argv: list[str] | None = None) -> int:
           file=sys.stderr)
 
     from godot_qa_toolkit.measurement.orchestrator import run_measurement
+    import godot_qa_toolkit
+    # 证据有效性守卫：harness 必须测量本 worktree 的实现——多 worktree
+    # 机器上 stale editable egg-link 会劫持 import（README 约定
+    # PYTHONPATH=src），错树证据比无证据更糟 → fail-loud。
+    _pkg_root = Path(godot_qa_toolkit.__file__).resolve().parent.parent
+    if _pkg_root != (Path(__file__).resolve().parents[2] / "src"):
+        return _fail(f"measuring the wrong tree: imported godot_qa_toolkit "
+                     f"from {_pkg_root} — run with PYTHONPATH="
+                     f"{Path(__file__).resolve().parents[2] / 'src'} "
+                     f"(README worktree convention)")
+    env_anchor["gqt_package"] = str(_pkg_root)
+
     from godot_qa_toolkit.measurement.increment import run_attribution_increment
     from godot_qa_toolkit.measurement.recipe import build_recipe
     from godot_qa_toolkit.mutation.truth_select import resolve_selection
@@ -183,50 +251,109 @@ def main(argv: list[str] | None = None) -> int:
     targets = [str(p) for p in samples]
     recipe = _recipe_or_fail(kol_root)
 
-    # --- 段 1：full build（映射全量构建，绝对秒数）---
+    # --- 段 0：基线现场获取（同 tests 面无插桩 GUT 一次；Owner 方案 A）---
+    baseline_pairs, baseline_meta = _acquire_baseline(
+        kol_root, args.timeout, face="res://tests")
+    if isinstance(baseline_meta, str):
+        return _fail(baseline_meta)
+    print(f"[harness] baseline: {baseline_meta['count']} known failing "
+          f"pairs acquired uninstrumented ({baseline_meta['wall_s']}s) — "
+          f"only NEW failures invalidate the arm", file=sys.stderr)
+
+    # --- 段 1：full build（映射全量构建；baseline 内失败不判臂无效）---
     t1 = time.monotonic()
     report = run_measurement(str(kol_root), targets, recipe,
                              timeout_s=args.timeout, test_attribution=True,
+                             baseline_failures=baseline_pairs,
                              attribution_out=str(kol_root / ".qa-cache"
                                                  / "attribution-map.json"))
     print(f"[harness] full build report ok={report.get('ok')} "
           f"keys={sorted(report.keys())}", file=sys.stderr)
+    if not report.get("ok"):
+        print(f"[harness] report ok=false diagnostics: "
+              f"failures={json.dumps(report.get('failures'), default=str)[:600]} "
+              f"union={json.dumps(report.get('union'), default=str)[:300]} "
+              f"unions={json.dumps(report.get('unions'), default=str)[:300]}",
+              file=sys.stderr)
     print(f"[harness] report[:800]="
           f"{json.dumps(report, ensure_ascii=False, default=str)[:800]}",
           file=sys.stderr)
     full_build_s = round(time.monotonic() - t1, 3)
-    # §SPEC-026 判据锚：全量构建成功与否以「映射产物有效性」为准
-    # （schema/arms_state/probes），不以批式 report.ok 为准——KOL 副本
-    # headless 下 acceptance 臂失败会使 ok=False 但映射仍有效。
-    if report.get("failures") is not None and \
-            not isinstance(report.get("failures"), dict):
-        pass  # list 形态留给下面的 map 校验统一判定
 
     map_file = kol_root / ".qa-cache" / "attribution-map.json"
     if not map_file.is_file():
         return _fail("full build did not produce attribution map "
                      f"at {map_file}")
     doc = json.loads(map_file.read_text(encoding="utf-8"))
+
+    # S6.2：映射产物记录基线元数据（新键只加不改；消费者不读不改语义）
+    doc["baseline_failures_meta"] = {
+        "method": baseline_meta["method"],
+        "face": baseline_meta.get("face"),
+        "count": baseline_meta["count"],
+        "sha256": baseline_meta["sha256"],
+        "wall_s": baseline_meta["wall_s"],
+        "gating": "new failures only (baseline-absorbed failures keep the "
+                  "arm valid)",
+    }
+    map_file.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+
     if doc.get("schema_version") != "test-attribution/6":
         return _fail(f"map schema mismatch: {doc.get('schema_version')!r}")
+    gut_state = (doc.get("arms_state") or {}).get("gut_full") or {}
     if not (doc.get("arms_state") or {}).get("gut_full"):
         return _fail("map incomplete: arms_state.gut_full missing")
+    if int(gut_state.get("probes_fired") or 0) <= 0:
+        return _fail("map not fresh: probes_fired == 0 (GUT never executed)")
 
     # --- 段 2：incremental（增量刷新，绝对秒数；只做一次）---
+    # S6.2：受影响面现场取基线（touch 后、刷新前重取，不得沿用陈旧基线）
     touch = samples[0]
+    touch_rel = touch.relative_to(kol_root).as_posix()
+    inc_pairs, inc_meta = _acquire_baseline(kol_root, args.timeout)
+    if isinstance(inc_meta, str):
+        return _fail(inc_meta)
     t2 = time.monotonic()
     inc = run_attribution_increment(
         str(kol_root), targets, recipe, str(map_file),
-        [touch.relative_to(kol_root).as_posix()],
+        [touch_rel],
         str(kol_root / ".qa-cache" / "attribution-map.increment.json"),
         timeout_s=args.timeout)
     incremental_s = round(time.monotonic() - t2, 3)
     if inc.get("out_path") and Path(inc["out_path"]).is_file():
         Path(inc["out_path"]).replace(map_file)
     doc = json.loads(map_file.read_text(encoding="utf-8"))
-    if doc.get("schema_version") != "test-attribution/6":
-        return _fail("incremental produced stale/invalid map (schema mismatch)"
-                     " — refusing to project (fail-loud)")
+
+    # S6.2：增量后受影响面无插桩复跑——失败集必须 ⊆ 增量前现场基线
+    # （不得有新增失败被 valid 状态掩盖）
+    affected = sorted({str(ident).split("::")[0] for ident, by_rel in
+                       ((doc.get("arms") or {}).get("gut_full")
+                        or {}).get("test_to_lines", {}).items()
+                       if by_rel.get(touch_rel)})
+    if affected:
+        # test_to_lines 身份 = <GUT 裸名>.gd::<test>（A12）；-gselect 按
+        # 脚本名匹配（实测锚定：裸名精确命中唯一脚本）
+        sel = ",".join(affected)
+        rc_v, out_v = _run_uninstr_gut(kol_root, args.timeout, select=sel)
+        post_pairs = _pairs_from_output(out_v)
+        fresh_pairs = {tuple(p) for p in inc_meta["pairs"]}
+        new_after = post_pairs - fresh_pairs
+        if new_after:
+            return _fail_json(
+                f"post-increment new failures outside baseline: "
+                f"{sorted(new_after)}", out,
+                {"env": env_anchor, "incremental_s": incremental_s,
+                 "projection_s": projection})
+    # 基线元数据刷新标注（增量后现场基线）
+    if "baseline_failures_meta" in doc:
+        doc["baseline_failures_meta"]["refresh"] = {
+            "face": "affected", "count": inc_meta["count"],
+            "sha256": inc_meta["sha256"]}
+        map_file.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+
+
 
     # --- 段 3：projection（行级映射投影；per-file + 聚合）---
     projection = {"files": [], "aggregate_s": 0.0}
@@ -245,10 +372,14 @@ def main(argv: list[str] | None = None) -> int:
         projection["files"].append({"file": rel, "s": per_s,
                                     "covered_lines": sorted(pf["covered_lines"]),
                                     "coverage_percent": pf["coverage_percent"]})
-        # parity：新投影 covered set vs 映射行事实（唯一真源）逐文件对比
+        # parity：新投影 covered set vs 映射行事实（唯一真源）逐文件对比。
+        # 真值 = 映射携带的全部行事实：test 级身份 + script 级事实
+        # （script_to_lines 是映射的一等行事实，投影消费侧同样并集）。
         arm = (doc.get("arms") or {}).get("gut_full") or {}
         truth: set[int] = set()
         for ident, by_rel in (arm.get("test_to_lines") or {}).items():
+            truth |= set((by_rel.get(rel) or ()))
+        for _sp, by_rel in (arm.get("script_to_lines") or {}).items():
             truth |= set((by_rel.get(rel) or ()))
         inst = {int(x) for x in
                 ((doc.get("instrumentable_lines") or {}).get(rel) or ())}
@@ -299,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         "ok": True,
         "env": env_anchor,
         "samples": [str(p.relative_to(kol_root)) for p in samples],
+        "baseline_failures": doc.get("baseline_failures_meta") or {},
         "full_build_s": full_build_s,
         "incremental_s": incremental_s,
         "projection_s": {"per_file": projection["files"],

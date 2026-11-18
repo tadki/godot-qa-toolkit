@@ -89,14 +89,13 @@ from ..timing import (explicit_timing_meta, project_relative,
 # SEE-1594 BTIDY：glob/util/loop 支撑簇物理迁移至 runhelp（零行为拆分）；
 # 再导出保持既有 runner.* 引用面与 monkeypatch seam。
 from .runhelp import (  # noqa: F401
-    _adaptive_timeout,
     _attach_killed_certificate,
     _auto_scan_tests_glob,
     _auto_scan_tests_glob_meta,
     _BaselineLaunchFailure,
     _caliper_lines,
-    _loop_baseline,
-    _loop_legs,
+    _exec_finalize,
+    _exec_prep_results,
     _loop_slot,
     _negotiate_budget,
     _orphan_disclosure,
@@ -104,14 +103,11 @@ from .runhelp import (  # noqa: F401
     _record_timing_sample,
     _res_path_of,
     _resolve_auto_glob,
-    _run_baseline,
-    _run_cold_legs,
-    _run_mutant_loop,
-    _run_mutant_loop_with_aborts,
+    _sm_classify,
+    _sm_inject,
     _tally,
     adaptive_timeout_for,
 )
-from . import runhelp as _rh
 from .gutrun import (  # noqa: F401,E402
     GUT_SCRIPT_RES_PATH,
     _GUT_RUN_EVIDENCE,
@@ -449,59 +445,8 @@ def _run_mutation_core(file_path: str,
 
 
 
-def _exec_prep_results(path, project_root, original_src, mutants, executed_list,
-                       reused, results_uncovered, scope_hashes, disclosures,
-                       budget, store2, header_hash, retry_ids, total_sites) -> tuple:
-    """复用/invalid/uncovered 记录重建 + manifest 索引层先行写（中断安全；
-    worker 注入路径不写——父层合并后单点写，规避并发竞态）。
-    返回 (results, invalid_count)。"""
-    # 复用记录重建（全签名已验）——串行路径在此落报告面；worker 路径的
-    # reused 为空（父层合并后单点注入，避免分片重复计数）。
-    results = _rebuild_reused_records(reused, mutants, original_src)
-    # _record_invalid_mutants 返回新列表——与 reused/uncovered 记录拼接而非覆盖。
-    # O2：invalid_mutant（语法预检剔除）从未进入 GUT 执行——执行面以
-    # _valid_mutants 过滤后的可执行集合为准。
-    invalid_results, invalid_count = _record_invalid_mutants(
-        original_src, executed_list, None)
-    results = results + results_uncovered + invalid_results
-    # O2 键在场性守卫：executed 只在【披露语义在场】时出现——在场时以
-    # actually_executed 覆写计划面值（Revy 实机 20 vs mutants 19 口径漂移）。
-    if "executed" in disclosures:
-        disclosures["executed"] = len(_valid_mutants(original_src,
-                                                     executed_list))
-    if retry_ids is None:
-        store2.write_manifest(header_hash, scope_hashes,
-                              ResumeStoreV2._sha1_text(original_src),
-                              project_relative(project_root, str(path)))
-    return results, invalid_count
 
 
-def _exec_finalize(path, results, raw_pairs, prior_entries, scope_hashes,
-                   store2, timing_store, baseline_reused, baseline_elapsed,
-                   timing_meta, reused, invalid_count, budget, scoped,
-                   disclosures, slot_info, original_src, clock) -> dict:
-    """D5 streak 落定（权威口径）：streak/pinned 转化 + 毒 run 修正——
-    循环内乐观落盘已保证中断安全，毒窗口时改写条目为未递增 streak。"""
-    clock.add("baseline", baseline_elapsed)
-    streaks = apply_timeout_streaks(raw_pairs, prior_entries, scope_hashes,
-                                    time.time())
-    results.extend(streaks.records)
-    if streaks.suspended:
-        for e in streaks.entries:
-            store2.record_entry(e)
-        print("mutation: timeout streak suspended: suspected infra run",
-              file=sys.stderr)
-    _record_timing_sample(timing_store, baseline_reused, baseline_elapsed,
-                          timing_meta)
-    return _mutation_report(str(path), *_tally(results), invalid_count,
-                            budget, results, scoped, baseline_reused,
-                            timing_meta,
-                            len(reused) if reused else None,
-                            disclosures=disclosures or None,
-                            pinned_count=len(streaks.pinned_ids),
-                            slot_info=slot_info, original_src=original_src,
-                            adaptive_timeout_s=_rh._adaptive_timeout,
-                            stage_timings=clock.disclosure())
 
 
 def _execute_planned(path, project_root, original_src, backup, mutants,
@@ -585,58 +530,8 @@ _adaptive_timeout = 0
 
 
 
-def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
-               path, auto_name) -> tuple:
-    """mutant 注入影子槽（临时文件 + os.replace，引擎启动前落盘）+ beacon
-    配置与进程 env 准备。返回 (mutated_src, cfg_path, user_dir)。"""
-    mutated_src = _apply_mutation(original_src, m)
-    if target_res == "":
-        target_res = _res_path_of(str(path), str(Path(project_root)))
-    if target_rel == "":
-        target_rel = project_relative(project_root, str(path))
-    try:
-        mutant_sha = shadow.inject_mutant(slot.root, target_rel, mutated_src)
-    except (OSError, SlotProvisionError) as e:
-        return _mutant_record(
-            m, "run_error",
-            f"disk injection failed for {target_res}: {e}",
-            src=original_src), None, None
-    cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
-                                       auto_name)
-    register_temp(cfg_path)
-    user_dir = make_user_dir()
-    env_extra, _ = mutant_env(str(cfg_path), user_dir)
-    return mutated_src, cfg_path, user_dir
 
 
-def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
-                 ownership_fn, project_root) -> dict:
-    """beacon 四级失败分类 + kill 判定 + L4 GUT 运行证据门 + killed 证书。"""
-    # 四级 beacon 失败分类：load-null/parse → invalid_mutant；
-    # 哈希不符/实例不同源/基础设施 → run_error（§SPEC-003）。
-    beacon_verdict = beacon.classify_beacon_failure(rc, tail)
-    if beacon_verdict is not None:
-        return _mutant_record(
-            m, beacon_verdict,
-            f"beacon failed ({beacon_verdict}): {tail.strip()[:200]}",
-            src=original_src)
-    # classify 保持 5 参签名（interrupt 令牌测试以同签名 fake 替换）；
-    # line_text 统一在消费侧补——所有 verdict 记录同构（SEE-1416）。
-    verdict = _classify_mutant_run(m, rc, tail, baseline_failures,
-                                   baseline_dirty)
-    verdict = {**verdict, "line_text": line_text_of(original_src, m.line)}
-    # L4 GUT 运行证据门：无运行流不得 killed/survived（§SPEC-003）。
-    if verdict["verdict"] in ("killed", "survived") \
-            and not _GUT_RUN_EVIDENCE.search(tail):
-        return _mutant_record(
-            m, "run_error",
-            f"no GUT run stream evidence for "
-            f"{m.kind} {m.original}→{m.mutated} — engine output "
-            f"lacks test-run markers: {tail.strip()[:200]}",
-            src=original_src)
-    _attach_killed_certificate(verdict, tail, baseline_failures,
-                               ownership_fn, project_root)
-    return verdict
 
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
@@ -660,7 +555,7 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     try:
         try:
             rc, tail = _run_gut_on_project(
-                str(slot.root), timeout_s=_rh._adaptive_timeout,
+                str(slot.root), timeout_s=_adaptive_timeout,
                 tests_glob=tests_glob)
             verdict = _sm_classify(m, rc, tail, baseline_failures,
                                    baseline_dirty, original_src, ownership_fn,
@@ -680,3 +575,202 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     return verdict
 
 
+def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
+                  ) -> tuple[int, str, float]:
+    """跑 baseline 并计时；TimeoutExpired 由调用方按中止契约处理。"""
+    from godot_qa_toolkit.mutation import runner as _r
+
+    t0 = time.monotonic()
+    rc, tail = _r._run_gut_on_project(project_root, timeout_s=timeout_s,
+                                      tests_glob=tests_glob)
+    return rc, tail, time.monotonic() - t0
+
+
+def _run_cold_legs(path, project_root, original_src, backup, mutants,
+                   tests_glob, baseline_failures, baseline_dirty, slot,
+                   auto_name, target_rel, target_res, ownership_fn, reporter,
+                   store2, prior_entries, scopes):
+    """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
+    raw_pairs: list[tuple] = []
+    for seq, m in enumerate(mutants):
+        t_mutant = time.monotonic()
+        verdict = _run_single_mutant(
+            m, path, project_root, original_src, backup, tests_glob, seq,
+            baseline_failures, baseline_dirty, slot=slot,
+            auto_name=auto_name, ownership_fn=ownership_fn,
+            target_rel=target_rel, target_res=target_res)
+        raw_pairs.append((m, verdict))
+        # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
+        if reporter is not None:
+            reporter.record(m, verdict, time.monotonic() - t_mutant)
+        # 中断安全增量落盘：乐观 streak（毒窗口收尾修正）。
+        # SEE-1405 发现三毒条目防护由 resume2.record_entry 承接
+        # （启动失败类 run_error 拒收——verdict 零信息量）。
+        if store2 is not None:
+            prior = prior_entries.get(m.stable_id)
+            streak, v2_verdict = streak_for(prior, verdict["verdict"])
+            store2.record_entry(make_entry(m, verdict, v2_verdict, streak,
+                                           scopes or {}, time.time()))
+    return raw_pairs
+
+
+def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
+                   precomputed_baseline, timeout_factor) -> tuple:
+    """workdir 备份 + baseline 实测/复用 + 自适应 timeout 锚 + 启动失败守卫。
+    baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。"""
+    backup_path = os.path.join(workdir, "original.gd")
+    shutil.copy2(str(path), backup_path)
+    if precomputed_baseline is not None:
+        baseline_rc = int(precomputed_baseline["rc"])
+        baseline_tail = str(precomputed_baseline["tail"])
+        baseline_elapsed = float(precomputed_baseline["elapsed"])
+        baseline_reused = True
+    else:
+        # Revy QA retest 实证：baseline 必然花最久——timeout 漏网按 run_error
+        # JSON 契约归一（与 per-mutant 循环同款处理）。
+        baseline_rc, baseline_tail, baseline_elapsed = _run_baseline(
+            project_root, tests_glob, timeout_s)
+        baseline_reused = False
+    # SPEC-009 自适应 timeout：per-mutant 上限 = baseline 耗时 × F（只放大）。
+    global _adaptive_timeout
+    _adaptive_timeout = adaptive_timeout_for(baseline_elapsed, timeout_s,
+                                             timeout_factor)
+    if baseline_rc != 0 and _looks_like_godot_launch_failure(baseline_tail):
+        raise _BaselineLaunchFailure(baseline_tail)
+    baseline_failures = _parse_failing_tests(baseline_tail)
+    return baseline_failures, bool(baseline_failures), baseline_reused, \
+        baseline_elapsed
+
+
+def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
+               baseline_failures, baseline_dirty, slot, auto_name, target_rel,
+               target_res, kind, idpack, exec_scheme_resolved, worker_channel,
+               reporter, store2, prior_entries, scopes, clock, slot_info,
+               t_slot) -> list:
+    """beacon 播种 → worker/冷腿执行 → 槽归还断言与 slot_sync 计时。"""
+    ownership_holder: list = []
+
+    def _ownership():
+        if not ownership_holder:
+            from .truth_select import ownership_for
+            ownership_holder.append(
+                ownership_for(str(project_root), str(path)))
+        return ownership_holder[0]
+
+    use_worker = exec_scheme_resolved == WORKER_SCHEME
+    timings_out: dict = {}
+    try:
+        beacon.seed_beacon_script(slot.root)
+        if use_worker:
+            from .worker_channel import execute_worker_branch
+            with clock.stage("per_mutant"):
+                raw_pairs, fatal_events = execute_worker_branch(
+                    path, project_root, original_src, mutants, tests_glob,
+                    baseline_failures, baseline_dirty, slot, auto_name,
+                    target_rel, target_res, kind, reporter, store2,
+                    prior_entries, scopes, _ownership,
+                    timings_out=timings_out)
+            clock.add("worker_boot",
+                      timings_out.get("worker_boot_s", 0.0))
+            if fatal_events:
+                slot_info["worker_fatal_events"] = fatal_events
+                slot_info["worker_channel"] = degraded_worker_disclosure(
+                    slot_info.get("worker_channel") or {}, fatal_events)
+        else:
+            with clock.stage("per_mutant"):
+                raw_pairs = _run_cold_legs(
+                    path, project_root, original_src, backup, mutants,
+                    tests_glob, baseline_failures, baseline_dirty, slot,
+                    auto_name, target_rel, target_res, _ownership, reporter,
+                    store2, prior_entries, scopes)
+    finally:
+        release_problems = shadowpool.release_slot(slot)
+        # §SPEC-202 slot_sync = 槽获取→归还断言全程；槽位固定成本 = 其与
+        # per_mutant 之差（§SPEC-210 LOW-1 口径修正）。
+        clock.add("slot_sync", time.monotonic() - t_slot)
+        if release_problems:
+            slot_info["release_problems"] = release_problems
+    return raw_pairs
+
+
+def _run_mutant_loop(
+    path, project_root: str, original_src: str, backup: str,
+    mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
+    precomputed_baseline: dict | None = None,
+    store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
+    timeout_factor: float | None = None, reporter=None,
+    identity: dict | None = None, targeted_only: bool = False,
+    worker_channel=None, clock: StageClock | None = None,
+) -> tuple[list, bool, float, dict]:
+    """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
+    baseline_elapsed, slot_info)。verdict 记录不在此处进 results——D5 streak
+    是窗口级判定，由调用方 apply_timeout_streaks 落定后统一扩展。"""
+    with tempfile.TemporaryDirectory() as workdir:
+        (baseline_failures, baseline_dirty, baseline_reused,
+         baseline_elapsed) = _loop_baseline(workdir, path, project_root,
+                                            tests_glob, timeout_s,
+                                            precomputed_baseline,
+                                            timeout_factor)
+        clock = clock or StageClock()
+        (slot, idpack, auto_name, target_rel, target_res, scheme,
+         slot_info, t_slot) = _loop_slot(
+            project_root, path, detect_binary_kind(), identity, tests_glob,
+            worker_channel, targeted_only, clock)
+        raw_pairs = _loop_legs(
+            path, project_root, original_src, backup, mutants, tests_glob,
+            baseline_failures, baseline_dirty, slot, auto_name, target_rel,
+            target_res, detect_binary_kind(), idpack, scheme, worker_channel,
+            reporter, store2, prior_entries, scopes, clock, slot_info, t_slot)
+        slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
+        slot_info["slot_mode"] = slot.mode
+        slot_info["freshness"] = list(slot.freshness)
+        if any(v["verdict"] == "survived" for _, v in raw_pairs):
+            slot_info["suspected_orphan"] = _orphan_disclosure(
+                project_root, target_res)
+    return raw_pairs, baseline_reused, baseline_elapsed, slot_info
+
+
+def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
+                                 executed_list, tests_glob, timeout_s,
+                                 precomputed_baseline=None,
+                                 store2=None, prior_entries=None,
+                                 scopes=None,
+                                 timeout_factor: float | None = None,
+                                 reporter=None, identity=None,
+                                 targeted_only: bool = False,
+                                 worker_channel=None,
+                                 clock: StageClock | None = None):
+    """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
+    try:
+        return _run_mutant_loop(
+            path, project_root, original_src, backup,
+            _valid_mutants(original_src, executed_list), tests_glob, timeout_s,
+            precomputed_baseline, store2, prior_entries, scopes,
+            timeout_factor, reporter=reporter, identity=identity,
+            targeted_only=targeted_only, worker_channel=worker_channel,
+            clock=clock,
+        )
+    except subprocess.TimeoutExpired:
+        # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
+        return _run_error_result(
+            str(path),
+            f"baseline GUT timed out after {timeout_s}s — mutation data untrustworthy",
+            f"baseline GUT timed out after {timeout_s}s (project's baseline run exceeds "
+            f"the timeout — raise --timeout or check why tests are this slow)",
+            hint=suggested_action(timeout_s),
+            action_kind=suggested_action_kind(timeout_s),
+        )
+    except _BaselineLaunchFailure as e:
+        return _run_error_result(
+            str(path),
+            "godot launch failed on baseline — mutation data untrustworthy",
+            f"godot launch failed on baseline run: {e.tail.strip()[:200]}",
+        )
+    except SlotProvisionError as e:
+        # 影子槽制备失败（.gitignore fail-loud / 磁盘不足）——数据不可信，
+        # 中止契约转统一 JSON（与 baseline 启动失败同档）。
+        return _run_error_result(
+            str(path),
+            "shadow slot provisioning failed — mutation data untrustworthy",
+            f"shadow slot provisioning failed: {e}",
+        )

@@ -20,13 +20,17 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.shadowio import (
+    _prepare_shadow,
+)
+from godot_qa_toolkit.measurement.backup import (
     MeasurementError,
     _backup_base,
-    _load_baseline_report,
-    _prepare_shadow,
     _recover_stale_backups,
     _rel_within_root,
+)
+from godot_qa_toolkit.measurement.orchestrator import (
+    _load_baseline_report,
     run_measurement,
 )
 
@@ -435,7 +439,7 @@ def test_canonical_evidence_record_has_no_phantom_sink_path(
 def test_atomic_write_excl_0600_no_leftover(project):
     """O_CREAT|O_EXCL|O_NOFOLLOW + 0600 + 随机后缀（经 pinned dirfd）：
     临时名不可抢注、不跟随 symlink、replace 后零残留、终态 0600。"""
-    from godot_qa_toolkit.measurement.orchestrator import \
+    from godot_qa_toolkit.measurement.backup import \
         _atomic_write_via_dir_fd
     src_dir = project / "src_game"
     target = src_dir / "cell.gd"
@@ -616,10 +620,10 @@ def test_ghost_replay_semantics_reconciled_with_current_form():
     本轮该文件实测形态对账；rel 不在本轮测量面时保留 baseline 原值并
     显式标注 carried。"""
     from godot_qa_toolkit.measurement.orchestrator import (
-        _crap_replay_vanished_baseline,
-        _SEM_BLOCK,
-        _SEM_STATEMENT,
-    )
+    _crap_replay_vanished_baseline,
+    _SEM_BLOCK,
+    _SEM_STATEMENT,
+)
     prepared = {
         "src_game/blocky.gd": {"block_map": {0: [1, 2]}},
         "src_game/plain.gd": {"block_map": {}},

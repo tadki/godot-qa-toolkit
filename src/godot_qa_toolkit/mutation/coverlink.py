@@ -16,6 +16,7 @@ writer/reader/prefilter 层已物理退役（A04）；盘上残留 /1 条目按 
 """
 
 from __future__ import annotations
+from ..digest import canonical_sha256, sha256_file
 
 import hashlib
 import json
@@ -143,16 +144,12 @@ def save_coverage(covered_lines: set[int], total_lines: int,
 def tests_face_digest(tests_face: dict) -> str:
     """测试面摘要（投影绑定包成分）：排序稳定 JSON sha256。"""
     canon = {str(k): str(v) for k, v in sorted((tests_face or {}).items())}
-    return hashlib.sha256(json.dumps(
-        canon, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":")).encode("utf-8")).hexdigest()
+    return canonical_sha256(canon)
 
 
 def _canonical_sha256(obj) -> str:
     """任意 JSON 值的排序稳定 sha256（A05 绑定指纹的统一实现）。"""
-    return hashlib.sha256(json.dumps(
-        obj, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":")).encode("utf-8")).hexdigest()
+    return canonical_sha256(obj)
 
 
 def current_tests_face(project_root: str | os.PathLike) -> dict[str, str]:
@@ -163,8 +160,7 @@ def current_tests_face(project_root: str | os.PathLike) -> dict[str, str]:
     if tests.is_dir():
         for p in sorted(tests.rglob("*.gd")):
             try:
-                out[str(p.relative_to(root))] = hashlib.sha256(
-                    p.read_bytes()).hexdigest()
+                out[str(p.relative_to(root))] = sha256_file(p)
             except OSError:
                 continue
     return out
@@ -206,8 +202,7 @@ def _projection_map_reject(
     if not arms_valid(doc.get("arms_state") or {}):
         return "attribution map arms invalid"
     try:
-        file_sha = hashlib.sha256(
-            (root / rel).read_bytes()).hexdigest()
+        file_sha = sha256_file(root / rel)
     except OSError as e:
         return f"cannot read target file: {e}"
     if (doc.get("file_sha256") or {}).get(rel) != file_sha:
@@ -375,8 +370,7 @@ def _projection_binding_reject(
     """投影绑定包校验（目标文件 sha / recipe pristine / 测试面摘要 /
     映射内容 sha / 执行证据 sha）。失配返回显式原因；通过返回 None。"""
     try:
-        file_sha = hashlib.sha256(
-            Path(file_path).read_bytes()).hexdigest()
+        file_sha = sha256_file(file_path)
     except OSError as e:
         return f"cannot read target file: {e}"
     if binding.get("map_file_sha256") != file_sha:

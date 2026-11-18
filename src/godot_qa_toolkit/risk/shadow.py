@@ -8,6 +8,7 @@ the real KOL tree. Extra GUT rounds are limited to what §SPEC-009 prescribes
 """
 
 from __future__ import annotations
+from ..digest import sha256_text
 
 import json
 import time
@@ -142,7 +143,7 @@ def _derive_per_entry(
 
     from ..registry.functions import build_file_registry
 
-    current_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    current_sha = sha256_text(source)
     stale = bundle.get("target", {}).get("sha256") != current_sha
     if registry is None:
         registry = build_file_registry(source, file_label="")

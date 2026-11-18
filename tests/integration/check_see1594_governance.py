@@ -478,10 +478,91 @@ def scan_dead_code(repo_root: Path) -> dict:
     }
 
 
+
+# §SPEC-011 同语义重复惯用式：实现必须单点（digest.py）；语义不同者不并。
+DUPLICATE_IDIOMS = {
+    "file_sha256_read_bytes": (
+        r"hashlib\.sha256\(\s*\n?\s*[^()\n]*read_bytes\(\)\s*\)"
+        r"\s*\.hexdigest\(\)",
+        "src/godot_qa_toolkit/digest.py",
+        "文件内容 sha256 唯一实现 = digest.sha256_file（read_bytes 等价）"),
+    "sha256_text_encode": (
+        r"hashlib\.sha256\(\s*[^()\n]*\.encode\(",
+        "src/godot_qa_toolkit/digest.py",
+        "文本 sha256 唯一实现 = digest.sha256_text"),
+}
+# 语义不同、明确不并的相似写法（报告为 excluded 供复核，不当违规）。
+DISTINCT_SEMANTICS_EXCLUSIONS = {
+    "indent_json_output": (
+        r"json\.dumps\([^\n]*indent=[12][^\n]*sort_keys=True",
+        "indent 化的可读 JSON 落盘（格式输出，非摘要序列化）"),
+    "sha1_file_binding": (
+        r"hashlib\.sha1\(\s*\n?\s*[^()\n]*read_bytes\(\)",
+        "source_sha1 绑定（sha1 域，非 sha256 语义）"),
+}
+
+
+def scan_duplicates(repo_root: Path) -> dict:
+    """§SPEC-011：同语义 ≥3 处重复的惯用式实现单点扫描。
+
+    每个惯用式的实现文件必须唯一（digest.py）；其他文件命中即违规。
+    语义不同的相似写法显式列 excluded（不强并的证据）。"""
+    import re as _re
+    src_root = repo_root / "src"
+    files = sorted(src_root.rglob("*.py"))
+    violations: list[dict] = []
+    inventory: dict = {}
+    for name, (pattern, owner, semantics) in DUPLICATE_IDIOMS.items():
+        pat = _re.compile(pattern, _re.M)
+        hits = []
+        for py in files:
+            try:
+                text = py.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = py.relative_to(repo_root).as_posix()
+            for m in pat.finditer(text):
+                line = text.count("\n", 0, m.start()) + 1
+                hits.append({"file": rel, "line": line})
+        inventory[name] = {"owner": owner, "semantics": semantics,
+                           "hits": hits}
+        for h in hits:
+            if h["file"] != owner:
+                violations.append({"idiom": name, **h,
+                                   "expected_owner": owner,
+                                   "semantics": semantics})
+    excluded = {}
+    for name, (pattern, why) in DISTINCT_SEMANTICS_EXCLUSIONS.items():
+        pat = _re.compile(pattern)
+        hits = []
+        for py in files:
+            try:
+                for no, line in enumerate(
+                        py.read_text(encoding="utf-8").splitlines(), 1):
+                    if pat.search(line):
+                        hits.append({"file": py.relative_to(
+                            repo_root).as_posix(), "line": no})
+            except (OSError, UnicodeDecodeError):
+                continue
+        excluded[name] = {"why": why, "hits": hits}
+    return {
+        "tool": "see1594.governance",
+        "mode": "duplicates",
+        "ok": not violations,
+        "idioms": inventory,
+        "excluded_distinct_semantics": excluded,
+        "failures": [{"reason": f"duplicate idiom {v['idiom']} at "
+                                f"{v['file']}:{v['line']} (owner {v['expected_owner']})"}
+                     for v in violations],
+    }
+
+
 def run(mode: str, repo_root: Path | None = None) -> dict:
     root = repo_root or REPO_ROOT
     if mode == "dead-code":
         return scan_dead_code(root)
+    if mode == "duplicates":
+        return scan_duplicates(root)
     if mode != "semantics":
         return {"tool": "see1594.governance", "ok": False,
                 "failures": [{"reason": f"unknown mode: {mode}"}]}
@@ -515,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="SEE-1594 §SPEC-027 governance scan")
     parser.add_argument("--mode", default="semantics",
-                        choices=["semantics", "dead-code"])
+                        choices=["semantics", "dead-code", "duplicates"])
     parser.add_argument("--out", required=True, help="JSON 报告输出路径")
     parser.add_argument("--repo-root", default=None,
                         help="仓库根（缺省=本脚本所在仓库）")

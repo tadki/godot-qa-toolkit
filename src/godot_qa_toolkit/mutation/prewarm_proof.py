@@ -40,6 +40,8 @@ import sys
 import time
 from pathlib import Path
 
+from ..digest import sha256_file
+
 SCHEMA = "gqt-prewarm-proof/1"
 PROOF_DIRNAME = ".qa-cache/gqt-prewarm"
 PROOF_NAME = "proof.json"
@@ -81,14 +83,7 @@ def _proof_paths(project_root: str) -> tuple[Path, Path]:
 
 
 def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(_CHUNK)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+    return sha256_file(path)
 
 
 def _joint_digest(lines: list[str]) -> str:

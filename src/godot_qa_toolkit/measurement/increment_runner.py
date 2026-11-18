@@ -7,6 +7,7 @@ block_map 读回，否则行事实退化为块首行。
 """
 
 from __future__ import annotations
+from ..digest import sha256_text
 
 import hashlib
 import os
@@ -53,7 +54,7 @@ def prepare_attr_templates(root: Path, target_files: list[str],
         src = p.read_text(encoding="utf-8")
         rel = str(p.resolve().relative_to(root))
         key8 = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:8]
-        src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
+        src_sha = sha256_text(src)
         entry = prepcache.load_entry(
             root, rel=rel, src_sha256=src_sha,
             recipe_hash=recipe["recipe_hash"], algo=algo)

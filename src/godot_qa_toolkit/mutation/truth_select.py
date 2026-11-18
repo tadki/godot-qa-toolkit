@@ -1,3 +1,4 @@
+
 """SEE-1581 — mutation 选面改「运行时真值映射」（A09 后静态归属零消费者）。
 
 合同（Owner 2026-11-14 拍板 + ④ 实测数据）：
@@ -20,6 +21,7 @@
 """
 
 from __future__ import annotations
+from ..digest import sha256_file
 
 import hashlib
 import json
@@ -407,7 +409,7 @@ def _file_rel(project_root: str, target_file: str) -> str:
 
 def _sha256(path: Path) -> str | None:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return sha256_file(path)
     except OSError:
         return None
 

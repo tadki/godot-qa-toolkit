@@ -17,6 +17,7 @@ certification.status="not_certified"——单轮 exploratory，WP5 拥有双轮�
 """
 
 from __future__ import annotations
+from ..digest import sha256_text
 
 import hashlib
 import json
@@ -1730,7 +1731,7 @@ def _prepare_target_file(root: Path, rel: str, src: str, abs_path: str,
 
     out = {"prepared": None, "unmeasured": None,
            "cache_hits": 0, "cache_misses": 0, "causal_site": None}
-    src_sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
+    src_sha = sha256_text(src)
     cached = _load_cached_templates(
         root, rel, src_sha, recipe_hash, base_algo, algo_used,
         test_attribution)
@@ -2504,7 +2505,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     perf = _performance(root, probe_keys, timeout_s)
     perf["gated_core_s"] = gated_core_s
     perf["command_total_s"] = round(time.monotonic() - t_command, 3)
-    _file_sha = {rel: hashlib.sha256(item["src"].encode("utf-8")).hexdigest()
+    _file_sha = {rel: sha256_text(item["src"])
                  for rel, item in prepared.items()}
     attr_section = _attribution_section(
         test_attribution, (arm_a, arm_b), recipe_hash, root, attribution_out,

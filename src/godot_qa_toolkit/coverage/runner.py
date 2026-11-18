@@ -112,629 +112,33 @@ class BranchSet:
     items: tuple[BranchItem, ...] = field(default_factory=tuple)
 
 
-def _tree_depth_walk(node, callback, depth=0, prune=None):
-    callback(node, depth)
-    if prune is not None and prune(node):
-        return
-    for child in getattr(node, "children", []):
-        _tree_depth_walk(child, callback, depth + 1, prune)
 
 
-def _node_line(node) -> int | None:
-    """gather_metadata 模式下 Tree 的起始行；无元数据（Token/空 meta）返回 None。"""
-    meta = getattr(node, "meta", None)
-    if meta is not None and not meta.empty and meta.line > 0:
-        return meta.line
-    return None
-
-
-def _dedupe_sorted(lines: list[ExecutableLine]) -> list[ExecutableLine]:
-    seen = set()
-    unique = []
-    for l in lines:
-        if l.line not in seen:
-            seen.add(l.line)
-            unique.append(l)
-    unique.sort(key=lambda x: x.line)
-    return unique
-
-
-def _paren_depths(src: str) -> list[int]:
-    """每行开始时的括号深度（()[]{}，字符串字面量已屏蔽）。
-
-    探针只允许插在【深度==0】的行——深度>0 意味着该行处于括号/参数列表内部，
-    在其前插探针会破坏语法（硬化 实机实证：save_manager.gd 的跨行分组
-    `(
-        result
-        . append(...)  ← 该行插探针 → Parse Error
-    )` 与 sort_custom( 的 lambda 实参行同炸）。
-    """
-    depths = []
-    depth = 0
-    for line in src.splitlines():
-        depths.append(depth)
-        cleaned = re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
-        cleaned = re.sub(r"'(?:[^'\\]|\\.)*'", "''", cleaned)
-        cleaned = re.sub(r"#.*", "", cleaned)
-        depth += (cleaned.count("(") + cleaned.count("[") + cleaned.count("{")
-                  - cleaned.count(")") - cleaned.count("]") - cleaned.count("}"))
-    return depths
-
-
-def _collect_executable_lines(src: str) -> list[ExecutableLine]:
-    """用 gdtoolkit lark（gather_metadata）找出所有可执行语句的【起始行】。
-
-    语句跨多行时只取节点起始行——探针插在语句前，绝不落进表达式内部
-    （SEE-1308 实测：探针插进跨行分组表达式内部 → Parse Error）。
-    """
-    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
-    lines: list[ExecutableLine] = []
-    depths = _paren_depths(src)
-
-    def visit(node, depth=0):
-        if not hasattr(node, "data"):
-            return
-        if node.data in _EXECUTABLE_NODE_NAMES:
-            ln = _node_line(node)
-            if ln and ln <= len(depths) and depths[ln - 1] == 0:
-                lines.append(ExecutableLine(line=ln, node=node.data))
-            # 括号内部行（depths>0）不是语句起始位置——即使 AST 报告该行为
-            # 语句行（如跨行分组表达式 / lambda 实参行），也绝不插桩。
-
-    # 内部类（class_def）整体不插桩（SEE-1367 §SPEC-017 硬化 反例实证）：
-    # 探针函数追加在外层类作用域，内部类方法的 self 看不到它们——
-    # Godot Parse Error "Function __qa_cov_probe_N() not found in base self"，
-    # 目标文件整体拒载（GUT 侧表现为 "does not extend GutTest"），零探针假象。
-    # 代价：内部类体（通常为测试桩）不计量——在套件自测量场景可接受。
-    _tree_depth_walk(tree, visit, prune=lambda n: getattr(n, "data", None) == "class_def")
-    return _dedupe_sorted(lines)
-
-
-def _derive_branches(src: str) -> BranchSet:
-    """SPEC-007：分支覆盖 v1 纯推导——行探针命中 + AST 分支结构，零新探针。
-
-    if_stmt 的每个子分支（if/elif/else）与 match_stmt 的每个 match_branch
-    各计 1 分支；分支判定锚定【分支体首条可执行语句行】（硬化 反例实证：
-    分支头行探针在条件求值时即点火，false 路径下 if 分支会被误判 covered）。
-    分支体无语句（pass/空）时回退分支头行。
-    observational：不参与 ok 判定（探针只证明「执行过」，不证明「被断言守护」）。
-    """
-    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
-    items: list[BranchItem] = []
-
-    def _branch_body_line(branch_node) -> int | None:
-        head = _node_line(branch_node)
-        body_first = None
-        for desc in _branch_body_nodes(branch_node):
-            ln = _node_line(desc)
-            if ln is not None and (body_first is None or ln < body_first):
-                body_first = ln
-        # 体首行若与头行相同（单行体），二者等价；否则用体首行
-        return body_first if body_first is not None else head
-
-    def _branch_body_nodes(branch_node):
-        children = [c for c in getattr(branch_node, "children", []) if hasattr(c, "data")]
-        # 分支头行污染层：if_branch/elif_branch 的 children[0] 是条件表达式、
-        # match_branch 的 children[0] 是 pattern——meta.line 均等于分支头行。
-        # 不跳过会把「条件求值/模式匹配行」当分支体首行（false 路径下 if 分支
-        # 被误判 covered，硬化 反例实证）。
-        # else_branch 无该层，全收。
-        skip_first = branch_node.data in ("if_branch", "elif_branch", "match_branch")
-        body = children[1:] if skip_first else children
-        for c in body:
-            yield c
-            yield from _branch_body_nodes(c)
-
-    def visit(node, depth=0):
-        if not hasattr(node, "data"):
-            return
-        if node.data == "if_stmt":
-            branch_nodes = (c for c in node.children
-                            if hasattr(c, "data") and c.data in _IF_BRANCH_NODES)
-        elif node.data == "match_stmt":
-            branch_nodes = (c for c in node.children
-                            if hasattr(c, "data") and c.data == "match_branch")
-        else:
-            branch_nodes = ()
-        for child in branch_nodes:
-            items.append(BranchItem(line=_branch_body_line(child)))
-        # 子节点遍历由 _tree_depth_walk 统一处理——visit 内不再手动递归
-        # （否则 if_stmt 会被双重遍历，分支重复计数）。
-
-    # 同款 class_def 剪枝：内部类分支体行不在探针面内，计入 branch_total 会
-    # 制造结构性永假分支（与探针面不一致）。
-    _tree_depth_walk(tree, visit, prune=lambda n: getattr(n, "data", None) == "class_def")
-    return BranchSet(total=len(items), items=tuple(items))
-
-
-def _build_manifest(executable_lines: list[ExecutableLine]) -> list[int]:
-    """probe_id（列表下标）→ 源文件行号。ID-keyed 数据面的 runner 侧映射表。"""
-    return [l.line for l in executable_lines]
-
-
-_CAUSAL_METHODS = ("call_deferred", "create_timer")
-
-
-def _find_call_paren(text: str, method: str) -> tuple[int, int] | None:
-    """定位最后一次 `<method>` 调用（允许方法名与左括号间有空白）。
-
-    返回 (方法名起始下标, 左括号下标)；无调用返回 None。"""
-    idx = -1
-    pos = 0
-    while True:
-        found = text.find(method, pos)
-        if found < 0:
-            break
-        after = found + len(method)
-        j = after
-        while j < len(text) and text[j] in " \t\r\n":
-            j += 1
-        if j < len(text) and text[j] == "(":
-            idx = found
-        pos = after
-    if idx < 0:
-        return None
-    open_idx = idx + len(method)
-    while open_idx < len(text) and text[open_idx] != "(":
-        open_idx += 1
-    return idx, open_idx
-
-
-def _match_paren(text: str, open_idx: int) -> int | None:
-    """从左括号起按括号深度与字符串状态找到配对的右括号下标；未闭合 None。"""
-    depth = 0
-    quote = ""
-    i = open_idx
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    return i if depth == 0 else None
-
-
-def _call_receiver(text: str, idx: int) -> str | None:
-    """调用点前缀 → 接收者文本：裸调用 = 隐式 self；点号前表达式取原文。"""
-    head = text[:idx].rstrip()
-    if head == "":
-        return "self"
-    if head.endswith("."):
-        return head[:-1].strip() or None
-    return None
-
-
-def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
-    """在调用点文本中定位 `<method>(<args>)`：返回 (开括号下标, 闭括号
-    下标, 接收者文本)。接收者为 `self`（裸调用）或点号前的表达式文本；
-    字符串/注释内的同名片段不参与匹配（本函数只处理 AST 已确认的调用点，
-    文本扫描仅用于取实参原文，按括号深度与字符串状态推进）。"""
-    found = _find_call_paren(text, method)
-    if found is None:
-        return None
-    idx, open_idx = found
-    close_idx = _match_paren(text, open_idx)
-    if close_idx is None:
-        return None
-    recv = _call_receiver(text, idx)
-    if recv is None:
-        return None
-    return open_idx, close_idx, recv
-
-
-def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:
-    """§SPEC-083 R2：把插桩文件内的 `call_deferred(...)` / `create_timer(...)`
-    调用点改写为创建点包装（捕获当前上下文 tag，回调触发时按 tag 因果归属）。
-
-    - `recv.call_deferred(a, b)` → `<ctx>.call_deferred_tagged(recv, [a, b])`
-    - `recv.create_timer(a, b)`  → `<ctx>.create_timer_tagged(recv, a, b)`
-    - 裸调用（隐式 self）同样处理。只改 AST 确认的调用点，字符串/注释内
-      文本不受影响；替换不插入换行，行号与探针 manifest 保持对齐。
-    返回 (改写后源码, 改写处数)。"""
-    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
-    starts = [0]
-    for line in src.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
-
-    def _off(line: int, column: int) -> int:
-        return starts[line - 1] + (column - 1)
-
-    edits: list[tuple[int, int, str]] = []
-
-    def _visit(node) -> None:
-        data = getattr(node, "data", None)
-        if data in ("standalone_call", "getattr_call"):
-            meta = node.meta
-            start = _off(meta.line, meta.column)
-            end = _off(meta.end_line, meta.end_column)
-            text = src[start:end]
-            for method in _CAUSAL_METHODS:
-                if method not in text:
-                    continue
-                span = _call_arg_span(text, method)
-                if span is None:
-                    continue
-                open_idx, close_idx, recv = span
-                args = text[open_idx + 1:close_idx]
-                ctx = f"__qgta_{key_suffix}"
-                if method == "call_deferred":
-                    if not args.strip():
-                        continue
-                    repl = (f"{ctx}.call_deferred_tagged({recv}, "
-                            f"[{args}])")
-                elif args.strip():
-                    repl = f"{ctx}.create_timer_tagged({recv}, {args})"
-                else:
-                    repl = f"{ctx}.create_timer_tagged({recv})"
-                # 只替换「接收者起点 → 本次调用的右括号」，调用链后缀
-                #（如 `.timeout.connect(...)`）原样保留；嵌套 getattr_call
-                # 会重复命中同一段，按 (start, end) 去重。
-                edits.append((start, start + close_idx + 1, repl))
-                break
-        for child in getattr(node, "children", []):
-            _visit(child)
-
-    _visit(tree)
-    if not edits:
-        return src, 0
-    unique: dict[tuple[int, int], str] = {}
-    for start, end, repl in edits:
-        unique.setdefault((start, end), repl)
-    out = src
-    for (start, end), repl in sorted(unique.items(), key=lambda e: -e[0][0]):
-        out = out[:start] + repl + out[end:]
-    return out, len(unique)
-
-
-def _attr_sink_name(sink_name: str) -> str:
-    """命中 sink → 归属 sink 名（同 run_uuid/key8，前缀改 attr）。"""
-    hits_prefix = "qa-coverage-hits-"
-    if sink_name.startswith(hits_prefix):
-        return "qa-coverage-attr-" + sink_name[len(hits_prefix):]
-    return "qa-coverage-attr-" + sink_name
-
-
-def _attr_var_name(sink_name: str) -> str:
-    return f"{_PROBE_PREFIX}a_{_flag_var_suffix(sink_name)}"
-
-
-def _probe_calls(src: str, line_to_id: dict[int, int],
-                 flags: bool = False, sink_name: str = "",
-                 attribution: bool = False,
-                 attr_probe_ids: "frozenset[int] | None" = None) -> list[str]:
-    """每个可执行语句前插一行探针调用（整数 probe_id）。
-
-    flags 形态（§SPEC-046）：语句前只做内存 flag 标记（预置尺寸静态 Array
-    的索引写）——零 I/O、零函数调用、零 append，写入（落盘）次数由统一
-    收尾决定、不随事件数增长。direct 形态保持既有逐 id 函数形态，单文件/
-    risk 路径字节不变。
-
-    attribution=True（§SPEC-083 试验，默认关闭）：在 flag 标记之外追加
-    「当前上下文身份」归属写——Engine meta `gqt_cov_slot`（钩子维护的
-    上下文槽位，0 = 无主）。两种粒度：
-    - attr_probe_ids=None：逐命中归属（hit 级，[seen_test, seen_script,
-      unattr, counts6] 结构，ctx 正负编码测试/脚本车道）；
-    - attr_probe_ids=函数入口 probe 集合（方向②）：只有这些位点带归属块
-      （fn 级，[seen, cnt, fctx, unattr, phase4] 结构，槽位统一正数编码，
-      fctx 记 (probe, slot)→1 的函数级归属），行覆盖 flag 照旧全量。"""
-    out = []
-    attr = _attr_var_name(sink_name)
-    fn_mode = attr_probe_ids is not None
-    for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
-        if idx in line_to_id:
-            indent = re.match(r"^(\s*)", line_text).group(1)
-            pid = line_to_id[idx]
-            if flags:
-                out.append(
-                    f"{indent}{_flag_var_name(sink_name)}"
-                    f"[{pid}] = 1\n")
-                if attribution and (fn_mode is False
-                                    or pid in attr_probe_ids):
-                    out.append(_attr_probe_block_text(
-                        attr, pid, fn_mode, indent))
-            else:
-                out.append(f"{indent}{_PROBE_PREFIX}{pid}()\n")
-        out.append(line_text)
-    return out
-
-
-def _attr_probe_block_text(attr: str, pid: int, fn_mode: bool,
-                           indent: str) -> str:
-    """归属探针块（方向②）：fn_mode=True 生成函数入口级块——Engine meta
-    `gqt_cov_slot` 统一正数编码上下文槽位（0 = 无主），热路径只有一次
-    meta 读 + 一次比较 + 两次数组写；fn_mode=False 保留 hit 级三车道块
-    （上轮形态，供单测对照）。计数用显式赋值而非 `+=`：被测仓存在
-    「断言源码无 +=」的源文本测试（KOL test_see1116）。"""
-    t = f"{_PROBE_PREFIX}t{pid}"
-    if not fn_mode:
-        return (
-            f"{indent}var {t} = Engine.get_meta(\"gqt_cov_ctx\", 0)\n"
-            f"{indent}if {t} > 0:\n"
-            f"{indent}\tvar {_PROBE_PREFIX}s{pid} = {attr}[0]\n"
-            f"{indent}\tif {t} > {_PROBE_PREFIX}s{pid}.size():\n"
-            f"{indent}\t\t{_PROBE_PREFIX}s{pid}.resize({t})\n"
-            f"{indent}\t{_PROBE_PREFIX}s{pid}[{t} - 1] = 1\n"
-            f"{indent}\t{attr}[3][0] = {attr}[3][0] + 1\n"
-            f"{indent}elif {t} < 0:\n"
-            f"{indent}\tvar {_PROBE_PREFIX}c{pid} = {attr}[1]\n"
-            f"{indent}\tif -{t} > {_PROBE_PREFIX}c{pid}.size():\n"
-            f"{indent}\t\t{_PROBE_PREFIX}c{pid}.resize(-{t})\n"
-            f"{indent}\t{_PROBE_PREFIX}c{pid}[-{t} - 1] = 1\n"
-            f"{indent}\t{attr}[3][1] = {attr}[3][1] + 1\n"
-            f"{indent}else:\n"
-            # 方向③：无主命中记 probe 热点与阶段桶
-            # （0 bootstrap / 1 script_gap / 2 shutdown / 3 other）
-            f"{indent}\t{attr}[2][{pid}] = {attr}[2].get({pid}, 0) + 1\n"
-            f"{indent}\tvar {_PROBE_PREFIX}p{pid} = "
-            f"Engine.get_meta(\"gqt_cov_phase\", 0)\n"
-            f"{indent}\tif {_PROBE_PREFIX}p{pid} >= 0 "
-            f"and {_PROBE_PREFIX}p{pid} <= 3:\n"
-            f"{indent}\t\t{attr}[3][{_PROBE_PREFIX}p{pid} + 2]"
-            f" = {attr}[3][{_PROBE_PREFIX}p{pid} + 2] + 1\n")
-    p = f"{_PROBE_PREFIX}p{pid}"
-    return (
-        f"{indent}var {t} = Engine.get_meta(\"gqt_cov_slot\", 0)\n"
-        f"{indent}if {t} > 0:\n"
-        f"{indent}\t{attr}[0][{t} - 1] = 1\n"
-        f"{indent}\t{attr}[1][{t} - 1] = {attr}[1][{t} - 1] + 1\n"
-        f"{indent}\tvar {_PROBE_PREFIX}k{pid} = {attr}[2].get_or_add({pid}, {{}})\n"
-        f"{indent}\t{_PROBE_PREFIX}k{pid}[{t} - 1] = 1\n"
-        f"{indent}else:\n"
-        # 无主分支（方向③口径不变）：probe 热点 + 阶段桶
-        f"{indent}\t{attr}[3][{pid}] = {attr}[3].get({pid}, 0) + 1\n"
-        f"{indent}\tvar {p} = Engine.get_meta(\"gqt_cov_phase\", 0)\n"
-        f"{indent}\tif {p} >= 0 and {p} <= 3:\n"
-        f"{indent}\t\t{attr}[4][{p}] = {attr}[4][{p}] + 1\n")
-
-
-def _flag_var_suffix(sink_name: str) -> str:
-    """从 sink 名提取 per-file key8（`...-<key8>.txt`），用于静态变量名
-    唯一化——父/子类脚本同时插桩时同名 static var 触发 GDScript
-    "member already exists in parent class" Parse Error，且子类探针经继承
-    解析到父类数组造成索引越界（R5 真机实证缺陷）。"""
-    m = re.search(r"-([0-9a-f]{8})\.txt$", sink_name)
-    return m.group(1) if m else hashlib.sha1(sink_name.encode()).hexdigest()[:8]
-
-
-def _flag_var_name(sink_name: str) -> str:
-    return f"{_PROBE_PREFIX}m_{_flag_var_suffix(sink_name)}"
-
-
-def _flag_probe_block(sink_name: str, count: int,
-                      runtime_sink: bool = False,
-                      attribution: bool = False,
-                      causal: bool = False,
-                      fn_mode: bool = False) -> str:
-    """flag 标记注册块：per-file 预置尺寸静态 Array（变量名带文件 key8
-    去继承冲突），经 Engine meta 注册（Godot 4.6 实证：脚本 reload 重跑
-    不发生但 static Array 身份保留——跨 reload 合并由共享引用自然成立）。
-    落盘由注入的 finalizer 在 suite 结束统一完成：写次数 = 文件数，与
-    命中事件数无关。
-
-    runtime_sink=True（measurement 并行分片臂）：sink 名拼接进程 PID——
-    同一棵插桩树可被多个 GUT 进程并发执行而互不写串（每进程独立 sink，
-    读取侧按 run_uuid+key8 模式合并）。
-
-    attribution=True（§SPEC-083 试验，默认关闭）：追加归属注册块——
-    hit 级（fn_mode=False）`[seen_test, seen_script, unattr_counts(字典),
-    counts6]`；fn 级（fn_mode=True，方向②）`[seen, cnt, fctx, unattr_counts,
-    phase4]`，seen/cnt 由注册函数按 `gqt_cov_slot_max` 预置尺寸（钩子在
-    新槽位注册时同步扩容并零填充）。结构经 Engine meta `gqt_cov_attr`
-    按 attr sink 名登记，finalizer 收尾时按 attr sink 落盘。默认路径不
-    生成任何新代码。"""
-    var = _flag_var_name(sink_name)
-    key8 = _flag_var_suffix(sink_name)
-    reg = f"{_PROBE_PREFIX}reg_{key8}"
-    if runtime_sink:
-        sink_var = f"{_PROBE_PREFIX}sink_{key8}"
-        head = sink_name.rsplit("-", 1)
-        sink_expr = (f"\"{head[0]}-\" + str(OS.get_process_id()) + "
-                     f"\"-{key8}.txt\"")
-        sink_decl = f"static var {sink_var}: String = {sink_expr}\n"
-        sink_ref = sink_var
-    else:
-        sink_decl = ""
-        sink_ref = f"\"{sink_name}\""
-    attr_decl = ""
-    if causal:
-        # 创建点包装的上下文脚本（同目录注入，随备份/恢复清理）
-        attr_decl += (f"const __qgta_{key8} = "
-                      f"preload(\"res://addons/gqt_cov_ctx.gd\")\n")
-    if attribution:
-        attr = _attr_var_name(sink_name)
-        areg = f"{_PROBE_PREFIX}areg_{key8}"
-        attr_name = _attr_sink_name(sink_name)
-        if runtime_sink:
-            attr_head = attr_name.rsplit("-", 1)
-            attr_ref = (f"\"{attr_head[0]}-\" + str(OS.get_process_id()) + "
-                        f"\"-{key8}.txt\"")
-        else:
-            attr_ref = f"\"{attr_name}\""
-        if fn_mode:
-            holder = ("[[], [], {}, {}, [0, 0, 0, 0]]")
-            sizing = (
-                f"\tvar n: int = Engine.get_meta(\"gqt_cov_slot_max\", 0)\n"
-                f"\th[0].resize(n)\n"
-                f"\th[1].resize(n)\n"
-                f"\tvar i: int = 0\n"
-                f"\twhile i < n:\n"
-                f"\t\th[0][i] = 0\n"
-                f"\t\th[1][i] = 0\n"
-                f"\t\ti += 1\n")
-        else:
-            holder = "[[], [], {}, [0, 0, 0, 0, 0, 0]]"
-            sizing = ""
-        attr_decl += (
-            f"static var {attr}: Array = {areg}()\n"
-            f"\n"
-            f"static func {areg}() -> Array:\n"
-            f"\tvar d: Dictionary = Engine.get_meta(\"gqt_cov_attr\")"
-            f" if Engine.has_meta(\"gqt_cov_attr\") else {{}}\n"
-            f"\tvar h: Array = d.get({attr_ref}, [])\n"
-            f"\tif h.is_empty():\n"
-            f"\t\th = {holder}\n"
-            f"\t\td[{attr_ref}] = h\n"
-            f"\t\tEngine.set_meta(\"gqt_cov_attr\", d)\n"
-            f"{sizing}"
-            f"\treturn h\n"
-        )
-    return (
-        f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
-        f"{sink_decl}"
-        f"static var {var}: Array = {reg}()\n"
-        f"{attr_decl}"
-        f"\n"
-        f"static func {reg}() -> Array:\n"
-        f"\tvar d: Dictionary = Engine.get_meta(\"gqt_cov_marks\")"
-        f" if Engine.has_meta(\"gqt_cov_marks\") else {{}}\n"
-        f"\tvar arr: Array = d.get({sink_ref}, [])\n"
-        f"\tarr.resize({count})\n"
-        f"\td[{sink_ref}] = arr\n"
-        f"\tEngine.set_meta(\"gqt_cov_marks\", d)\n"
-        f"\treturn arr\n"
-    )
-
-
-def _probe_func(sink_name: str, count: int) -> str:
-    """文件尾探针函数：wrapper 用 user:// 唯一 sink 追加写（GDScript 侧无环境
-    读取——sink 名与 user:// 前缀在生成期以字面量嵌入）。
-
-    探针一律声明为 static：被插桩文件的 static 函数体内不允许调用实例方法
-    （GDScript 4 Parse Error "Cannot call non-static function"，SEE-1316
-    NumberCompactFormat 全 static util 实测——探针非 static 时整个脚本
-    解析失败，probes_fired 恒 0）。static 探针在实例/静态两种语境下均合法。
-    """
-    # 追加写语义：READ_WRITE + seek_end——裸 WRITE 每次命中重开会截断此前
-    # 全部命中（SEE-1312 代码走查实测缺陷）。
-    code = (
-        f"\n\n# qa-toolkit coverage probe (auto-instrumented, never in production)\n"
-        f"static func {_PROBE_PREFIX}wrapper(probe_id):\n"
-        f"\tvar f = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.READ_WRITE)\n"
-        f"\tif f == null:\n"
-        f"\t\tf = FileAccess.open(\"{_SINK_DIR_MARKER}{sink_name}\", FileAccess.WRITE)\n"
-        f"\telse:\n"
-        f"\t\tf.seek_end()\n"
-        f"\tif f:\n"
-        f"\t\tf.store_line(str(probe_id))\n"
-        f"\t\tf.close()\n\n"
-    )
-    for i in range(count):
-        code += (
-            f"static func {_PROBE_PREFIX}{i}():\n"
-            f"\t{_PROBE_PREFIX}wrapper({i})\n"
-        )
-    return code
-
-
-# §SPEC-055/070 FR-4：基本块压缩——控制转移/控制结构/缩进变化处切块。
-# 块入口探针命中会展开为块内全部语句起始行计入覆盖——这是行覆盖**近似**
-# 而非逐语句精确测量：运行期错误中止块内执行时，后继语句仍会被计为已
-# 覆盖（measurement 报告 coverage_semantics 显式披露该近似，不冒充精确
-# statement_start_line）。
-_BLOCK_BREAKER_NODES = frozenset(
-    {"return_stmt", "break_stmt", "continue_stmt"})
-_BLOCK_COMPOUND_NODES = frozenset(
-    {"if_branch", "elif_branch", "else_branch", "for_stmt", "while_stmt",
-     "match_stmt", "match_branch"})
-
-
-def _blocks_from_execs(execs, src: str) -> dict[int, list[int]]:
-    lines = src.splitlines()
-    blocks: dict[int, list[int]] = {}
-    run: list[int] = []
-
-    def _flush() -> None:
-        nonlocal run
-        if run:
-            blocks[run[0]] = run
-            run = []
-
-    prev = None
-    for e in sorted(execs, key=lambda x: x.line):
-        if not (0 < e.line <= len(lines)):
-            continue
-        indent = len(re.match(r"^(\s*)", lines[e.line - 1]).group(1))
-        start_new = prev is None
-        if not start_new:
-            p_line, p_node, p_indent = prev
-            if e.line != p_line + 1:
-                start_new = True
-            elif e.node in _BLOCK_COMPOUND_NODES:
-                start_new = True
-            elif indent != p_indent:
-                start_new = True
-            elif p_node in _BLOCK_BREAKER_NODES:
-                start_new = True
-        if start_new:
-            _flush()
-        run.append(e.line)
-        if e.node in _BLOCK_BREAKER_NODES:
-            _flush()
-        prev = (e.line, e.node, indent)
-    _flush()
-    return blocks
-
-
-def _instrument_blocks(src: str, sink_name: str,
-                       runtime_sink: bool = False,
-                       attribution: bool = False,
-                       causal: bool = False,
-                       attr_probe_ids: "frozenset[int] | None" = None
-                       ) -> tuple[str, list[int], dict[int, list[int]]]:
-    """§SPEC-055 块压缩插桩：仅块入口行插 flag 探针；返回
-    (插桩源码, 块入口行清单, 块入口→块内全部起始行映射)。
-
-    attribution=True 时 attr_probe_ids 指定携带归属块的 probe 集合
-    （方向②函数入口级）；None = 全部 probe 携带（hit 级）。"""
-    execs = list(_collect_executable_lines(src))
-    bmap = _blocks_from_execs(execs, src)
-    starts = sorted(bmap)
-    if not starts:
-        return src, [], {}
-    line_to_id = {ln: i for i, ln in enumerate(starts)}
-    fb = "".join(_probe_calls(src, line_to_id, True, sink_name,
-                              attribution, attr_probe_ids))
-    return (fb + _flag_probe_block(sink_name, len(starts), runtime_sink,
-                                   attribution, causal,
-                                   fn_mode=attr_probe_ids is not None),
-            starts, bmap)
-
-
-def _instrument(src: str, sink_name: str, flags: bool = False,
-                runtime_sink: bool = False,
-                attribution: bool = False,
-                causal: bool = False) -> tuple[str, list[int]]:
-    """AST 语句级插桩：每个可执行语句前插一行探针调用（整数 probe_id），
-    文件尾追加探针机制。返回 (插桩源码, probe_id→行号 manifest)。
-
-    flags=True（§SPEC-046 measurement 批式臂）：命中点只做内存 flag 标记
-    （预置尺寸静态 Array 索引写），落盘由编排器注入的 finalizer 在 suite
-    结束统一完成；direct（缺省）保持既有逐命中追加写形态，单文件/risk
-    路径行为与产物字节不变。"""
-    manifest = _build_manifest(_collect_executable_lines(src))
-    line_to_id = {line: i for i, line in enumerate(manifest)}
-    if flags and not manifest:
-        # 零可执行行：无探针面，插桩产物 = 原文（vacuous 车道在编排器落）
-        return src, manifest
-    body = "".join(_probe_calls(src, line_to_id, flags, sink_name,
-                                attribution))
-    if flags:
-        return (body + _flag_probe_block(sink_name, len(manifest),
-                                         runtime_sink, attribution, causal),
-                manifest)
-    return body + _probe_func(sink_name, len(manifest)), manifest
-
+from .instrument import (
+    _attr_probe_block_text,
+    _attr_sink_name,
+    _attr_var_name,
+    _blocks_from_execs,
+    _build_manifest,
+    _call_arg_span,
+    _call_receiver,
+    _collect_executable_lines,
+    _dedupe_sorted,
+    _derive_branches,
+    _find_call_paren,
+    _flag_probe_block,
+    _flag_var_name,
+    _flag_var_suffix,
+    _instrument,
+    _instrument_blocks,
+    _match_paren,
+    _node_line,
+    _paren_depths,
+    _probe_calls,
+    _probe_func,
+    _rewrite_call_sites,
+    _tree_depth_walk,
+)
 
 def _err_envelope(file: str, message: str, *,
                   min_percent: float = 80.0) -> dict:
@@ -814,32 +218,19 @@ def _write_mapping_evidence(evidence_out, file_path, gd_source, tests_glob,
         return f"evidence write failed: {type(e).__name__}: {e}"
 
 
-def run_coverage(
-    file_path: str,
-    project_root: str,
-    min_percent: float = 80.0,
-    timeout_s: int | None = None,
-    tests_glob: str | None = None,
-    evidence_out: str | None = None,
-) -> dict:
-    """单文件行覆盖——由行级归属映射投影（§SPEC-025 唯一真源），零 GUT。
+def _cov_fail(path, src, tests_glob, evidence_out, msg,
+              min_percent: float) -> dict:
+    """统一失败出口：失败 bundle 落盘 + run_error 域 JSON。"""
+    if evidence_out:
+        _write_failure_evidence(evidence_out, str(path), src, tests_glob, msg)
+    return _err_envelope(str(path), msg, min_percent=min_percent)
 
-    - 新鲜映射 → 亚秒投影；缺失/失效 → 自动构建或增量重建（`--timeout`
-      绑定这些**真实执行阶段**；新鲜投影不启进程，无执行成本）。
-    - 旧 direct 就地插桩 + GUT + sink 执行体已物理退役；`--recover` 不再
-      作为覆盖来源（sink-recovery 已退役）。
-    - `probes_fired` 取自映射 `arms_state`（不伪造）：缺失 → fail-loud；
-      `probes_fired==0` 且存在有效行事实（非 vacuous）→ 不得产出可信分数，
-      同样 fail-loud。
-    - 任何失败路径（含映射构建超时/Godot 启动失败/投影异常）都产出
-      `run_error` 域 JSON，并在 `--evidence-out` 下落**失败 bundle**，供
-      `measure risk` 逐文件降级、不整批中止。
-    输出契约保持 file/total_lines/covered_lines/coverage_percent/min_percent/
-    branch_*/hits_lines。
-    """
+
+def _cov_precheck(file_path: str, project_root: str, tests_glob,
+                  evidence_out, min_percent: float) -> tuple:
+    """目标锚定 + 读源 + 已插桩残留守卫。返回 (path, src) 或
+    (None, err_envelope)。"""
     from ..source_io import anchor_to_project_root, read_gd_source
-    from ..mutation import truth_select as _truth
-    from .mapping import CoverageMappingError, project_file_coverage
 
     path = Path(anchor_to_project_root(file_path, project_root))
     if not path.is_file():
@@ -847,69 +238,53 @@ def run_coverage(
             f"coverage target not found: {file_path} (anchored: {path})")
     src, read_error = read_gd_source(str(path))
     if read_error is not None:
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    read_error)
-        return _err_envelope(str(path), read_error, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out,
+                               read_error, min_percent)
     if _PROBE_PREFIX in src:
         msg = (f"target source appears already instrumented (contains "
                f"'{_PROBE_PREFIX}'); restore from version control first "
                f"(legacy direct residue; new path never writes the real file)")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
+                               min_percent)
+    return path, src
 
-    try:
-        proj = project_file_coverage(project_root, str(path), tests_glob,
-                                     timeout_s=timeout_s)
-    except CoverageMappingError as e:
-        msg = str(e)
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
-    except (ValueError, OSError) as e:
-        msg = f"{type(e).__name__}: {e}"
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
 
-    inst = set(proj["instrumentable_lines"])
-    covered = (set(proj["covered_lines"]) & inst) if inst else set(proj["covered_lines"])
-    total = len(inst)
+def _cov_vacuous(path, src, tests_glob, evidence_out, min_percent: float,
+                 proj: dict) -> dict:
+    """vacuous 出口：无可执行行 → 满分 vacuous（无行事实可言）。"""
+    summary = {
+        "file": str(path), "total_lines": 0, "covered_lines": 0,
+        "coverage_percent": 100.0, "min_percent": min_percent,
+        "probes_fired": 0, "probes_source": "none",
+        "branch_total": 0, "branch_covered": 0,
+        "branch_coverage_percent": 100.0, "hits_lines": [],
+        "coverage_source": "line_mapping_projection",
+        "attribution_map": proj.get("map_path"),
+        "selection_scripts": 0, "vacuous": True,
+        "note": "no executable lines",
+    }
+    summary.update(explicit_timing_meta())
+    if evidence_out:
+        why = _write_mapping_evidence(evidence_out, str(path), src,
+                                      tests_glob, set(), 0, 0)
+        if why is not None:
+            return _cov_fail(path, src, tests_glob, evidence_out, why,
+                             min_percent)
+    return {"tool": "measure.coverage", "ok": True, "summary": summary,
+            "failures": []}
 
-    # vacuous：无可执行行 → 无行事实可言，无需映射/无需执行即满分 vacuous。
-    if total == 0:
-        summary = {
-            "file": str(path), "total_lines": 0, "covered_lines": 0,
-            "coverage_percent": 100.0, "min_percent": min_percent,
-            "probes_fired": 0, "probes_source": "none",
-            "branch_total": 0, "branch_covered": 0,
-            "branch_coverage_percent": 100.0, "hits_lines": [],
-            "coverage_source": "line_mapping_projection",
-            "attribution_map": proj.get("map_path"),
-            "selection_scripts": 0, "vacuous": True,
-            "note": "no executable lines",
-        }
-        summary.update(explicit_timing_meta())
-        if evidence_out:
-            why = _write_mapping_evidence(evidence_out, str(path), src,
-                                          tests_glob, set(), 0, 0)
-            if why is not None:
-                return _err_envelope(str(path), why, min_percent=min_percent)
-        return {"tool": "measure.coverage", "ok": True, "summary": summary,
-                "failures": []}
+
+def _cov_probes_evidence(path, src, tests_glob, evidence_out, min_percent,
+                         proj: dict) -> tuple:
+    """执行证据链（probes_fired 取自映射 arms_state，不伪造）：缺失/畸形/
+    无效 → 具名 run_error。返回 ((arms_ok, probes), None) 或 (None, err)。"""
+    from ..mutation import truth_select as _truth
 
     try:
         doc = _truth.load_map(proj["map_path"])
     except Exception as e:  # noqa: BLE001
-        msg = f"attribution map unusable: {e}"
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out,
+                               f"attribution map unusable: {e}", min_percent)
     try:
         arms_state = doc.get("arms_state") or {}
         arms_ok = _truth.arms_valid(arms_state)
@@ -917,59 +292,41 @@ def run_coverage(
     except (AttributeError, TypeError, ValueError) as e:
         msg = (f"attribution map execution evidence malformed "
                f"({type(e).__name__}: {e}); refusing to fabricate")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
+                               min_percent)
     if not arms_ok:
         msg = ("attribution map execution evidence invalid (arms_state); "
                "line facts untrustworthy")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
+                               min_percent)
     if probes_raw is None:
         msg = ("attribution map lacks execution evidence (probes_fired "
                "missing); refusing to fabricate a trusted score")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
+                               min_percent)
     try:
         probes = int(probes_raw)
     except (TypeError, ValueError) as e:
         msg = (f"attribution map probes_fired malformed "
                f"({probes_raw!r}); refusing to fabricate")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
+        return None, _cov_fail(path, src, tests_glob, evidence_out, msg,
+                               min_percent)
+    return (arms_ok, probes), None
 
-    try:
-        inst = {int(l) for l in
-                (proj["instrumentable_lines"] or [])}
-        covered = {int(l) for l in
-                   (proj["covered_lines"] or [])}
-    except (TypeError, ValueError) as e:
-        msg = (f"projection covered/instrumentable lines malformed: {e}")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
-    total = len(inst)
 
+def _cov_report_build(path, src, tests_glob, evidence_out, min_percent,
+                      proj: dict, probes: int, inst: set, covered: set,
+                      total: int) -> dict:
+    """分数/分支/汇总组装 + 映射投影 evidence 落盘 + 阈值门。"""
     # 执行证据哨兵：映射构建期 probes_fired==0 且存在有效行事实 → 行事实
     # 不可信，不得产出可信分数（fail-loud；非 vacuous 不豁免）。
     if probes == 0 and total > 0:
-        msg = ("attribution map has probes_fired=0 with a non-empty "
-               "instrumentable surface — mapped line facts are untrustworthy "
-               "(map build timed out or Godot never executed); refusing to "
-               "produce a trusted coverage score")
-        if evidence_out:
-            _write_failure_evidence(evidence_out, str(path), src, tests_glob,
-                                    msg)
-        return _err_envelope(str(path), msg, min_percent=min_percent)
-
+        return _cov_fail(path, src, tests_glob, evidence_out,
+                         ("attribution map has probes_fired=0 with a "
+                          "non-empty instrumentable surface — mapped line "
+                          "facts are untrustworthy (map build timed out or "
+                          "Godot never executed); refusing to produce a "
+                          "trusted coverage score"), min_percent)
     cov = len(covered)
     pct = round(100.0 * cov / total, 2) if total else 100.0
     ok = pct >= min_percent
@@ -979,13 +336,11 @@ def run_coverage(
             "reason": f"coverage {pct}% below threshold {min_percent}%",
             "covered": cov, "total": total,
             "uncovered_lines": sorted(inst - covered)[:20]})
-
     branches = _derive_branches(src)
     b_total = branches.total
     b_cov = sum(1 for b in branches.items
                 if b.line is not None and b.line in covered)
     b_pct = round(100.0 * b_cov / b_total, 2) if b_total else 100.0
-
     summary = {
         "file": str(path), "total_lines": total, "covered_lines": cov,
         "coverage_percent": pct, "min_percent": min_percent,
@@ -1001,16 +356,72 @@ def run_coverage(
     if total == 0:
         summary["note"] = "no executable lines"
     summary.update(explicit_timing_meta())
-
     if evidence_out:
         why = _write_mapping_evidence(evidence_out, str(path), src, tests_glob,
                                       covered, total, probes)
         if why is not None:
-            return _err_envelope(str(path), why, min_percent=min_percent)
-
+            return _cov_fail(path, src, tests_glob, evidence_out, why,
+                             min_percent)
     return {"tool": "measure.coverage", "ok": ok, "summary": summary,
             "failures": failures}
 
+
+def run_coverage(
+    file_path: str,
+    project_root: str,
+    min_percent: float = 80.0,
+    timeout_s: int | None = None,
+    tests_glob: str | None = None,
+    evidence_out: str | None = None,
+) -> dict:
+    """单文件行覆盖——由行级归属映射投影（§SPEC-025 唯一真源），零 GUT。
+
+    新鲜映射亚秒投影；缺失/失效自动构建。probes_fired 取自映射
+    arms_state（不伪造）；任何失败路径产出 run_error 域 JSON + 失败
+    bundle（`measure risk` 逐文件降级）。输出契约保持 file/total_lines/
+    covered_lines/coverage_percent/min_percent/branch_*/hits_lines。
+    """
+    from .mapping import CoverageMappingError, project_file_coverage
+
+    path, src = _cov_precheck(file_path, project_root, tests_glob,
+                              evidence_out, min_percent)
+    if path is None:
+        return src
+    try:
+        proj = project_file_coverage(project_root, str(path), tests_glob,
+                                     timeout_s=timeout_s)
+    except CoverageMappingError as e:
+        return _cov_fail(path, src, tests_glob, evidence_out, str(e),
+                         min_percent)
+    except (ValueError, OSError) as e:
+        return _cov_fail(path, src, tests_glob, evidence_out,
+                         f"{type(e).__name__}: {e}", min_percent)
+
+    inst = set(proj["instrumentable_lines"])
+    covered = (set(proj["covered_lines"]) & inst) if inst \
+        else set(proj["covered_lines"])
+    total = len(inst)
+    # vacuous：无可执行行 → 无行事实可言，无需映射/无需执行即满分 vacuous。
+    if total == 0:
+        return _cov_vacuous(path, src, tests_glob, evidence_out, min_percent,
+                            proj)
+    checked, err = _cov_probes_evidence(path, src, tests_glob, evidence_out,
+                                        min_percent, proj)
+    if checked is None:
+        return err
+    _arms_ok, probes = checked
+    try:
+        inst = {int(l) for l in
+                (proj["instrumentable_lines"] or [])}
+        covered = {int(l) for l in
+                   (proj["covered_lines"] or [])}
+    except (TypeError, ValueError) as e:
+        return _cov_fail(path, src, tests_glob, evidence_out,
+                         f"projection covered/instrumentable lines "
+                         f"malformed: {e}", min_percent)
+    total = len(inst)
+    return _cov_report_build(path, src, tests_glob, evidence_out,
+                             min_percent, proj, probes, inst, covered, total)
 
 
 def _read_hits(project_root: str, sink_name: str, manifest: list[int]) -> tuple[set[int], int]:

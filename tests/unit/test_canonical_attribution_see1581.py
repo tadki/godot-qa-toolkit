@@ -21,12 +21,14 @@ from godot_qa_toolkit.measurement.attribution import (
     ATTRIBUTION_SCHEMA,
     build_attribution_map,
 )
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.probe_templates import (
     _ATTR_CTX_GD,
     _ATTR_PRE_HOOK_GD,
     _ATTR_FLUSHER_GD,
     _PRE_HOOK_GD,
     _FLUSHER_GD,
+)
+from godot_qa_toolkit.measurement.orchestrator import (
     run_measurement,
 )
 from godot_qa_toolkit.coverage.runner import (

@@ -18,7 +18,7 @@ import pytest
 from godot_qa_toolkit.measurement import increment_runner
 from godot_qa_toolkit.measurement import prepcache
 from godot_qa_toolkit.measurement.increment import run_attribution_increment
-from godot_qa_toolkit.measurement.orchestrator import _instrument_pair
+from godot_qa_toolkit.measurement.instrument import _instrument_pair
 from godot_qa_toolkit.mutation import coverlink
 
 TARGET_SRC = """extends RefCounted
@@ -104,7 +104,7 @@ def test_increment_fresh_template_is_byte_identical_to_orchestrator(tmp_path):
 
 def test_algo_key_shared_between_full_and_increment_paths():
     """全量与增量路径的 algo 键同源（归属粒度编码进键）。"""
-    from godot_qa_toolkit.measurement.orchestrator import _algo_used
+    from godot_qa_toolkit.measurement.instrument import _algo_used
     for causal in (False, True):
         assert increment_runner._algo_for(causal) \
             == _algo_used(prepcache.PROBE_ALGO_VERSION, True, causal)

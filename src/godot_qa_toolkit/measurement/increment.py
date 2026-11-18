@@ -58,10 +58,8 @@ _FWD_KEYS = ("test_to_files", "test_to_functions",
              "script_to_files", "script_to_functions")
 _LINE_KEYS = ("test_to_lines", "script_to_lines")
 
-
 class IncrementError(Exception):
     """增量入参/基线违例（CLI 转领域 JSON）。"""
-
 
 def load_baseline(path: str | Path) -> dict:
     try:
@@ -77,11 +75,9 @@ def load_baseline(path: str | Path) -> dict:
         raise IncrementError("baseline missing arms.gut_full edge maps")
     return baseline
 
-
 def _script_name_of(identity: str) -> str:
     """测试身份 `test_x.gd::test_name` → 脚本名；脚本级身份本就是脚本名。"""
     return identity.split("::", 1)[0]
-
 
 def _baseline_script_names(baseline: dict) -> set[str]:
     arm = baseline["arms"]["gut_full"]
@@ -89,10 +85,8 @@ def _baseline_script_names(baseline: dict) -> set[str]:
     names |= set(arm.get("script_to_files") or {})
     return names
 
-
 def _fid_file_of(fid: str) -> str:
     return fid.split("::", 1)[0]
-
 
 def classify_changes(root: Path, changed: list[str],
                      baseline: dict) -> dict[str, list[str]]:
@@ -120,7 +114,6 @@ def classify_changes(root: Path, changed: list[str],
                                 test_identities)
         out[verdict[0]].append(verdict[1])
     return out
-
 
 def _classify_one(root: Path, raw: str, edge_files: set[str],
                   known_fids: set[str],
@@ -150,7 +143,6 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
             return "prod_new", rel
     return "unknown", raw
 
-
 def _static_candidates(root: Path, rel: str,
                        index: dict | None) -> set[str]:
     from ..mutation.gdself import build_index, query_consumers
@@ -163,7 +155,6 @@ def _static_candidates(root: Path, rel: str,
             continue
         names.add(c["res"].rsplit("/", 1)[-1])
     return names
-
 
 def compute_invalidation(root: Path, baseline: dict,
                          classes: dict[str, list[str]],
@@ -199,7 +190,6 @@ def compute_invalidation(root: Path, baseline: dict,
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
             "explicit_rerun": explicit_rerun}
 
-
 def _merge_arm_lines(arm: dict, fresh: dict, dropped: set[str]) -> tuple:
     """行事实合并：test/script 双车道 + line_to_tests 反查（fresh 脚本的
     行集整并；dropped 脚本的行整删）。"""
@@ -226,7 +216,6 @@ def _merge_arm_lines(arm: dict, fresh: dict, dropped: set[str]) -> tuple:
                 slot.setdefault(ln, set()).add(ident)
     return test_to_lines, script_to_lines, line_to_tests
 
-
 def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
                        replace_names: set[str], name_of) -> dict:
     """同语义合并：dropped 删边 + replace_names 整体替换 + 其余身份原样
@@ -239,7 +228,6 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
     for identity, value in (fresh.get(key) or {}).items():
         base[identity] = value
     return base
-
 
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None
@@ -317,7 +305,6 @@ def _increment_decision(root: Path, recipe: dict, baseline: dict,
                               rerun_full_face_ratio)
     return raw_recipe, classes, invalidation, rerun, reason
 
-
 def run_attribution_increment(project_root: str | Path,
                               target_files: list[str], recipe: dict,
                               baseline_path: str | Path,
@@ -328,7 +315,7 @@ def run_attribution_increment(project_root: str | Path,
                               calibration_every: int = 5,
                               rerun_full_face_ratio: float
                               = DEFAULT_RERUN_FULL_FACE_RATIO) -> dict:
-    """增量重建主入口；返回增量报告（含产物落盘路径与 provenance）。"""
+    """增量重建主入口（含产物落盘与 provenance）。"""
     t0 = time.monotonic()
     root = Path(project_root).resolve()
     baseline = load_baseline(baseline_path)
@@ -387,7 +374,6 @@ def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
         return "rerun_surface_too_large_fallback"
     return "incremental"
 
-
 def _run_increment_arm(root: Path, target_files: list[str], recipe: dict,
                        rerun: set[str], timeout_s: int,
                        causal: bool) -> tuple[float, dict, list[dict],
@@ -420,7 +406,6 @@ def _run_increment_arm(root: Path, target_files: list[str], recipe: dict,
     return (round(time.monotonic() - t0, 3), _group_fresh_edges(arm_map),
             results, fid_by_line_by_rel)
 
-
 def _group_fresh_edges(inc_arm: dict) -> dict:
     out = {}
     for key in _FWD_KEYS + _LINE_KEYS:
@@ -428,7 +413,6 @@ def _group_fresh_edges(inc_arm: dict) -> dict:
                     if key in _LINE_KEYS else list(v)
                     for k, v in (inc_arm.get(key) or {}).items()}
     return out
-
 
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
@@ -469,7 +453,6 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         },
     }
 
-
 def _merged_tests_face(root: Path, baseline: dict,
                        classes: dict) -> dict:
     """测试面内容绑定继承 + 变更/新增测试脚本按当前内容重算、删除剔除。"""
@@ -482,7 +465,6 @@ def _merged_tests_face(root: Path, baseline: dict,
         face.pop(rel, None)
     return face
 
-
 def _merged_file_sha(root: Path, baseline: dict,
                      classes: dict) -> dict:
     """基线文件哈希继承 + 变更生产文件按当前内容重算（增量新鲜绑定）。"""
@@ -492,7 +474,6 @@ def _merged_file_sha(root: Path, baseline: dict,
         if p.is_file():
             shas[rel] = sha256_file(p)
     return shas
-
 
 def _merged_instrumentable_lines(root: Path, baseline: dict,
                                  classes: dict) -> dict:
@@ -510,7 +491,6 @@ def _merged_instrumentable_lines(root: Path, baseline: dict,
             src, "gqt-surface-computation.txt", runtime_sink=False)
         surface[rel] = _probe_surface_lines(probe_lines, block_map)
     return surface
-
 
 def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
                         out_path: str | Path, classes: dict, reason: str,
@@ -539,7 +519,6 @@ def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
         "canonical_ok": bool(report.get("ok")),
         "wall_s": round(time.monotonic() - t0, 3),
     }
-
 
 def diff_artifacts(a_doc: dict, b_doc: dict) -> dict:
     """两张归属产物的逐边差分（file/function 边 + 行事实三元组）。
@@ -577,5 +556,4 @@ def diff_artifacts(a_doc: dict, b_doc: dict) -> dict:
     for key in _LINE_KEYS:
         out[key] = _diff(line_edges(a_doc, key), line_edges(b_doc, key))
     return out
-
 

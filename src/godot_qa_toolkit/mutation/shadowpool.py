@@ -41,14 +41,11 @@ POOL_SCHEMA = "see1550-pool/1"
 _SELECT_ROOT = ".gqt-attr-select"
 WARNED_NO_FCNTL = False
 
-
 def _pool_dir(project_root: str) -> Path:
     return Path(project_root) / ".qa-cache" / shadow.POOL_DIRNAME
 
-
 def _pool_manifest_path(project_root: str) -> Path:
     return _pool_dir(project_root) / "pool.json"
-
 
 class MutationSlot:
     """一次 mutation 执行持有的影子槽句柄。"""
@@ -70,7 +67,6 @@ class MutationSlot:
         self._slot_lock_fd: int | None = None
         self.released = False
 
-
 # ---------------------------------------------------------------------------
 # flock 原语
 # ---------------------------------------------------------------------------
@@ -83,7 +79,6 @@ def _warn_no_fcntl_once() -> None:
               "unlocked best-effort (native-Windows honest downgrade)",
               file=sys.stderr)
 
-
 def _flock_ex(fd: int, blocking: bool) -> bool:
     if fcntl is None:
         return True
@@ -93,7 +88,6 @@ def _flock_ex(fd: int, blocking: bool) -> bool:
         return True
     except OSError:
         return False
-
 
 class _PoolLock:
     """池账本读改写锁（RAII；范围 = 一次 acquire/release 的账本段）。"""
@@ -118,7 +112,6 @@ class _PoolLock:
                 os.close(self.fd)
                 self.fd = None
 
-
 def _try_slot_lock(project_root: str, slot_id: str) -> int | None:
     """尝试独占槽锁；占用中返回 None（换下一个槽）。fd 由调用方持有。"""
     lock_path = _pool_dir(project_root) / "slots" / f"{slot_id}.lock"
@@ -131,7 +124,6 @@ def _try_slot_lock(project_root: str, slot_id: str) -> int | None:
         return fd
     os.close(fd)
     return None
-
 
 # ---------------------------------------------------------------------------
 # 池账本
@@ -156,7 +148,6 @@ def _load_pool(project_root: str) -> dict:
         return {"schema": POOL_SCHEMA, "slots": {}}
     return raw
 
-
 def _save_pool(project_root: str, pool: dict) -> None:
     path = _pool_manifest_path(project_root)
     try:
@@ -170,7 +161,6 @@ def _save_pool(project_root: str, pool: dict) -> None:
         print(f"shadowpool: pool manifest write failed ({e}) — pool state "
               f"may rebuild next run", file=sys.stderr)
 
-
 def _new_record(project_root: str, root: str, wiring_hash: str,
                 targets: list[str], now: float) -> dict:
     return {"path": root, "created_at": now, "last_used_at": now,
@@ -180,7 +170,6 @@ def _new_record(project_root: str, root: str, wiring_hash: str,
                         for t in targets},
             "sentinel": shadow.godot_sentinel(project_root),
             "size_bytes": shadow.dir_size_bytes(Path(root))}
-
 
 # ---------------------------------------------------------------------------
 # 新鲜度分层权威
@@ -226,7 +215,6 @@ def _sync_repo_delta(project_root: str, slot: MutationSlot, rec: dict) -> None:
     rec["delta_hash"] = cur
     slot.freshness.append(f"repo_delta:synced({applied} entries)")
 
-
 def _targeted_three_way(project_root: str, slot: MutationSlot, rec: dict
                         ) -> bool:
     """规则 3：目标集定向三向（repo stat / 槽 stat / 池记录）+ 修正。
@@ -265,7 +253,6 @@ def _targeted_three_way(project_root: str, slot: MutationSlot, rec: dict
     rec["targets"] = targets
     return ok
 
-
 def _sentinel_layer(project_root: str, slot: MutationSlot, rec: dict) -> bool:
     """规则 4：`.godot` sentinel 比对；漂移 = 外部 import → 整槽重建。"""
     cur = shadow.godot_sentinel(project_root)
@@ -274,7 +261,6 @@ def _sentinel_layer(project_root: str, slot: MutationSlot, rec: dict) -> bool:
         return False
     slot.freshness.append("godot_sentinel:match")
     return True
-
 
 def _full_census_layer(project_root: str, slot: MutationSlot) -> bool:
     """规则 6：显式 env 才走全量 census（逐文件 sha1 比对）。"""
@@ -293,7 +279,6 @@ def _full_census_layer(project_root: str, slot: MutationSlot) -> bool:
     slot.freshness.append(f"full_census:mismatches={mismatches}")
     return mismatches == 0
 
-
 # ---------------------------------------------------------------------------
 # acquire / release
 # ---------------------------------------------------------------------------
@@ -302,7 +287,6 @@ def _set_farm(slot: MutationSlot, decision: str, reason: str,
               **extra) -> None:
     slot.farm = {"mode": slot.mode, "decision": decision, "reason": reason,
                  **extra}
-
 
 def _farm_after_rebuild(slot: MutationSlot, project_root: str,
                         reason: str) -> None:
@@ -314,7 +298,6 @@ def _farm_after_rebuild(slot: MutationSlot, project_root: str,
     _set_farm(slot, "rebuilt", reason,
               proof_binding="bound" if ok else "drift_persisted",
               proof_reason=why, validation=list(slot.freshness))
-
 
 def acquire_slot(project_root: str, kind: str, targets: list[str],
                  wiring_hash: str, targeted_only: bool = False,
@@ -333,7 +316,6 @@ def acquire_slot(project_root: str, kind: str, targets: list[str],
     return _acquire_warm(project_root, targets, wiring_hash,
                          targeted_only, kind=kind,
                          required_globs=required_globs)
-
 
 def _acquire_fresh(project_root: str, kind: str, targets: list[str],
                    targeted_only: bool) -> MutationSlot:
@@ -380,7 +362,6 @@ def _acquire_fresh(project_root: str, kind: str, targets: list[str],
     slot.farm["validation"] = list(slot.freshness)
     return slot
 
-
 def _missing_required(project_root: str, slot_root: str,
                       required_globs: list[str] | None) -> list[str]:
     """仅校验「项目侧存在的测试目录」在槽内也存在。
@@ -400,7 +381,6 @@ def _missing_required(project_root: str, slot_root: str,
         if not (Path(slot_root) / rel).is_dir():
             missing.append(glob)
     return missing
-
 
 def _sync_generated_dirs(project_root: str, slot: MutationSlot,
                          required_globs: list[str] | None) -> dict:
@@ -436,7 +416,6 @@ def _sync_generated_dirs(project_root: str, slot: MutationSlot,
                 "missing": missing, "synced": synced, "pruned": pruned}
     return {"status": "ok", "synced": synced, "pruned": pruned}
 
-
 def _release_slot_lock(slot: MutationSlot) -> None:
     """槽锁解锁（gen 重建不可用路径用——归还并落盘后抛错前的清理）。"""
     if slot._slot_lock_fd is not None:
@@ -446,7 +425,6 @@ def _release_slot_lock(slot: MutationSlot) -> None:
         finally:
             os.close(slot._slot_lock_fd)
             slot._slot_lock_fd = None
-
 
 def _proof_guard_or_rebuild(project_root: str, pool: dict, slot: MutationSlot,
                             rec: dict, wiring_hash: str, now: float,
@@ -470,12 +448,10 @@ def _proof_guard_or_rebuild(project_root: str, pool: dict, slot: MutationSlot,
                                   "pruned": gen["pruned"]},
                   validation=list(slot.freshness))
 
-
 def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlot,
                      wiring_hash: str, now: float,
                      required_globs: "list[str] | None") -> MutationSlot:
-    """复用候选槽分层新鲜度门（树/哨兵+census/generated/proof）；任何
-    歧义整槽重建（终案纪律）。仍缺 required dirs → SlotProvisionError。"""
+    """复用候选槽分层新鲜度门；歧义整槽重建。"""
     if not rec.get("path") or not Path(slot.root).is_dir():
         # D-1（hardener P6 实证）：标死记录 path="" 经 Path("")→'.' 使
         # is_dir() 恒真——空 path 必须显式走重建通道。
@@ -525,7 +501,6 @@ def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlo
                             gen)
     return slot
 
-
 def _create_warm_slot(project_root: str, pool: dict, targets: list[str],
                       wiring_hash: str, kind: str, now: float,
                       targeted_only: bool) -> MutationSlot:
@@ -570,7 +545,6 @@ def _create_warm_slot(project_root: str, pool: dict, targets: list[str],
               proof_binding="bound" if ok else "drift_persisted",
               proof_reason=reason, validation=list(slot.freshness))
     return slot
-
 
 def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
                   targeted_only: bool, kind: str = "win64",
@@ -622,7 +596,6 @@ def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
                            slot.targets, now))
     _save_pool(project_root, pool)
 
-
 def _prune_pool_locked(project_root: str, pool: dict, now: float) -> None:
     """预算/LRU prune（锁内）：超槽数或超预算时删最久未用且未持锁的槽。
 
@@ -666,7 +639,6 @@ def _prune_pool_locked(project_root: str, pool: dict, now: float) -> None:
         if sid is None:
             break
         total -= _drop(sid)
-
 
 def release_slot(slot: MutationSlot) -> list[str]:
     """槽归还：目标还原 + 断言 ==原码；warm 槽记录回写；fresh 槽删除。

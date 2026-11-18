@@ -82,7 +82,6 @@ from .scopemanifest import build_manifest
 from ..timing import (explicit_timing_meta, project_relative,
                       resolve_budget, suggested_action, suggested_action_kind)
 
-
 # GUT 执行域判定原语在 gutrun.py（SEE-1420 <800 行纪律拆分）；re-export
 # 保持既有 import / monkeypatch 名称空间稳定。
 
@@ -115,14 +114,12 @@ from .gutrun import (  # noqa: F401,E402
     _parse_failing_tests,
 )
 
-
 def _godot_project_path(project_root: str) -> str:
     """--path 语义随 detect_binary_kind() 同源（§SPEC-1525-002）：委托
     inject.godot_project_path 统一原语——win64 通道 /mnt/ 转 Windows 形式
     （行为与 af728f5 逐字节一致）、linux 通道原生不转换，转换子进程行为
     与 coverage 共用一份，勿在此模块再分叉。"""
     return _unified_godot_project_path(project_root)
-
 
 def _gut_extra_args(tests_glob: str | None) -> list[str]:
     """tests_glob → GUT 附加参数。
@@ -139,7 +136,6 @@ def _gut_extra_args(tests_glob: str | None) -> list[str]:
             f"-gselect={script_stem}",
         ]
     return [f"-gdir={gdir}"]
-
 
 def _run_gut_on_project(project_root: str, timeout_s: int = 60,
                         tests_glob: str | None = None) -> tuple[int, str]:
@@ -171,7 +167,6 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
     tail = (r.stdout[-200000:] if r.stdout else "") + "\n--- gqt: stderr ---\n" + r.stderr[-10000:]
     return r.returncode, tail
 
-
 # 子进程环境/入口脚本的活动状态（mutant 循环内动态切换，见 _run_single_mutant）
 _ACTIVE_ENV: dict | None = None
 _ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
@@ -179,13 +174,8 @@ _ACTIVE_SCRIPT: str = GUT_SCRIPT_RES_PATH
 # 不能锚到各 worker 各自的影子槽）；baseline 轮为 None → 回落 project_root。
 _ACTIVE_GATE_ROOT: str | None = None
 
-
 # 自适应 timeout 倍数：per-mutant 上限 = baseline 实测耗时 × 该倍数。
 _TIMEOUT_SCALE = 2.0
-
-
-
-
 
 def run_mutation(file_path: str, project_root: str, budget: int = 50,
     timeout_s: int = 60, dry_run: bool = False,
@@ -231,7 +221,6 @@ def run_mutation(file_path: str, project_root: str, budget: int = 50,
         s["stage_reconciliation"] = reconcile(s["stage_timings"], wall_s)
         s["rss_peak_mb"] = self_rss_peak_mb()
     return result
-
 
 def _core_setup(file_path, project_root, tests_glob, binary_kind,
                 worker_channel, identity, selection_meta, select_mode, clock,
@@ -280,7 +269,6 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
     }
     return None, ctx
 
-
 def _core_caliper(project_root, path, mutants, select_ids, select_lines,
                   select_mode, selection_meta, tests_glob) -> tuple:
     """SEE-1587 卡尺行级测试面：`--mutation`/`--lines` 默认（line 模式）消费
@@ -316,7 +304,6 @@ def _core_caliper(project_root, path, mutants, select_ids, select_lines,
         tests_glob = sel["tests_glob"]
     return selection_meta, tests_glob
 
-
 def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
                   tests_glob, binary_kind, resume2_store, mutate_all,
                   header_hash, scope_hashes, attention, identity,
@@ -347,7 +334,6 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
         }
     return estimate
 
-
 def _run_mutation_core(file_path: str,
     project_root: str,
     budget: int = 50,
@@ -372,10 +358,8 @@ def _run_mutation_core(file_path: str,
     select_mode: str = "full",
     selection_meta: dict | None = None,
 ) -> dict:
-    """对单个 .gd 文件做变异测试并出统一 JSON 契约（kill 判定 = 相对
-    baseline 的新增失败集，非 exit code；注入 = 磁盘影子注入 disk-farm/1）。
-    语义总账见 _core_setup / _core_caliper / _core_dry_run 及
-    plan_execution / _execute_planned 分解。"""
+    """对单个 .gd 文件做变异测试并出统一 JSON 契约。分解见 _core_setup/
+    _core_select_and_early_out/_core_plan_phase + _execute_planned。"""
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
     clock = StageClock()
     setup_error, c = _core_setup(
@@ -438,15 +422,6 @@ def _run_mutation_core(file_path: str,
         identity=identity, targeted_only=bool(select_ids or select_lines),
         worker_channel=worker_channel, clock=clock)
 
-
-
-
-
-
-
-
-
-
 def _execute_planned(path, project_root, original_src, backup, mutants,
                      executed_list, reused, results_uncovered, prior_entries,
                      scope_hashes, disclosures, budget, tests_glob,
@@ -490,47 +465,9 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                           budget, scoped, disclosures, slot_info,
                           original_src, clock)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # per-mutant 自适应上限（baseline 耗时决定，_run_mutant_loop 内写入；统一
 # 报告构建已迁 reporting.py，经参数传入读取时刻同值）。
 _adaptive_timeout = 0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
@@ -572,7 +509,6 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
             shutil.rmtree(user_dir, ignore_errors=True)
     return verdict
 
-
 def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
                   ) -> tuple[int, str, float]:
     """跑 baseline 并计时；TimeoutExpired 由调用方按中止契约处理。"""
@@ -582,7 +518,6 @@ def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
     rc, tail = _r._run_gut_on_project(project_root, timeout_s=timeout_s,
                                       tests_glob=tests_glob)
     return rc, tail, time.monotonic() - t0
-
 
 def _run_cold_legs(path, project_root, original_src, backup, mutants,
                    tests_glob, baseline_failures, baseline_dirty, slot,
@@ -611,7 +546,6 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
                                            scopes or {}, time.time()))
     return raw_pairs
 
-
 def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
                    precomputed_baseline, timeout_factor) -> tuple:
     """workdir 备份 + baseline 实测/复用 + 自适应 timeout 锚 + 启动失败守卫。
@@ -638,7 +572,6 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     baseline_failures = _parse_failing_tests(baseline_tail)
     return baseline_failures, bool(baseline_failures), baseline_reused, \
         baseline_elapsed
-
 
 def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                baseline_failures, baseline_dirty, slot, auto_name, target_rel,
@@ -690,7 +623,6 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
             slot_info["release_problems"] = release_problems
     return raw_pairs
 
-
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
@@ -726,7 +658,6 @@ def _run_mutant_loop(
             slot_info["suspected_orphan"] = _orphan_disclosure(
                 project_root, target_res)
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
-
 
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  executed_list, tests_glob, timeout_s,

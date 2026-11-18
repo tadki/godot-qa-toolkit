@@ -20,10 +20,8 @@ from ..digest import canonical_sha256, sha256_file
 RECIPE_VERSION = "measurement-suite/2"
 _GUTCONFIG = ".gutconfig.json"
 
-
 def _sha256_file(path: Path) -> str:
     return sha256_file(path)
-
 
 def load_gutconfig(project_root: Path) -> tuple[dict | None, str | None]:
     """Parse `.gutconfig.json`; returns (config, None) or (None, reason)."""
@@ -37,7 +35,6 @@ def load_gutconfig(project_root: Path) -> tuple[dict | None, str | None]:
     if not isinstance(config, dict):
         return None, f"{_GUTCONFIG} is not a JSON object"
     return config, None
-
 
 def scan_acceptance_features(project_root: Path) -> tuple[list[dict], int, str | None]:
     """Scan acceptance/features/**/*.feature; returns (rows, count, error).
@@ -59,9 +56,7 @@ def scan_acceptance_features(project_root: Path) -> tuple[list[dict], int, str |
         )
     return rows, len(rows), None
 
-
 LEGAL_SCOPES = frozenset({"gut_dir", "acceptance_feature"})
-
 
 def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
     # §SPEC-066：exclusions 是外部 JSON 输入的直接消费结构——容器/行/字段
@@ -111,7 +106,6 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
         )
     return normalized, None
 
-
 def _recipe_gut_face(gutconfig: dict, dirs: list[str],
                      normalized_exclusions: list[dict], root: Path) -> dict:
     """gut_face 块组装（gutconfig 原文整体入 hash——换 recipe 是显式来源事件）。"""
@@ -128,7 +122,6 @@ def _recipe_gut_face(gutconfig: dict, dirs: list[str],
             if x["scope"] == "gut_dir"
         ],
     }
-
 
 def _recipe_acceptance_face(features: list, feature_count: int,
                             normalized_exclusions: list[dict],
@@ -154,7 +147,6 @@ def _recipe_acceptance_face(features: list, feature_count: int,
         "harness": harness,
     }
 
-
 def build_recipe(
     project_root: str | Path,
     exclusions: list[dict] | None = None,
@@ -165,7 +157,7 @@ def build_recipe(
     gut_version: str = "unknown",
 ) -> tuple[dict | None, str | None]:
     """Build the measurement-suite/2 dict; returns (recipe, None) or
-    (None, reason) when the project layout or an exclusion is illegal."""
+    (None, reason) on illegal layout/exclusion."""
     root = Path(project_root)
     # §SPEC-066：只有 None 归缺省；其余非 list 交给 _legal_exclusions
     # 显式拒绝（falsy 值不得静默降级为空面）
@@ -218,13 +210,11 @@ def recipe_hash(recipe: dict) -> str:
              if k not in ("recipe_hash", "project_root")}
     return canonical_sha256(basis)
 
-
 def _verify_hash(recipe: dict) -> "tuple[bool, str | None]":
     """recipe_hash 现算对照（§SPEC-041 L2 同内容同 hash）。"""
     if recipe.get("recipe_hash") != recipe_hash(recipe):
         return False, "recipe_hash mismatch — recipe was modified after hashing"
     return True, None
-
 
 def _verify_faces(recipe: dict) -> "tuple[list, list] | tuple[None, str]":
     """双 face 结构校验（§SPEC-067）+ dirs 非空 strip 规则（§SPEC-068/R23）。
@@ -258,7 +248,6 @@ def _verify_faces(recipe: dict) -> "tuple[list, list] | tuple[None, str]":
                           f"non-empty string, got {key!r} (§SPEC-067)")
     return dirs, features
 
-
 def _verify_exclusions(recipe: dict) -> "tuple[bool, str | None]":
     """exclusions 行校验（§SPEC-066/067）：scope/entry/reason 与 build 侧
     同规则——缺失、空白、非 str、非法 scope 一律拒绝。"""
@@ -288,7 +277,6 @@ def _verify_exclusions(recipe: dict) -> "tuple[bool, str | None]":
         if not reason.strip():
             return False, f"exclusion without reason: {row!r}"
     return True, None
-
 
 def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
     """Verify a loaded recipe: version tag, exclusion legality, consumed

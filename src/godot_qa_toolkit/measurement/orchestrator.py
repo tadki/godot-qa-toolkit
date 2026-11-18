@@ -122,18 +122,6 @@ CERTIFICATION = {
     "reason": "single round; WP5 owns two-round certification",
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 def _parse_baseline_failures(baseline_failures) -> "set[tuple[str, str]]":
     """§SPEC-064b：基线失败集升级为 (script, test) 身份对——同名跨脚本不
     互相吸收、未归因仅匹配未归因；裸名字符串身份歧义 → fail-closed 拒绝。"""
@@ -149,7 +137,6 @@ def _parse_baseline_failures(baseline_failures) -> "set[tuple[str, str]]":
                 f"rejected (§SPEC-064b)")
     return baseline_pairs
 
-
 def _req_str(obj: dict, key: str, kind: str) -> str:
     """§SPEC-065：配置字段统一类型校验——非 str 或空白即 MeasurementError
     fail-fast（非 str 会在匹配/附着层失配静默失效，如 file=123）。"""
@@ -159,7 +146,6 @@ def _req_str(obj: dict, key: str, kind: str) -> str:
             f"{kind} field {key!r} must be a non-empty string, "
             f"got {v!r} (§SPEC-065)")
     return v
-
 
 def _parse_intolerant_config(cfg: dict) -> tuple:
     """§SPEC-065（R19）：intolerant 声明解析与统一校验——顶层键显式
@@ -212,7 +198,6 @@ def _parse_intolerant_config(cfg: dict) -> tuple:
     return intolerant_tests, declared_scoped, declared_bare, \
         coverage_limitations
 
-
 def _prepare_targets(root: Path, target_files: list[str], *, recipe_hash: str,
                      base_algo: str, algo_used: str, block_compress: bool,
                      test_attribution: bool,
@@ -255,7 +240,6 @@ def _prepare_targets(root: Path, target_files: list[str], *, recipe_hash: str,
             "cache_hits": cache_hits, "cache_misses": cache_misses,
             "causal_sites": causal_sites}
 
-
 def _scope_complete(scope_roots: list[str] | None,
                     target_files: list[str]) -> bool:
     """§SPEC-053：subset 不得标 comparable——目标集未覆盖 scope_roots 下
@@ -265,7 +249,6 @@ def _scope_complete(scope_roots: list[str] | None,
     scope_files = {str(x) for sr in scope_roots
                    for x in Path(sr).rglob("*.gd") if x.is_file()}
     return scope_files <= {str(Path(tf)) for tf in target_files}
-
 
 def _build_unions(arm_a: dict, arm_b: dict, recipe_hash: str) -> list:
     """逐文件 union（coverage-union/1，禁平均）。"""
@@ -280,7 +263,6 @@ def _build_unions(arm_a: dict, arm_b: dict, recipe_hash: str) -> list:
                                    wall_s=arm_b["wall_s"])
         unions.append(union_file(a, b, canonical_recipe_hash=recipe_hash))
     return unions
-
 
 def _gate_comparable(unions: list, arm_a: dict, arm_b: dict,
                      scope_complete: bool) -> tuple:
@@ -302,7 +284,6 @@ def _gate_comparable(unions: list, arm_a: dict, arm_b: dict,
             u["comparable_reason"] = "subset_targets"
     return gated_arms, comparable_reason
 
-
 def _measurable_stats(unions: list) -> tuple:
     """§SPEC-043 measurable 子集披露：vacuous / no_probe_fired 文件归
     unmeasurable（本就无可测数据），其余 union 无效仍属 measurable 失败
@@ -322,7 +303,6 @@ def _measurable_stats(unions: list) -> tuple:
             measurable_files += 1
     return unmeasurable, measurable_files, measurable_valid
 
-
 def _report_failures_block(gated_arms: dict, arm_a: dict) -> dict:
     """§SPEC-060a：双臂失败集逐名披露（observed 全集 + new 相对基线）；
     baseline_count = gut_full 臂生效基线（显式提供或懒获取）。"""
@@ -332,7 +312,6 @@ def _report_failures_block(gated_arms: dict, arm_a: dict) -> dict:
         "gated": any(v["new"] for v in gated_arms.values()),
         "arms": gated_arms,
     }
-
 
 def _report_intolerant_block(intolerant_tests: list, arm_a: dict,
                              arm_b: dict) -> dict:
@@ -360,7 +339,6 @@ def _report_intolerant_block(intolerant_tests: list, arm_a: dict,
                  "coverage blind spots — not silently skipped"),
     }
 
-
 def _report_union_block(unions: list, comparable_reason: str | None,
                         scope_complete: bool, unmeasurable: list,
                         measurable_files: int,
@@ -379,7 +357,6 @@ def _report_union_block(unions: list, comparable_reason: str | None,
         },
         "unmeasurable": unmeasurable,
     }
-
 
 def _report_crap_block(crap_records: list, crap_lanes: dict,
                        crap_version: str, scope_complete: bool,
@@ -423,7 +400,6 @@ def _report_crap_block(crap_records: list, crap_lanes: dict,
         },
     }
 
-
 def _report_coverage_semantics_block(algo_used: str, prepared: dict) -> dict:
     """§SPEC-070 FR-4：块压缩近似语义显式披露——不得冒充逐语句精确
     statement_start_line（块内后继语句被运行期错误中止时仍计入覆盖）。"""
@@ -439,7 +415,6 @@ def _report_coverage_semantics_block(algo_used: str, prepared: dict) -> dict:
             "exact measurement); a runtime error aborting mid-block can "
             "mark later statements covered"),
     }
-
 
 def _assemble_report(root: Path, recipe_hash: str, arm_a: dict, arm_b: dict,
                      unions: list, gated_arms: dict,
@@ -491,7 +466,6 @@ def _assemble_report(root: Path, recipe_hash: str, arm_a: dict, arm_b: dict,
         "dynamic_cache": False,
         "ok": bool(unions) and all(u["valid"] for u in unions),
     }
-
 
 def run_measurement(project_root: str | Path, target_files: list[str],
                   recipe: dict, *, acceptance_keys: list[str] | None = None,
@@ -615,14 +589,8 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     report.update(attr_section)
     return report
 
-
-
-
-
-
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")
-
 
 def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
     """§SPEC-063c/064a：失败身份解析为 (script, test) 对。运行流按脚本
@@ -654,15 +622,11 @@ def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
             pairs.add((current_script, current_test))
     return pairs
 
-
-
-
 def _gutconfig_face_args(recipe: dict) -> list[str]:
     """gut_full 臂的同面无插桩参数：与分片计划同源（recipe gut_face
     dirs 的并集）；空 dirs = GUT 读 .gutconfig 缺省面（不传 -gdir）。"""
     dirs = list((recipe.get("gut_face") or {}).get("dirs") or [])
     return [("-gdir=" + ",".join(dirs))] if dirs else []
-
 
 def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],
                            timeout_s: int) -> tuple[set, dict]:
@@ -695,9 +659,6 @@ def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],
             "count": len(pairs), "sha256": _pairs_sha256(pairs),
             "wall_s": round(time.monotonic() - t0, 3)}
     return pairs, meta
-
-
-
 
 def _performance(root: Path, probe_keys: list[str] | None,
                  timeout_s: int) -> dict:

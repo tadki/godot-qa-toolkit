@@ -29,22 +29,17 @@ EVIDENCE_VERSION = "coverage-evidence/2"
 SINK_PREFIX = "qa-coverage-hits-"
 RETENTION_DAYS = 7
 
-
 def make_run_uuid() -> str:
     return str(uuid.uuid4())
-
 
 def sink_name_for(run_uuid: str) -> str:
     return f"{SINK_PREFIX}{run_uuid}.txt"
 
-
 def sha256_text(text: str) -> str:
     return _digest_text(text)
 
-
 def evidence_dir_for(evidence_out: str | None) -> Path:
     return Path(evidence_out) if evidence_out else Path.cwd()
-
 
 def write_run_record(evidence_dir: Path, record: dict,
                      name_suffix: str = "") -> None:
@@ -59,7 +54,6 @@ def write_run_record(evidence_dir: Path, record: dict,
     )
     tmp.replace(evidence_dir / f"{record['run_uuid']}{name_suffix}.record.json")
 
-
 def read_run_record(evidence_dir: Path, run_uuid: str) -> dict | None:
     record_path = evidence_dir / f"{run_uuid}.record.json"
     if not record_path.is_file():
@@ -69,7 +63,6 @@ def read_run_record(evidence_dir: Path, run_uuid: str) -> dict | None:
     except ValueError:
         return {"run_uuid": run_uuid, "status": "record_corrupt"}
 
-
 def update_run_record(evidence_dir: Path, run_uuid: str,
                       name_suffix: str = "", **fields) -> None:
     record = (read_run_record(evidence_dir, run_uuid)
@@ -77,14 +70,12 @@ def update_run_record(evidence_dir: Path, run_uuid: str,
     record.update(fields)
     write_run_record(evidence_dir, record, name_suffix=name_suffix)
 
-
 def _resolve_arm(tests_glob: str | None, arm: str | None) -> str:
     # §SPEC-037：recipe.arm 显式参数注入（measurement 编排器传入）；
     # 不传 arm 时保留 tests_glob 推断（既有调用方 stdout 契约零漂移）。
     if arm is not None:
         return arm
     return "gut_core" if tests_glob else "gut_full"
-
 
 def build_run_record(
     *,
@@ -109,7 +100,6 @@ def build_run_record(
         "status": "started",
         "probe_manifest": probe_manifest,
     }
-
 
 def _bundle_rows(manifest: dict, registry: dict, hits: set) -> tuple:
     """T/I/C 三表 + entry_states（per-entry measured/partial 车道）。
@@ -155,7 +145,6 @@ def _bundle_rows(manifest: dict, registry: dict, hits: set) -> tuple:
             )
     return t_rows, i_rows, c_rows, entry_states
 
-
 def _bundle_header(run_uuid: str, file_path: str, gd_source: str,
                    tests_glob: "str | None", recovered: bool,
                    manifest: dict, arm: "str | None") -> dict:
@@ -174,7 +163,6 @@ def _bundle_header(run_uuid: str, file_path: str, gd_source: str,
             "inline": manifest,
         },
     }
-
 
 def build_bundle(
     *,
@@ -236,7 +224,6 @@ def write_bundle(evidence_dir: Path, bundle: dict,
     )
     return out
 
-
 def prune_sinks(project_root: str, retention_days: int = RETENTION_DAYS) -> dict:
     """Explicit cleanup of `qa-coverage-hits-*` files older than the
     retention period (W1 ruling: user:// lives under HOME — no implicit
@@ -266,7 +253,6 @@ def prune_sinks(project_root: str, retention_days: int = RETENTION_DAYS) -> dict
         "retention_days": retention_days,
         "dirs_checked": [str(d) for d in checked_dirs],
     }
-
 
 def clear_sink(sink_path: str | None, project_root: str,
                sink_name: str) -> None:

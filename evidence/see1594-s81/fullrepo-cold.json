@@ -1,0 +1,35 @@
+{
+  "tool": "see1594.s81.fullrepo_cold",
+  "question": "Owner：全库插桩冷跑到底要多久？118.9s 是否就是全库口径？（118.9s 实为 3 样本目标，非全库）",
+  "kol_commit": "ac6a7282",
+  "universe": {
+    "targets": "systems autoload utils scenes resources 五个生产目录（递归 .gd）",
+    "files": 182,
+    "note": "排除 tests/ addons/ acceptance(harness 17)/.dev(2)；Atlas 台账估 ~149 与实数 182 的差 = 口径差，实数以 JSON 为准"
+  },
+  "segments_s": {
+    "engine_import_cold": 11.26,
+    "instrument_write_parse_union_mapwrite": 64.1,
+    "lazy_baseline_uninstrumented_gut": 73.3,
+    "instrumented_gut_arms": 64.9,
+    "arm_breakdown": {
+      "gut_full_6_shards_wall": 60.8,
+      "acceptance_4_shards_wall": 4.1
+    },
+    "total_wall_s": 204.93
+  },
+  "derivation": "total=外部 /usr/bin/time；command_total_s=204.4（report）；gated_core_s=202.3=插桩写树+基线+两臂+union+落盘；import=独立冷副本实测（measure run 内部 bootstrap 含同量级 import）；减法段=202.3−73.3−64.9",
+  "verdict_state": {
+    "ok": false,
+    "gut_full": "invalid — 3 个新增失败（插桩臂观测、懒基线 16 对中不存在）：test_inf_bookmark_and_share_signals_are_noops / test_key_bindings_use_same_signal_as_buttons / test_rot_container_utils_rotation_wraps_negative_and_out_of_range —— 按裁定作为插桩扰动证据上报，不基线化、不缩面",
+    "acceptance": "invalid — 177 个既有失败保持可见（acceptance 面不接基线，裁定不变）",
+    "union": "invalid（182 文件 0 可认证——门控生效所致，如实披露）",
+    "note": "计时证据有效（两臂 GUT 轮完整执行，非中止）；invalid 是 verdict 门控结论，不影响耗时口径"
+  },
+  "progress_surface_demo": "本次冷跑即用新 stderr 进度面：arm=gut_full start shards=6 → shard=1/6..6/6 start → shard done s=25.0..58.7 → arm done（日志见 evidence/see1594-s81/cold-run-stderr-sample.txt）",
+  "raw": {
+    "report": "/tmp/s81_cold_report.json（跑后清理，关键数字已内嵌）",
+    "map": "/tmp/s81_cold_map.json",
+    "stderr": "evidence/see1594-s81/cold-run-stderr-sample.txt"
+  }
+}

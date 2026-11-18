@@ -1,0 +1,25 @@
+measure: arm=gut_full start shards=6 reps=1
+measure: arm=gut_full shard=1/6 rep=0/1 start
+measure: arm=gut_full shard=2/6 rep=0/1 start
+measure: arm=gut_full shard=3/6 rep=0/1 start
+measure: arm=gut_full shard=4/6 rep=0/1 start
+measure: arm=gut_full shard=5/6 rep=0/1 start
+measure: arm=gut_full shard=6/6 rep=0/1 start
+measure: arm=gut_full shard=5/6 done s=25.0
+measure: arm=gut_full shard=4/6 done s=28.8
+measure: arm=gut_full shard=6/6 done s=31.5
+measure: arm=gut_full shard=3/6 done s=42.7
+measure: arm=gut_full shard=1/6 done s=58.7
+measure: arm=gut_full shard=2/6 done s=60.8
+measure: lazy baseline 16 failing pairs acquired uninstrumented (73.275s) — only NEW failures gate the arm
+measure: arm=gut_full done state=invalid wall_s=60.8
+measure: arm=acceptance start shards=4 reps=1
+measure: arm=acceptance shard=1/4 rep=0/1 start
+measure: arm=acceptance shard=2/4 rep=0/1 start
+measure: arm=acceptance shard=3/4 rep=0/1 start
+measure: arm=acceptance shard=4/4 rep=0/1 start
+measure: arm=acceptance shard=3/4 done s=3.8
+measure: arm=acceptance shard=2/4 done s=4.0
+measure: arm=acceptance shard=4/4 done s=4.1
+measure: arm=acceptance shard=1/4 done s=4.1
+measure: arm=acceptance done state=invalid wall_s=4.1

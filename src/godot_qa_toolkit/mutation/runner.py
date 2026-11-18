@@ -85,6 +85,33 @@ from ..timing import (explicit_timing_meta, project_relative,
 
 # GUT 执行域判定原语在 gutrun.py（SEE-1420 <800 行纪律拆分）；re-export
 # 保持既有 import / monkeypatch 名称空间稳定。
+
+# SEE-1594 BTIDY：glob/util/loop 支撑簇物理迁移至 runhelp（零行为拆分）；
+# 再导出保持既有 runner.* 引用面与 monkeypatch seam。
+from .runhelp import (  # noqa: F401
+    _adaptive_timeout,
+    _attach_killed_certificate,
+    _auto_scan_tests_glob,
+    _auto_scan_tests_glob_meta,
+    _BaselineLaunchFailure,
+    _caliper_lines,
+    _loop_baseline,
+    _loop_legs,
+    _loop_slot,
+    _negotiate_budget,
+    _orphan_disclosure,
+    _rebuild_reused_records,
+    _record_timing_sample,
+    _res_path_of,
+    _resolve_auto_glob,
+    _run_baseline,
+    _run_cold_legs,
+    _run_mutant_loop,
+    _run_mutant_loop_with_aborts,
+    _tally,
+    adaptive_timeout_for,
+)
+from . import runhelp as _rh
 from .gutrun import (  # noqa: F401,E402
     GUT_SCRIPT_RES_PATH,
     _GUT_RUN_EVIDENCE,
@@ -101,45 +128,39 @@ def _godot_project_path(project_root: str) -> str:
     return _unified_godot_project_path(project_root)
 
 
+def _gut_extra_args(tests_glob: str | None) -> list[str]:
+    """tests_glob → GUT 附加参数。
+
+    -gtest 接受的是「脚本完整路径列表」，但会在装满所有收集脚本后仍全量跑
+    （GUT 9.6 实测：单脚本 -gtest 展开 251 scripts/2718 tests）——不能作
+    文件级子集。文件路径改走 -gselect=脚本名（GUT 按 -select_script 子集
+    过滤收集结果，实测精确 1 script），目录仍走 -gdir（SEE-1316 实测）。"""
+    gdir = tests_glob if tests_glob else "res://tests/"
+    if gdir.endswith(".gd"):
+        script_stem = Path(gdir).stem
+        return [
+            "-gdir=res://tests/",
+            f"-gselect={script_stem}",
+        ]
+    return [f"-gdir={gdir}"]
+
+
 def _run_gut_on_project(project_root: str, timeout_s: int = 60,
                         tests_glob: str | None = None) -> tuple[int, str]:
     """在项目里 headless 跑 GUT；返回 (exit_code, 输出尾部)。
 
-    -s 用 res:// 路径（绝对路径会让 godot 拒绝加载）；脚本存在性仍由调用方
-    校验（文件系统检查），加载失败由 _looks_like_godot_launch_failure 识别。
-    tests_glob（SPEC-009）：受影响测试子集（如 res://tests/save/），替代全量
-    -gdir=res://tests/ 以压缩单轮成本。
-    SEE-1321 SPEC-006/007：子进程 env 注入（XDG_DATA_HOME / GQT_MUTATION_CFG）
-    与入口脚本切换经模块级 _ACTIVE_ENV/_ACTIVE_SCRIPT 传递——保持函数签名
-    向后兼容（既有令牌测试以 3 参 fake 替换本函数）。
-    SEE-1550：mutant 轮的 project_root 是影子槽，跨进程槽位闸必须仍锚真实仓
-    （"GlobalGodotGate 锚真实仓"既有语义）——闸锚经模块级 _ACTIVE_GATE_ROOT
-    传递（缺省回落 project_root，3 参 fake 契约零变化）。
-    §SPEC-015：真实 Godot 项目缺导入缓存时在此 fail-fast（首个 GUT 调用即
-    拦截——baseline 之前，绝不放行进逐位点 timeout 级联）。
-    """
+    -s 用 res:// 路径（绝对路径会让 godot 拒绝加载）；槽位闸/env/入口脚本
+    经模块级 _ACTIVE_* 传递（3 参 fake 契约不变）；§SPEC-015 导入缓存缺失
+    fail-fast。tail = 运行流 + stderr 尾部拼接（SPEC-017：注入失败与 GUT
+    运行流互斥出现，拼接不互相挤出）。"""
     shadow.require_import_cache(project_root)
     gut_fs = os.path.join(project_root, "addons", "gut", "gut_cmdln.gd")
     if not os.path.isfile(gut_fs):
         raise FileNotFoundError(f"GUT runner not found: {gut_fs}")
-    gdir = tests_glob if tests_glob else "res://tests/"
-    # -gtest 接受的是「脚本完整路径列表」，但会在装满所有收集脚本后仍全量跑
-    # （GUT 9.6 实测：单脚本 -gtest 展开 251 scripts/2718 tests）——不能作
-    # 文件级子集。文件路径改走 -gselect=脚本名（GUT 按 -select_script 子集
-    # 过滤收集结果，实测精确 1 script），目录仍走 -gdir（SEE-1316 实测）。
-    if gdir.endswith(".gd"):
-        script_stem = Path(gdir).stem
-        extra = [
-            "-gdir=res://tests/",
-            f"-gselect={script_stem}",
-        ]
-    else:
-        extra = [f"-gdir={gdir}"]
+    extra = _gut_extra_args(tests_glob)
     env = dict(os.environ)
     if _ACTIVE_ENV:
         env.update(_ACTIVE_ENV)
-    # SEE-1400 §SPEC-003：跨进程槽位闸包裹真实 godot 子进程（等槽时间不计
-    # timeout——timeout 语义只管测试进程本身）。签名与 3 参 fake 契约不变。
     with GlobalGodotGate(_ACTIVE_GATE_ROOT or project_root):
         r = spawn_godot(
             [godot_command(), "--headless", "--path",
@@ -151,15 +172,6 @@ def _run_gut_on_project(project_root: str, timeout_s: int = 60,
             cwd=project_root,
             env=env,
         )
-    # 失败测试名解析需要完整运行流（'-*', '* test_x'、[Failed] 行）——2000
-    # 字符的窗口在长断言输出下会把失败行挤出窗外导致 kill 判定失真（
-    # SEE-1321 实测 pricing_resolver or→and 29 项新失败被吞成 survived）。
-    # SPEC-017（§SPEC-016 实证）：注入宿主的 printerr 全落 stderr——GUT 运行
-    # 流落 stdout，而 GQT_INJECT_FAIL 只落 stderr。旧逻辑 stdout 非空时丢弃
-    # stderr，rc==3 注入失败在 stdout 里只有 73 字节引擎 banner，
-    # "GQT_INJECT_FAIL in tail" 守卫永不命中 → 注入失败被吞成 survived
-    # （12/17 假 survived）。修复：tail = 运行流 + stderr 尾部拼接，两者都
-    # 进判定窗口；注入失败与 GUT 运行流互斥出现，拼接不会互相挤出。
     tail = (r.stdout[-200000:] if r.stdout else "") + "\n--- gqt: stderr ---\n" + r.stderr[-10000:]
     return r.returncode, tail
 
@@ -176,41 +188,21 @@ _ACTIVE_GATE_ROOT: str | None = None
 _TIMEOUT_SCALE = 2.0
 
 
-def adaptive_timeout_for(baseline_elapsed: float, timeout_s: int,
-                         factor: float | None = None) -> int:
-    """§SPEC-1420-02：adaptive = max(timeout_s, baseline×F+1)。
-
-    factor None → 模块默认 _TIMEOUT_SCALE（2.0，L5 定案"默认不动"）；
-    显式 factor 只放大不收紧（低于显式 timeout 的派生值被显式值覆盖）。
-    """
-    k = _TIMEOUT_SCALE if factor is None else float(factor)
-    return max(timeout_s, int(baseline_elapsed * k) + 1)
 
 
 
-def run_mutation(    file_path: str,
-    project_root: str,
-    budget: int = 50,
-    timeout_s: int = 60,
-    dry_run: bool = False,
+def run_mutation(file_path: str, project_root: str, budget: int = 50,
+    timeout_s: int = 60, dry_run: bool = False,
     tests_glob: str | None = None,
     precomputed_baseline: dict | None = None,
-    mutant_slice: tuple[int, int] | None = None,
-    timing_store=None,
-    binary_kind: str | None = None,
-    mutation_warning: int | None = None,
-    timeout_factor: float | None = None,
-    mutate_all: bool = False,
-    retry_ids: list[str] | None = None,
-    resume2_store=None,
-    select_ids: list[str] | None = None,
-    select_lines: list[int] | None = None,
-    reuse_coverage: bool = True,
-    progress: dict | None = None,
-    identity: dict | None = None,
-    worker_channel: bool | None = None,
-    select_mode: str = "full",
-    selection_meta: dict | None = None,
+    mutant_slice: tuple[int, int] | None = None, timing_store=None,
+    binary_kind: str | None = None, mutation_warning: int | None = None,
+    timeout_factor: float | None = None, mutate_all: bool = False,
+    retry_ids: list[str] | None = None, resume2_store=None,
+    select_ids: list[str] | None = None, select_lines: list[int] | None = None,
+    reuse_coverage: bool = True, progress: dict | None = None,
+    identity: dict | None = None, worker_channel: bool | None = None,
+    select_mode: str = "full", selection_meta: dict | None = None,
 ) -> dict:
     """单文件 mutation 入口（§SPEC-202 单位级测量面挂载点）。
 
@@ -245,6 +237,121 @@ def run_mutation(    file_path: str,
     return result
 
 
+def _core_setup(file_path, project_root, tests_glob, binary_kind,
+                worker_channel, identity, selection_meta, select_mode, clock,
+                mutation_warning) -> tuple:
+    """core 前置：目标锚定、选面解析、源码/身份/路由、收集与 manifest 标定。
+    返回 (error_result_or_None, ctx)；error 在场时 ctx 为空（目标缺失 /
+    收集异常 → error 契约）。"""
+    path = Path(anchor_to_project_root(file_path, project_root))
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"mutation target not found: {file_path} (anchored: {path})")
+    selection_meta = dict(selection_meta or {})
+    # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
+    # （SEE-1587 默认 line）——不可用映射 fail-loud，无静默全脸路径。
+    # SEE-1587：显式 --tests 也经同一守门函数，披露「未使用行级选面」。
+    with clock.stage("test_scan"):
+        tests_glob, selection_meta = _resolve_auto_glob(
+            tests_glob, str(path), project_root, selection_meta,
+            select_mode=select_mode)
+    original_src = path.read_text(encoding="utf-8")
+    kind = binary_kind or detect_binary_kind()
+    target_res_early = _res_path_of(str(path), str(project_root))
+    # SEE-1550 §SPEC-020：exec_scheme 按目标路由入身份包（worker 显式启用且
+    # 路由判 worker 才 worker-reset/1；A9 默认冷）。parent 传入的 identity
+    # 用同源解析覆盖 scheme——父子两侧 file_key 一致。
+    with clock.stage("route_scan"):
+        identity, _route, exec_scheme = identity_for_target(
+            identity, project_root, target_res_early, worker_channel)
+    if identity is None:
+        identity = identity_pack(project_root, kind, exec_scheme=exec_scheme)
+    try:
+        raw_mutants = _collect_mutations(original_src, str(path))
+    except Exception as e:
+        return _setup_error_result(str(path), e), {}
+    # P1 manifest 标定（定案 D1/D2/D3 + L6）：scope 提取 → no-mutate 过滤
+    # → stable id。total_sites 按过滤后位点数计（无位点 scope 不进 manifest）。
+    header_hash, spans, mutants, scope_hashes = build_manifest(
+        original_src, str(path), raw_mutants)
+    ctx = {
+        "path": path, "tests_glob": tests_glob, "selection_meta": selection_meta,
+        "original_src": original_src, "kind": kind, "identity": identity,
+        "header_hash": header_hash, "spans": spans, "mutants": mutants,
+        "scope_hashes": scope_hashes, "total_sites": len(mutants),
+        "attention": _attention_note(mutation_warning, len(mutants),
+                                     str(path)),
+    }
+    return None, ctx
+
+
+def _core_caliper(project_root, path, mutants, select_ids, select_lines,
+                  select_mode, selection_meta, tests_glob) -> tuple:
+    """SEE-1587 卡尺行级测试面：`--mutation`/`--lines` 默认（line 模式）消费
+    选中位点所在行的测试集合并集物化为单一 glob；无映射测试的选中位点照常
+    执行（公平重跑通道）并披露 no_mapped_tests。显式 --tests 用户接管时不
+    参与。返回 (selection_meta, tests_glob)。"""
+    if not ((select_ids or select_lines)
+            and str(select_mode).lower() == "line"
+            and selection_meta.get("source") != "explicit_tests"):
+        return selection_meta, tests_glob
+    caliper_lines = _caliper_lines(mutants, select_ids, select_lines)
+    if not caliper_lines:
+        return selection_meta, tests_glob
+    from .truth_select import resolve_line_group_selection
+    file_sel = {"source": "runtime_mapping", "zero_ref": False,
+                "tests": selection_meta.get("tests") or [],
+                "tests_glob": tests_glob,
+                "mapping": selection_meta.get("mapping")}
+    sel = resolve_line_group_selection(
+        project_root, str(path), caliper_lines,
+        file_selection=file_sel)
+    selection_meta = {
+        **selection_meta,
+        "source": sel.get("source"),
+        "reason": ("caliper_line_mapping"
+                   if sel.get("source") == "line_mapping"
+                   else "caliper_line_has_no_mapped_tests"),
+        "tests": sel.get("tests") or [],
+        "lines": sel.get("lines") or sorted(caliper_lines),
+        "no_mapped_tests": sel.get("no_mapped_tests") or [],
+    }
+    if sel.get("tests_glob"):
+        tests_glob = sel["tests_glob"]
+    return selection_meta, tests_glob
+
+
+def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
+                  tests_glob, binary_kind, resume2_store, mutate_all,
+                  header_hash, scope_hashes, attention, identity,
+                  selection_meta, select_ids, select_lines, select_mode) -> dict:
+    """dry_run（SPEC-009）估算与选面/求交披露（与完整执行路径同一判别点）。"""
+    estimate = dry_run_estimate(
+        str(path), mutants, budget, scoped, total_sites,
+        project_root, tests_glob, binary_kind, resume2_store,
+        mutate_all, header_hash, scope_hashes, attention=attention,
+        identity=identity)
+    from .testscan import resolve_selection_mode, selection_disclosure
+    estimate["summary"].update(selection_disclosure(selection_meta))
+    estimate["summary"].setdefault(
+        "selection_mode",
+        resolve_selection_mode(select_mode, selection_meta or {},
+                               select_ids, select_lines))
+    # 卡尺 `--lines` 的求交披露在 dry-run 也与完整路径同源（requested/
+    # hit/skipped_no_site），避免只在实际执行轮才可见。
+    if select_lines is not None:
+        lines = {int(v) for v in select_lines}
+        dry_hit = sorted({m.line for m in mutants if m.line in lines})
+        estimate["summary"]["lines_selection"] = {
+            "requested": sorted(lines),
+            "requested_count": len(lines),
+            "hit": dry_hit,
+            "hit_count": len(dry_hit),
+            "skipped_no_site": sorted(lines - set(dry_hit)),
+        }
+    return estimate
+
+
 def _run_mutation_core(file_path: str,
     project_root: str,
     budget: int = 50,
@@ -269,167 +376,53 @@ def _run_mutation_core(file_path: str,
     select_mode: str = "full",
     selection_meta: dict | None = None,
 ) -> dict:
-    """对单个 .gd 文件做变异测试并出统一 JSON 契约。
+    """对单个 .gd 文件做变异测试并出统一 JSON 契约（语义总账见各分解函数；
+    kill 判定 = 相对 baseline 的新增失败集，非 exit code）。
 
-    budget 控制 mutant 上限（mutation 风暴防御——100 变异 × GUT 全套 = 时间爆炸）。
-    kill 判定 = 失败测试名集合相对 baseline 的差集（mutant 引入的新失败），
-    而非 exit code——pre-existing failure 不算 killed。
-    dry_run（SPEC-009）：只清点变异点不跑 GUT——CI 快闸与成本评估入口。
-    tests_glob（SPEC-009）：受影响测试子集，passed to _run_gut_on_project。
-    precomputed_baseline（SEE-1321 SPEC-008）：同次运行内共享的 baseline
-    快照 {rc, tail, elapsed}——单进程冷启动产物，自适应 timeout 锚点。
-    mutant_slice（SEE-1321 SPEC-003 修订）：per-mutant 并发 worker 的分片，
-    只跑 [start, stop) 的 mutants；必须携带共享 baseline（worker 各自跑
-    baseline 会 N 倍放大启动税且并发期耗时污染 timeout 锚）。
-    resume（A13 退役）：SEE-1400 v1 遗留开关已物理退役——差分自 SEE-1420
-    起默认开启（manifest 在场即差分，定案 D4），summary.resumed 恒在场
-    （= 本轮复用的 killed 数，无复用时为 0）。
-    mutate_all（§SPEC-1420-07）：--mutate-all 显式全量——忽略旧 manifest，
-    全位点执行（仍落盘 v2）。
-    retry_ids（并发 worker 注入面）：父层（executor）已做差分规划与预算
-    截断，worker 只执行这些 stable_id；注入时 worker 不再自建 plan、
-    不写 manifest 索引层（父层单点写，规避并发竞态）。
-    mutation_warning（§SPEC-1420-01）：按截断前全量位点数计数的告警阈值
-    （默认 50）——超阈值 stderr 告警 + summary.attention 建议拆分。
-    timeout_factor（§SPEC-1420-02）：覆盖 _TIMEOUT_SCALE 的自适应倍数
-    （默认 None=2.0 不动）；两者均不进任何 resume key（定案 D6 负面清单）。
-    progress（SEE-1525）：父层注入的进度上下文 {run_id,total,worker}；缺省
-    自建（串行 / 单点寻址路径）。进度只写 stderr 与 `.qa-cache`，绝不影响
-    stdout 单 JSON 契约。
-    reuse_coverage（SEE-1550 L1）：coverage prefilter **默认自动启用**
-    （store fresh ∧ 身份包全匹配才生效，任一漂移禁用并披露；uncovered 不进
-    ok 门禁、不跑 GUT）；--no-reuse-coverage 显式关断。
-    identity（SEE-1550）：缓存身份包（executor 父层计算后随 chunk 注入，
-    保证多 worker 同 key）；缺省自建（含 godot --version，按 path+mtime 缓存）。
-    注入机制 = 磁盘影子注入（disk-farm/1，终案 §3）：mutant 经 os.replace
-    写影子内目标 `.gd`，引擎启动前从磁盘读到变异体。
-    返回 {"tool":"mutation", "ok", "summary", "failures"}；ok=True 表示
-    所有 mutant 均被测试杀死。
-    """
-    # §SPEC-610（SEE-1576 R-5）：相对目标锚定 --project-root，路径解析
-    # 不依赖调用方 CWD（绝对路径直过）。
-    path = Path(anchor_to_project_root(file_path, project_root))
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"mutation target not found: {file_path} (anchored: {path})")
-
+    budget 控制 mutant 上限；dry_run 只清点不跑 GUT；precomputed_baseline
+    为共享快照锚；retry_ids = 父层差分规划后的 worker 注入面（不自建
+    plan、不写 manifest 索引层）；mutate_all 显式全量；reuse_coverage
+    默认自动启用；注入机制 = 磁盘影子注入（disk-farm/1）。"""
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
-
     clock = StageClock()
-    selection_meta = dict(selection_meta or {})
-    # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
-    # （SEE-1587 默认 line）——不可用映射 fail-loud，无静默全脸路径。
-    # SEE-1587：显式 --tests 也经同一守门函数，披露「未使用行级选面」。
-    with clock.stage("test_scan"):
-        tests_glob, selection_meta = _resolve_auto_glob(
-            tests_glob, str(path), project_root, selection_meta,
-            select_mode=select_mode)
+    setup_error, c = _core_setup(
+        file_path, project_root, tests_glob, binary_kind, worker_channel,
+        identity, selection_meta, select_mode, clock, mutation_warning)
+    if setup_error is not None:
+        return setup_error
+    path, original_src = c["path"], c["original_src"]
+    tests_glob, selection_meta = c["tests_glob"], c["selection_meta"]
     scoped = tests_glob is not None
-
-    original_src = path.read_text(encoding="utf-8")
     backup = original_src  # 永不改写原文件之外的任何东西（kill rate 证据隔离）
-
-    kind = binary_kind or detect_binary_kind()
-    target_res_early = _res_path_of(str(path), str(project_root))
-    # SEE-1550 §SPEC-020：exec_scheme 按目标路由入身份包（worker 显式启用且
-    # 路由判 worker 才 worker-reset/1；A9 默认冷）。parent 传入的 identity
-    # 用同源解析覆盖 scheme——父子两侧 file_key 一致。
-    with clock.stage("route_scan"):
-        identity, _route, exec_scheme = identity_for_target(
-            identity, project_root, target_res_early, worker_channel)
-    if identity is None:
-        identity = identity_pack(project_root, kind, exec_scheme=exec_scheme)
-
-    try:
-        raw_mutants = _collect_mutations(original_src, str(path))
-    except Exception as e:
-        return _setup_error_result(str(path), e)
-
-    # P1 manifest 标定（定案 D1/D2/D3 + L6）：scope 提取 → no-mutate 过滤
-    # → stable id。total_sites 按过滤后位点数计（无位点 scope 不进 manifest）。
-    header_hash, spans, mutants, scope_hashes = build_manifest(
-        original_src, str(path), raw_mutants)
-    total_sites = len(mutants)
-    attention = _attention_note(mutation_warning, total_sites, str(path))
-
-    # SEE-1587：卡尺行级测试面——`--mutation`/`--lines` 默认（line 模式）消费
-    # 选中位点所在行的测试集合并集物化为单一 glob（不再回落文件/函数整面
-    # 包）；无映射测试的选中位点照常执行（公平重跑通道）并披露
-    # no_mapped_tests。显式 --tests 用户接管测试面时不参与。
-    if (select_ids or select_lines) and str(select_mode).lower() == "line" \
-            and selection_meta.get("source") != "explicit_tests":
-        caliper_lines = _caliper_lines(mutants, select_ids, select_lines)
-        if caliper_lines:
-            from .truth_select import resolve_line_group_selection
-            file_sel = {"source": "runtime_mapping", "zero_ref": False,
-                        "tests": selection_meta.get("tests") or [],
-                        "tests_glob": tests_glob,
-                        "mapping": selection_meta.get("mapping")}
-            sel = resolve_line_group_selection(
-                project_root, str(path), caliper_lines,
-                file_selection=file_sel)
-            selection_meta = {
-                **selection_meta,
-                "source": sel.get("source"),
-                "reason": ("caliper_line_mapping"
-                           if sel.get("source") == "line_mapping"
-                           else "caliper_line_has_no_mapped_tests"),
-                "tests": sel.get("tests") or [],
-                "lines": sel.get("lines") or sorted(caliper_lines),
-                "no_mapped_tests": sel.get("no_mapped_tests") or [],
-            }
-            if sel.get("tests_glob"):
-                tests_glob = sel["tests_glob"]
+    # SEE-1587：卡尺行级测试面（--mutation/--lines 默认 line 模式）。
+    selection_meta, tests_glob = _core_caliper(
+        project_root, path, mutants=c["mutants"], select_ids=select_ids,
+        select_lines=select_lines, select_mode=select_mode,
+        selection_meta=selection_meta, tests_glob=tests_glob)
     scoped = tests_glob is not None
-
     if dry_run:
-        estimate = dry_run_estimate(
-            str(path), mutants, budget, scoped, total_sites,
-            project_root, tests_glob, binary_kind, resume2_store,
-            mutate_all, header_hash, scope_hashes, attention=attention,
-            identity=identity)
-        # §SPEC-012：dry-run 同样如实披露选面（串行路径此前整体丢弃
-        # selection meta，silent full-face 无从鉴别）。
-        from .testscan import resolve_selection_mode, selection_disclosure
-        estimate["summary"].update(selection_disclosure(selection_meta))
-        # 与完整执行路径同一判别点：卡尺 `--lines`/`--mutation` 与显式
-        # `--tests` 必须在 dry-run 也披露实际生效面（此前误报 select_mode）。
-        estimate["summary"].setdefault(
-            "selection_mode",
-            resolve_selection_mode(select_mode, selection_meta or {},
-                                   select_ids, select_lines))
-        # 卡尺 `--lines` 的求交披露在 dry-run 也与完整路径同源（requested/
-        # hit/skipped_no_site），避免只在实际执行轮才可见。
-        if select_lines is not None:
-            lines = {int(v) for v in select_lines}
-            dry_hit = sorted({m.line for m in mutants if m.line in lines})
-            estimate["summary"]["lines_selection"] = {
-                "requested": sorted(lines),
-                "requested_count": len(lines),
-                "hit": dry_hit,
-                "hit_count": len(dry_hit),
-                "skipped_no_site": sorted(lines - set(dry_hit)),
-            }
-        return estimate
-
-    if not mutants:
+        return _core_dry_run(
+            path, c["mutants"], budget, scoped, c["total_sites"],
+            project_root, tests_glob, binary_kind, resume2_store, mutate_all,
+            c["header_hash"], c["scope_hashes"], c["attention"], identity,
+            selection_meta, select_ids, select_lines, select_mode)
+    if not c["mutants"]:
         return _no_sites_result(str(path), scoped,
                                 zero_ref=bool(selection_meta.get("zero_ref")))
-
-    # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行 retry_ids；
-    # 显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分复用。
+    # P1 差分（定案 D4）：串行路径自建 plan；worker 注入路径只执行
+    # retry_ids；显式寻址（--mutation/--lines 卡尺）强制新执行，绕过差分。
     store2 = resume2_store if resume2_store is not None else ResumeStoreV2(
         project_root, str(path), tests_glob, binary_kind=binary_kind,
         identity=identity)
     prior_entries, reused, untouched, disclosures, executed_list, \
         results_uncovered = plan_execution(
-            path, project_root, mutants, header_hash, scope_hashes, budget,
-            tests_glob, binary_kind, resume2_store, mutate_all, retry_ids,
-            select_ids, select_lines, reuse_coverage, attention,
-            mutant_slice, original_src, identity=identity, clock=clock,
+            path, project_root, c["mutants"], c["header_hash"],
+            c["scope_hashes"], budget, tests_glob, binary_kind, resume2_store,
+            mutate_all, retry_ids, select_ids, select_lines, reuse_coverage,
+            c["attention"], mutant_slice, original_src, identity=identity,
+            clock=clock,
             tests_scripts=selection_meta.get("tests") or None,
             map_path=selection_map_path(selection_meta))
-
     # budget 吃光且无可报告复用——零 mutant 不得触发 baseline GUT（硬化
     # 反例实证：白付一轮 108s baseline）。
     if not executed_list and not reused:
@@ -437,47 +430,78 @@ def _run_mutation_core(file_path: str,
     from .testscan import selection_disclosure
     # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
     disclosures.update(selection_disclosure(selection_meta))
-    if total_sites > budget:
-        disclosures["total_sites"] = total_sites
+    if c["total_sites"] > budget:
+        disclosures["total_sites"] = c["total_sites"]
         # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid
         # 预检后以 actually_executed 覆写（实际执行语义的唯一出处）。
         disclosures.setdefault("executed", len(executed_list))
-
     return _execute_planned(
-        path, project_root, original_src, backup, mutants, executed_list,
-        reused, results_uncovered, prior_entries, scope_hashes, disclosures,
-        budget, tests_glob, timing_store, timeout_s, precomputed_baseline,
-        store2, timeout_factor, header_hash, retry_ids, scoped,
-        total_sites, progress=progress, identity=identity,
-        targeted_only=bool(select_ids or select_lines),
+        path, project_root, original_src, backup, c["mutants"], executed_list,
+        reused, results_uncovered, prior_entries, c["scope_hashes"],
+        disclosures, budget, tests_glob, timing_store, timeout_s,
+        precomputed_baseline, store2, timeout_factor, c["header_hash"],
+        retry_ids, scoped, c["total_sites"], progress=progress,
+        identity=identity, targeted_only=bool(select_ids or select_lines),
         worker_channel=worker_channel, clock=clock)
 
 
-def _caliper_lines(mutants: list, select_ids: "list[str] | None",
-                   select_lines: "list[int] | set[int] | None") -> set[int]:
-    """卡尺选中位点的实际行集合（--mutation id 先解析到行；--lines 求交）。
-
-    未命中任何位点的请求（stale id / 越界行）不在此处失败——交由
-    planner._plan_selection 的显式错误契约统一收口（单一失败出处）。"""
-    if select_ids:
-        wanted = set(select_ids)
-        return {m.line for m in mutants if m.stable_id in wanted}
-    lines = {int(l) for l in (select_lines or [])}
-    return {m.line for m in mutants if m.line in lines}
 
 
-def _rebuild_reused_records(reused: dict, mutants: list,
-                            original_src: str) -> list[dict]:
-    """复用条目 → 报告记录重建（全签名已在 plan 阶段验证）。"""
-    by_id_all = {m.stable_id: m for m in mutants}
-    results: list[dict] = []
-    for sid, entry in reused.items():
-        m = by_id_all.get(sid)
-        if m is not None:
-            results.append(_mutant_record(m, entry["verdict"],
-                                          entry.get("reason", ""),
-                                          src=original_src))
-    return results
+
+
+def _exec_prep_results(path, project_root, original_src, mutants, executed_list,
+                       reused, results_uncovered, scope_hashes, disclosures,
+                       budget, store2, header_hash, retry_ids, total_sites) -> tuple:
+    """复用/invalid/uncovered 记录重建 + manifest 索引层先行写（中断安全；
+    worker 注入路径不写——父层合并后单点写，规避并发竞态）。
+    返回 (results, invalid_count)。"""
+    # 复用记录重建（全签名已验）——串行路径在此落报告面；worker 路径的
+    # reused 为空（父层合并后单点注入，避免分片重复计数）。
+    results = _rebuild_reused_records(reused, mutants, original_src)
+    # _record_invalid_mutants 返回新列表——与 reused/uncovered 记录拼接而非覆盖。
+    # O2：invalid_mutant（语法预检剔除）从未进入 GUT 执行——执行面以
+    # _valid_mutants 过滤后的可执行集合为准。
+    invalid_results, invalid_count = _record_invalid_mutants(
+        original_src, executed_list, None)
+    results = results + results_uncovered + invalid_results
+    # O2 键在场性守卫：executed 只在【披露语义在场】时出现——在场时以
+    # actually_executed 覆写计划面值（Revy 实机 20 vs mutants 19 口径漂移）。
+    if "executed" in disclosures:
+        disclosures["executed"] = len(_valid_mutants(original_src,
+                                                     executed_list))
+    if retry_ids is None:
+        store2.write_manifest(header_hash, scope_hashes,
+                              ResumeStoreV2._sha1_text(original_src),
+                              project_relative(project_root, str(path)))
+    return results, invalid_count
+
+
+def _exec_finalize(path, results, raw_pairs, prior_entries, scope_hashes,
+                   store2, timing_store, baseline_reused, baseline_elapsed,
+                   timing_meta, reused, invalid_count, budget, scoped,
+                   disclosures, slot_info, original_src, clock) -> dict:
+    """D5 streak 落定（权威口径）：streak/pinned 转化 + 毒 run 修正——
+    循环内乐观落盘已保证中断安全，毒窗口时改写条目为未递增 streak。"""
+    clock.add("baseline", baseline_elapsed)
+    streaks = apply_timeout_streaks(raw_pairs, prior_entries, scope_hashes,
+                                    time.time())
+    results.extend(streaks.records)
+    if streaks.suspended:
+        for e in streaks.entries:
+            store2.record_entry(e)
+        print("mutation: timeout streak suspended: suspected infra run",
+              file=sys.stderr)
+    _record_timing_sample(timing_store, baseline_reused, baseline_elapsed,
+                          timing_meta)
+    return _mutation_report(str(path), *_tally(results), invalid_count,
+                            budget, results, scoped, baseline_reused,
+                            timing_meta,
+                            len(reused) if reused else None,
+                            disclosures=disclosures or None,
+                            pinned_count=len(streaks.pinned_ids),
+                            slot_info=slot_info, original_src=original_src,
+                            adaptive_timeout_s=_rh._adaptive_timeout,
+                            stage_timings=clock.disclosure())
 
 
 def _execute_planned(path, project_root, original_src, backup, mutants,
@@ -495,46 +519,19 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
     if total_sites > budget:
         disclosures["total_sites"] = total_sites
         disclosures.setdefault("executed", len(executed_list))
-
-    # 复用记录重建（全签名已验）——串行路径在此落报告面；worker 路径的
-    # reused 为空（父层合并后单点注入，避免分片重复计数）。
-    results = _rebuild_reused_records(reused, mutants, original_src)
-    # _record_invalid_mutants 返回新列表——与 reused/uncovered 记录拼接而非覆盖。
-    # O2：invalid_mutant（语法预检剔除）从未进入 GUT 执行——执行面以
-    # _valid_mutants 过滤后的可执行集合为准，summary.executed 报实际执行数
-    # 而非计划面（Revy 实机 20 vs mutants 19 实证口径漂移）。
-    invalid_results, invalid_count = _record_invalid_mutants(
-        original_src, executed_list, None)
-    results = results + results_uncovered + invalid_results
-    # O2 键在场性守卫：executed 只在【披露语义在场】（差分/寻址/截断披露）
-    # 时出现——无披露语义的常规 run 保持既有 summary 形态（零键增量）；
-    # 在场时以 actually_executed（invalid 预检剔除后的真实 GUT 执行数）
-    # 覆写计划面值（Revy 实机 20 vs mutants 19 实证口径漂移）。
-    if "executed" in disclosures:
-        disclosures["executed"] = len(_valid_mutants(original_src,
-                                                     executed_list))
-    # P1：manifest 索引层先行写入（中断安全——索引在场 + 条目增量，下轮
-    # 差分对已执行子集正确复用，未落盘位点按 new_site 重跑，保守正确）。
-    # worker 注入路径不写（父层合并后单点写，规避并发竞态）。
-    if retry_ids is None:
-        store2.write_manifest(header_hash, scope_hashes,
-                              ResumeStoreV2._sha1_text(original_src),
-                              project_relative(project_root, str(path)))
-
+    results, invalid_count = _exec_prep_results(
+        path, project_root, original_src, mutants, executed_list, reused,
+        results_uncovered, scope_hashes, disclosures, budget, store2,
+        header_hash, retry_ids, total_sites)
     effective_timeout, timing_meta = _negotiate_budget(
         timing_store, timeout_s, precomputed_baseline)
-
     # SEE-1525 进度面：分母 = 本 worker 真实 GUT 执行面（invalid 预检剔除后）；
-    # 并行分片由父层注入全局分母（progress["total"]，含 invalid 位点），此时
-    # done 从本 worker 已判定的 invalid 数起算（判定在 make_reporter 内），
-    # 双路径都不会停在 [n-1/n]。
+    # 并行分片由父层注入全局分母（progress["total"]，含 invalid 位点）。
     reporter = make_reporter(project_root, str(path), progress,
                              len(executed_list) - invalid_count,
                              invalid_count)
-
     # 磁盘影子注入（SEE-1550 M0）：目标文件写入全部发生在影子槽内，真实仓
-    # 目标文件零写入——中断/硬杀不可能留变异残留进 git（守卫语义由槽归还
-    # 断言与下轮定向三向承接，不再需要真实仓恢复守卫）。
+    # 目标文件零写入。
     outcome = _run_mutant_loop_with_aborts(
         path, project_root, original_src, backup, executed_list,
         tests_glob, effective_timeout, precomputed_baseline,
@@ -543,205 +540,28 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
         worker_channel=worker_channel, clock=clock)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
-
     raw_pairs, baseline_reused, baseline_elapsed, slot_info = outcome
-    # §SPEC-202：本 run 消费的 baseline GUT 耗时入账（复用父层快照时
-    # elapsed 同样入账——占比归因口径：成本付过就该可见）。
-    clock.add("baseline", baseline_elapsed)
-    resumed_count = len(reused)
-
-    # D5 落定（权威口径）：streak/pinned 转化 + 毒 run 修正——循环内乐观
-    # 落盘已保证中断安全，此处毒窗口时改写条目为未递增 streak。
-    streaks = apply_timeout_streaks(raw_pairs, prior_entries, scope_hashes,
-                                    time.time())
-    results.extend(streaks.records)
-    if streaks.suspended:
-        for e in streaks.entries:
-            store2.record_entry(e)
-        print("mutation: timeout streak suspended: suspected infra run",
-              file=sys.stderr)
-
-    _record_timing_sample(timing_store, baseline_reused, baseline_elapsed,
-                          timing_meta)
-
-    return _mutation_report(str(path), *_tally(results), invalid_count,
-                            budget, results, scoped, baseline_reused,
-                            timing_meta,
-                            resumed_count if resumed_count else None,
-                            disclosures=disclosures or None,
-                            pinned_count=len(streaks.pinned_ids),
-                            slot_info=slot_info, original_src=original_src,
-                            adaptive_timeout_s=_adaptive_timeout,
-                            stage_timings=clock.disclosure())
+    return _exec_finalize(path, results, raw_pairs, prior_entries,
+                          scope_hashes, store2, timing_store, baseline_reused,
+                          baseline_elapsed, timing_meta, reused, invalid_count,
+                          budget, scoped, disclosures, slot_info,
+                          original_src, clock)
 
 
-def _negotiate_budget(timing_store, timeout_s: int,
-                      precomputed_baseline: dict | None
-                      ) -> tuple[int, dict]:
-    """SEE-1356 L1 (§SPEC-L1-01)：预算协商。缓存只喂预算锚——baseline 永远
-    实测（判定语义）；worker 分片（precomputed_baseline 携带者）跳过
-    store 读写（executor 单进程拥有协商与采样）。"""
-    timing_meta = explicit_timing_meta()
-    if timing_store is None or precomputed_baseline is not None:
-        return timeout_s, timing_meta
-    hist = timing_store.read()
-    anchor = hist["last"] if hist else None
-    effective_timeout, timing_meta["timing_source"] = resolve_budget(
-        timeout_s, anchor)
-    timing_meta["samples_n"] = hist["samples_n"] if hist else 0
-    timing_meta["baseline_p90"] = hist["p90"] if hist else None
-    return effective_timeout, timing_meta
 
 
-def _record_timing_sample(timing_store, baseline_reused: bool,
-                          baseline_elapsed: float, timing_meta: dict) -> None:
-    """baseline 永远实测——只有亲自跑过 baseline 才采样（worker 不重复计数）。
-    报告字段反映本轮采样后的 store 状态（samples_n/baseline_p90 为观察字段）。"""
-    if timing_store is None or baseline_reused:
-        return
-    timing_store.record(baseline_elapsed)
-    fresh = timing_store.read()
-    if fresh:
-        timing_meta["samples_n"] = fresh["samples_n"]
-        timing_meta["baseline_p90"] = fresh["p90"]
 
 
-def _auto_scan_tests_glob(file_path: str, project_root: str,
-                          select_mode: str = "full") -> str | None:
-    """SPEC-001：目标 → 选面 glob（SEE-1581：运行时映射；full=显式全脸）。
-
-    SEE-1581：自动选面唯一出处委托 _auto_scan_tests_glob_meta（运行时
-    真值映射；A10 后静态强度选面已退役）。
-    """
-    glob, _meta = _auto_scan_tests_glob_meta(file_path, project_root,
-                                             select_mode=select_mode)
-    return glob
 
 
-def _resolve_auto_glob(tests_glob: str | None, file_path: str,
-                       project_root: str,
-                       selection_meta: dict,
-                       select_mode: str = "full") -> tuple[str | None, dict]:
-    """显式 `--tests` 直过（选测未发生，披露 meta 原样保留）；否则自动选测。
-
-    §SPEC-613 判据唯一出处的守门形态：并行规划/串行门共用，禁止按 CLI
-    参数推断选测是否发生。select_mode: line/fn/file（严格真值选面，不可用
-    即 fail-loud）| full（显式审计全脸）。
-
-    SEE-1587：显式 `--tests` 表示用户接管测试面——在 line/fn 模式下必须
-    披露「未使用行级选面」（source=explicit_tests），不得静默。"""
-    if tests_glob:
-        if not selection_meta.get("source") \
-                and str(select_mode).lower() in ("line", "fn"):
-            selection_meta = {
-                "source": "explicit_tests",
-                "reason": "explicit --tests overrides line-level selection",
-                "tests": [], "zero_ref": False, "mapping": None,
-                "ambiguous_names": [],
-            }
-        return tests_glob, selection_meta
-    return _auto_scan_tests_glob_meta(file_path, project_root,
-                                      select_mode=select_mode)
 
 
-def _auto_scan_tests_glob_meta(file_path: str,
-                               project_root: str,
-                               select_mode: str = "full"
-                               ) -> tuple[str | None, dict]:
-    """SEE-1581：选面改运行时真值映射（A09 后静态归属/静态选面零消费者）。
-
-    - 新鲜映射（recipe_hash + 目标文件 sha256 绑定）→ 精确测试脚本集，
-      tests_glob 指向选择目录（`.qa-cache/gqt-attr-select/<id>/`）；
-    - 映射说零测试 → zero_ref=True（零引用短路以真值为准）；
-    - fn/file 面：无映射 / 过期 / 歧义 → resolve_selection fail-loud 拒跑
-      （唯 `--select full` 显式审计面 tests_glob=None，不再派生静态 glob）。
-    meta 由调用方挂入 summary.test_selection（source/reason/mapping 披露）。
-    """
-    from .truth_select import MutationSelectionError, resolve_selection
-    if (select_mode or "fn").lower() == "full":
-        return None, {"source": "full_face", "reason": "explicit_full_face",
-                      "tests": [], "zero_ref": False, "mapping": None,
-                      "ambiguous_names": []}
-    # Owner 定稿：映射不可用 → fail-loud 拒跑（全脸仅显式审计开关）
-    sel = resolve_selection(project_root, file_path)
-    meta = {"source": sel["source"], "reason": sel["reason"],
-            "mapping": sel.get("mapping"), "tests": sel.get("tests", []),
-            "zero_ref": sel.get("zero_ref", False),
-            "ambiguous_names": sel.get("ambiguous_names", [])}
-    if sel["source"] == "runtime_mapping" and not sel.get("zero_ref"):
-        print(f"mutation: runtime-mapping selection for {file_path} -> "
-              f"{len(sel['tests'])} test script(s)", file=sys.stderr)
-    elif sel.get("zero_ref"):
-        print(f"mutation: runtime mapping says no test touches {file_path}",
-              file=sys.stderr)
-    # fn/file 不可用即 fail-loud（上方 resolve_selection 已抛），无静默
-    # 回退路径；explicit full 腿的 tests_glob=None 是显式审计语义
-    return sel["tests_glob"], meta
 
 
-def _res_path_of(file_path: str, project_root: str) -> str:
-    real = Path(file_path).resolve().as_posix()
-    root = Path(project_root).resolve().as_posix()
-    rel = real[len(root):].lstrip("/") if real.startswith(root) \
-        else Path(file_path).name
-    return "res://" + rel
 
 
-def _tally(results: list[dict]) -> tuple[int, int, int, int, int]:
-    """results（含复用/invalid/streak 终态记录）→ 五档计数。"""
-    tally = {"killed": 0, "survived": 0, "timeout": 0, "run_error": 0,
-             "suspect": 0}
-    for r in results:
-        if r["verdict"] in tally:
-            tally[r["verdict"]] += 1
-    return (tally["killed"], tally["survived"], tally["timeout"],
-            tally["run_error"], tally["suspect"])
 
 
-def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
-                                 executed_list, tests_glob, timeout_s,
-                                 precomputed_baseline=None,
-                                 store2=None, prior_entries=None,
-                                 scopes=None,
-                                 timeout_factor: float | None = None,
-                                 reporter=None, identity=None,
-                                 targeted_only: bool = False,
-                                 worker_channel=None,
-                                 clock: StageClock | None = None):
-    """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
-    try:
-        return _run_mutant_loop(
-            path, project_root, original_src, backup,
-            _valid_mutants(original_src, executed_list), tests_glob, timeout_s,
-            precomputed_baseline, store2, prior_entries, scopes,
-            timeout_factor, reporter=reporter, identity=identity,
-            targeted_only=targeted_only, worker_channel=worker_channel,
-            clock=clock,
-        )
-    except subprocess.TimeoutExpired:
-        # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
-        return _run_error_result(
-            str(path),
-            f"baseline GUT timed out after {timeout_s}s — mutation data untrustworthy",
-            f"baseline GUT timed out after {timeout_s}s (project's baseline run exceeds "
-            f"the timeout — raise --timeout or check why tests are this slow)",
-            hint=suggested_action(timeout_s),
-            action_kind=suggested_action_kind(timeout_s),
-        )
-    except _BaselineLaunchFailure as e:
-        return _run_error_result(
-            str(path),
-            "godot launch failed on baseline — mutation data untrustworthy",
-            f"godot launch failed on baseline run: {e.tail.strip()[:200]}",
-        )
-    except SlotProvisionError as e:
-        # 影子槽制备失败（.gitignore fail-loud / 磁盘不足）——数据不可信，
-        # 中止契约转统一 JSON（与 baseline 启动失败同档）。
-        return _run_error_result(
-            str(path),
-            "shadow slot provisioning failed — mutation data untrustworthy",
-            f"shadow slot provisioning failed: {e}",
-        )
 
 
 # per-mutant 自适应上限（baseline 耗时决定，_run_mutant_loop 内写入；统一
@@ -749,223 +569,26 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
 _adaptive_timeout = 0
 
 
-def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
-                  ) -> tuple[int, str, float]:
-    """跑 baseline 并计时；TimeoutExpired 由调用方按中止契约处理。"""
-    t0 = time.monotonic()
-    rc, tail = _run_gut_on_project(project_root, timeout_s=timeout_s, tests_glob=tests_glob)
-    return rc, tail, time.monotonic() - t0
 
 
-def _run_mutant_loop(
-    path, project_root: str, original_src: str, backup: str,
-    mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
-    precomputed_baseline: dict | None = None,
-    store2=None, prior_entries: dict | None = None, scopes: dict | None = None,
-    timeout_factor: float | None = None, reporter=None,
-    identity: dict | None = None, targeted_only: bool = False,
-    worker_channel=None, clock: StageClock | None = None,
-) -> tuple[list, bool, float, dict]:
-    """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
-    baseline_elapsed, slot_info)。
-
-    mutants = 已过差分/预算的【执行面】（串行：budget_on_retry 产物；worker：
-    父层注入的 retry_ids 子集）。verdict 记录不在此处进 results——D5 streak
-    是窗口级判定，由调用方 apply_timeout_streaks 落定后统一扩展。
-    条目增量落盘（中断安全）：每 verdict 立即以乐观 streak 写 v2 条目；
-    毒 run 守卫在窗口收尾修正（apply_timeout_streaks + 调用方改写）。
-    baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。
-    timeout_factor（§SPEC-1420-02）：None = 模块默认 _TIMEOUT_SCALE。
-    注入 = 磁盘影子槽（SEE-1550 M0）：每 worker 一个槽，mutant 经
-    os.replace 写影子内目标，真实仓零写入；槽归还原并断言。
-    """
-    global _adaptive_timeout
-    raw_pairs: list[tuple] = []
-    prior_entries = prior_entries or {}
-    slot_info: dict = {}
-
-    with tempfile.TemporaryDirectory() as workdir:
-        backup_path = os.path.join(workdir, "original.gd")
-        shutil.copy2(str(path), backup_path)
-
-        # Baseline：原文件的 GUT 结果（失败测试名集合）。pre-existing 失败
-        # 不属于任何 mutant——kill 判定只看相对 baseline 的【新增】失败。
-        if precomputed_baseline is not None:
-            baseline_rc = int(precomputed_baseline["rc"])
-            baseline_tail = str(precomputed_baseline["tail"])
-            baseline_elapsed = float(precomputed_baseline["elapsed"])
-            baseline_reused = True
-        else:
-            # Revy QA retest 实证：baseline 必然花最久（实测项目 ~108s），默认
-            # --timeout 60 下 TimeoutExpired 漏网成原始 traceback（无统一 JSON）——
-            # 与 per-mutant 循环的 timeout 同款处理：归 run_error JSON 契约。
-            baseline_rc, baseline_tail, baseline_elapsed = _run_baseline(
-                project_root, tests_glob, timeout_s)
-            baseline_reused = False
-        # SPEC-009 自适应 timeout：per-mutant 上限 = baseline 耗时 × F（§SPEC-
-        # 1420-02：F 可由 --timeout-factor 覆盖；不降低于显式 timeout——只放大）。
-        _adaptive_timeout = adaptive_timeout_for(baseline_elapsed, timeout_s,
-                                                 timeout_factor)
-
-        if baseline_rc != 0 and _looks_like_godot_launch_failure(baseline_tail):
-            raise _BaselineLaunchFailure(baseline_tail)
-
-        baseline_failures = _parse_failing_tests(baseline_tail)
-        baseline_dirty = bool(baseline_failures)
-
-        kind = detect_binary_kind()
-        idpack = identity if identity is not None else \
-            identity_pack(project_root, kind)
-        target_rel = project_relative(project_root, str(path))
-        target_res = _res_path_of(str(path), str(Path(project_root)))
-        auto_name = beacon.autoload_name_for(project_root, target_res)
-        clock = clock or StageClock()
-        t_slot = time.monotonic()
-        with clock.stage("farm_provision"):
-            slot = shadowpool.acquire_slot(
-                project_root, kind, [target_rel],
-                idpack.get("boot_wiring_hash", ""),
-                targeted_only=targeted_only,
-                required_globs=[tests_glob] if tests_glob else None)
-        # killed 证书归属（SEE-1581）：以新鲜运行时映射为准；无新鲜映射 →
-        # None（证书不产出，fail-safe 只偏向重跑），不与静态索引混用。
-        ownership_holder: list = []
-
-        def _ownership():
-            if not ownership_holder:
-                from .truth_select import ownership_for
-                ownership_holder.append(
-                    ownership_for(str(project_root), str(path)))
-            return ownership_holder[0]
-
-        # R-DW6 默认启用实测轮：身份与执行同源解析（resolve_exec_scheme 统一
-        # 路由排除 + gut.gd 直驱可用性）——coverage/resume store file_key 与
-        # 实际执行通道一致，杜绝 scheme 漂移性 store-miss。
-        with clock.stage("route_scan"):
-            exec_scheme_resolved, route_resolved = resolve_exec_scheme(
-                project_root, target_res, worker_channel)
-        use_worker = exec_scheme_resolved == WORKER_SCHEME
-        slot_info["exec_scheme"] = exec_scheme_resolved
-        slot_info["worker_channel"] = build_worker_disclosure(
-            project_root, target_res, worker_channel, exec_scheme_resolved,
-            route_resolved)
-        slot_info["farm"] = dict(getattr(slot, "farm", {}) or {})
-        try:
-            beacon.seed_beacon_script(slot.root)
-            timings_out: dict = {}
-            if use_worker:
-                from .worker_channel import execute_worker_branch
-                with clock.stage("per_mutant"):
-                    raw_pairs, fatal_events = execute_worker_branch(
-                        path, project_root, original_src, mutants, tests_glob,
-                        baseline_failures, baseline_dirty, slot, auto_name,
-                        target_rel, target_res, kind, reporter, store2,
-                        prior_entries, scopes, _ownership,
-                        timings_out=timings_out)
-                clock.add("worker_boot",
-                          timings_out.get("worker_boot_s", 0.0))
-                if fatal_events:
-                    slot_info["worker_fatal_events"] = fatal_events
-                    slot_info["worker_channel"] = degraded_worker_disclosure(
-                        slot_info.get("worker_channel") or {}, fatal_events)
-            else:
-                with clock.stage("per_mutant"):
-                    raw_pairs = _run_cold_legs(
-                        path, project_root, original_src, backup, mutants,
-                        tests_glob, baseline_failures, baseline_dirty, slot,
-                        auto_name, target_rel, target_res, _ownership, reporter,
-                        store2, prior_entries, scopes)
-        finally:
-            release_problems = shadowpool.release_slot(slot)
-            # §SPEC-202 slot_sync = 槽获取（含 fresh 制备/warm 同步）→ 归还
-            # 断言全程——窗口含整段 per_mutant 执行；槽位固定成本 = 其与
-            # per_mutant 之差（§SPEC-210 LOW-1 口径修正，QA 实测 ≈0.09s/chunk）。
-            clock.add("slot_sync", time.monotonic() - t_slot)
-            if release_problems:
-                slot_info["release_problems"] = release_problems
-
-        slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
-        slot_info["slot_mode"] = slot.mode
-        slot_info["freshness"] = list(slot.freshness)
-        if any(v["verdict"] == "survived" for _, v in raw_pairs):
-            slot_info["suspected_orphan"] = _orphan_disclosure(
-                project_root, target_res)
-
-    return raw_pairs, baseline_reused, baseline_elapsed, slot_info
 
 
-def _run_cold_legs(path, project_root, original_src, backup, mutants,
-                   tests_glob, baseline_failures, baseline_dirty, slot,
-                   auto_name, target_rel, target_res, ownership_fn, reporter,
-                   store2, prior_entries, scopes):
-    """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
-    raw_pairs: list[tuple] = []
-    for seq, m in enumerate(mutants):
-        t_mutant = time.monotonic()
-        verdict = _run_single_mutant(
-            m, path, project_root, original_src, backup, tests_glob, seq,
-            baseline_failures, baseline_dirty, slot=slot,
-            auto_name=auto_name, ownership_fn=ownership_fn,
-            target_rel=target_rel, target_res=target_res)
-        raw_pairs.append((m, verdict))
-        # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
-        if reporter is not None:
-            reporter.record(m, verdict, time.monotonic() - t_mutant)
-        # 中断安全增量落盘：乐观 streak（毒窗口收尾修正）。
-        # SEE-1405 发现三毒条目防护由 resume2.record_entry 承接
-        # （启动失败类 run_error 拒收——verdict 零信息量）。
-        if store2 is not None:
-            prior = prior_entries.get(m.stable_id)
-            streak, v2_verdict = streak_for(prior, verdict["verdict"])
-            store2.record_entry(make_entry(m, verdict, v2_verdict, streak,
-                                           scopes or {}, time.time()))
-    return raw_pairs
 
 
-def _orphan_disclosure(project_root: str, target_res: str) -> bool:
-    """unreachable 不进 verdict、不 skip——静态零引用只做疑似孤儿披露。"""
-    try:
-        return suspected_orphan(project_root, target_res)
-    except OSError as e:
-        print(f"orphan scan failed for {target_res}: {e}", file=sys.stderr)
-        return False
 
 
-def _attach_killed_certificate(verdict: dict, tail: str,
-                               baseline_failures: set[str], ownership_fn,
-                               project_root: str) -> None:
-    """killed 证书附挂（SEE-1581）：完整失败集 + 运行时归属。
-
-    归属/闭包不确定（owner=None）→ 不附证书 → 下轮保守重跑；fail-safe
-    只偏向重跑。"""
-    if verdict["verdict"] != "killed" or ownership_fn is None:
-        return
-    owner = ownership_fn()
-    if owner is None:
-        return
-    new_failures = _parse_failing_tests(tail) - baseline_failures
-    cert = killer_certificate(
-        new_failures, owner, project_root,
-        ownership_source=getattr(owner, "source", "runtime_mapping"))
-    if cert is not None:
-        verdict["killed_by"] = cert
 
 
-def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
-                       backup: str, tests_glob: str | None, seq: int,
-                       baseline_failures: set[str], baseline_dirty: bool,
-                       slot=None, auto_name: str = "",
-                       ownership_fn=None, target_rel: str = "",
-                       target_res: str = "") -> dict:
-    """磁盘影子注入 → 跑 GUT → 分类；真实仓目标文件全程零写入（SEE-1550）。
 
-    - 注入：mutant 经「临时文件 + os.replace」写影子槽内目标 `.gd`（引擎
-      启动前落盘）——每 mutant 一次 replace，无恢复步，下一个 mutant 直接
-      覆盖上一个；写失败上抛转 run_error（绝不让引擎读到原码假 survived）。
-    - 四级 beacon（beacon.py）：磁盘哈希 / load 编译 / autoload 同源 /
-      GUT 运行证据——任何一级失败都不得产出 killed/survived。
-    """
-    global _ACTIVE_ENV, _ACTIVE_SCRIPT
+
+
+
+
+
+def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
+               path, auto_name) -> tuple:
+    """mutant 注入影子槽（临时文件 + os.replace，引擎启动前落盘）+ beacon
+    配置与进程 env 准备。返回 (mutated_src, cfg_path, user_dir)。"""
     mutated_src = _apply_mutation(original_src, m)
     if target_res == "":
         target_res = _res_path_of(str(path), str(Path(project_root)))
@@ -977,44 +600,71 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
         return _mutant_record(
             m, "run_error",
             f"disk injection failed for {target_res}: {e}",
-            src=original_src)
+            src=original_src), None, None
     cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
                                        auto_name)
     register_temp(cfg_path)
     user_dir = make_user_dir()
     env_extra, _ = mutant_env(str(cfg_path), user_dir)
-    _ACTIVE_ENV = env_extra
+    return mutated_src, cfg_path, user_dir
+
+
+def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
+                 ownership_fn, project_root) -> dict:
+    """beacon 四级失败分类 + kill 判定 + L4 GUT 运行证据门 + killed 证书。"""
+    # 四级 beacon 失败分类：load-null/parse → invalid_mutant；
+    # 哈希不符/实例不同源/基础设施 → run_error（§SPEC-003）。
+    beacon_verdict = beacon.classify_beacon_failure(rc, tail)
+    if beacon_verdict is not None:
+        return _mutant_record(
+            m, beacon_verdict,
+            f"beacon failed ({beacon_verdict}): {tail.strip()[:200]}",
+            src=original_src)
+    # classify 保持 5 参签名（interrupt 令牌测试以同签名 fake 替换）；
+    # line_text 统一在消费侧补——所有 verdict 记录同构（SEE-1416）。
+    verdict = _classify_mutant_run(m, rc, tail, baseline_failures,
+                                   baseline_dirty)
+    verdict = {**verdict, "line_text": line_text_of(original_src, m.line)}
+    # L4 GUT 运行证据门：无运行流不得 killed/survived（§SPEC-003）。
+    if verdict["verdict"] in ("killed", "survived") \
+            and not _GUT_RUN_EVIDENCE.search(tail):
+        return _mutant_record(
+            m, "run_error",
+            f"no GUT run stream evidence for "
+            f"{m.kind} {m.original}→{m.mutated} — engine output "
+            f"lacks test-run markers: {tail.strip()[:200]}",
+            src=original_src)
+    _attach_killed_certificate(verdict, tail, baseline_failures,
+                               ownership_fn, project_root)
+    return verdict
+
+
+def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
+                       backup: str, tests_glob: str | None, seq: int,
+                       baseline_failures: set[str], baseline_dirty: bool,
+                       slot=None, auto_name: str = "",
+                       ownership_fn=None, target_rel: str = "",
+                       target_res: str = "") -> dict:
+    """磁盘影子注入 → 跑 GUT → 分类；真实仓目标文件全程零写入（SEE-1550）。
+
+    - 注入：每 mutant 一次 replace，无恢复步，写失败上抛转 run_error。
+    - 四级 beacon：任何一级失败都不得产出 killed/survived。"""
+    global _ACTIVE_ENV, _ACTIVE_SCRIPT
+    injected, cfg_path, user_dir = _sm_inject(
+        m, slot, target_rel, target_res, original_src, project_root, path,
+        auto_name)
+    if cfg_path is None:
+        return injected  # 注入失败 run_error 契约
+    _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
     _ACTIVE_SCRIPT = beacon.beacon_script_res(slot.root)
-    _ACTIVE_GATE_ROOT = project_root
     try:
         try:
             rc, tail = _run_gut_on_project(
-                str(slot.root), timeout_s=_adaptive_timeout,
+                str(slot.root), timeout_s=_rh._adaptive_timeout,
                 tests_glob=tests_glob)
-            # 四级 beacon 失败分类：load-null/parse → invalid_mutant；
-            # 哈希不符/实例不同源/基础设施 → run_error（§SPEC-003）。
-            beacon_verdict = beacon.classify_beacon_failure(rc, tail)
-            if beacon_verdict is not None:
-                return _mutant_record(
-                    m, beacon_verdict,
-                    f"beacon failed ({beacon_verdict}): {tail.strip()[:200]}",
-                    src=original_src)
-            # classify 保持 5 参签名（interrupt 令牌测试以同签名 fake 替换）；
-            # line_text 统一在消费侧补——所有 verdict 记录同构（SEE-1416）。
-            verdict = _classify_mutant_run(m, rc, tail, baseline_failures,
-                                           baseline_dirty)
-            verdict = {**verdict, "line_text": line_text_of(original_src, m.line)}
-            # L4 GUT 运行证据门：无运行流不得 killed/survived（§SPEC-003）。
-            if verdict["verdict"] in ("killed", "survived") \
-                    and not _GUT_RUN_EVIDENCE.search(tail):
-                return _mutant_record(
-                    m, "run_error",
-                    f"no GUT run stream evidence for "
-                    f"{m.kind} {m.original}→{m.mutated} — engine output "
-                    f"lacks test-run markers: {tail.strip()[:200]}",
-                    src=original_src)
-            _attach_killed_certificate(verdict, tail, baseline_failures,
-                                       ownership_fn, project_root)
+            verdict = _sm_classify(m, rc, tail, baseline_failures,
+                                   baseline_dirty, original_src, ownership_fn,
+                                   project_root)
         except subprocess.TimeoutExpired:
             verdict = _mutant_record(m, "timeout",
                                      f"GUT timed out after {m.kind} {m.original}→{m.mutated}",
@@ -1030,9 +680,3 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     return verdict
 
 
-class _BaselineLaunchFailure(Exception):
-    """baseline run 命中 godot 启动失败——mutant 数据不可信，run_mutation 层转中止契约。"""
-
-    def __init__(self, tail: str):
-        self.tail = tail
-        super().__init__(tail[:200])

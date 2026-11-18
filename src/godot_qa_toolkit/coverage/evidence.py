@@ -111,6 +111,71 @@ def build_run_record(
     }
 
 
+def _bundle_rows(manifest: dict, registry: dict, hits: set) -> tuple:
+    """T/I/C 三表 + entry_states（per-entry measured/partial 车道）。
+
+    inner-class 方法按设计被插桩剪枝 → partial_instrumentation（t_equal_i
+    恒 False）。"""
+    t_rows: list[dict] = []
+    i_rows: list[dict] = []
+    c_rows: list[dict] = []
+    entry_states: list[dict] = []
+    per_function = {p["fid"]: p for p in manifest["per_function"]}
+    instrumentable_fids = {
+        e["fid"] for e in registry["entries"] if e["instrumentable"]
+    }
+    for entry in registry["entries"]:
+        fid = entry["fid"]
+        pf = per_function.get(fid, {})
+        t_ids = list(pf.get("t_line_ids", []))
+        i_ids = sorted(
+            p["line"] for p in manifest["probe_plan"] if p["fid"] == fid
+        )
+        covered_ids = sorted(line for line in i_ids if line in hits)
+        t_rows.append(
+            {"fid": fid, "kind": entry["kind"],
+             "t_lines": len(t_ids), "line_ids": t_ids}
+        )
+        i_rows.append({"fid": fid, "i_lines": len(i_ids)})
+        c_rows.append(
+            {"fid": fid, "covered": len(covered_ids),
+             "covered_line_ids": covered_ids}
+        )
+        if fid in instrumentable_fids:
+            entry_states.append(
+                {"fid": fid,
+                 "state": ("measured" if len(t_ids) == len(i_ids)
+                           else "partial_instrumentation"),
+                 "t_equal_i": len(t_ids) == len(i_ids)}
+            )
+        else:
+            entry_states.append(
+                {"fid": fid, "state": "partial_instrumentation",
+                 "t_equal_i": False}
+            )
+    return t_rows, i_rows, c_rows, entry_states
+
+
+def _bundle_header(run_uuid: str, file_path: str, gd_source: str,
+                   tests_glob: "str | None", recovered: bool,
+                   manifest: dict, arm: "str | None") -> dict:
+    """bundle 头段：evidence_version / target / recipe / probe_manifest。"""
+    return {
+        "evidence_version": EVIDENCE_VERSION,
+        "run_uuid": run_uuid,
+        "recovered": recovered,
+        "target": {"file": file_path, "sha256": sha256_text(gd_source)},
+        "recipe": {
+            "arm": _resolve_arm(tests_glob, arm),
+            "tests_glob": tests_glob or "res://tests/",
+        },
+        "probe_manifest": {
+            "manifest_version": "probe-manifest/2",
+            "inline": manifest,
+        },
+    }
+
+
 def build_bundle(
     *,
     run_uuid: str,
@@ -129,91 +194,24 @@ def build_bundle(
     probe_manifest: dict | None = None,
     arm: str | None = None,
 ) -> dict:
-    """Assemble the `coverage-evidence/2` bundle: probe-manifest/2 (T/I), the
-    sink hits attributed to fids (C), run sentinels and per-entry states.
-
-    §SPEC-030 (D-性能-1): the run path already built the registry and probe
-    manifest for instrumentation — pass them in via `registry`/`probe_manifest`
-    to avoid a second lark parse per run. When omitted (direct callers,
-    tests), both are built here exactly as before."""
+    """Assemble the `coverage-evidence/2` bundle (T/I/C rows, sentinels,
+    per-entry states). §SPEC-030: pass registry/probe_manifest in to avoid a
+    second lark parse per run."""
     if registry is None:
         registry = build_file_registry(gd_source, file_label=file_path)
     if probe_manifest is None:
         probe_manifest = build_probe_manifest_v2(gd_source, registry)
-    manifest = probe_manifest
-    line_to_plan = {p["line"]: p for p in manifest["probe_plan"]}
     hits = set(hits_lines)
-    instrumentable_fids = {
-        e["fid"] for e in registry["entries"] if e["instrumentable"]
-    }
-
-    t_rows: list[dict] = []
-    i_rows: list[dict] = []
-    c_rows: list[dict] = []
-    entry_states: list[dict] = []
-    per_function = {p["fid"]: p for p in manifest["per_function"]}
-    for entry in registry["entries"]:
-        fid = entry["fid"]
-        pf = per_function.get(fid, {})
-        t_ids = list(pf.get("t_line_ids", []))
-        i_ids = sorted(
-            p["line"] for p in manifest["probe_plan"] if p["fid"] == fid
-        )
-        covered_ids = sorted(line for line in i_ids if line in hits)
-        t_rows.append(
-            {
-                "fid": fid,
-                "kind": entry["kind"],
-                "t_lines": len(t_ids),
-                "line_ids": t_ids,
-            }
-        )
-        i_rows.append({"fid": fid, "i_lines": len(i_ids)})
-        c_rows.append(
-            {
-                "fid": fid,
-                "covered": len(covered_ids),
-                "covered_line_ids": covered_ids,
-            }
-        )
-        if fid in instrumentable_fids:
-            entry_states.append(
-                {
-                    "fid": fid,
-                    "state": (
-                        "measured"
-                        if len(t_ids) == len(i_ids)
-                        else "partial_instrumentation"
-                    ),
-                    "t_equal_i": len(t_ids) == len(i_ids),
-                }
-            )
-        else:
-            # inner-class method: pruned from instrumentation by design
-            entry_states.append(
-                {"fid": fid, "state": "partial_instrumentation",
-                 "t_equal_i": False}
-            )
-
+    t_rows, i_rows, c_rows, entry_states = _bundle_rows(
+        probe_manifest, registry, hits)
     file_state = "vacuous" if not registry["entries"] else "bundle_only"
-
-    return {
-        "evidence_version": EVIDENCE_VERSION,
-        "run_uuid": run_uuid,
-        "recovered": recovered,
-        "target": {"file": file_path, "sha256": sha256_text(gd_source)},
-        "recipe": {
-            "arm": _resolve_arm(tests_glob, arm),
-            "tests_glob": tests_glob or "res://tests/",
-        },
-        "probe_manifest": {
-            "manifest_version": "probe-manifest/2",
-            "inline": manifest,
-        },
+    doc = _bundle_header(run_uuid, file_path, gd_source, tests_glob,
+                         recovered, probe_manifest, arm)
+    doc.update({
         "T": t_rows,
         "I": i_rows,
         "C": c_rows,
-        "census_gaps": manifest["census_gaps"],
+        "census_gaps": probe_manifest["census_gaps"],
         "sentinels": {
             "probes_fired": probes_fired,
             "vacuous": vacuous,
@@ -225,9 +223,8 @@ def build_bundle(
         },
         "entry_states": entry_states,
         "file_state": file_state,
-    }
-
-
+    })
+    return doc
 def write_bundle(evidence_dir: Path, bundle: dict,
                  name_suffix: str = "") -> Path:
     evidence_dir.mkdir(parents=True, exist_ok=True)

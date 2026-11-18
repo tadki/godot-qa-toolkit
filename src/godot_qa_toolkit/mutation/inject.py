@@ -221,21 +221,10 @@ def _file_usable(path: str) -> bool:
 
 
 def _shebang_interpreter_issue(path: str, _depth: int = 0) -> str:
-    """§SPEC-078 M1 + §SPEC-079 C：#! 头解释器可用性校验，与内核 execve
-    语义一致。
-
-    - 解释器含分隔符且为绝对路径 → 文件校验（存在+可执行+**自身
-      exec-format**，§SPEC-079 C——带执行位但非可执行格式的解释器
-      内核必抛 Errno 8）；
-    - `#!/usr/bin/env X` → 内核只执行 env 本体（绝对路径校验），随后
-      env(1) 对首个非旗标参数做 PATH 查找——两段各按真实语义校验，
-      PATH 命中者同样做 exec-format 校验；
-    - 直接解释器为裸名 → Linux 内核 shebang 不做 PATH 查找（ENOENT），
-      必然拉起失败，前置即拒绝；
-    - 相对形态解释器按子进程 cwd 解析、CLI 侧静态判定不可靠 → 不预判
-      （避免误拒有效配置，交由真实执行面）。
-    格式校验深度有界（_depth≥1 只查文件可用性），防互指循环。
-    可用返回空串；不可用返回诊断串（含 "interpreter not usable"）。"""
+    """§SPEC-078 M1 + §SPEC-079 C：#! 头解释器可用性校验（与内核 execve
+    语义一致：绝对路径文件 + exec-format 校验；env 两段各校验；裸名前置
+    拒绝；相对形态不预判；深度有界防互指循环）。可用返回空串，不可用
+    返回诊断串（含 "interpreter not usable"）。"""
     try:
         with open(path, "rb") as fh:
             first = fh.readline()

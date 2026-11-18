@@ -277,7 +277,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       clock: StageClock | None = None,
                       auto_selection: dict | None = None,
                       select_mode: str = "full"):
-    """单文件规划：收集 → 差分 plan → prefilter → budget → 分片。"""
+    """单文件规划（收集→差分→prefilter→budget→分片；返回 chunks, ctx, settled）。"""
     clock = clock or StageClock()
     src, collected, raw_total, settled = _plan_collect(f)
     if settled is not None:

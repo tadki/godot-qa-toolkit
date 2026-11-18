@@ -115,14 +115,9 @@ def build_reference_graph(
         project_root: str,
         files: list[Path] | None = None,
 ) -> dict[str, set[str]]:
-    """构建引用图：{被引用 res 路径 → 引用者 res 路径集合}（反向边）。
-
-    边来源：.gd 的 preload/load 字面量、.tscn/.tres 的 ext_resource path、
-    autoload 裸名使用（compile-time 绑定语义——B2 探针实证不随 free/register
-    更新，静态保守计入）、class_name 裸名使用（同 compile-time 绑定族——
-    D-W2 根因修复：缺此边时消费者不进 reload 闭包，跨腿持有首腿编译绑定，
-    mutant 对测试不可见 → 漏杀/过杀双向分歧）。方向：引用者 → 被引用物。
-    """
+    """构建引用图（反向边：引用者 → 被引用物）。边来源：preload/load 字面
+    量、ext_resource path、autoload 裸名、class_name 裸名（均 compile-time
+    绑定语义——D-W2 根因修复）。"""
     root = Path(project_root)
     if files is None:
         files = _iter_project_sources(project_root)

@@ -96,40 +96,39 @@ def _collect_executable_lines(src: str) -> list[_rt().ExecutableLine]:
     return _dedupe_sorted(lines)
 
 
-def _derive_branches(src: str) -> _rt().BranchSet:
+def _branch_body_nodes(branch_node):
+    """分支体节点流（跳过头行污染层：if_branch/elif_branch 的 children[0]
+    是条件表达式、match_branch 的 children[0] 是 pattern——meta.line 均等于
+    分支头行；else_branch 无该层，全收）。"""
+    children = [c for c in getattr(branch_node, "children", []) if hasattr(c, "data")]
+    skip_first = branch_node.data in ("if_branch", "elif_branch", "match_branch")
+    body = children[1:] if skip_first else children
+    for c in body:
+        yield c
+        yield from _branch_body_nodes(c)
+
+
+def _branch_body_line(branch_node) -> "int | None":
+    """分支判定锚 = 分支体首条可执行语句行（硬化 反例实证：分支头行探针
+    在条件求值时即点火，false 路径下 if 分支会被误判 covered）；体无语句
+    （pass/空）回退分支头行。"""
+    head = _node_line(branch_node)
+    body_first = None
+    for desc in _branch_body_nodes(branch_node):
+        ln = _node_line(desc)
+        if ln is not None and (body_first is None or ln < body_first):
+            body_first = ln
+    return body_first if body_first is not None else head
+
+
+def _derive_branches(src: str) -> "_rt().BranchSet":
     """SPEC-007：分支覆盖 v1 纯推导——行探针命中 + AST 分支结构，零新探针。
 
     if_stmt 的每个子分支（if/elif/else）与 match_stmt 的每个 match_branch
-    各计 1 分支；分支判定锚定【分支体首条可执行语句行】（硬化 反例实证：
-    分支头行探针在条件求值时即点火，false 路径下 if 分支会被误判 covered）。
-    分支体无语句（pass/空）时回退分支头行。
-    observational：不参与 ok 判定（探针只证明「执行过」，不证明「被断言守护」）。
-    """
+    各计 1 分支。observational：不参与 ok 判定。class_def 剪枝：内部类
+    分支体行不在探针面内（防结构性永假分支）。"""
     tree = _rt().gdtoolkit_parser.parse(src, gather_metadata=True)
-    items: list[_rt().BranchItem] = []
-
-    def _branch_body_line(branch_node) -> int | None:
-        head = _node_line(branch_node)
-        body_first = None
-        for desc in _branch_body_nodes(branch_node):
-            ln = _node_line(desc)
-            if ln is not None and (body_first is None or ln < body_first):
-                body_first = ln
-        # 体首行若与头行相同（单行体），二者等价；否则用体首行
-        return body_first if body_first is not None else head
-
-    def _branch_body_nodes(branch_node):
-        children = [c for c in getattr(branch_node, "children", []) if hasattr(c, "data")]
-        # 分支头行污染层：if_branch/elif_branch 的 children[0] 是条件表达式、
-        # match_branch 的 children[0] 是 pattern——meta.line 均等于分支头行。
-        # 不跳过会把「条件求值/模式匹配行」当分支体首行（false 路径下 if 分支
-        # 被误判 covered，硬化 反例实证）。
-        # else_branch 无该层，全收。
-        skip_first = branch_node.data in ("if_branch", "elif_branch", "match_branch")
-        body = children[1:] if skip_first else children
-        for c in body:
-            yield c
-            yield from _branch_body_nodes(c)
+    items: "list" = []
 
     def visit(node, depth=0):
         if not hasattr(node, "data"):
@@ -144,14 +143,9 @@ def _derive_branches(src: str) -> _rt().BranchSet:
             branch_nodes = ()
         for child in branch_nodes:
             items.append(_rt().BranchItem(line=_branch_body_line(child)))
-        # 子节点遍历由 _tree_depth_walk 统一处理——visit 内不再手动递归
-        # （否则 if_stmt 会被双重遍历，分支重复计数）。
 
-    # 同款 class_def 剪枝：内部类分支体行不在探针面内，计入 branch_total 会
-    # 制造结构性永假分支（与探针面不一致）。
     _tree_depth_walk(tree, visit, prune=lambda n: getattr(n, "data", None) == "class_def")
     return _rt().BranchSet(total=len(items), items=tuple(items))
-
 
 def _build_manifest(executable_lines: list[_rt().ExecutableLine]) -> list[int]:
     """probe_id（列表下标）→ 源文件行号。ID-keyed 数据面的 runner 侧映射表。"""
@@ -239,24 +233,13 @@ def _call_arg_span(text: str, method: str) -> tuple[int, int, str] | None:
     return open_idx, close_idx, recv
 
 
-def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:
-    """§SPEC-083 R2：把插桩文件内的 `call_deferred(...)` / `create_timer(...)`
-    调用点改写为创建点包装（捕获当前上下文 tag，回调触发时按 tag 因果归属）。
-
-    - `recv.call_deferred(a, b)` → `<ctx>.call_deferred_tagged(recv, [a, b])`
-    - `recv.create_timer(a, b)`  → `<ctx>.create_timer_tagged(recv, a, b)`
-    - 裸调用（隐式 self）同样处理。只改 AST 确认的调用点，字符串/注释内
-      文本不受影响；替换不插入换行，行号与探针 manifest 保持对齐。
-    返回 (改写后源码, 改写处数)。"""
-    tree = _rt().gdtoolkit_parser.parse(src, gather_metadata=True)
-    starts = [0]
-    for line in src.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
-
+def _causal_edits(src: str, key_suffix: str, starts: list[int]) -> "list":
+    """AST 遍历收集改写点：(start, end, replacement) 列表（嵌套 getattr_call
+    重复命中同段，由调用方按 (start, end) 去重）。"""
     def _off(line: int, column: int) -> int:
         return starts[line - 1] + (column - 1)
 
-    edits: list[tuple[int, int, str]] = []
+    edits: list = []
 
     def _visit(node) -> None:
         data = getattr(node, "data", None)
@@ -284,14 +267,26 @@ def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:
                 else:
                     repl = f"{ctx}.create_timer_tagged({recv})"
                 # 只替换「接收者起点 → 本次调用的右括号」，调用链后缀
-                #（如 `.timeout.connect(...)`）原样保留；嵌套 getattr_call
-                # 会重复命中同一段，按 (start, end) 去重。
+                #（如 `.timeout.connect(...)`）原样保留。
                 edits.append((start, start + close_idx + 1, repl))
                 break
         for child in getattr(node, "children", []):
             _visit(child)
 
+    tree = _rt().gdtoolkit_parser.parse(src, gather_metadata=True)
     _visit(tree)
+    return edits
+
+
+def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:
+    """§SPEC-083 R2：把插桩文件内的 `call_deferred(...)` / `create_timer(...)`
+    调用点改写为创建点包装（捕获当前上下文 tag，回调触发时按 tag 因果归属）；
+    裸调用同样处理。只改 AST 确认的调用点；不插入换行，行号与探针 manifest
+    保持对齐。返回 (改写后源码, 改写处数)。"""
+    starts = [0]
+    for line in src.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    edits = _causal_edits(src, key_suffix, starts)
     if not edits:
         return src, 0
     unique: dict[tuple[int, int], str] = {}
@@ -301,7 +296,6 @@ def _rewrite_call_sites(src: str, key_suffix: str) -> tuple[str, int]:
     for (start, end), repl in sorted(unique.items(), key=lambda e: -e[0][0]):
         out = out[:start] + repl + out[end:]
     return out, len(unique)
-
 
 def _attr_sink_name(sink_name: str) -> str:
     """命中 sink → 归属 sink 名（同 run_uuid/key8，前缀改 attr）。"""

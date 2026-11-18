@@ -372,13 +372,10 @@ def _run_mutation_core(file_path: str,
     select_mode: str = "full",
     selection_meta: dict | None = None,
 ) -> dict:
-    """对单个 .gd 文件做变异测试并出统一 JSON 契约（语义总账见各分解函数；
-    kill 判定 = 相对 baseline 的新增失败集，非 exit code）。
-
-    budget 控制 mutant 上限；dry_run 只清点不跑 GUT；precomputed_baseline
-    为共享快照锚；retry_ids = 父层差分规划后的 worker 注入面（不自建
-    plan、不写 manifest 索引层）；mutate_all 显式全量；reuse_coverage
-    默认自动启用；注入机制 = 磁盘影子注入（disk-farm/1）。"""
+    """对单个 .gd 文件做变异测试并出统一 JSON 契约（kill 判定 = 相对
+    baseline 的新增失败集，非 exit code；注入 = 磁盘影子注入 disk-farm/1）。
+    语义总账见 _core_setup / _core_caliper / _core_dry_run 及
+    plan_execution / _execute_planned 分解。"""
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
     clock = StageClock()
     setup_error, c = _core_setup(

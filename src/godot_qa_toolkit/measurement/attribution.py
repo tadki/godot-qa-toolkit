@@ -344,16 +344,8 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
                           block_map_by_rel: "dict[str, dict] | None" = None,
                           fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
                           hotspot_limit: int = 20) -> dict:
-    """SEE-1587（line-primary）：per-file 归属证据 → 行事实 + 三条车道。
-
-    归属证据按 (file, pid) 记录；pid 对应一个 GUT 进程的组合注册表
-    （test/script 身份共用槽位空间，kind 由注册表行给出）。行事实取自
-    `fn <probe> <slot>` 对（hit 级插桩下覆盖整个探针面）：probe →
-    probe_lines → block_map 展开为 covered line set，slot 按注册表解析
-    身份与车道。file/function 视图由行事实 + 源码 registry 派生，不再是
-    独立测量的主真值。车道事件统计取自 per-slot cnt（hit 级下计数为
-    全探针命中事件，量级与 fn 级不可比——披露口径见 notes）。无主热点
-    同方向③（probe→行→函数）。"""
+    """SEE-1587（line-primary）：per-file 归属证据 → 行事实 + 三条车道
+    （车道事件统计取自 per-slot cnt，量级口径披露见 notes）。"""
     test_tables, script_tables = registries
     test_to_lines: dict[str, dict[str, set[int]]] = {}
     script_to_lines: dict[str, dict[str, set[int]]] = {}

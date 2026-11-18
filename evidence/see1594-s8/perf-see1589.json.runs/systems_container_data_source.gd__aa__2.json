@@ -1,0 +1,23 @@
+{
+ "worker": false,
+ "rc": 1,
+ "wall_s": 387.732,
+ "ok": false,
+ "error": "generated mapping has invalid arms (gut_full arm invalid (state='invalid', reason='run_error') — new failures gate the build (§SPEC-060a))",
+ "mutants": null,
+ "executed": null,
+ "killed": null,
+ "survived": null,
+ "exec_scheme": null,
+ "slot_mode": null,
+ "worker_channel": null,
+ "farm": null,
+ "prewarm": null,
+ "stage_timings": null,
+ "stage_reconciliation": null,
+ "stderr_tail": [
+  "measure: lazy baseline 2 failing pairs acquired uninstrumented (84.139s) — only NEW failures gate the arm"
+ ],
+ "phase": "aa",
+ "index": 2
+}

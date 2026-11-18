@@ -257,6 +257,9 @@ def main(argv=None) -> int:
     ap.add_argument("--map", action="append", default=[],
                     help="face=path to a prebuilt test-attribution map")
     ap.add_argument("--godot-bin", default=None)
+    ap.add_argument("--timeout-s", type=int, default=900,
+                    help="单轮 mutation 调用上限；fresh 副本首轮含 map 全量构建"
+                         "（懒基线+插桩），按需调大")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-wall-seconds", type=float, default=None)
     args = ap.parse_args(argv)
@@ -319,8 +322,17 @@ def main(argv=None) -> int:
                     "completed_targets": len(results)},
                     ensure_ascii=False, indent=2))
                 return 0
-            rec = run_one(kol, rel, args.budget, worker, map_path,
-                          args.godot_bin, jobs=args.jobs)
+            try:
+                rec = run_one(kol, rel, args.budget, worker, map_path,
+                              args.godot_bin, timeout_s=args.timeout_s,
+                              jobs=args.jobs)
+            except subprocess.TimeoutExpired:
+                rec = {"phase": phase, "worker": worker,
+                       "timeout": True,
+                       "wall_s": float(args.timeout_s),
+                       "rc": None, "ok": False,
+                       "error": "round exceeded --timeout-s (named abort, "
+                                "counted)"}
             rec.update(phase=phase, index=idx)
             tmp = rec_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1),

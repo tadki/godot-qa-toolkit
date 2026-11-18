@@ -1,0 +1,69 @@
+{
+  "tool": "see1594.spec006_adaptation_checklist",
+  "spec": "§SPEC-006 与 Stryker/PIT/mutmut 的适配逐项落地或不适用理由齐全；默认退出码、JSON、增量、日志、CI/artifact 可核查；报告仅 CLI-native，不搬 HTML/Dashboard，不新增 mutation score 阈值门",
+  "framing": "gqt 为 GDScript CLI-native 变异工具；Stryker(.NET)/PIT(Java)/mutmut(Python) 为异语言生态——适配面 = gqt 自身暴露同类别可核查的 CI 契约面（退出码/机器可读报告/增量/日志纪律/artifact），不搬运异工具的 HTML/Dashboard/score 阈值形态（规格明示禁止）。",
+  "items": [
+    {
+      "item": "默认退出码",
+      "status": "落地",
+      "evidence": {
+        "contract": "exit 0=pass；1=verdict fail/abort（含 MutationSelectionError fail-loud）；2=argparse 错误",
+        "doc": "docs/runbook/mutation.md「Output & exit codes」节",
+        "machine_check": "矩阵 case A0-argparse-bad-select / A0-argparse-bad-budget 钉 rc==2；A1-exec-* 钉 rc∈[0,1]（acceptance-matrix.json cases[].expect.rc）",
+        "tool_mapping": "mutmut 同为「退出码反映结果」形态；Stryker/PIT 的 threshold-break 建门语义按规格不引入（gqt ok 门 = verdict 域，非 score 阈值）"
+      }
+    },
+    {
+      "item": "单 JSON（stdout 机器可读）",
+      "status": "落地",
+      "evidence": {
+        "contract": "stdout 恒为恰好一个 JSON 对象（{tool, ok, summary, failures} 或 {tool, ok, jobs, results[]}），进度绝不进 stdout",
+        "doc": "docs/runbook/mutation.md「Single-file runs always use the flat envelope」+ contract.md:169（stdout 恒恰好一个 JSON）",
+        "machine_check": "矩阵 A0-dryrun-flat-envelope expect.single_json=true；acceptance runner _parse_stdout 对全部 36 case 的 stdout 严格 json.loads 单对象校验，non-json 即 FAIL"
+      }
+    },
+    {
+      "item": "增量/差分",
+      "status": "落地",
+      "evidence": {
+        "contract": "differential resume 默认开：unchanged scope 的 killed/suspect/invalid verdict 复用；survived/timeout/run_error 恒重跑（红线）；--mutate-all 为唯一逃逸；内容寻址 line-group glob 参与 resume key（升组自然 miss 重跑，不脏复用）；summary.resumed 只在真实复用时在场",
+        "doc": "docs/runbook/mutation.md「Differential resume」节 + A13/A22 语义（SEE-1594 S5）",
+        "machine_check": "矩阵 EQ-fresh-vs-diff（逐 stable id verdict 对账）+ A1-exec-no-reuse-coverage；report summary.diff_skipped/resumed 字段（S6.3 报告 keys 实证）"
+      }
+    },
+    {
+      "item": "日志噪声纪律",
+      "status": "落地",
+      "evidence": {
+        "contract": "运行进度 [n/m] <verdict> 行只进 **stderr**（非判据面）；stdout 单 JSON 不变量；写失败一次 stderr 告警后放弃进度面",
+        "doc": "docs/contract.md:169（SEE-1525 进度面条目）",
+        "machine_check": "acceptance runner 对每个 case 同时校验 stdout 可解析 + no_traceback（36/36 预期），进度噪声不可能污染 stdout（契约级隔离）"
+      }
+    },
+    {
+      "item": "CI/artifact 可核查",
+      "status": "落地",
+      "evidence": {
+        "contract": "每条非 killed 记录带 stable id（failures[] 机器可对账）；--out JSON / --evidence-dir 产出 coverage-evidence/2 bundle 与 run record（原子写、可续读）；progress JSON 按 worker 槽位原子落盘 <root>/.qa-cache/gqt-mutation-progress/",
+        "doc": "docs/runbook/mutation.md「failures lists only non-killed records (each with an id)」+ contract.md:169 机器可读面",
+        "machine_check": "acceptance-matrix.json 本身即 CI 可消费的验收 artifact（36 case 逐条 PASS/FAIL + evidence 字段）；EQ case 的 verdict map 对账输出逐 stable id"
+      }
+    }
+  ],
+  "tool_rows": [
+    {
+      "tool": "Stryker (.NET)",
+      "applicability": "异语言不适用直接集成；对应面 = gqt 退出码+单 JSON+失败 id 明细可被 CI 脚本消费（等价于 Stryker 的 console/report 可核查面）；HTML dashboard 按规格不搬"
+    },
+    {
+      "tool": "PIT (Java)",
+      "applicability": "同上；PIT 的 threshold 门语义不引入（规格禁止 score 阈值门）；gqt ok 门为 verdict 域机器判定"
+    },
+    {
+      "tool": "mutmut (Python)",
+      "applicability": "同上；mutmut 的 JSON results 形态与 gqt 单 JSON 面同类；增量语义 gqt 以内容寻址 resume key 实现"
+    }
+  ],
+  "gaps": [],
+  "note": "无真实缺口——五项均以现有 CLI 契约面落地且有机器判据；未新增任何功能/阈值门（符合规格禁止项）"
+}

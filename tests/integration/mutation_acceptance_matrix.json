@@ -913,7 +913,7 @@
             "--project-root",
             "{kol}",
             "--budget",
-            "{budget}"
+            "{eq_budget}"
           ],
           "timeout": 600
         },
@@ -925,7 +925,7 @@
             "--project-root",
             "{kol}",
             "--budget",
-            "{budget}",
+            "{eq_budget}",
             "--mutate-all"
           ],
           "timeout": 600
@@ -951,7 +951,7 @@
             "--project-root",
             "{kol}",
             "--budget",
-            "{budget}",
+            "{eq_budget}",
             "--mutate-all"
           ],
           "timeout": 600
@@ -965,7 +965,7 @@
             "{kol}",
             "--worker-channel",
             "--budget",
-            "{budget}",
+            "{eq_budget}",
             "--mutate-all"
           ],
           "timeout": 600
@@ -988,7 +988,7 @@
             "--project-root",
             "{kol}",
             "--budget",
-            "{budget}",
+            "{eq_budget}",
             "--mutate-all"
           ],
           "timeout": 600
@@ -1001,7 +1001,7 @@
             "--project-root",
             "{kol}",
             "--budget",
-            "{budget}"
+            "{eq_budget}"
           ],
           "timeout": 600
         }

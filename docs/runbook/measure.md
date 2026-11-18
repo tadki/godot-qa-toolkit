@@ -161,6 +161,24 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 | `--arms-parallel` | off | Run gut_full and acceptance arms concurrently; the timing baseline must be redefined when enabled |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override |
 
+### Watching progress (`measure run`)
+
+`measure run` writes progress lines to **stderr** only (stdout stays exactly one
+JSON object); they are disclosure-only and never affect arm validity or the
+`ok` gate:
+
+```text
+measure: arm=gut_full start shards=6 reps=1
+measure: arm=gut_full shard=3/6 rep=0/1 start
+measure: arm=gut_full shard=3/6 done s=42.1
+measure: arm=gut_full done state=valid wall_s=180.3
+measure: arm=acceptance start shards=4 reps=3
+measure: lazy baseline 2 failing pairs acquired uninstrumented (75.7s) — only NEW failures gate the arm
+```
+
+For per-shard raw GUT logs, pass `--shard-log-dir <dir>` and follow the files:
+`tail -f <dir>/gut_full-shard<i>-rep<r>.log` (one file per shard/repetition).
+
 ### measure diagnose
 
 `gqt measure diagnose <roots...> --project-root <root> --recipe <recipe.json> --features <k1,k2> --out <diagnose.json> [--timeout 480] [--godot-bin <path>]`

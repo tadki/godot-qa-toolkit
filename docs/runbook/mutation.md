@@ -70,6 +70,11 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   evidence is not a valid empty map. In auto mode a missing, stale, or old-schema
   map is regenerated or incrementally refreshed once, then re-judged; an
   explicit `--attribution-map` remains read-only and fails loud on mismatch.
+  Auto builds gate on new test failures only (§SPEC-060a): pre-existing
+  failures are absorbed by a lazily acquired uninstrumented baseline (one
+  extra same-face GUT run, triggered only when the instrumented arm observed
+  failures; disclosed as `baseline_failures_meta` on the map), while any
+  new failure keeps the build fail-loud.
 - Explicit `--tests`: the caller takes over test selection; the report uses
   `test_selection.source=explicit_tests` to disclose that line-level selection
   was not used.

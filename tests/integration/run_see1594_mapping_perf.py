@@ -6,9 +6,11 @@
         --kol-root <KOL副本> --out <json>
 
 测量三段绝对秒数（真实测量，非估算）：
-- full_build_s   映射全量构建（measure run --test-attribution 等价调用）
-- incremental_s  增量刷新（改一个 target 后 run_attribution_increment 等价调用）
-- projection_s   行级映射投影（per-file 与聚合）
+- instrumented_build_s   映射全量构建插桩测量段（产品入口 run_measurement）
+- baseline_wall_s        同面无插桩基线获取（懒获取触发时的现场一轮）
+- full_build_total_s     两者之和（§SPEC-026 full build 绝对秒数口径）
+- incremental_s          增量刷新（改一个 target 后 run_attribution_increment 等价调用）
+- projection_s           行级映射投影（per-file 与聚合）
 
 parity 节：同一测试面/同一 target 集合下，投影 covered line set 与映射
 行事实（唯一真源）的逐文件对比、相同率、percent parity、错误语义对比
@@ -61,18 +63,6 @@ def _fail_json(reason: str, out_path: Path, extra: dict) -> int:
                       "failures": [{"reason": reason}]},
                      ensure_ascii=False, indent=2))
     return EXIT_FAIL
-
-
-def _head_commit() -> str:
-    try:
-        repo = Path(__file__).resolve().parents[2]
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                             capture_output=True, text=True, timeout=30)
-        if out.returncode == 0:
-            return out.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return "unknown"
 
 
 def _kol_commit(kol_root: Path) -> str:
@@ -132,57 +122,40 @@ def _recipe_or_fail(kol_root: Path) -> dict:
 
 
 
-def _run_uninstr_gut(kol_root: Path, timeout: int,
-                     select: str | None = None) -> tuple[int, str]:
-    """无插桩 GUT 运行（全 face 或 -gselect 指定脚本）。"""
-    import os
-    godot_bin = os.environ.get("GQT_GODOT_BIN") or "godot"
-    cmd = [godot_bin, "--headless", "--path", str(kol_root),
-           "-s", "res://addons/gut/gut_cmdln.gd"]
-    if select:
-        cmd += [f"-gselect={select}"]
-    else:
-        cmd += ["-gdir=res://tests", "-ginclude_subdirs"]
-    cmd += ["-gexit"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return r.returncode, r.stdout + r.stderr
+def _verify_baseline(kol_root: Path, recipe: dict, timeout: int,
+                     select: str | None = None) -> "tuple[set, dict]":
+    """证据验证用基线获取——复用测量层产品 helper（`_acquire_lazy_baseline`
+    共享实现，零第二套解析/GUT 通道）。`-gselect` 形态仅用于受影响面
+    复跑证明（证据验证，非映射构建路径）。失败 → RuntimeError（fail-loud）。"""
+    from godot_qa_toolkit.measurement.orchestrator import (
+        _acquire_lazy_baseline, _gutconfig_face_args)
+    gut_args = ([f"-gselect={select}"] if select
+                else _gutconfig_face_args(recipe))
+    try:
+        return _acquire_lazy_baseline(kol_root, gut_args, timeout)
+    except Exception as e:  # noqa: BLE001 — 证据验证 fail-loud 具名
+        raise RuntimeError(f"verification baseline failed: {e}") from e
 
 
-def _pairs_from_output(out: str) -> set[tuple[str, str]]:
-    """GUT 输出 → (script, test) 身份对——复用测量侧同一解析器
-    （§SPEC-063c/064a 混合形态；与臂观测逐对可比，§SPEC-064b）。"""
-    from godot_qa_toolkit.measurement.orchestrator import _parse_failing_pairs
-    return _parse_failing_pairs(out)
+def _repo_state() -> dict:
+    """被测仓（harness 所在 worktree）的锚状态：commit/describe/tree/
+    脏标记——锚必须能标识实际被测代码（§SPEC-026）。"""
+    repo = Path(__file__).resolve().parents[2]
 
+    def _git(*a: str) -> str | None:
+        try:
+            out = subprocess.run(["git", *a], cwd=repo, capture_output=True,
+                                 text=True, timeout=30)
+            return out.stdout.strip() if out.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
 
-def _acquire_baseline(kol_root: Path, timeout: int,
-                      face: str = "res://tests",
-                      select: str | None = None,
-                      ) -> "tuple[set, dict | str]":
-    """现场获取基线（无插桩 GUT 一次）：返回 (pairs, meta) 或 (set(), 错误串)。
-
-    fail-loud：启动失败 / 无 GUT 运行流（不得按空基线静默继续）。
-    基线仅当次现场获取，不跨 run 缓存；身份对歧义由 (script, test)
-    对身份原生消解（§SPEC-064b：未归因仅匹配未归因，同名跨脚本不
-    互相吸收）。"""
-    import hashlib
-    from godot_qa_toolkit.mutation.gutrun import _looks_like_godot_launch_failure
-    t0 = time.monotonic()
-    rc, out = _run_uninstr_gut(kol_root, timeout, select=select)
-    if _looks_like_godot_launch_failure(out) or (
-            "Run Summary" not in out and "[Failed]" not in out
-            and "[Passed]" not in out):
-        return set(), ("baseline acquisition failed: uninstrumented GUT "
-                       f"run has no run stream (rc={rc}) — refusing "
-                       f"empty baseline (fail-loud)")
-    pairs = _pairs_from_output(out)
-    meta = {"method": "uninstrumented_run", "face": face,
-            "pairs": sorted([list(p) for p in pairs]), "count": len(pairs),
-            "sha256": hashlib.sha256(json.dumps(
-                sorted([list(p) for p in pairs]),
-                ensure_ascii=False).encode("utf-8")).hexdigest(),
-            "wall_s": round(time.monotonic() - t0, 3)}
-    return pairs, meta
+    dirty = _git("status", "--porcelain")
+    return {"head_commit": _git("rev-parse", "HEAD") or "unknown",
+            "head_describe": _git("describe", "--always", "--dirty")
+            or "unknown",
+            "head_tree": _git("rev-parse", "HEAD^{tree}") or "unknown",
+            "dirty": bool(dirty)}
 
 
 
@@ -200,8 +173,14 @@ def main(argv: list[str] | None = None) -> int:
     kol_root = Path(args.kol_root).resolve()
     out = Path(args.out)
     cmd = f"python tests/integration/run_see1594_mapping_perf.py --kol-root {kol_root} --out {args.out}"
+    repo_state = _repo_state()
+    if repo_state["dirty"]:
+        return _fail(f"qa-toolkit worktree is dirty "
+                     f"(describe={repo_state['head_describe']!r}) — commit "
+                     f"before measuring: the evidence anchor must identify "
+                     f"the exact code under test (§SPEC-026)")
     env_anchor = {
-        "head_commit": _head_commit(),
+        **repo_state,
         "kol_commit": _kol_commit(kol_root),
         "godot_version": _godot_version(kol_root),
         "python_version": sys.version.split()[0],
@@ -251,20 +230,11 @@ def main(argv: list[str] | None = None) -> int:
     targets = [str(p) for p in samples]
     recipe = _recipe_or_fail(kol_root)
 
-    # --- 段 0：基线现场获取（同 tests 面无插桩 GUT 一次；Owner 方案 A）---
-    baseline_pairs, baseline_meta = _acquire_baseline(
-        kol_root, args.timeout, face="res://tests")
-    if isinstance(baseline_meta, str):
-        return _fail(baseline_meta)
-    print(f"[harness] baseline: {baseline_meta['count']} known failing "
-          f"pairs acquired uninstrumented ({baseline_meta['wall_s']}s) — "
-          f"only NEW failures invalidate the arm", file=sys.stderr)
-
-    # --- 段 1：full build（映射全量构建；baseline 内失败不判臂无效）---
+    # --- 段 1：full build（产品入口：run_measurement 懒基线门控内置；
+    # 插桩臂观测到失败时由测量层现场跑一次同面无插桩 GUT 取基线）---
     t1 = time.monotonic()
     report = run_measurement(str(kol_root), targets, recipe,
                              timeout_s=args.timeout, test_attribution=True,
-                             baseline_failures=baseline_pairs,
                              attribution_out=str(kol_root / ".qa-cache"
                                                  / "attribution-map.json"))
     print(f"[harness] full build report ok={report.get('ok')} "
@@ -278,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[harness] report[:800]="
           f"{json.dumps(report, ensure_ascii=False, default=str)[:800]}",
           file=sys.stderr)
-    full_build_s = round(time.monotonic() - t1, 3)
+    instrumented_build_s = round(time.monotonic() - t1, 3)
 
     map_file = kol_root / ".qa-cache" / "attribution-map.json"
     if not map_file.is_file():
@@ -286,18 +256,15 @@ def main(argv: list[str] | None = None) -> int:
                      f"at {map_file}")
     doc = json.loads(map_file.read_text(encoding="utf-8"))
 
-    # S6.2：映射产物记录基线元数据（新键只加不改；消费者不读不改语义）
-    doc["baseline_failures_meta"] = {
-        "method": baseline_meta["method"],
-        "face": baseline_meta.get("face"),
-        "count": baseline_meta["count"],
-        "sha256": baseline_meta["sha256"],
-        "wall_s": baseline_meta["wall_s"],
-        "gating": "new failures only (baseline-absorbed failures keep the "
-                  "arm valid)",
-    }
-    map_file.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
+    # 基线披露（§SPEC-060a）：meta 由产品路径原生写入（懒获取或显式），
+    # harness 只读取汇总，不再自建第二套基线获取
+    baseline_meta = doc.get("baseline_failures_meta") or {}
+    baseline_wall_s = float(baseline_meta.get("wall_s") or 0.0)
+    full_build_total_s = round(instrumented_build_s + baseline_wall_s, 3)
+    print(f"[harness] full build split: instrumented={instrumented_build_s}s "
+          f"baseline={baseline_wall_s}s "
+          f"(pairs={baseline_meta.get('count')}) "
+          f"total={full_build_total_s}s", file=sys.stderr)
 
     if doc.get("schema_version") != "test-attribution/6":
         return _fail(f"map schema mismatch: {doc.get('schema_version')!r}")
@@ -308,12 +275,13 @@ def main(argv: list[str] | None = None) -> int:
         return _fail("map not fresh: probes_fired == 0 (GUT never executed)")
 
     # --- 段 2：incremental（增量刷新，绝对秒数；只做一次）---
-    # S6.2：受影响面现场取基线（touch 后、刷新前重取，不得沿用陈旧基线）
+    # 受影响面现场取基线（刷新前重取，不得沿用陈旧基线；产品 helper 复用）
     touch = samples[0]
     touch_rel = touch.relative_to(kol_root).as_posix()
-    inc_pairs, inc_meta = _acquire_baseline(kol_root, args.timeout)
-    if isinstance(inc_meta, str):
-        return _fail(inc_meta)
+    try:
+        _inc_pairs, inc_meta = _verify_baseline(kol_root, recipe, args.timeout)
+    except RuntimeError as e:
+        return _fail(str(e))
     t2 = time.monotonic()
     inc = run_attribution_increment(
         str(kol_root), targets, recipe, str(map_file),
@@ -325,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(inc["out_path"]).replace(map_file)
     doc = json.loads(map_file.read_text(encoding="utf-8"))
 
-    # S6.2：增量后受影响面无插桩复跑——失败集必须 ⊆ 增量前现场基线
+    # 增量后受影响面无插桩复跑——失败集必须 ⊆ 增量前现场基线
     # （不得有新增失败被 valid 状态掩盖）
     affected = sorted({str(ident).split("::")[0] for ident, by_rel in
                        ((doc.get("arms") or {}).get("gut_full")
@@ -335,8 +303,11 @@ def main(argv: list[str] | None = None) -> int:
         # test_to_lines 身份 = <GUT 裸名>.gd::<test>（A12）；-gselect 按
         # 脚本名匹配（实测锚定：裸名精确命中唯一脚本）
         sel = ",".join(affected)
-        rc_v, out_v = _run_uninstr_gut(kol_root, args.timeout, select=sel)
-        post_pairs = _pairs_from_output(out_v)
+        try:
+            post_pairs, _post_meta = _verify_baseline(
+                kol_root, recipe, args.timeout, select=sel)
+        except RuntimeError as e:
+            return _fail(str(e))
         fresh_pairs = {tuple(p) for p in inc_meta["pairs"]}
         new_after = post_pairs - fresh_pairs
         if new_after:
@@ -349,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     if "baseline_failures_meta" in doc:
         doc["baseline_failures_meta"]["refresh"] = {
             "face": "affected", "count": inc_meta["count"],
-            "sha256": inc_meta["sha256"]}
+            "sha256": inc_meta["sha256"], "wall_s": inc_meta["wall_s"]}
         map_file.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
                             encoding="utf-8")
 
@@ -420,7 +391,9 @@ def main(argv: list[str] | None = None) -> int:
             "evidence)", out,
             {"env": env_anchor,
              "samples": [str(p.relative_to(kol_root)) for p in samples],
-             "full_build_s": full_build_s,
+             "instrumented_build_s": instrumented_build_s,
+             "baseline_wall_s": baseline_wall_s,
+             "full_build_total_s": full_build_total_s,
              "incremental_s": incremental_s,
              "projection_s": projection,
              "parity": parity})
@@ -431,7 +404,9 @@ def main(argv: list[str] | None = None) -> int:
         "env": env_anchor,
         "samples": [str(p.relative_to(kol_root)) for p in samples],
         "baseline_failures": doc.get("baseline_failures_meta") or {},
-        "full_build_s": full_build_s,
+        "instrumented_build_s": instrumented_build_s,
+        "baseline_wall_s": baseline_wall_s,
+        "full_build_total_s": full_build_total_s,
         "incremental_s": incremental_s,
         "projection_s": {"per_file": projection["files"],
                          "aggregate_s": projection["aggregate_s"]},
@@ -444,7 +419,9 @@ def main(argv: list[str] | None = None) -> int:
                    encoding="utf-8")
     print(json.dumps({"tool": "see1594.mapping_perf", "ok": True,
                       "summary": {
-                          "full_build_s": full_build_s,
+                          "instrumented_build_s": instrumented_build_s,
+                          "baseline_wall_s": baseline_wall_s,
+                          "full_build_total_s": full_build_total_s,
                           "incremental_s": incremental_s,
                           "projection_aggregate_s": projection["aggregate_s"],
                           "parity": f"{matched}/{len(parity_rows)}",

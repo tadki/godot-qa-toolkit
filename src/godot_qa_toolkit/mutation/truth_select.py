@@ -65,6 +65,15 @@ def _record(event: dict) -> None:
     _LEDGER.append(event)
 
 
+from .truth_lines import (  # noqa: F401 — 迁移绑定保持引用面
+    RuntimeOwnership,
+    _line_script_sets,
+    _resolve_script_paths,
+    _tests_for_target,
+    materialize_selection,
+    ownership_for,
+    parse_lines_spec,
+)
 class SelectionError(Exception):
     """映射装载/绑定违例。"""
 
@@ -214,6 +223,42 @@ def _default_map_reuse(path: str | None, explicit: bool
     return path, None
 
 
+def _ensure_generate(root: str, out: str, files: list[str],
+                     timeout_s: int | None, action: str,
+                     rebuild_reason: str | None, t0: float) -> str:
+    """`measure run --test-attribution` 一次（原子写）；台账披露。"""
+    from ..measurement.orchestrator import run_measurement
+    from ..measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(Path(root))
+    if error is not None:
+        raise SelectionError(f"recipe unavailable: {error}")
+    targets = _targets_under(_roots_of(files, root))
+    tmp = _unique_tmp(out)
+    try:
+        run_measurement(root, targets, recipe, test_attribution=True,
+                      attribution_out=tmp,
+                      **({"timeout_s": int(timeout_s)}
+                         if timeout_s is not None else {}))
+        doc = load_map(tmp)
+        gate = _build_gate_fail_reason(doc)
+        if gate is not None:
+            raise MutationSelectionError(
+                "generated mapping has invalid arms "
+                f"({gate})")
+        os.replace(tmp, out)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    os.environ[ENV_MAP] = out
+    event = {"action": action, "map": out,
+             "targets": len(targets),
+             "wall_s": round(time.monotonic() - t0, 3), "ok": True}
+    if rebuild_reason:
+        event["reason"] = rebuild_reason
+    _record(event)
+    return out
+
+
 def ensure_map(project_root: str | Path, files: list[str],
                timeout_s: int | None = None) -> str | None:
     """默认自动生成/重建：约定默认位置缺失或不可用（旧 schema/无效状态）
@@ -233,8 +278,7 @@ def ensure_map(project_root: str | Path, files: list[str],
         # 可用直接复用；显式产物不可用同样原样透传（绝不重建/删除用户
         # 指定文件——fail-loud 由 resolve_selection）。
         return existing
-    # §SPEC-012 HIGH-2：默认位置旧 schema/无效状态（rebuild_reason=原因串）
-    # → 原子重建（原样返回会让下游必然 fail-loud 且 _regenerate 不可达）。
+    # §SPEC-012 HIGH-2：默认位置旧 schema/无效状态 → 原子重建。
     out = default_map_path(root)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
@@ -245,34 +289,8 @@ def ensure_map(project_root: str | Path, files: list[str],
         rebuild_reason = rebuild_reason or reason
         action = "rebuild" if rebuild_reason else "generate"
         try:
-            from ..measurement.orchestrator import run_measurement
-            from ..measurement.recipe import build_recipe
-            recipe, error = build_recipe(Path(root))
-            if error is not None:
-                raise SelectionError(f"recipe unavailable: {error}")
-            targets = _targets_under(_roots_of(files, root))
-            tmp = _unique_tmp(out)
-            try:
-                run_measurement(root, targets, recipe, test_attribution=True,
-                              attribution_out=tmp,
-                              **({"timeout_s": int(timeout_s)}
-                                 if timeout_s is not None else {}))
-                doc = load_map(tmp)
-                gate = _build_gate_fail_reason(doc)
-                if gate is not None:
-                    raise MutationSelectionError(
-                        "generated mapping has invalid arms "
-                        f"({gate})")
-                os.replace(tmp, out)
-            finally:
-                Path(tmp).unlink(missing_ok=True)
-            os.environ[ENV_MAP] = out
-            event = {"action": action, "map": out,
-                     "targets": len(targets),
-                     "wall_s": round(time.monotonic() - t0, 3), "ok": True}
-            if rebuild_reason:
-                event["reason"] = rebuild_reason
-            _record(event)
+            out = _ensure_generate(root, out, files, timeout_s, action,
+                                   rebuild_reason, t0)
             return out
         except MutationSelectionError as e:
             _record({"action": action, "ok": False, "error": str(e),
@@ -283,6 +301,34 @@ def ensure_map(project_root: str | Path, files: list[str],
                      "wall_s": round(time.monotonic() - t0, 3)})
             raise MutationSelectionError("attribution_generate_failed",
                                          str(e)) from e
+
+def _increment_apply(root: str, path: str, changed: list[str],
+                     timeout_s: int | None, t0: float) -> None:
+    """锁内增量执行：唯一 tmp 落盘 + 守恒校验 + os.replace。"""
+    from ..measurement.increment import run_attribution_increment
+    from ..measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(Path(root))
+    if error is not None:
+        raise SelectionError(f"recipe unavailable: {error}")
+    current = load_map(path)
+    targets = [str(Path(root) / f)
+               for f in (current.get("target_files") or [])]
+    if not targets:
+        raise SelectionError("baseline missing target_files")
+    tmp = _unique_tmp(path)
+    try:
+        report = run_attribution_increment(
+            root, targets, recipe, path, changed, tmp,
+            timeout_s=int(timeout_s) if timeout_s is not None else 180)
+        validate_refresh(load_map(path), load_map(tmp))
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    _record({"action": "increment", "changed": changed, "map": path,
+             "mode": report.get("mode"),
+             "rerun_scripts": report.get("rerun_scripts") or [],
+             "wall_s": round(time.monotonic() - t0, 3), "ok": True})
 
 
 def _auto_increment(project_root: str, path: str, doc: dict,
@@ -307,29 +353,8 @@ def _auto_increment(project_root: str, path: str, doc: dict,
         if key in _INCREMENTED:
             return True, None
         try:
-            from ..measurement.increment import run_attribution_increment
-            from ..measurement.recipe import build_recipe
-            recipe, error = build_recipe(Path(root))
-            if error is not None:
-                raise SelectionError(f"recipe unavailable: {error}")
-            targets = [str(Path(root) / f)
-                       for f in (current.get("target_files") or [])]
-            if not targets:
-                raise SelectionError("baseline missing target_files")
-            tmp = _unique_tmp(path)
-            try:
-                report = run_attribution_increment(
-                    root, targets, recipe, path, changed, tmp,
-                    timeout_s=int(timeout_s) if timeout_s is not None else 180)
-                validate_refresh(current, load_map(tmp))
-                os.replace(tmp, path)
-            finally:
-                Path(tmp).unlink(missing_ok=True)
+            _increment_apply(root, path, changed, timeout_s, t0)
             _INCREMENTED.add(key)
-            _record({"action": "increment", "changed": changed, "map": path,
-                     "mode": report.get("mode"),
-                     "rerun_scripts": report.get("rerun_scripts") or [],
-                     "wall_s": round(time.monotonic() - t0, 3), "ok": True})
             return True, None
         except MutationSelectionError as e:
             _record({"action": "increment", "changed": changed, "ok": False,
@@ -342,7 +367,6 @@ def _auto_increment(project_root: str, path: str, doc: dict,
                      "wall_s": round(time.monotonic() - t0, 3)})
             raise MutationSelectionError("attribution_increment_failed",
                                          str(e)) from e
-
 
 @lru_cache(maxsize=8)
 def _current_tests_face(project_root: str) -> dict[str, str]:
@@ -537,6 +561,46 @@ def _detail_of(base: dict) -> str | None:
     return ", ".join(bits) or None
 
 
+def _resolve_renew(root, path, doc, rel, timeout_s) -> bool:
+    """mode=auto 的映射续新：无 file_sha 基线 → 全量重建；有 → 增量更新
+    （tests_face 漂移并集为 changed）。返回是否成功。"""
+    if not (doc.get("file_sha256") or {}):
+        return _regenerate(root, path, rel, timeout_s=timeout_s)
+    drift = _tests_face_drift(root, doc)
+    extra = drift["changed"] + drift["removed"]
+    renewed, _err = _auto_increment(root, path, doc, rel,
+                                    changed_extra=extra,
+                                    timeout_s=timeout_s)
+    return renewed
+
+
+def _resolve_materialize(root, base, scripts, strict) -> dict:
+    """新鲜映射脚本集 → 选择目录物化（OSError → 具名 reason / strict 抛）。"""
+    try:
+        sel_dir = materialize_selection(root, scripts)
+    except OSError as e:
+        base["reason"] = f"selection_materialize_failed:{e}"
+        return _finish(base, strict)
+    base.update({"source": "runtime_mapping", "tests": scripts,
+                 "tests_glob": sel_dir, "reason": "fresh_runtime_mapping"})
+    return base
+
+
+def _resolve_entry_doc(root, path, target_file, base, strict) -> tuple:
+    """映射装载与 rel 解析守卫；失败直接返回 (None, finished_base)。"""
+    try:
+        doc = load_map(path)
+    except SelectionError as e:
+        base["reason"] = f"map_invalid:{e}"
+        return None, _finish(base, strict)
+    try:
+        rel = _file_rel(root, target_file)
+    except ValueError:
+        base["reason"] = "target_outside_project"
+        return None, _finish(base, strict)
+    return (doc, rel), None
+
+
 def resolve_selection(project_root: str | Path, target_file: str,
                       map_path_override: str | None = None,
                       strict: bool = True,
@@ -554,29 +618,15 @@ def resolve_selection(project_root: str | Path, target_file: str,
     if path is None:
         base["reason"] = "no_attribution_map"
         return _finish(base, strict)
-    try:
-        doc = load_map(path)
-    except SelectionError as e:
-        base["reason"] = f"map_invalid:{e}"
-        return _finish(base, strict)
-    try:
-        rel = _file_rel(root, target_file)
-    except ValueError:
-        base["reason"] = "target_outside_project"
-        return _finish(base, strict)
+    loaded, done = _resolve_entry_doc(root, path, target_file, base, strict)
+    if done is not None:
+        return done
+    doc, rel = loaded
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path
     if not evaluation["ok"] and auto:
-        if not (doc.get("file_sha256") or {}):
-            renewed = _regenerate(root, path, rel, timeout_s=timeout_s)
-        else:
-            drift = _tests_face_drift(root, doc)
-            extra = drift["changed"] + drift["removed"]
-            renewed, _err = _auto_increment(root, path, doc, rel,
-                                            changed_extra=extra,
-                                            timeout_s=timeout_s)
-        if renewed:
+        if _resolve_renew(root, path, doc, rel, timeout_s):
             try:
                 doc = load_map(path)
                 evaluation = _evaluate(root, rel, doc)
@@ -599,16 +649,7 @@ def resolve_selection(project_root: str | Path, target_file: str,
         base.update({"source": "runtime_mapping", "zero_ref": True,
                      "reason": "mapping_says_no_tests"})
         return base
-    try:
-        sel_dir = materialize_selection(root, scripts)
-    except OSError as e:
-        base["reason"] = f"selection_materialize_failed:{e}"
-        return _finish(base, strict)
-    base.update({"source": "runtime_mapping", "tests": scripts,
-                 "tests_glob": sel_dir, "reason": "fresh_runtime_mapping"})
-    return base
-
-
+    return _resolve_materialize(root, base, scripts, strict)
 def function_tests(project_root: str, doc: dict, rel: str,
                    fid: str) -> tuple[list[str], list[str]]:
     """映射内 function→tests（test 车道；多轮并集口径即产物边集本身）。
@@ -638,75 +679,28 @@ def function_tests(project_root: str, doc: dict, rel: str,
 # 卡尺显式披露 no_mapped_tests 后执行（公平重跑通道，不静默丢弃）。
 
 
-def parse_lines_spec(spec: str) -> list[int]:
-    """`--lines` 规格解析：单行 / 连续区间 / 多段区间（逗号分隔）。
-
-    `"42"` / `"10-20"` / `"10-20,30,35-40"` → 去重升序行号列表。
-    非法形态（非整数 / 倒序区间 / 非正行号 / 空规格）→ ValueError
-    （CLI 按参数错误契约转 ok=false，不与"无位点"混淆）。"""
-    lines: set[int] = set()
-    for seg in str(spec).split(","):
-        seg = seg.strip()
-        if not seg:
-            raise ValueError(f"invalid --lines segment (empty): {spec!r}")
-        if "-" in seg:
-            lo_s, _, hi_s = seg.partition("-")
-            lo, hi = int(lo_s), int(hi_s)
-            if lo <= 0 or hi < lo:
-                raise ValueError(
-                    f"invalid --lines range {seg!r} (need 1<=lo<=hi)")
-            lines.update(range(lo, hi + 1))
-        else:
-            n = int(seg)
-            if n <= 0:
-                raise ValueError(f"invalid --lines value {seg!r} (need >=1)")
-            lines.add(n)
-    if not lines:
-        raise ValueError(f"empty --lines spec: {spec!r}")
-    return sorted(lines)
 
 
-def _line_script_sets(doc: dict, rel: str,
-                      lines: set[int]) -> dict[int, set[str]]:
-    """行 → 触达它的测试脚本 basename 集合。
-
-    test 车道（line_to_tests）∪ script 车道（script_to_lines，before_all
-    等脚本级执行同样是该脚本的测试面）。行不在任何行事实 = 空集 =
-    no_mapped_tests。身份两侧统一 basename（注册表身份是全路径）。"""
-    arm = (doc.get("arms") or {}).get("gut_full") or {}
-    out: dict[int, set[str]] = {}
-    for ln_s, idents in (arm.get("line_to_tests") or {}).get(rel,
-                                                            {}).items():
-        ln = int(ln_s)
-        if ln not in lines:
-            continue
-        out.setdefault(ln, set()).update(
-            Path(i.split("::", 1)[0]).name for i in idents)
-    for script, rel_map in (arm.get("script_to_lines") or {}).items():
-        for ln in (rel_map or {}).get(rel, []) or []:
-            if int(ln) in lines:
-                out.setdefault(int(ln), set()).add(Path(script).name)
-    return out
 
 
-def _resolve_script_paths(by_name: dict,
-                          names) -> "tuple[list[str], list[str]]":
-    """basename → tests 树路径解析（缺失名跳过、多路径记歧义）。
 
-    返回 (scripts, ambiguous)，歧义由调用方 fail-loud。行级选面的两个
-    消费点（resolve_line_group_selection / executor._line_group_chunks）
-    单源共用；scripts 顺序为 sorted(names)，materialize_selection 内部
-    再排序，物化产物与传入顺序无关。"""
-    scripts: list[str] = []
-    ambiguous: list[str] = []
-    for name in sorted(names):
-        paths = by_name.get(name)
-        if not paths:
-            continue
-        if len(paths) > 1:
-            ambiguous.append(name)
-        scripts.extend(paths)
-    return scripts, ambiguous
+
+def _line_group_load(root, target_file, file_sel) -> tuple:
+    """runtime_mapping 守卫（S2.2 必携带 resolved map path——缺失具名
+    fail-loud，绝不回退默认路径重猜）+ 映射装载与 rel 解析。"""
+    path = (file_sel.get("mapping") or {}).get("path")
+    if not path:
+        raise MutationSelectionError(
+            "selection_metadata_inconsistent",
+            "line_group: source=runtime_mapping without a resolved map "
+            "path — refusing to re-guess the default attribution map")
+    try:
+        doc = load_map(path)
+        rel = _file_rel(root, target_file)
+    except (SelectionError, ValueError) as e:
+        raise MutationSelectionError("line_selection_load_failed",
+                                     str(e)) from e
+    return doc, rel
 
 
 def resolve_line_group_selection(project_root: str | Path, target_file: str,
@@ -726,21 +720,7 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
         root, target_file, map_path_override, strict=strict)
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel
-    path = (file_sel.get("mapping") or {}).get("path")
-    if not path:
-        # S2.2：runtime_mapping 必携带 resolved map path——缺失 = selection
-        # 元数据不一致，具名 fail-loud；绝不回退默认路径重猜（与 prefilter
-        # 哨兵语义同源，防第三套漂移）。
-        raise MutationSelectionError(
-            "selection_metadata_inconsistent",
-            "line_group: source=runtime_mapping without a resolved map "
-            "path — refusing to re-guess the default attribution map")
-    try:
-        doc = load_map(path)
-        rel = _file_rel(root, target_file)
-    except (SelectionError, ValueError) as e:
-        raise MutationSelectionError("line_selection_load_failed",
-                                     str(e)) from e
+    doc, rel = _line_group_load(root, target_file, file_sel)
     per_line = _line_script_sets(doc, rel, want)
     names: set[str] = set()
     for scripts in per_line.values():
@@ -766,27 +746,10 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
     return {**base, "source": "line_mapping", "reason": "line_mapping_fresh",
             "tests": scripts, "tests_glob": sel_dir}
 
-
-def resolve_function_selection(project_root: str | Path, target_file: str,
-                               fid: str,
-                               file_selection: dict | None = None,
-                               map_path_override: str | None = None,
-                               strict: bool = True) -> dict:
-    """fn 级选面：映射 fn→tests → 选择目录；fn 不在映射 → 文件级回退。
-
-    三层：fn 命中 → `source=function_mapping`；fn 未命中（unknown/新函数）
-    → 文件级集合并 `source=file_fallback`（披露 `function_not_in_mapping`）；
-    文件级本身不可用 → fail-loud（全脸仅显式审计开关）。"""
-    root = str(Path(project_root).resolve())
-    file_sel = file_selection or resolve_selection(
-        root, target_file, map_path_override, strict=strict)
-    if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
-        return file_sel                      # 零引用终态 / 不可用（strict 已抛）
+def _fn_group_load(root, target_file, file_sel) -> tuple:
+    """runtime_mapping 守卫（S2.2）+ 映射装载与 rel 解析（fn 面）。"""
     path = (file_sel.get("mapping") or {}).get("path")
     if not path:
-        # S2.2：runtime_mapping 必携带 resolved map path——缺失 = selection
-        # 元数据不一致，具名 fail-loud；绝不回退默认路径重猜（与 prefilter
-        # 哨兵语义同源，防第三套漂移）。
         raise MutationSelectionError(
             "selection_metadata_inconsistent",
             "function: source=runtime_mapping without a resolved map path "
@@ -797,6 +760,23 @@ def resolve_function_selection(project_root: str | Path, target_file: str,
     except (SelectionError, ValueError) as e:
         raise MutationSelectionError("function_selection_load_failed",
                                      str(e)) from e
+    return doc, rel
+
+
+def resolve_function_selection(project_root: str | Path, target_file: str,
+                               fid: str,
+                               file_selection: dict | None = None,
+                               map_path_override: str | None = None,
+                               strict: bool = True) -> dict:
+    """fn 级选面：fn 命中 → function_mapping；未命中 → 文件级回退
+    （file_fallback，披露 function_not_in_mapping）；文件级不可用 →
+    fail-loud（全脸仅显式审计开关）。"""
+    root = str(Path(project_root).resolve())
+    file_sel = file_selection or resolve_selection(
+        root, target_file, map_path_override, strict=strict)
+    if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
+        return file_sel                      # 零引用终态 / 不可用（strict 已抛）
+    doc, rel = _fn_group_load(root, target_file, file_sel)
     scripts, ambiguous = function_tests(root, doc, rel, fid)
     if ambiguous:
         raise MutationSelectionError("ambiguous_test_names",
@@ -820,101 +800,8 @@ def resolve_function_selection(project_root: str | Path, target_file: str,
             "ambiguous_names": []}
 
 
-def _tests_for_target(root: str, arm: dict, rel: str) -> tuple[list[str], list[str]]:
-    names: set[str] = set()
-    for identity, files in (arm.get("test_to_files") or {}).items():
-        if rel in files:
-            names.add(identity.split("::", 1)[0])
-    for identity, files in (arm.get("script_to_files") or {}).items():
-        if rel in files:
-            names.add(identity)
-    by_name = _test_scripts_by_name(root)
-    scripts: list[str] = []
-    ambiguous: list[str] = []
-    for name in sorted(names):
-        paths = by_name.get(name)
-        if not paths:
-            continue
-        if len(paths) > 1:
-            ambiguous.append(name)
-        scripts.extend(paths)
-    return sorted(set(scripts)), ambiguous
 
 
-def materialize_selection(project_root: str, scripts: list[str]) -> str:
-    """选择目录：每个脚本一个同名 extends 包装（GUT 继承收集，身份=原名）。
-
-    目录按脚本集内容哈希命名，已存在即复用（幂等）；返回 res:// 目录。"""
-    sel_id = hashlib.sha1(
-        "\n".join(sorted(scripts)).encode("utf-8")).hexdigest()[:12]
-    root = Path(project_root)
-    sel_fs = root / SELECT_ROOT / sel_id
-    if not sel_fs.is_dir():
-        sel_fs.mkdir(parents=True, exist_ok=True)
-        for res_path in sorted(scripts):
-            if not res_path.startswith("res://"):
-                continue
-            name = res_path.rsplit("/", 1)[-1]
-            wrapper = sel_fs / name
-            if wrapper.exists():
-                continue
-            wrapper.write_text(
-                f'extends "{res_path}"\n', encoding="utf-8")
-    return f"res://{SELECT_ROOT}/{sel_id}/"
 
 
-class RuntimeOwnership:
-    """kill 证书归属：测试名 → 脚本（来自新鲜映射身份；歧义/缺失 → None）。
 
-    无映射或过期时由调用方传 None —— 证书不产出（fail-safe 只偏向重跑），
-    不与静态归属索引混用（A09 后静态索引已退役）。"""
-
-    __test__ = False
-
-    def __init__(self, project_root: str, doc: dict):
-        self.project_root = str(Path(project_root).resolve())
-        self._by_name: dict[str, set[str]] = {}
-        arm = doc["arms"]["gut_full"]
-        for identity in (arm.get("test_to_files") or {}):
-            script, _, name = identity.partition("::")
-            self._by_name.setdefault(name, set()).add(script)
-        for identity in (arm.get("script_to_files") or {}):
-            if "::" in identity:
-                script, _, name = identity.partition("::")
-                self._by_name.setdefault(name, set()).add(script)
-        self._name_to_path = _test_scripts_by_name(self.project_root)
-
-    def owner_of(self, test_name: str) -> str | None:
-        owners = self._by_name.get(test_name)
-        if not owners or len(owners) != 1:
-            return None
-        script = next(iter(owners))
-        paths = self._name_to_path.get(script, ())
-        if len(paths) != 1:
-            return None
-        return paths[0]
-
-
-def ownership_for(project_root: str, target_file: str,
-                  map_path_override: str | None = None):
-    """新鲜映射 → RuntimeOwnership；无新鲜映射/解析异常 → None（A09）。
-
-    None = 不产出 kill 证书 → killed 保守重跑（fail-safe 只偏向重跑）。
-    解析异常具名披露到 stderr（不吞错）；绝不回退静态归属索引
-    （结构性兜底已退役——静态归属会给 stale 索引签发 kill 证书）。"""
-    import sys
-    try:
-        sel = resolve_selection(project_root, target_file, map_path_override)
-        mp = sel.get("mapping") or {}
-        if mp.get("file_sha256_bound") and mp.get("recipe_hash_ok"):
-            doc = load_map(mp["path"])
-            owner = RuntimeOwnership(project_root, doc)
-            owner.source = "runtime_mapping"
-            return owner
-        print(f"ownership: no fresh runtime mapping for {target_file} "
-              "(no kill certificate — conservative rerun)", file=sys.stderr)
-        return None
-    except Exception as e:  # noqa: BLE001 — 具名披露后按无新鲜映射处理
-        print(f"ownership: resolution failed ({type(e).__name__}: {e}) — "
-              "no kill certificate (conservative rerun)", file=sys.stderr)
-        return None

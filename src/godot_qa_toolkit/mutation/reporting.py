@@ -196,6 +196,46 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                           src=None)
 
 
+def _report_base_summary(file: str, killed: int, survived: int,
+                         timeout_count: int, run_error_count: int,
+                         suspect_count: int, invalid_count: int, budget: int,
+                         adaptive_timeout_s: int, scoped: bool,
+                         baseline_reused: bool) -> tuple:
+    """基础 summary 组装（total 含 invalid_count 参数项——原口径）。"""
+    total = killed + survived + timeout_count + run_error_count \
+        + invalid_count + suspect_count
+    summary = {
+        "file": file,
+        "mutants": total,
+        "killed": killed,
+        "survived": survived,
+        "suspect": suspect_count,
+        "timeout": timeout_count,
+        "run_errors": run_error_count,
+        "invalid_mutants": 0,
+        "kill_rate": round(killed / total, 4) if total else 0.0,
+        "budget": budget,
+        "adaptive_timeout_s": adaptive_timeout_s,
+        "scoped": scoped,
+        "baseline_reused": baseline_reused,
+    }
+    return summary, total
+
+
+def _report_conditional_keys(summary: dict, stage_timings, resumed, pinned_count,
+                             disclosures, timing_meta) -> None:
+    """条件披露键（§SPEC-202 / SEE-1400 / §SPEC-1420-08/01/07 / SEE-1356）。"""
+    if stage_timings is not None:
+        summary["stage_timings"] = stage_timings
+    if resumed is not None:
+        summary["resumed"] = resumed
+    if pinned_count:
+        summary["timeout_pinned"] = pinned_count
+    if disclosures:
+        summary.update(disclosures)
+    summary.update(timing_meta or explicit_timing_meta())
+
+
 def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      run_error_count: int, suspect_count: int, invalid_count: int,
                      budget: int, results: list[dict], scoped: bool = False,
@@ -208,49 +248,20 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
                      original_src: str | None = None,
                      adaptive_timeout_s: int = 0,
                      stage_timings: dict | None = None) -> dict:
-    total = killed + survived + timeout_count + run_error_count + invalid_count + suspect_count
-    kill_rate = killed / total if total else 0.0
+    """统一 JSON 报告（单文件路径唯一出处；ok 门 = 无未证明杀死档）。"""
+    summary, _total = _report_base_summary(
+        file, killed, survived, timeout_count, run_error_count, suspect_count,
+        invalid_count, budget, adaptive_timeout_s, scoped, baseline_reused)
     failures = [r for r in results if r["verdict"] != "killed"]
-    # SPEC-017：runtime invalid_mutant（impl 编译被拒）与静态预检 invalid 合并
-    # 计数——同档同语义，failures 里已留明细。O2 修复：静态 invalid 记录本身
-    # 已在 results 内——param 传入值与扫描会双计数，改为扫描唯一口径。
-    invalid_count = sum(1 for r in results if r["verdict"] == "invalid_mutant")
-    summary = {
-        "file": file,
-        "mutants": total,
-        "killed": killed,
-        "survived": survived,
-        "suspect": suspect_count,
-        "timeout": timeout_count,
-        "run_errors": run_error_count,
-        "invalid_mutants": invalid_count,
-        "kill_rate": round(kill_rate, 4),
-        "budget": budget,
-        "adaptive_timeout_s": adaptive_timeout_s,
-        "scoped": scoped,
-        "baseline_reused": baseline_reused,
-    }
+    # SPEC-017：runtime invalid 与静态预检 invalid 合并计数——param 传入值
+    # 与扫描会双计数，改为扫描唯一口径。
+    summary["invalid_mutants"] = sum(
+        1 for r in results if r["verdict"] == "invalid_mutant")
     _apply_mechanism_disclosures(summary, results, slot_info, original_src)
     # §SPEC-202 只加不改：完整报告路径恒携带 8 阶段全键（缺省阶段 0.0）；
-    # dry-run / 零位点 / setup 错误契约不经本函数，形态零变化。rss_peak_mb
-    # 由 run_mutation 包装层补记（VmHWM 是进程级高水位，报告收尾时刻读取）。
-    if stage_timings is not None:
-        summary["stage_timings"] = stage_timings
-    # SEE-1400 §SPEC-002：仅在 resume 跳过语义在场的 run 报 skipped 数——
-    # 常规 run 的 summary 与升级前逐字节同构（既有消费方零感知）。
-    if resumed is not None:
-        summary["resumed"] = resumed
-    # §SPEC-1420-08（D5）：timeout_pinned 独立档——永不并入 killed、不计入
-    # ok 门禁失败档；报告持续可见并披露降级来源（failures 明细 reason）。
-    if pinned_count:
-        summary["timeout_pinned"] = pinned_count
-    # §SPEC-1420-01/07：截断面 N/M 披露 + 差分披露（retry_total/executed/
-    # untouched_ranges/diff_skipped）。
-    if disclosures:
-        summary.update(disclosures)
-    # SEE-1356 L1 (§SPEC-L1-03)：报告字段 timing_source/samples_n/baseline_p90
-    # ——timing store 未接入时缺省 explicit（显式 timeout 即最终预算）。
-    summary.update(timing_meta or explicit_timing_meta())
+    # dry-run / 零位点 / setup 错误契约不经本函数，形态零变化。
+    _report_conditional_keys(summary, stage_timings, resumed, pinned_count,
+                             disclosures, timing_meta)
     # SEE-1416 §SPEC-1416-1：summary 自足——非 killed verdict 的 top 明细
     # 投影进场（键恒在场，`| jq '.summary'` 切片也不失明；零命中为空数组）。
     summary["survivors"], truncated = survivors_projection(failures)
@@ -265,7 +276,6 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
         "summary": summary,
         "failures": failures,
     }
-
 
 def _apply_mechanism_disclosures(summary: dict, results: list[dict],
                                  slot_info: dict | None,
@@ -311,65 +321,64 @@ def _emit_suspected_orphans(summary: dict, results: list[dict],
                                         if r.get("verdict") == "survived"]
 
 
+def _leg_killed_record(m, new_failures, ownership_fn, project_root,
+                       original_src) -> dict:
+    """killed 记录 + killer 证书签发（与冷通道相同签发面）。"""
+    from .identity import killer_certificate
+
+    record = _mutant_record(
+        m, "killed",
+        f"new failures after {m.kind} {m.original}→{m.mutated}: "
+        f"{sorted(new_failures)[:3]}", src=original_src)
+    if ownership_fn is not None:
+        owner = ownership_fn()
+        if owner is not None:
+            cert = killer_certificate(
+                new_failures, owner, project_root,
+                ownership_source=getattr(owner, "source",
+                                         "runtime_mapping"))
+            if cert is not None:
+                record["killed_by"] = cert
+    return record
+
+
 def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
                         ownership_fn, project_root, original_src) -> dict:
     """worker 腿 → verdict（与冷通道同一 kill 语义：失败名差集 + 同档分类）。
 
     worker 腿的 L1/L4 beacon 失败 → run_error（数据不可信，绝不 killed/
     survived）；killed 走与冷通道相同的 killer 证书签发面。D-DVP：目标
-    编译失败（reload 43/44，can_instantiate=false 族）→ invalid_mutant
-    ——与冷通道 beacon-invalid 同档同语义，杜绝证据缺失的假 killed。
-    """
-    from .identity import killer_certificate
-
+    编译失败 → invalid_mutant（与冷通道 beacon-invalid 同档同语义）。"""
+    src = original_src
+    tag = f"{m.kind} {m.original}→{m.mutated}"
     if getattr(leg, "target_compile_invalid", False):
         return _mutant_record(
             m, "invalid_mutant",
             "mutant fails to compile in the resident worker "
             "(target reload non-zero, can_instantiate=false) — "
-            "cold-beacon-equivalent invalid",
-            src=original_src)
+            "cold-beacon-equivalent invalid", src=src)
     if not leg.hash_ok:
         return _mutant_record(
-            m, "run_error",
-            f"worker beacon: disk hash mismatch for {m.kind} "
-            f"{m.original}→{m.mutated}", src=original_src)
+            m, "run_error", f"worker beacon: disk hash mismatch for {tag}",
+            src=src)
     if not leg.gut_ran:
         return _mutant_record(
-            m, "run_error",
-            f"worker leg: no GUT run stream for {m.kind} "
-            f"{m.original}→{m.mutated}", src=original_src)
+            m, "run_error", f"worker leg: no GUT run stream for {tag}",
+            src=src)
     if leg.fail_count == 0:
         return _mutant_record(
-            m, "survived",
-            f"tests passed after {m.kind} {m.original}→{m.mutated} "
-            f"(worker leg)", src=original_src)
+            m, "survived", f"tests passed after {tag} (worker leg)", src=src)
     new_failures = leg.failing_tests - baseline_failures
     if new_failures:
-        record = _mutant_record(
-            m, "killed",
-            f"new failures after {m.kind} {m.original}→{m.mutated}: "
-            f"{sorted(new_failures)[:3]}", src=original_src)
-        if ownership_fn is not None:
-            owner = ownership_fn()
-            if owner is not None:
-                cert = killer_certificate(
-                    new_failures, owner, project_root,
-                    ownership_source=getattr(owner, "source",
-                                             "runtime_mapping"))
-                if cert is not None:
-                    record["killed_by"] = cert
-        return record
+        return _leg_killed_record(m, new_failures, ownership_fn,
+                                  project_root, src)
     if baseline_dirty:
         return _mutant_record(
             m, "suspect",
-            f"dirty baseline ∧ empty diff after {m.kind} "
-            f"{m.original}→{m.mutated} (worker leg)", src=original_src)
+            f"dirty baseline ∧ empty diff after {tag} (worker leg)", src=src)
     return _mutant_record(
         m, "survived",
-        f"only pre-existing failures after {m.kind} "
-        f"{m.original}→{m.mutated} (worker leg)", src=original_src)
-
+        f"only pre-existing failures after {tag} (worker leg)", src=src)
 
 def _require_baseline_snapshot(mutant_slice, retry_ids,
                                precomputed_baseline) -> None:

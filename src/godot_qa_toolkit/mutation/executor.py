@@ -78,7 +78,6 @@ _worker_pool = ProcessPoolExecutor
 ENV_JOBS_CAP = "GQT_MUTATION_JOBS_CAP"
 ENV_BASELINE_IN_FARM = "GQT_MUTATION_BASELINE_IN_FARM"
 
-
 def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                       tests_glob, binary_kind, timing_store,
                       mutation_warning, timeout_factor, reuse_coverage,
@@ -94,7 +93,6 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                      worker_channel=worker_channel, select_mode=select_mode)
     r["summary"].setdefault("jobs", 1)
     return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
-
 
 def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                   binary_kind, mutation_warning, timeout_factor,
@@ -116,11 +114,9 @@ def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
     return {"tool": "mutation", "ok": all(r["ok"] for r in results),
             "jobs": 1, "results": results}
 
-
 def _detect_binary_kind() -> str:
     from .inject import detect_binary_kind
     return detect_binary_kind()
-
 
 def jobs_cap() -> int:
     """jobs 并发上限（§SPEC-203：GQT_MUTATION_JOBS_CAP 覆写，钳制保留）。
@@ -137,7 +133,6 @@ def jobs_cap() -> int:
               f"the default cap", file=sys.stderr)
         return max(2, (os.cpu_count() or 2) // 2)
 
-
 def default_jobs(jobs: int | None) -> int:
     """jobs 钳制：缺省给上限；显式值取 min(jobs, 上限) 且不低于 2。"""
     cap = jobs_cap()
@@ -145,13 +140,11 @@ def default_jobs(jobs: int | None) -> int:
         return cap
     return max(2, min(jobs, cap))
 
-
 def baseline_in_farm_requested() -> bool:
     """§SPEC-203：baseline 移入 ext4 影子槽（opt-in，缺省 OFF——D5「真实仓
     baseline 权威」默认路径不动）。真值解析与 full_census_requested 同款。"""
     return os.environ.get(ENV_BASELINE_IN_FARM, "").strip() \
         not in ("", "0", "false")
-
 
 def knobs_disclosure(baseline_in_farm_effective: bool | None = None) -> dict:
     """旋钮 set 时才披露（缺省全 unset = {}，stdout 逐位不变）。
@@ -167,14 +160,12 @@ def knobs_disclosure(baseline_in_farm_effective: bool | None = None) -> dict:
         disc["baseline_in_farm"] = bool(baseline_in_farm_effective)
     return disc
 
-
 def _group_by_file(files: list[str]) -> list[str]:
     if len(set(files)) != len(files):
         raise ValueError(
             "duplicate mutation target files are forbidden — repeated CLI "
             f"paths of one file would race deduplication: {files}")
     return list(dict.fromkeys(files))
-
 
 def prewarm_import(project_root: str) -> dict:
     """并发路径预热：导入幂等，消除 worker 首轮 .godot 缓存竞争。
@@ -195,7 +186,6 @@ def prewarm_import(project_root: str) -> dict:
     from . import prewarm_proof
     return prewarm_proof.prewarm_with_proof(project_root)
 
-
 def _guard_baseline(root: str, project_root: str) -> tuple[bool, str]:
     """SEE-1571 §SPEC-507 §4：baseline 执行根双绑定（缺证 = 守卫不激活
     并披露；失配时调用方必须保持 baseline 计数 0 并走 MUST_REBUILD）。"""
@@ -205,7 +195,6 @@ def _guard_baseline(root: str, project_root: str) -> tuple[bool, str]:
         print(f"mutation: baseline double-binding inactive ({reason})",
               file=sys.stderr)
     return ok, reason
-
 
 def run_mutation_files(
     files: list[str],
@@ -255,7 +244,6 @@ def run_mutation_files(
     return _finalize_run_envelope(envelope, files, project_root, clock,
                                   knob_state, t0, disk_before)
 
-
 def _finalize_run_envelope(envelope: dict, files: list[str],
                            project_root: str, clock: StageClock,
                            knob_state: dict, t0: float,
@@ -280,7 +268,6 @@ def _finalize_run_envelope(envelope: dict, files: list[str],
         envelope["knobs"] = disc
     _project_single_file(envelope, files, project_root)
     return envelope
-
 
 def _project_single_file(envelope: dict, files: list[str],
                          project_root: str) -> None:
@@ -308,7 +295,6 @@ def _project_single_file(envelope: dict, files: list[str],
                        int(summary.get("executed")
                            or summary.get("mutants") or 0))
 
-
 def _zero_ref_terminal(file: str, total: int,
                        selection_meta: dict) -> dict | None:
     """SEE-1581：仅当新鲜映射明确判零测试（zero_ref）才短路。
@@ -328,7 +314,6 @@ def _zero_ref_terminal(file: str, total: int,
         "selection_mode") or "line"
     return {"tool": "mutation", "ok": True, "jobs": 1, "results": [result]}
 
-
 def _gate_collect_total(files: list[str], budget: int) -> int:
     """门内位点收集：目标缺失与串行路径同款 FileNotFoundError；收集异常
     交给 _build_chunks 定终态（返回 -1，error 契约）。"""
@@ -339,7 +324,6 @@ def _gate_collect_total(files: list[str], budget: int) -> int:
         return min(len(_collect_mutations(src, files[0])), budget)
     except Exception:
         return -1
-
 
 def _gate_zero_ref(files, project_root, tests_glob, dry_run, total,
                    select_mode) -> tuple:
@@ -358,7 +342,6 @@ def _gate_zero_ref(files, project_root, tests_glob, dry_run, total,
         else:
             tests_glob = derived
     return tests_glob, selection_meta, None
-
 
 def _gate_serial_dispatch(files, project_root, *, budget, timeout_s,
                           tests_glob, jobs, total, binary_kind, timing_store,
@@ -391,7 +374,6 @@ def _gate_serial_dispatch(files, project_root, *, budget, timeout_s,
         return {"tool": "mutation", "ok": r["ok"], "jobs": 1,
                 "results": [r]}
     return None
-
 
 def _single_file_serial_gate(files: list[str], project_root: str, *,
                              budget: int, timeout_s: int,
@@ -433,7 +415,6 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
         return ret, tests_glob, selection_meta
     return None, tests_glob, selection_meta
 
-
 def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                     tests_glob, binary_kind, timing_store, mutation_warning,
                     timeout_factor, reuse_coverage, identity,
@@ -453,7 +434,6 @@ def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                              worker_channel=worker_channel,
                              select_mode=select_mode)
     return None
-
 
 def _impl_serial_gate(files, project_root, *, budget, timeout_s, tests_glob,
                       jobs, dry_run, binary_kind, timing_store,
@@ -476,7 +456,6 @@ def _impl_serial_gate(files, project_root, *, budget, timeout_s, tests_glob,
         if ret is not None:
             return ret, tests_glob, selection_meta
     return None, tests_glob, selection_meta
-
 
 def _impl_parallel_envelope(files, project_root, budget, timeout_s,
                             tests_glob, jobs, binary_kind,
@@ -521,7 +500,6 @@ def _impl_parallel_envelope(files, project_root, budget, timeout_s,
         envelope["summary"] = {"attention": _attention_details(results)}
     return envelope
 
-
 def _impl_prep(files, project_root, binary_kind, clock, knob_state) -> tuple:
     """入口归一：§SPEC-610 相对目标锚定 + 身份包 + 时钟/旋钮态（调用方
     传入优先，缺省兜底）。"""
@@ -532,7 +510,6 @@ def _impl_prep(files, project_root, binary_kind, clock, knob_state) -> tuple:
     clock = clock or StageClock()
     knob_state = knob_state if knob_state is not None else {}
     return files, kind, identity, clock, knob_state
-
 
 def _run_mutation_files_impl(
     files: list[str],
@@ -555,8 +532,7 @@ def _run_mutation_files_impl(
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
-    阶段纪律与各语义（dry_run 零 GUT、SPEC-016 报告完备性、SEE-1413 退
-    串行、SEE-1550 身份包注入）见 _impl_fast_path / _impl_serial_gate /
+    阶段纪律与各语义见 _impl_fast_path / _impl_serial_gate /
     _impl_parallel_envelope 分解函数——本函数只做顺序编排。
     """
     files, _kind, identity, clock, knob_state = _impl_prep(
@@ -586,7 +562,6 @@ def _run_mutation_files_impl(
         selection_meta, select_mode, prewarm_info,
         pool_factory=lambda max_workers: _worker_pool(max_workers=max_workers))
 
-
 def _settled_error(file: str, err) -> dict:
     """收集异常（如不可解析 GDScript）的定终态 error 契约——
     与 runner._setup_error_result 同构（单文件路径的既定形态）。"""
@@ -596,7 +571,6 @@ def _settled_error(file: str, err) -> dict:
         "summary": {"file": file, "mutants": 0, "jobs": 0, "error": str(err)},
         "failures": [{"reason": f"mutation setup failed: {err}"}],
     }
-
 
 def _settled_no_sites(file: str, scoped: bool) -> dict:
     """零变异文件的定终态 no_sites 契约——与 runner._no_sites_result 同构。"""
@@ -609,7 +583,6 @@ def _settled_no_sites(file: str, scoped: bool) -> dict:
                     "scoped": bool(scoped)},
         "failures": [],
     }
-
 
 def _settled_all_uncovered(file: str, records: list[dict],
                            total_sites: int) -> dict:
@@ -629,8 +602,6 @@ def _settled_all_uncovered(file: str, records: list[dict],
         },
         "failures": records,
     }
-
-
 
 def _build_chunks(files: list[str], project_root: str, budget: int,
                   timeout_s: int, tests_glob: str | None, jobs: int,
@@ -682,8 +653,6 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             settled.append(file_settled)
     return chunks, settled, v2ctx
 
-
-
 def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
     """P1 差分收尾（父层单点）：reused 记录注入 + 披露字段 + manifest 落盘。
 
@@ -706,11 +675,9 @@ def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
             project_relative(ctx["store2"].project_root,
                              r["summary"]["file"]))
 
-
 _VERDICT_SUMMARY_KEY = {"killed": "killed", "survived": "survived",
                         "timeout": "timeout", "run_error": "run_errors",
                         "suspect": "suspect"}
-
 
 def _inject_reused(r: dict, ctx: dict) -> None:
     """reused 条目 → 报告记录重建 + 计数并入（全签名已在 plan 阶段验证）。"""
@@ -731,7 +698,6 @@ def _inject_reused(r: dict, ctx: dict) -> None:
         s["mutants"] += 1
     s["resumed"] = len(ctx["plan"].reused)
 
-
 def _inject_selection_block(s: dict, ctx: dict) -> None:
     """§SPEC-613：自动选测披露随报告透出（显式 --tests 时缺省缺席）；
     selection_mode / 并发上限披露按组数修正。"""
@@ -748,7 +714,6 @@ def _inject_selection_block(s: dict, ctx: dict) -> None:
             s.update(cap)
         elif ctx.get("selection_groups"):
             s["selection_groups"] = list(ctx["selection_groups"])
-
 
 def _inject_uncovered(r: dict, s: dict, ctx: dict) -> None:
     """§SPEC-1420-12（P2）：uncovered 位点不执行、不进 ok 门禁，failures
@@ -772,7 +737,6 @@ def _inject_uncovered(r: dict, s: dict, ctx: dict) -> None:
         s["coverage_prefilter"] = coverage_prefilter_summary(
             pf_source, 0, len(ctx["executed"]))
 
-
 def _inject_diff_disclosure(s: dict, ctx: dict) -> None:
     """§SPEC-1420-07（D6）+ O3 键集对齐：差分在场与 --mutate-all 两径披露
     同一键集（--mutate-all 全量面也可见：executed == retry_total、
@@ -784,7 +748,6 @@ def _inject_diff_disclosure(s: dict, ctx: dict) -> None:
         s.setdefault("executed",
                      len(_valid_mutants(ctx["src"], ctx["executed"])))
         s["untouched_ranges"] = untouched_ranges(ctx["untouched"])
-
 
 def _inject_one(r: dict, ctx: dict) -> None:
     """单文件收尾注入：reused/uncovered 记录 + 差分与覆盖披露 + gate 重算。"""
@@ -799,5 +762,4 @@ def _inject_one(r: dict, ctx: dict) -> None:
     s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0
     r["ok"] = (s["survived"] == 0 and s["timeout"] == 0
                and s["run_errors"] == 0 and s["suspect"] == 0)
-
 

@@ -43,7 +43,6 @@ from .shadowio import (
     _shard_groups,
 )
 
-
 def _orch(name: str):
     """运行时经 orchestrator 模块命名空间解析共享 helper——保持既有
     monkeypatch 点（orch._run_one_gut / orch._read_hits_merged）的调用
@@ -53,13 +52,10 @@ def _orch(name: str):
     return getattr(_o, name)
 from .attribution import _collect_attribution
 
-
 def _stage_arm_files(name: str, prepared: dict, run_uuid: str,
                      test_attribution: bool) -> tuple:
     """臂内模板→sink/manifest/插桩文本装载（方向②③：归属只在 gut_full
-    臂启用——acceptance 臂用 plain 模板与默认钩子）。返回 (started,
-    sink_by_rel, manifest_by_rel, instrumented_files, inst_by_rel,
-    vacuous_rels)。"""
+    臂启用）。返回 6 元组（started/sinks/manifests/instrumented/inst/vacuous）。"""
     started = {"run_uuid": run_uuid, "project_root": "",
                "files": {}}
     sink_by_rel: dict[str, str] = {}
@@ -94,7 +90,6 @@ def _stage_arm_files(name: str, prepared: dict, run_uuid: str,
     return (started, sink_by_rel, manifest_by_rel, instrumented_files,
             inst_by_rel, vacuous_rels)
 
-
 def _arm_plans(root: Path, recipe: dict, acceptance: dict | None,
                shard_width: int) -> list[dict]:
     """分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs。"""
@@ -110,7 +105,6 @@ def _arm_plans(root: Path, recipe: dict, acceptance: dict | None,
     return [{"args": ([("-gdir=" + ",".join(g))] if g else []),
              "keys": None, "suite_dir": None} for g in groups]
 
-
 def _instrument_shadow(shadow: Path, inst_by_rel: dict[str, str],
                        shadow_hook_files: list[tuple[str, str]]) -> None:
     """P2 双臂并行：插桩写入分片 shadow 而非项目根——两臂可并发执行
@@ -123,7 +117,6 @@ def _instrument_shadow(shadow: Path, inst_by_rel: dict[str, str],
         hp = shadow / relpath
         hp.parent.mkdir(parents=True, exist_ok=True)
         hp.write_text(text, encoding="utf-8")
-
 
 def _shard_run_reps(root: Path, shadow: Path, args: list[str],
                     run_uuid: str, name: str, idx: int, reps: int,
@@ -175,7 +168,6 @@ def _shard_run_reps(root: Path, shadow: Path, args: list[str],
             prev_union = frozenset(shard_union)
     return rep_records, prev_union
 
-
 def _run_shard_leg(ip, *, name: str, plans: list[dict],
                    root: Path, run_uuid: str, reps: int, timeout_s: int,
                    adaptive_reps: bool, prev_union, sink_by_rel: dict,
@@ -185,6 +177,7 @@ def _run_shard_leg(ip, *, name: str, plans: list[dict],
                    shard_log_dir: str | None,
                    xdg_homes: list[str]) -> dict:
     """单分片：shadow 准备（rep 间复用）→ 逐 rep GUT → 还原清理。"""
+
     from .probe_templates import _PRE_HOOK_RELPATH
 
     idx, plan = ip
@@ -214,7 +207,6 @@ def _run_shard_leg(ip, *, name: str, plans: list[dict],
     return {"plan": plan, "reps": rep_records,
             "shadow_disclosure": shadow_disclosure}
 
-
 def _arm_inject_root(root: Path, instrumented_files: dict[str, str],
                      shadow_hook_files: list[tuple[str, str]],
                      attribution_causal: bool, name: str) -> None:
@@ -238,7 +230,6 @@ def _arm_inject_root(root: Path, instrumented_files: dict[str, str],
         abs_p.parent.mkdir(parents=True, exist_ok=True)
         abs_p.write_text(text, encoding="utf-8")
 
-
 def _arm_restore(root: Path, started: dict, backup_dir: Path) -> None:
     """finally 还原：插桩文件写回原文、created 清单删除、备份目录删除。"""
     for abs_path, original in started["files"].items():
@@ -246,7 +237,6 @@ def _arm_restore(root: Path, started: dict, backup_dir: Path) -> None:
     for created in started.get("created", []):
         Path(created).unlink(missing_ok=True)
     shutil.rmtree(backup_dir, ignore_errors=True)
-
 
 def _arm_fail_scan(results: list[dict]) -> tuple:
     """§SPEC-063a/c：失败身份解析为 (script, test) 对；任一 rep rc!=0
@@ -276,7 +266,6 @@ def _arm_fail_scan(results: list[dict]) -> tuple:
                     gut_ok = False
                     run_error = True
     return gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs
-
 
 def _gate_ctx(baseline_failures, baseline_pairs: set,
               arm_fail_pairs: set, declared_scoped: set,
@@ -309,7 +298,6 @@ def _gate_ctx(baseline_failures, baseline_pairs: set,
     new_pairs = {p for p in arm_fail_pairs if not _covered(p)}
     exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
     return effective_baseline, baseline_meta, new_pairs, exempt_pairs
-
 
 def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
                          timeout_s: int, arm_fail_pairs: set,
@@ -355,7 +343,6 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
               f"gate the arm", file=sys.stderr)
     return effective_baseline, baseline_meta, new_pairs
 
-
 def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
                    run_error: bool) -> tuple:
     """§SPEC-035 对账：分片组逐 rep 对账（rep 间独立进程独立输出），
@@ -389,7 +376,6 @@ def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
     return (reconciliation, arm_valid, invalid_reason, gut_ok_delta,
             run_error)
 
-
 def _bundle_with_evidence(prepared_item: dict, rel: str, name: str,
                           run_uuid: str, hits_lines: list,
                           probes_fired: int, gut_ok: bool, run_error: bool,
@@ -419,7 +405,6 @@ def _bundle_with_evidence(prepared_item: dict, rel: str, name: str,
         update_run_record(evidence_dir, run_uuid, name_suffix=suffix,
                           status="bundle_written")
     return bundle
-
 
 def _arm_hit_bundles(name: str, prepared: dict, sink_by_rel: dict,
                      manifest_by_rel: dict, xdg_homes: list[str],
@@ -451,7 +436,6 @@ def _arm_hit_bundles(name: str, prepared: dict, sink_by_rel: dict,
         clear_sink(None, str(root), sink)
     return bundles
 
-
 def _arm_vacuous_bundles(name: str, prepared: dict, vacuous_rels: list[str],
                          run_uuid: str, gut_ok: bool, run_error: bool,
                          timed_out: bool, evidence_dir) -> dict:
@@ -463,7 +447,6 @@ def _arm_vacuous_bundles(name: str, prepared: dict, vacuous_rels: list[str],
             prepared[rel], rel, name, run_uuid, [], 0,
             gut_ok, run_error, timed_out, True, evidence_dir)
     return bundles
-
 
 def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
                test_attribution: bool, attribution_causal: bool,
@@ -517,7 +500,6 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
             "vacuous_rels": vacuous_rels, "plans": plans, "reps": reps,
             "shadow_hook_files": shadow_hook_files,
             "attribution_causal": attribution_causal}
-
 
 def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
                  timeout_s: int, adaptive_reps: bool, shard_log_dir: str | None,
@@ -577,7 +559,6 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
     return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
             arm_failures, arm_fail_pairs)
 
-
 def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             acceptance: dict | None = None,
             shadow_instrument: bool = False,
@@ -598,7 +579,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
     文件进显式 vacuous 车道（§SPEC-042）。
 
     shadow_instrument=True（P2 双臂并行）；adaptive_reps=True（P1）。
-    分解函数族 _arm_stage/_arm_execute/_arm_gate 等承载阶段语义。"""
+    分解函数族 _arm_stage/_arm_execute/_arm_result 承载阶段语义。"""
     stage = _arm_stage(
         name, root=root, prepared=prepared, recipe=recipe,
         test_attribution=test_attribution,
@@ -742,7 +723,6 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
         plans=plans, sink_by_rel=sink_by_rel, manifest_by_rel=manifest_by_rel,
         xdg_homes=xdg_homes, vacuous_rels=vacuous_rels)
 
-
 def run_acceptance_flow(*, root: Path, recipe: dict,
                         acceptance_keys: list[str] | None,
                         acceptance_shards: int,
@@ -780,7 +760,6 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
                                   "new": [], "new_pairs": [],
                                   "instrumentation_intolerant": []},
                 "repeats": 0, "convergence": None}
-
 
 def execute_arms(*, root: Path, recipe: dict, arms_parallel: bool,
                  acceptance_keys: list[str] | None,

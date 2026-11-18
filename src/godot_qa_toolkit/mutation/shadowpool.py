@@ -448,6 +448,30 @@ def _proof_guard_or_rebuild(project_root: str, pool: dict, slot: MutationSlot,
                                   "pruned": gen["pruned"]},
                   validation=list(slot.freshness))
 
+def _reuse_generated_rebuild(project_root: str, pool: dict,
+                             slot: MutationSlot, rec: dict,
+                             wiring_hash: str, now: float, gen: dict,
+                             required_globs: "list[str] | None") -> None:
+    """generated dirs 缺失 → 整槽重建 + 必要目录复查（仍缺 → 归还锁后
+    具名 SlotProvisionError）。"""
+    slot.freshness.append(
+        f"generated_dirs:missing({','.join(gen['missing'])})")
+    _rebuild_locked(project_root, pool, slot, rec,
+                    wiring_hash, now)
+    slot.freshness.insert(0, "warm:reused")
+    _farm_after_rebuild(slot, project_root,
+                        "generated_dirs_missing")
+    still = _missing_required(project_root, slot.root, required_globs)
+    if still:
+        rec["in_use"] = False
+        _save_pool(project_root, pool)
+        _release_slot_lock(slot)
+        raise SlotProvisionError(
+            "warm slot generated selection dirs unavailable "
+            f"after rebuild: {still} (project_root="
+            f"{project_root})")
+
+
 def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlot,
                      wiring_hash: str, now: float,
                      required_globs: "list[str] | None") -> MutationSlot:
@@ -472,22 +496,8 @@ def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlo
     _sync_repo_delta(project_root, slot, rec)
     gen = _sync_generated_dirs(project_root, slot, required_globs)
     if gen["status"] == "rebuild":
-        slot.freshness.append(
-            f"generated_dirs:missing({','.join(gen['missing'])})")
-        _rebuild_locked(project_root, pool, slot, rec,
-                        wiring_hash, now)
-        slot.freshness.insert(0, "warm:reused")
-        _farm_after_rebuild(slot, project_root,
-                            "generated_dirs_missing")
-        still = _missing_required(project_root, slot.root, required_globs)
-        if still:
-            rec["in_use"] = False
-            _save_pool(project_root, pool)
-            _release_slot_lock(slot)
-            raise SlotProvisionError(
-                "warm slot generated selection dirs unavailable "
-                f"after rebuild: {still} (project_root="
-                f"{project_root})")
+        _reuse_generated_rebuild(project_root, pool, slot, rec, wiring_hash,
+                                 now, gen, required_globs)
         return slot
     if gen["synced"] or gen["pruned"]:
         slot.freshness.append(
@@ -500,7 +510,6 @@ def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlo
     _proof_guard_or_rebuild(project_root, pool, slot, rec, wiring_hash, now,
                             gen)
     return slot
-
 def _create_warm_slot(project_root: str, pool: dict, targets: list[str],
                       wiring_hash: str, kind: str, now: float,
                       targeted_only: bool) -> MutationSlot:

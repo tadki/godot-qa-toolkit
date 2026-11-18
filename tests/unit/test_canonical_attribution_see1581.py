@@ -17,14 +17,16 @@ from pathlib import Path
 
 import pytest
 
+from godot_qa_toolkit.measurement.attribution import (
+    ATTRIBUTION_SCHEMA,
+    build_attribution_map,
+)
 from godot_qa_toolkit.measurement.orchestrator import (
     _ATTR_CTX_GD,
-    ATTRIBUTION_SCHEMA,
     _ATTR_PRE_HOOK_GD,
     _ATTR_FLUSHER_GD,
     _PRE_HOOK_GD,
     _FLUSHER_GD,
-    build_attribution_map,
     run_measurement,
 )
 from godot_qa_toolkit.coverage.runner import (

@@ -21,7 +21,7 @@ from godot_qa_toolkit.measurement.shadowio import (
     _accumulate_attr_lines,
     _new_attr_rec,
 )
-from godot_qa_toolkit.measurement.orchestrator import (
+from godot_qa_toolkit.measurement.attribution import (
     _arms_state,
     _tests_face_map,
     build_attribution_map,

@@ -331,7 +331,7 @@ def test_d3_legit_empty_map_keeps_zero_ref_short_circuit(tmp_path,
 
 def test_d3_arms_state_records_execution_integrity_evidence():
     """落盘证据字段：probes_fired 求和 + vacuous 全体判定（消费侧判据来源）。"""
-    from godot_qa_toolkit.measurement.orchestrator import _arms_state
+    from godot_qa_toolkit.measurement.attribution import _arms_state
 
     arms = ({"arm": "gut_full", "state": "invalid",
              "invalid_reason": "run_error",

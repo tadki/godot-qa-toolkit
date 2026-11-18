@@ -153,10 +153,8 @@ class TestMachineContract:
                     " (dual-read forbidden)")
 
     def test_versioned_identifiers_active(self):
-        from godot_qa_toolkit.measurement.orchestrator import (
-            ATTRIBUTION_SCHEMA,
-            REPORT_VERSION,
-        )
+        from godot_qa_toolkit.measurement.attribution import ATTRIBUTION_SCHEMA
+        from godot_qa_toolkit.measurement.orchestrator import REPORT_VERSION
         from godot_qa_toolkit.measurement.recipe import RECIPE_VERSION
         from godot_qa_toolkit.mutation.truth_select import SCHEMA_VERSION
 

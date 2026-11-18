@@ -85,10 +85,10 @@ def test_hit_level_probe_surface_is_the_attribution_shape():
 
 def test_schema_constants_aligned_line_primary():
     from godot_qa_toolkit.measurement import increment as inc_mod
-    from godot_qa_toolkit.measurement.orchestrator import (
-        ATTRIBUTION_ALGO_TAG,
-        ATTRIBUTION_SCHEMA,
-    )
+    from godot_qa_toolkit.measurement.attribution import (
+    ATTRIBUTION_ALGO_TAG,
+    ATTRIBUTION_SCHEMA,
+)
     from godot_qa_toolkit.mutation import coverlink, truth_select
 
     assert ATTRIBUTION_SCHEMA == "test-attribution/6"
@@ -240,9 +240,9 @@ def test_write_map_fixture_produces_line_primary_doc(tmp_path):
 def test_line_primary_arm_shape_is_not_the_fn_shape():
     """行级主真值形状守卫：映射含行事实/反查，派生视图由其投影——回归到
     「只有 file/function 边、无行事实」的 /5 形状在此报警。"""
-    from godot_qa_toolkit.measurement.orchestrator import (
-        build_attribution_map,
-    )
+    from godot_qa_toolkit.measurement.attribution import (
+    build_attribution_map,
+)
 
     attr = {"a.gd": {5: {"seen": {0}, "cnt": {0: 2},
                          "fn": {0: {0}}, "unattr_counts": {},

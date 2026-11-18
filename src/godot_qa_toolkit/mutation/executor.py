@@ -543,13 +543,9 @@ def _run_mutation_files_impl(
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
-    dry_run（SPEC-009）：只清点不跑 GUT——预热、baseline、worker mutant 轮
-    全部短路。报告完备性（SPEC-016）：收集异常文件以 error 契约进 results、
-    零变异文件逐文件出 no_sites 记录——任何输入文件都不得从报告中消失。
-    SEE-1413：单文件 jobs>1 时变异点总数 ≤ jobs 自动退串行（判定在收集
-    后、prewarm/baseline 之前）；--jobs 1 走显式串行快路径。
-    SEE-1550：身份包在父层计算一次并随 chunk 注入（多 worker 同 key）；
-    reuse_coverage 默认自动启用（store fresh ∧ 身份包全匹配才生效）。
+    阶段纪律与各语义（dry_run 零 GUT、SPEC-016 报告完备性、SEE-1413 退
+    串行、SEE-1550 身份包注入）见 _impl_fast_path / _impl_serial_gate /
+    _impl_parallel_envelope 分解函数——本函数只做顺序编排。
     """
     # §SPEC-610（SEE-1576 R-5）：相对目标统一锚定 --project-root（绝对路径
     # 直过）——入口单点归一，后续规划/读取/报告一律以锚定路径为准，路径

@@ -238,6 +238,21 @@ def _plan_grouped_chunks(f, project_root, select_mode, glob, binary_kind,
     return chunks, ctx, None
 
 
+def _plan_make_ctx(plan, executed_list, untouched, header_hash, scope_hashes,
+                   store2, src, mutants, uncovered_mutants, selection_meta,
+                   select_mode, jobs, prefilter_disclosures) -> dict:
+    """v2ctx 组装（差分收尾注入与合并层的共享上下文）。"""
+    return {
+        "plan": plan, "executed": executed_list, "untouched": untouched,
+        "header_hash": header_hash, "scope_hashes": scope_hashes,
+        "store2": store2, "src": src, "mutants": mutants,
+        "uncovered": uncovered_mutants, "test_selection": selection_meta,
+        "selection_mode": select_mode, "requested_jobs": jobs,
+        "coverage_prefilter_source": prefilter_disclosures.get(
+            "coverage_prefilter"),
+    }
+
+
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
@@ -248,10 +263,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       auto_selection: dict | None = None,
                       select_mode: str = "full"):
     """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
-    budget → 分片。
-
-    返回 (chunks_for_file, v2ctx_entry_or_None, settled_or_None)。
-    """
+    budget → 分片（返回 chunks, v2ctx_or_None, settled_or_None）。"""
     clock = clock or StageClock()
     src, collected, raw_total, settled = _plan_collect(f)
     if settled is not None:
@@ -274,10 +286,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             timeout_factor, mutate_all, baseline, run_id, reuse_coverage,
             identity, worker_channel, select_mode, selection_meta)
     if baseline is None:
-        # baseline 快照失败（冷启动漂移/脏 baseline）→ 该文件整卷退回
-        # 串行单任务。SEE-1525：降级显式告警（目标文件 + 失败原因摘要 +
-        # falls back to serial），不改行为、不失败；未尝试预跑（glob=None
-        # 的全量面）不在此列。
+        # baseline 快照失败 → 整卷退串行单任务（SEE-1525 显式降级告警）。
         if glob is not None:
             _warn_serial_fallback(f, (baseline_failures or {}).get(glob))
         return [_plan_serial_chunk(
@@ -285,15 +294,10 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             timeout_factor, mutate_all, selection_meta, select_mode,
             raw_total, attention, run_id, executed_list, identity,
             worker_channel)], None, None
-    ctx = {
-        "plan": plan, "executed": executed_list, "untouched": untouched,
-        "header_hash": header_hash, "scope_hashes": scope_hashes,
-        "store2": store2, "src": src, "mutants": mutants,
-        "uncovered": uncovered_mutants, "test_selection": selection_meta,
-        "selection_mode": select_mode, "requested_jobs": jobs,
-        "coverage_prefilter_source": prefilter_disclosures.get(
-            "coverage_prefilter"),
-    }
+    ctx = _plan_make_ctx(plan, executed_list, untouched, header_hash,
+                         scope_hashes, store2, src, mutants,
+                         uncovered_mutants, selection_meta, select_mode,
+                         jobs, prefilter_disclosures)
     if select_mode in ("line", "fn") and glob is not None \
             and selection_meta.get("source") == "runtime_mapping":
         return _plan_grouped_chunks(
@@ -371,25 +375,13 @@ def _fn_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
         })
     return chunks, meta
 
-def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
-                       selection_meta, baseline, timeout_factor,
-                       timeout_s, budget, mutate_all, attention, *, run_id,
-                       identity, worker_channel, total_sites):
-    """SEE-1587 行级分组：按位点所在行的测试集签名 `frozenset(line→tests)`
-    分组，同签名共享一个物化选择目录 glob（禁止一行一组 / 任意多行组合
-    机械拆分——组数 = 不同测试集合数，不是行数/位点数）。
-
-    行→测试集来自新鲜映射的行事实（test 车道 line_to_tests ∪ 脚本车道
-    script_to_lines）；无映射测试的行上，位点**不静默丢弃**——按默认路径
-    uncovered 口径返回记录（不执行、不进 ok 门禁），并随 selection_groups
-    披露。返回 (chunks, group_meta, uncovered_records)。"""
+def _line_map_sets(f, project_root, selection_meta, executed_list) -> tuple:
+    """S2.3 守卫（runtime_mapping 必携带 resolved map path——缺失 = 具名
+    fail-loud，绝不回退默认路径重猜）+ 映射装载 + 行/名双表。"""
     from . import truth_select
 
     mapping_path = (selection_meta.get("mapping") or {}).get("path")
     if selection_meta.get("source") == "runtime_mapping" and not mapping_path:
-        # S2.3 HIGH：runtime_mapping 必携带 resolved map path——缺失 =
-        # selection 元数据不一致，具名 fail-loud；绝不回退默认路径重猜
-        # （与 resolver/prefilter 哨兵语义同源）。
         raise truth_select.MutationSelectionError(
             "selection_metadata_inconsistent",
             "line_group_chunks: source=runtime_mapping without a resolved "
@@ -406,6 +398,11 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
         doc, rel, {getattr(m, "line", -1) for m in executed_list})
     by_name = truth_select._test_scripts_by_name(
         str(Path(project_root).resolve()))
+    return by_line, by_name
+
+
+def _line_partitions(executed_list: list, by_line: dict) -> tuple:
+    """位点按行测试集签名分组；无映射行不静默丢弃（uncovered 口径返回）。"""
     groups: dict[frozenset, list] = {}
     no_mapped: list = []          # Mutant 对象（与 prefilter uncovered 同形态）
     for m in executed_list:
@@ -414,47 +411,83 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
             no_mapped.append(m)
             continue
         groups.setdefault(names, []).append(m)
+    return groups, no_mapped
+
+
+def _line_chunk_for(f, project_root, file_glob, binary_kind, names, mutants,
+                    *, baseline, timeout_factor, timeout_s, budget,
+                    mutate_all, attention, run_id, identity, worker_channel,
+                    total_sites, selection_meta, by_name, seq,
+                    executed_list) -> tuple:
+    """单签名组 → 物化选择目录 glob → chunk。脚本漂移（行事实指向的脚本
+    不在 tests 树）按 uncovered 口径返回（与无映射行同形态）。"""
+    from . import truth_select
+
+    scripts, ambiguous = truth_select._resolve_script_paths(by_name,
+                                                            names)
+    if ambiguous:
+        raise truth_select.MutationSelectionError(
+            "ambiguous_test_names", str(sorted(ambiguous)[:5]))
+    if not scripts:
+        return None, mutants, None
+    try:
+        group_glob = truth_select.materialize_selection(
+            str(Path(project_root).resolve()), scripts)
+    except OSError as e:
+        raise truth_select.MutationSelectionError(
+            "selection_materialize_failed", str(e)) from e
+    meta = {"signature": sorted(names), "tests": len(scripts),
+            "mutants": len(mutants)}
+    chunk = {
+        "file": f, "project_root": project_root, "budget": budget,
+        "timeout_s": timeout_s, "tests_glob": group_glob,
+        "binary_kind": binary_kind,
+        "timeout_factor": timeout_factor, "total_sites": total_sites,
+        "attention": attention, "mutate_all": mutate_all,
+        "retry_ids": [m.stable_id for m in mutants],
+        "baseline": baseline,
+        # SEE-1587：worker 侧 prefilter 投影需要该 glob 实际承载的测试
+        # 脚本集（组内签名），不用文件级并集冒充组面。
+        "selection_meta": {**selection_meta, "tests": scripts,
+                           "source": "runtime_mapping",
+                           "reason": "line_mapping_fresh"},
+        "selection_mode": "line",
+        "progress": {"run_id": run_id,
+                     "worker": f"line:{seq}",
+                     "total": len(executed_list)},
+        "identity": identity, "worker_channel": worker_channel,
+    }
+    return chunk, meta, None
+
+
+def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
+                       selection_meta, baseline, timeout_factor,
+                       timeout_s, budget, mutate_all, attention, *, run_id,
+                       identity, worker_channel, total_sites):
+    """SEE-1587 行级分组：按位点所在行的测试集签名 `frozenset(line→tests)`
+    分组，同签名共享一个物化选择目录 glob（组数 = 不同测试集合数）。
+
+    返回 (chunks, group_meta, uncovered_records)。"""
+    by_line, by_name = _line_map_sets(f, project_root, selection_meta,
+                                      executed_list)
+    groups, no_mapped = _line_partitions(executed_list, by_line)
     chunks: list[dict] = []
     meta: list[dict] = []
     for names, mutants in sorted(groups.items(),
                                  key=lambda kv: (len(kv[0]), sorted(kv[0]))):
-        scripts, ambiguous = truth_select._resolve_script_paths(by_name,
-                                                                names)
-        if ambiguous:
-            raise truth_select.MutationSelectionError(
-                "ambiguous_test_names", str(sorted(ambiguous)[:5]))
-        if not scripts:
-            # 行事实指向的脚本不在 tests 树（删除/改名漂移）：不猜，按
-            # uncovered 口径披露（与无映射行同形态）
-            no_mapped.extend(mutants)
+        chunk, m, extra = _line_chunk_for(
+            f, project_root, file_glob, binary_kind, names, mutants,
+            baseline=baseline, timeout_factor=timeout_factor,
+            timeout_s=timeout_s, budget=budget, mutate_all=mutate_all,
+            attention=attention, run_id=run_id, identity=identity,
+            worker_channel=worker_channel, total_sites=total_sites,
+            selection_meta=selection_meta, by_name=by_name,
+            seq=len(meta) + 1, executed_list=executed_list)
+        if chunk is None:
+            no_mapped.extend(extra)
             continue
-        try:
-            group_glob = truth_select.materialize_selection(
-                str(Path(project_root).resolve()), scripts)
-        except OSError as e:
-            raise truth_select.MutationSelectionError(
-                "selection_materialize_failed", str(e)) from e
-        meta.append({"signature": sorted(names), "tests": len(scripts),
-                     "mutants": len(mutants)})
-        chunks.append({
-            "file": f, "project_root": project_root, "budget": budget,
-            "timeout_s": timeout_s, "tests_glob": group_glob,
-            "binary_kind": binary_kind,
-            "timeout_factor": timeout_factor, "total_sites": total_sites,
-            "attention": attention, "mutate_all": mutate_all,
-            "retry_ids": [m.stable_id for m in mutants],
-            "baseline": baseline,
-            # SEE-1587：worker 侧 prefilter 投影需要该 glob 实际承载的测试
-            # 脚本集（组内签名），不用文件级并集冒充组面。
-            "selection_meta": {**selection_meta, "tests": scripts,
-                               "source": "runtime_mapping",
-                               "reason": "line_mapping_fresh"},
-            "selection_mode": "line",
-            "progress": {"run_id": run_id,
-                         "worker": f"line:{len(meta)}",
-                         "total": len(executed_list)},
-            "identity": identity, "worker_channel": worker_channel,
-        })
+        chunks.append(chunk)
+        meta.append(m)
     return chunks, meta, no_mapped
 
 

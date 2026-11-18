@@ -37,6 +37,11 @@ from ..gherkin.suite import (
 )
 from .backup import MeasurementError, _backup_base, batch_sink_name, file_key8
 from .crapbuild import _cause_tail, _pairs_sha256  # noqa: F401
+from .probe_templates import (
+    _ATTR_CTX_RELPATH,
+    _FLUSHER_RELPATH,
+    _PRE_HOOK_RELPATH,
+)
 from .shadowio import (
     _cleanup_shadow,
     _prepare_shadow,
@@ -448,18 +453,37 @@ def _arm_vacuous_bundles(name: str, prepared: dict, vacuous_rels: list[str],
             gut_ok, run_error, timed_out, True, evidence_dir)
     return bundles
 
+def _arm_stage_created(root: Path, started: dict, name: str,
+                       attribution_causal: bool, shadow_instrument: bool,
+                       backup_dir: Path) -> None:
+    """project.godot 存在性检查 + created 清单 + 非 shadow 臂落 started.json。
+
+    §SPEC-062A：project.godot 全程只读——finalizer 经 GUT pre_run_script
+    通道注册，不再改写 [autoload] 表。"""
+    pg_path = root / "project.godot"
+    if not pg_path.is_file():
+        raise MeasurementError(
+            "cannot run measurement: project.godot missing")
+    started["created"] = [str(root / _FLUSHER_RELPATH),
+                          str(root / _PRE_HOOK_RELPATH)]
+    if attribution_causal and name == "gut_full":
+        started["created"].append(str(root / _ATTR_CTX_RELPATH))
+    if not shadow_instrument:
+        (backup_dir / "started.json").write_text(
+            json.dumps(started, ensure_ascii=False), encoding="utf-8")
+
+
 def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
                test_attribution: bool, attribution_causal: bool,
                shadow_instrument: bool, shard_width: int,
                acceptance, acceptance_repeats: int) -> tuple:
     """臂前置：uuid/备份/装载/pg 检查/created 清单/分片计划/钩子文本。"""
-    from . import prepcache  # noqa: F401 — 占位消费面保持
     from .instrument import _hook_templates
     from .probe_templates import (
         _ATTR_CTX_GD,
-        _ATTR_CTX_RELPATH,
         _FLUSHER_RELPATH,
         _PRE_HOOK_RELPATH,
+        _ATTR_CTX_RELPATH,
     )
 
     run_uuid = make_run_uuid()
@@ -469,19 +493,8 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
      inst_by_rel, vacuous_rels) = _stage_arm_files(
         name, prepared, run_uuid, test_attribution)
     started["project_root"] = str(root)
-    pg_path = root / "project.godot"
-    if not pg_path.is_file():
-        raise MeasurementError(
-            "cannot run measurement: project.godot missing")
-    # §SPEC-062A：project.godot 全程只读——finalizer 经 GUT
-    # pre_run_script 通道注册，不再改写 [autoload] 表
-    started["created"] = [str(root / _FLUSHER_RELPATH),
-                          str(root / _PRE_HOOK_RELPATH)]
-    if attribution_causal and name == "gut_full":
-        started["created"].append(str(root / _ATTR_CTX_RELPATH))
-    if not shadow_instrument:
-        (backup_dir / "started.json").write_text(
-            json.dumps(started, ensure_ascii=False), encoding="utf-8")
+    _arm_stage_created(root, started, name, attribution_causal,
+                       shadow_instrument, backup_dir)
     plans = _arm_plans(root, recipe, acceptance, shard_width)
     # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
     reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
@@ -499,7 +512,6 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
             "vacuous_rels": vacuous_rels, "plans": plans, "reps": reps,
             "shadow_hook_files": shadow_hook_files,
             "attribution_causal": attribution_causal}
-
 def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
                  timeout_s: int, adaptive_reps: bool, shard_log_dir: str | None,
                  stage: dict) -> tuple:

@@ -395,6 +395,8 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 
 同源码 sha256、同 probe manifest 哈希、两臂 run_uuid 不同、两臂 bundle 均 valid（run_error/timeout/zero_tests/vacuous/no_probe 任一 → 臂 invalid）、两臂臂名不同（整臂替换禁拼接）、**禁平均**（`coverage=|∪C|/total`，行集并集）；任一不满足 → `valid=false` + `invalid_reason`，union=null 不出分。`comparable` 仅在两臂 recipe_hash 一致且等于 canonical recipe_hash 时 true（子集配方 false）。
 
+**臂级新增失败门控（§SPEC-060a/064b）**：`baseline_failures` 传入既有（未插桩）运行的失败 `(script, test)` 身份对集合——臂失败对逐对披露后仅**新增**失败对判臂 run_error → invalid；缺省（None）按空基线处理，任何失败即新增（fail-closed）。未归因对仅匹配未归因、同名跨脚本不互相吸收；Run Summary 段未归因回显在其归因实例被基线吸收时随同覆盖（§SPEC-064a）。带 `--test-attribution` 的归属产物可附 `baseline_failures_meta` 披露键（method/face/count/sha256/wall_s/gating），描述该基线获取方式并随增量刷新携带；键只加不改、消费者不读。
+
 ### 13.3 性能门（§SPEC-039）
 
 端到端墙钟（插桩 + 两臂 GUT + union，recipe 构建与 W4 探针不计）对「现有 GUT + acceptance 序贯基线」3+3 交错中位数 ≤1.0×（§SPEC-052 现行最终性能门；旧 §SPEC-039 时代的 1.5× 中间门已作废）；**不达标=停下汇报、不得合并**；loadavg+CPU 双记录（§SPEC-022 协议）随交付。

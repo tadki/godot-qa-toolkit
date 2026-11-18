@@ -144,6 +144,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 | `--recipe <path>` | required | `measurement-suite/2` JSON from `gqt measure suite` |
 | `--out <path>` | required | `measurement-report/2` output JSON path |
 | `--baseline-failures <path>` | omitted | JSON of pre-existing un-instrumented failing `(script, test)` pairs; new failing pairs gate the arm; bare names are rejected as ambiguous |
+|  |  | With `--test-attribution`, the emitted attribution map records a `baseline_failures_meta` disclosure key (`method` / `face` / `count` / `sha256` / `wall_s` / `gating`) describing how that baseline was acquired; the key is carried across `measure map-update` increments and is disclosure-only (consumers do not read it) |
 | `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; declared tests bypass failure gating by name and are disclosed as coverage blind spots |
 | `--acceptance-probe-keys [keys]` | `aidomain_integration` | W4 acceptance cost-probe keys |
 | `--timeout <s>` | 180 | GUT timeout seconds per arm |

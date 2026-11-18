@@ -411,6 +411,7 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                                                              classes),
         "arms": {"gut_full": merged},
         "arms_state": dict(baseline.get("arms_state") or {}),
+        "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),
         "increment": {
             "mode": "incremental",

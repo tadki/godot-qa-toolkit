@@ -1,0 +1,27 @@
+{
+ "worker": false,
+ "rc": 1,
+ "wall_s": 135.888,
+ "ok": false,
+ "error": "refresh_arms_invalid: gut_full arm invalid (state='invalid', reason='run_error') — new failures gate the build (§SPEC-060a)",
+ "mutants": null,
+ "executed": null,
+ "killed": null,
+ "survived": null,
+ "exec_scheme": null,
+ "slot_mode": null,
+ "worker_channel": null,
+ "farm": null,
+ "prewarm": null,
+ "stage_timings": null,
+ "stage_reconciliation": null,
+ "stderr_tail": [
+  "measure: arm=acceptance shard=2/4 done s=12.6",
+  "measure: arm=acceptance shard=1/4 done s=12.8",
+  "measure: arm=acceptance shard=3/4 done s=12.9",
+  "measure: arm=acceptance shard=4/4 done s=12.9",
+  "measure: arm=acceptance done state=invalid wall_s=12.9"
+ ],
+ "phase": "aa",
+ "index": 0
+}

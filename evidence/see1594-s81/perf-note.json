@@ -1,0 +1,34 @@
+{
+  "tool": "see1594.s81.perf_note",
+  "kol_commit": "ac6a7282",
+  "protocol": "A/A cold >=3 + interleaved cold/worker >=3 (run_see1589_benchmark, budget 4, timeout-s 2400)",
+  "targets": [
+    {
+      "file": "systems/container/data_source.gd",
+      "channel": "worker",
+      "sites": 4,
+      "aa_median_s": 132.779,
+      "aa_noise_band": 0.049,
+      "interleaved_ratios": [
+        1.027,
+        1.0275,
+        null
+      ],
+      "ratio_median": 1.027,
+      "worker_effective": false,
+      "note": "worker vs cold ratios within 1.0x + noise band (1.027 <= 1.049); no regression signal"
+    },
+    {
+      "file": "systems/container/expansion_plan.gd",
+      "channel": "cold",
+      "sites": 1,
+      "aa_median_s": 129.129,
+      "aa_noise_band": 0.0294,
+      "worker_unreachable": true,
+      "unreachable_kind": "static_route_excluded",
+      "note": "cold-only per static routing; named route reason disclosed"
+    }
+  ],
+  "facts_only": "绝对秒数与噪声带如实记录；无回退信号（ratios ≤ 1.0×+noise）；PASS/FAIL 判定归 Leader",
+  "raw_runs": "evidence/see1594-s81/perf-see1589.json + .runs/（9 轮逐轮原子记录）"
+}

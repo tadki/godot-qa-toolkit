@@ -175,8 +175,10 @@ def test_prefilter_consumers_go_through_the_single_chain():
     """planner/executor 只经 coverlink 统一解析链做 prefilter——直连旧
     load 函数的旁路（双路径）在此报警。"""
     planner = (SRC / "mutation" / "planner.py").read_text(encoding="utf-8")
-    executor = (SRC / "mutation" / "executor.py").read_text(encoding="utf-8")
-    for name, text in (("planner", planner), ("executor", executor)):
+    # SEE-1594 BTIDY：executor 的 prefilter 消费簇物理迁移至 planning 模块
+    # （零行为拆分）——统一链守卫随迁，消费文件断言不弱化。
+    executor = (SRC / "mutation" / "planning.py").read_text(encoding="utf-8")
+    for name, text in (("planner", planner), ("executor/planning", executor)):
         assert "resolve_coverage_for_prefilter" in text, (
             f"{name} must consume the unified prefilter chain")
         for legacy in ("load_reusable_coverage", "load_instrumentable_lines"):

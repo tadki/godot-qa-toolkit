@@ -1354,18 +1354,12 @@ def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
 
 
 def _tests_face_map(root: Path) -> dict[str, str]:
-    """tests/ 树全部 .gd 的 rel→sha256（映射的测试面内容绑定）。"""
-    out: dict[str, str] = {}
-    tests = root / "tests"
-    if not tests.is_dir():
-        return out
-    for p in sorted(tests.rglob("*.gd")):
-        try:
-            rel = str(p.relative_to(root))
-            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
-        except OSError:
-            continue
-    return out
+    """tests/ 树全部 .gd 的 rel→sha256（映射的测试面内容绑定）。
+
+    A11（SEE-1594 S2）单一实现：本体在 coverlink.current_tests_face，
+    此处只委派（消费侧 truth_select 同口径）。"""
+    from ..mutation.coverlink import current_tests_face
+    return current_tests_face(str(root))
 
 
 def _arms_state(arms: tuple[dict, ...]) -> dict:

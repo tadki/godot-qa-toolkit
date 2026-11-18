@@ -1,0 +1,634 @@
+{
+  "tool": "see1594.governance",
+  "mode": "semantics",
+  "ok": true,
+  "retired_violations": [],
+  "retired_allowlisted": [
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "src/godot_qa_toolkit/cli.py",
+      "line": 633,
+      "allowlist_reason": "A13 退役说明 docstring（_reuse_coverage_flag 契约描述）",
+      "text": "显式关断。旧 --reuse-coverage 旗标已随 A13（SEE-1594 S5）物理退役"
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "src/godot_qa_toolkit/coverage/runner.py",
+      "line": 835,
+      "allowlist_reason": "sink-recovery 已退役声明注释（非覆盖来源）",
+      "text": "作为覆盖来源（sink-recovery 已退役）。"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "src/godot_qa_toolkit/mutation/coverlink.py",
+      "line": 32,
+      "allowlist_reason": "/1 拒绝守卫常量（盘上残留条目拒绝，零读写路径；A04）",
+      "text": "SCHEMA_COVERAGE = \"see1420-coverage/1\""
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "src/godot_qa_toolkit/mutation/coverlink.py",
+      "line": 347,
+      "allowlist_reason": "/1 拒绝守卫常量（盘上残留条目拒绝，零读写路径；A04）",
+      "text": "\"(see1420-coverage/1), not a projection\")"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "src/godot_qa_toolkit/mutation/diffengine.py",
+      "line": 11,
+      "allowlist_reason": "历史台账注释（v1 --resume 既有语义溯源）",
+      "text": "suspect 复用沿 v1 --resume 既有语义）"
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "src/godot_qa_toolkit/mutation/ops.py",
+      "line": 57,
+      "allowlist_reason": "ops 版本历史台账（当时的披露语义）",
+      "text": "# 旧 store 条目不读不写不删并披露（identity.disclose_superseded）。"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "src/godot_qa_toolkit/mutation/testscan.py",
+      "line": 1,
+      "allowlist_reason": "A10 退役声明注释（静态选面链物理退役标注）",
+      "text": "# A10（SEE-1594 S4）：静态选面（derive_tests_glob/_strength_glob/"
+    },
+    {
+      "pattern": "strength_glob",
+      "file": "src/godot_qa_toolkit/mutation/testscan.py",
+      "line": 1,
+      "allowlist_reason": "A10 退役声明注释",
+      "text": "# A10（SEE-1594 S4）：静态选面（derive_tests_glob/_strength_glob/"
+    },
+    {
+      "pattern": "index_cache",
+      "file": "src/godot_qa_toolkit/mutation/testscan.py",
+      "line": 2,
+      "allowlist_reason": "A10 退役声明注释",
+      "text": "# _INDEX_CACHE 直连强度链）已物理退役——选面唯一真源 = 运行时真值映射"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "docs/contract.md",
+      "line": 114,
+      "allowlist_reason": "历史台账/退役声明（A13 --resume retired 标注）",
+      "text": "### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--select {line,fn,file,full}] [--attribution-map <pat"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "docs/contract.md",
+      "line": 114,
+      "allowlist_reason": "历史台账/退役声明（A13 retired 标注）",
+      "text": "### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--select {line,fn,file,full}] [--attribution-map <pat"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "docs/contract.md",
+      "line": 121,
+      "allowlist_reason": "历史台账/退役声明（A13 retired 标注）",
+      "text": "- **coverage prefilter 自动启用（SEE-1550 L1；SEE-1587 同源投影；SEE-1594 A13/A14 退役旧面）**：`--reuse-coverage` 旗标已退役（默认自动启用，无需 flag）；`--no-reuse-coverage` 显式关断全部过滤层。解析顺序 = 同"
+    },
+    {
+      "pattern": "disclose_v1_superseded",
+      "file": "docs/contract.md",
+      "line": 158,
+      "allowlist_reason": "历史台账（A14 退役声明：该披露面已删除）",
+      "text": "- **v1 目录（`gqt-mutation-resume`）不读不写不删、静默忽略**（A14 已退役其一次性失效披露）。**CI 迁移点**：升级后首个 v2 run 全量重跑（一次性失效，不迁移不脏合并；SEE-1550 OPS `see1550/1` bump 再度一次性失效一次，见 M0 条）。**SEE-"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "docs/contract.md",
+      "line": 164,
+      "allowlist_reason": "历史台账/退役声明（A13 --resume retired 标注）",
+      "text": "- `--resume`（已退役——差分默认开启，无需 flag；SEE-1594 A13，SEE-1400 遗留）：语义已被差分默认开启吸收。`summary.resumed` 仅在真实复用（resumed > 0）时在场；store 落盘面已迁移 v2。"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "docs/contract.md",
+      "line": 168,
+      "allowlist_reason": "历史台账/退役声明（A13 retired 标注）",
+      "text": "- `--reuse-coverage`（P2；SEE-1550 L1 起默认自动启用、`--no-reuse-coverage` 显式关断——见上「coverage prefilter 自动启用」条）：统一经 `resolve_coverage_for_prefilter` 按 **`/2` 投影 store → 现"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "docs/contract.md",
+      "line": 213,
+      "allowlist_reason": "历史台账（S2 /1 store 层退役声明）",
+      "text": "- **行级事实落盘（SEE-1420 P2 → SEE-1594 S2 退役改写）**：手动 `see1420-coverage/1` store 已退役（A04）——`measure coverage` 现由行级映射投影（`/2` 派生缓存，绑定映射内容与执行证据），不再产出/消费 `/1` 条目；盘上残留 `/1"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "docs/mutation-architecture.md",
+      "line": 15,
+      "allowlist_reason": "退役标注（历史形态旗标已退役说明）",
+      "text": "| L3 | 覆盖率前置过滤（历史形态挂 `--reuse-coverage` 旗标——该旗标已随 SEE-1594 A13 退役） | 没被测试覆盖的 mutant 不用跑 | **采纳并升级为同源投影**：手动 `measure coverage` `/1` store → 行事实 `/2` 投影 store → "
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "docs/mutation-architecture.md",
+      "line": 55,
+      "allowlist_reason": "退役标注（防 --resume 误复用的毒条目防护描述）",
+      "text": "- `gutrun.py` 承担 GUT 子进程调用与 launch-failure 甄别（毒条目防护：启动失败类 run_error 不落盘，防 `--resume` 误复用）。"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "docs/runbook/measure.md",
+      "line": 117,
+      "allowlist_reason": "退役声明（manual /1 store retired A04）",
+      "text": "- The manual `see1420-coverage/1` store is retired (SEE-1594 A04): mutation"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "docs/runbook/mutation.md",
+      "line": 121,
+      "allowlist_reason": "退役声明（manual /1 store layer retired）",
+      "text": "demand). SEE-1594 S2 retired the manual `see1420-coverage/1` store layer;"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "docs/runbook/mutation.md",
+      "line": 188,
+      "allowlist_reason": "退役标注行（retired SEE-1594 A13）",
+      "text": "| `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "docs/runbook/mutation.md",
+      "line": 197,
+      "allowlist_reason": "退役标注行（retired SEE-1594 A13）",
+      "text": "| `--reuse-coverage` | **retired** (SEE-1594 A13) | Removed: prefilter is on by default; use `--no-reuse-coverage` to disable |"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 36,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"flag_resume\": r\"--resume\\b\","
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 37,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"flag_reuse_coverage\": r\"--reuse-coverage\","
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 38,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"derive_tests_glob\": r\"derive_tests_glob\","
+    },
+    {
+      "pattern": "strength_glob",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 39,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"strength_glob\": r\"_strength_glob\","
+    },
+    {
+      "pattern": "index_cache",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 40,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"index_cache\": r\"_INDEX_CACHE\","
+    },
+    {
+      "pattern": "structural_ownership",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 41,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"structural_ownership\": r\"StructuralOwnership\","
+    },
+    {
+      "pattern": "test_ownership_index",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 42,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"test_ownership_index\": r\"TestOwnershipIndex\","
+    },
+    {
+      "pattern": "test_func_pattern",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 43,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"test_func_pattern\": r\"_TEST_FUNC_PATTERN\","
+    },
+    {
+      "pattern": "disclose_v1_superseded",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 44,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"disclose_v1_superseded\": r\"disclose_v1_superseded\","
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 45,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"disclose_superseded\": r\"disclose_superseded\","
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 46,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"coverage_store_v1\": r\"see1420-coverage/1\","
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 47,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"sink_recovery_source\": r\"sink[- ]recovery|recovered sink|sink 复原\","
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 56,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "(\"docs/contract.md\", \"历史台账/退役声明（A13 --resume retired 标注）\"),"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 59,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"退役标注（防 --resume 误复用的毒条目防护描述）\"),"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 61,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"历史台账注释（v1 --resume 既有语义溯源）\"),"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 85,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"derive_tests_glob\": ["
+    },
+    {
+      "pattern": "disclose_v1_superseded",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 125,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"disclose_v1_superseded\": ["
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 132,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"disclose_superseded\": ["
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "tests/integration/check_see1594_governance.py",
+      "line": 160,
+      "allowlist_reason": "扫描器自身的 pattern 定义与最小测试",
+      "text": "\"sink-recovery 已退役声明注释（非覆盖来源）\"),"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/unit/test_argv_samesource_see1405.py",
+      "line": 6,
+      "allowlist_reason": "历史台账（SEE-1400 毒条目叙事，退役前行为背景）",
+      "text": "linux-kind key 写入 win64 引擎产 run_error 毒条目，后续 --resume 误复用。"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/unit/test_argv_samesource_see1405.py",
+      "line": 170,
+      "allowlist_reason": "历史台账（SEE-1400 毒条目叙事，退役前行为背景）",
+      "text": "\"\"\"端到端：注入失败条目不落盘（--resume 时自然不会复用）——"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "tests/unit/test_coverage_prefilter_reuse_see1420.py",
+      "line": 1,
+      "allowlist_reason": "历史台账 docstring（§SPEC-1420-12 定案标题引用旧旗标名）",
+      "text": "\"\"\"§SPEC-1420-12：P2 coverage 前置过滤 + `--reuse-coverage`（定案 L3/D7）。"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/unit/test_diff_default_budget_retry_see1420.py",
+      "line": 80,
+      "allowlist_reason": "历史台账注释（差分默认开启语义描述）",
+      "text": "# 差分默认开启（无 --mutate-all / --resume）：killed 全复用"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "tests/unit/test_mechanism_audit_see1587.py",
+      "line": 98,
+      "allowlist_reason": "拒绝守卫常量 pin（assert SCHEMA_COVERAGE == /1）",
+      "text": "assert coverlink.SCHEMA_COVERAGE == \"see1420-coverage/1\""
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/unit/test_see1550_collector_mdr.py",
+      "line": 94,
+      "allowlist_reason": "历史台账注释（SEE-1550 当期语义）",
+      "text": "并披露（identity.disclose_superseded 消费该值）。当前档位"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "tests/unit/test_see1594_derived_cache_identity.py",
+      "line": 126,
+      "allowlist_reason": "拒绝守卫反例（/1 条目必须被拒，非写入路径）",
+      "text": "entry = {\"schema\": \"see1420-coverage/1\", \"rel\": TARGET,"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 44,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "\"from x import derive_tests_glob  # 回潮\\n\")"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 45,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "mod.ALLOWLIST[\"derive_tests_glob\"] = []"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 47,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "assert any(v[\"pattern\"] == \"derive_tests_glob\""
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 53,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "\"from x import derive_tests_glob  # 退役声明注释\\n\")"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 54,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "mod.ALLOWLIST[\"derive_tests_glob\"] = ["
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 58,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "if v.get(\"pattern\") == \"derive_tests_glob\"]"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_governance_scan.py",
+      "line": 59,
+      "allowlist_reason": "载体文本：扫描器最小反例的合成样例——随用例增删而变，免 stale 检查",
+      "text": "assert any(a[\"pattern\"] == \"derive_tests_glob\" for a in allowlisted)"
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 9,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "sink-recovery 覆盖来源退役。"
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 41,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"A13：--resume / --reuse-coverage 物理退役（回潮即红）。\"\"\""
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 41,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"A13：--resume / --reuse-coverage 物理退役（回潮即红）。\"\"\""
+    },
+    {
+      "pattern": "flag_resume",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 47,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "[\"mutation\", \"a.gd\", \"--project-root\", \".\", \"--resume\"])"
+    },
+    {
+      "pattern": "flag_reuse_coverage",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 53,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "[\"mutation\", \"a.gd\", \"--project-root\", \".\", \"--reuse-coverage\"])"
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 67,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"A14：v1 在场披露与 identity.disclose_superseded 物理退役。\"\"\""
+    },
+    {
+      "pattern": "disclose_v1_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 69,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "def test_resume2_disclose_v1_superseded_removed(self):"
+    },
+    {
+      "pattern": "disclose_v1_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 71,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(ResumeStoreV2, \"disclose_v1_superseded\"), ("
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 74,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "def test_identity_disclose_superseded_removed(self):"
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 76,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(identity, \"disclose_superseded\"), ("
+    },
+    {
+      "pattern": "disclose_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 77,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"A14：identity.disclose_superseded 回潮\")"
+    },
+    {
+      "pattern": "disclose_v1_superseded",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 89,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(store, \"disclose_v1_superseded\")"
+    },
+    {
+      "pattern": "structural_ownership",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 95,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"A09：StructuralOwnership / TestOwnershipIndex 物理退役（src 零引用）。\"\"\""
+    },
+    {
+      "pattern": "test_ownership_index",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 95,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"A09：StructuralOwnership / TestOwnershipIndex 物理退役（src 零引用）。\"\"\""
+    },
+    {
+      "pattern": "structural_ownership",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 99,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(truth_select, \"StructuralOwnership\")"
+    },
+    {
+      "pattern": "test_ownership_index",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 100,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(truth_select, \"TestOwnershipIndex\")"
+    },
+    {
+      "pattern": "structural_ownership",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 103,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert _src_hits(\"StructuralOwnership\") == []"
+    },
+    {
+      "pattern": "test_ownership_index",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 104,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert _src_hits(\"TestOwnershipIndex\") == []"
+    },
+    {
+      "pattern": "derive_tests_glob",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 113,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(testscan, \"derive_tests_glob\")"
+    },
+    {
+      "pattern": "strength_glob",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 114,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(testscan, \"_strength_glob\")"
+    },
+    {
+      "pattern": "index_cache",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 115,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert not hasattr(testscan, \"_INDEX_CACHE\")"
+    },
+    {
+      "pattern": "test_func_pattern",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 122,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert _src_hits(\"_TEST_FUNC_PATTERN\") == []"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 130,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "hits = _src_hits(\"see1420-coverage/1\", allow_file_substr=\"coverlink.py\")"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 134,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"不存在以 see1420-coverage/1 落盘的写入：禁止 schema 赋值形态"
+    },
+    {
+      "pattern": "coverage_store_v1",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 139,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "if \"see1420-coverage/1\" not in text:"
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 153,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "\"\"\"sink-recovery 覆盖来源退役：src 不得存在以复原 sink 作为覆盖答案"
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 157,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "hits = _src_hits(\"sink-recovery\", allow_file_substr=\"runner.py\")"
+    },
+    {
+      "pattern": "sink_recovery_source",
+      "file": "tests/unit/test_see1594_semantic_retirement.py",
+      "line": 158,
+      "allowlist_reason": "退役防复发 pin",
+      "text": "assert hits == [], f\"sink-recovery 提及泄漏到声明之外: {hits}\""
+    }
+  ],
+  "single_point_violations": [],
+  "consumer_chain": [
+    {
+      "surface": "measure_coverage",
+      "anchor": "cmd_measure_coverage",
+      "references": "run_coverage",
+      "file": "src/godot_qa_toolkit/cli.py",
+      "line": 831,
+      "text": "from .coverage.runner import run_coverage"
+    },
+    {
+      "surface": "measure_coverage",
+      "anchor": "run_coverage",
+      "references": "project_file_coverage",
+      "file": "src/godot_qa_toolkit/coverage/runner.py",
+      "line": 847,
+      "text": "from .mapping import CoverageMappingError, project_file_coverage"
+    },
+    {
+      "surface": "measure_risk_shadow",
+      "anchor": "default_measure",
+      "references": "run_coverage",
+      "file": "src/godot_qa_toolkit/risk/shadow.py",
+      "line": 519,
+      "text": "from ..coverage.runner import run_coverage"
+    },
+    {
+      "surface": "mutation_prefilter",
+      "anchor": "apply_coverage_prefilter",
+      "references": "resolve_coverage_for_prefilter",
+      "file": "src/godot_qa_toolkit/mutation/coverlink.py",
+      "line": 546,
+      "text": "语义单点：reuse 关断即全量；解析链经 resolve_coverage_for_prefilter；"
+    },
+    {
+      "surface": "mutation_prefilter",
+      "anchor": "_current_tests_face",
+      "references": "current_tests_face",
+      "file": "src/godot_qa_toolkit/mutation/truth_select.py",
+      "line": 346,
+      "text": "def _current_tests_face(project_root: str) -> dict[str, str]:"
+    }
+  ],
+  "dual_truth_violations": [],
+  "failures": []
+}

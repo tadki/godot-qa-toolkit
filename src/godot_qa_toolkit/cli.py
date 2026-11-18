@@ -630,7 +630,8 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
 
 def _reuse_coverage_flag(args: argparse.Namespace) -> bool:
     """SEE-1550 L1：coverage prefilter 默认自动启用；--no-reuse-coverage
-    显式关断。旧 --reuse-coverage 旗标继续接受（与默认同义，向后兼容）。"""
+    显式关断。旧 --reuse-coverage 旗标已随 A13（SEE-1594 S5）物理退役
+    （不再注册，传参即 argparse exit 2）——prefilter 无旗标即默认开。"""
     return not getattr(args, "no_reuse_coverage", False)
 
 

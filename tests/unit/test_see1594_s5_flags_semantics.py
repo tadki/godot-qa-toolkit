@@ -1,9 +1,7 @@
-"""SEE-1594 S5（A13/A14/A19/A20/A22）：旧 flag/缓存退役与语义统一反例。
+"""SEE-1594 S5（A19/A20/A22）语义统一反例。
 
-- A13：--resume / --reuse-coverage 物理退役；--no-reuse-coverage 真实关断；
-  默认差分仍开（summary.resumed 只在真实复用时在场）。
-- A14：v1/旧 /1 启动提示与 identity.disclose_superseded 退役——不再有
-  一次性失效披露输出；store 语义 = 不读不写不删（静默忽略）。
+- A13/A14 的退役防复发钉已集中迁移至
+  test_see1594_semantic_retirement.py（S7 起退役钉唯一位置）。
 - A19：多文件自动选面 baseline 共享——select_mode 穿线后两文件解析出同一
   materialized glob → 单份共享 baseline（不退串行）。
 - A20：显式 --select full 不因无关映射失败阻断（不预建映射）。
@@ -22,94 +20,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 REPO = Path(__file__).resolve().parents[2]
-
-
-class TestA13FlagRetirement:
-    def test_resume_flag_not_registered(self):
-        from godot_qa_toolkit.cli import build_parser
-        with pytest.raises(SystemExit):
-            build_parser().parse_args(
-                ["mutation", "a.gd", "--project-root", ".", "--resume"])
-
-    def test_reuse_coverage_flag_not_registered(self):
-        from godot_qa_toolkit.cli import build_parser
-        with pytest.raises(SystemExit):
-            build_parser().parse_args(
-                ["mutation", "a.gd", "--project-root", ".", "--reuse-coverage"])
-
-    def test_no_reuse_coverage_is_real_off_switch(self):
-        from godot_qa_toolkit.cli import build_parser, _reuse_coverage_flag
-        args = build_parser().parse_args(
-            ["mutation", "a.gd", "--project-root", "."])
-        assert _reuse_coverage_flag(args) is True
-        args2 = build_parser().parse_args(
-            ["mutation", "a.gd", "--project-root", ".", "--no-reuse-coverage"])
-        assert _reuse_coverage_flag(args2) is False
-
-    def test_default_diff_still_on(self, tmp_path, monkeypatch):
-        """默认差分仍开：二轮 killed 复用（resumed 披露）。"""
-        from godot_qa_toolkit.mutation import runner as mrunner
-        proj = tmp_path / "proj"
-        (proj / "addons" / "gut").mkdir(parents=True)
-        (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        tests = proj / "tests"
-        tests.mkdir()
-        (tests / "test_x.gd").write_text(
-            "extends GutTest\n\nfunc test_x():\n\tpass\n")
-        target = proj / "calc.gd"
-        target.write_text(
-            "func add(a):\n\treturn a + 1\n\nfunc sub(a):\n\treturn a - 2\n")
-
-        # A09：killed 复用唯一依据 = 新鲜运行时映射证书——种子 killer 身份
-        import attribution_fixtures as _fx
-        from godot_qa_toolkit.mutation import truth_select as _ts
-        _fx.install_recipe(proj)
-        _fx.line_facts_map(proj, {"test_x.gd::test_x": {"calc.gd": [2, 5]}},
-                           instrumentable={"calc.gd": [2, 5]})
-        _ts._fresh_recipe_hash.cache_clear()
-        _ts._test_scripts_by_name.cache_clear()
-        monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
-
-        state = {"n": 0}
-
-        def fake(root, timeout_s=60, tests_glob=None):
-            state["n"] += 1
-            if state["n"] == 1:
-                return (0, "* t0\n[passed]")
-            return (1, "* test_x\n\t\ttest_x [Failed]")
-
-        monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
-        r1 = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                  tests_glob="res://tests/")
-        assert r1["summary"]["killed"] == 8
-        r2 = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                  tests_glob="res://tests/")
-        assert r2["summary"]["resumed"] == 8, "默认差分仍开（无 flag 参与）"
-
-
-class TestA14StartupDisclosureRetired:
-    def test_no_v1_disclosure_output(self, tmp_path, capsys):
-        """A14：v1 目录在场 → 无一次性失效披露输出（静默忽略，不读不写不删）。"""
-        from godot_qa_toolkit.mutation.resume2 import ResumeStoreV2
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        v1 = proj / ".qa-cache" / "gqt-resume-v1"
-        v1.mkdir(parents=True)
-        (v1 / "0.json").write_text("{}", encoding="utf-8")
-        store = ResumeStoreV2(str(proj), str(proj / "calc.gd"),
-                              "res://tests/", binary_kind=None,
-                              identity={"ops_version": "x"})
-        store.disclose_v1_superseded if hasattr(
-            store, "disclose_v1_superseded") else None
-        assert not hasattr(store, "disclose_v1_superseded"), (
-            "A14：v1 披露方法应已退役")
-        err = capsys.readouterr().err
-        assert "resume v1 store found" not in err
-
-    def test_identity_disclose_superseded_removed(self):
-        from godot_qa_toolkit.mutation import identity
-        assert not hasattr(identity, "disclose_superseded"), (
-            "A14：identity.disclose_superseded 应已物理删除")
 
 
 class TestA19SharedBaseline:

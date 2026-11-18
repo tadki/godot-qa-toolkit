@@ -292,6 +292,38 @@ def _report_ranking_block(scored: list[dict]) -> dict:
         "note": "2-3 files only; never extrapolate to the whole repo",
     }
 
+def _report_acceptance_cost() -> dict:
+    """acceptance_cost 块（诊断面固定占位 + 外推警告）。"""
+    return {
+        "samples": [],
+        "extrapolation_assumption": (
+            "one feature compile+run sample; linear scaling is assumed, "
+            "not proven — full 36-feature cost is out of scope for M2"
+        ),
+    }
+
+
+def _report_routing(scored: list[dict], negatives: list[dict],
+                    unknown_count: int) -> dict:
+    """routing 三计数（tidy 覆盖≥0.8 / harti 覆盖<0.5 / 工具链缺口）。"""
+    return {
+        "tidy": sum(1 for r in scored if (r["coverage"] or 0.0) >= 0.8),
+        "harti_safety_net": sum(
+            1 for r in scored if (r["coverage"] or 0.0) < 0.5
+        ),
+        "tool_chain_gap": len(negatives) + unknown_count,
+    }
+
+
+def _report_confidence(sample_files: int, negative_files: int) -> dict:
+    """confidence 块（样本量 + 外推警告）。"""
+    return {
+        "sample_files": sample_files,
+        "caveat": "2-3 files cannot be extrapolated to the whole repository",
+        "negative_files": negative_files,
+    }
+
+
 def _report_document(
     *,
     ranking: list[dict],
@@ -322,30 +354,13 @@ def _report_document(
         "ranking": _report_ranking_block(scored),
         "core_full": core_full,
         "noise": noise,
-        "acceptance_cost": {
-            "samples": [],
-            "extrapolation_assumption": (
-                "one feature compile+run sample; linear scaling is assumed, "
-                "not proven — full 36-feature cost is out of scope for M2"
-            ),
-        },
-        "routing": {
-            "tidy": sum(1 for r in scored if (r["coverage"] or 0.0) >= 0.8),
-            "harti_safety_net": sum(
-                1 for r in scored if (r["coverage"] or 0.0) < 0.5
-            ),
-            "tool_chain_gap": len(negatives) + unknown_count,
-        },
-        "confidence": {
-            "sample_files": sample_files,
-            "caveat": "2-3 files cannot be extrapolated to the whole repository",
-            "negative_files": negative_files,
-        },
+        "acceptance_cost": _report_acceptance_cost(),
+        "routing": _report_routing(scored, negatives, unknown_count),
+        "confidence": _report_confidence(sample_files, negative_files),
         "negatives": negatives,
         "files": per_file,
         "records": ranking,
     }
-
 def _shadow_collect(eligible_sources: dict[str, str], measure,
                     core_tests: str,
                     full_tests: "str | None") -> tuple:

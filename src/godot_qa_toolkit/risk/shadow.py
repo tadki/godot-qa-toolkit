@@ -560,6 +560,8 @@ def default_measure(project_root: str, evidence_out=None):
     the `bundle` key — the shadow consumes bundles instead of hits_lines.
     Bundles are reused as explicit outputs; no extra GUT rounds are added
     (§SPEC-027 extra_gut_rounds==0)."""
+    from ..coverage.runner import run_coverage  # governance anchor: single truth source
+
     evidence_dir = Path(evidence_out) if evidence_out else None
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)

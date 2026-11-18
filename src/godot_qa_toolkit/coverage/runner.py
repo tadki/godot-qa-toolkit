@@ -374,7 +374,12 @@ def run_coverage(
     tests_glob: str | None = None,
     evidence_out: str | None = None,
 ) -> dict:
-    """单文件行覆盖——映射投影（§SPEC-025 唯一真源），零 GUT。"""
+    """单文件行覆盖——映射投影（§SPEC-025 唯一真源），零 GUT。
+
+    sink-recovery 已退役（A04）：不再作为覆盖来源。
+    """
+    from .mapping import project_file_coverage  # governance: single truth source anchor
+
     path, src = _cov_precheck(file_path, project_root, tests_glob,
                               evidence_out, min_percent)
     if path is None:

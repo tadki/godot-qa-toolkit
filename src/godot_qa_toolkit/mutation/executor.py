@@ -522,6 +522,18 @@ def _impl_parallel_envelope(files, project_root, budget, timeout_s,
     return envelope
 
 
+def _impl_prep(files, project_root, binary_kind, clock, knob_state) -> tuple:
+    """入口归一：§SPEC-610 相对目标锚定 + 身份包 + 时钟/旋钮态（调用方
+    传入优先，缺省兜底）。"""
+    files = anchor_targets_to_project_root(_group_by_file(files),
+                                           project_root)
+    kind = binary_kind or _detect_binary_kind()
+    identity = identity_pack(project_root, kind)
+    clock = clock or StageClock()
+    knob_state = knob_state if knob_state is not None else {}
+    return files, kind, identity, clock, knob_state
+
+
 def _run_mutation_files_impl(
     files: list[str],
     project_root: str,
@@ -547,15 +559,8 @@ def _run_mutation_files_impl(
     串行、SEE-1550 身份包注入）见 _impl_fast_path / _impl_serial_gate /
     _impl_parallel_envelope 分解函数——本函数只做顺序编排。
     """
-    # §SPEC-610（SEE-1576 R-5）：相对目标统一锚定 --project-root（绝对路径
-    # 直过）——入口单点归一，后续规划/读取/报告一律以锚定路径为准，路径
-    # 解析不依赖调用方 CWD。
-    files = anchor_targets_to_project_root(_group_by_file(files),
-                                           project_root)
-    kind = binary_kind or _detect_binary_kind()
-    identity = identity_pack(project_root, kind)
-    clock = clock or StageClock()
-    knob_state = knob_state if knob_state is not None else {}
+    files, _kind, identity, clock, knob_state = _impl_prep(
+        files, project_root, binary_kind, clock, knob_state)
     fast = _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                            tests_glob, binary_kind, timing_store,
                            mutation_warning, timeout_factor, reuse_coverage,
@@ -580,8 +585,6 @@ def _run_mutation_files_impl(
         reuse_coverage, identity, worker_channel, clock, knob_state,
         selection_meta, select_mode, prewarm_info,
         pool_factory=lambda max_workers: _worker_pool(max_workers=max_workers))
-
-
 
 
 def _settled_error(file: str, err) -> dict:
@@ -626,7 +629,6 @@ def _settled_all_uncovered(file: str, records: list[dict],
         },
         "failures": records,
     }
-
 
 
 
@@ -679,7 +681,6 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         if file_settled is not None:
             settled.append(file_settled)
     return chunks, settled, v2ctx
-
 
 
 

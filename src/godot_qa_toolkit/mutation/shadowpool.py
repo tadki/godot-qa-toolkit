@@ -437,9 +437,147 @@ def _sync_generated_dirs(project_root: str, slot: MutationSlot,
     return {"status": "ok", "synced": synced, "pruned": pruned}
 
 
+def _release_slot_lock(slot: MutationSlot) -> None:
+    """槽锁解锁（gen 重建不可用路径用——归还并落盘后抛错前的清理）。"""
+    if slot._slot_lock_fd is not None:
+        try:
+            if fcntl is not None:
+                fcntl.flock(slot._slot_lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(slot._slot_lock_fd)
+            slot._slot_lock_fd = None
+
+
+def _proof_guard_or_rebuild(project_root: str, pool: dict, slot: MutationSlot,
+                            rec: dict, wiring_hash: str, now: float,
+                            gen: dict) -> None:
+    """B2a §4.2：win64 warm 复用枝 proof 双绑定——失配整槽重建一次
+    （既有歧义整槽重建纪律不变，本守卫只加不改）。"""
+    from . import prewarm_proof
+
+    ok, reason = prewarm_proof.guard_baseline_root(slot.root, project_root)
+    if not ok:
+        slot.freshness.append(f"proof-drift:{reason}→rebuild")
+        _rebuild_locked(project_root, pool, slot, rec,
+                        wiring_hash, now)
+        slot.freshness.insert(0, "warm:reused")
+        _farm_after_rebuild(slot, project_root, "proof_drift_rebuild")
+    else:
+        slot.freshness.insert(0, "warm:reused")
+        _set_farm(slot, "reused", "warm_reused",
+                  proof_binding="bound", proof_reason=reason,
+                  generated_dirs={"synced": gen["synced"],
+                                  "pruned": gen["pruned"]},
+                  validation=list(slot.freshness))
+
+
+def _reuse_candidate(project_root: str, pool: dict, rec: dict, slot: MutationSlot,
+                     wiring_hash: str, now: float,
+                     required_globs: "list[str] | None") -> MutationSlot:
+    """复用候选槽的分层新鲜度门：树缺失 / 哨兵+census / generated dirs /
+    proof 双绑定——任何歧义整槽重建（终案纪律）。返回可用槽或抛
+    SlotProvisionError（重建后仍缺 required selection dirs）。"""
+    if not rec.get("path") or not Path(slot.root).is_dir():
+        # D-1（hardener P6 实证）：标死记录 path="" 经 Path("")→'.' 使
+        # is_dir() 恒真——空 path 必须显式走重建通道。
+        slot.freshness.append("slot_tree:missing")
+        _rebuild_locked(project_root, pool, slot, rec,
+                        wiring_hash, now)
+        _farm_after_rebuild(slot, project_root, "slot_tree_missing")
+        return slot
+    if (not _sentinel_layer(project_root, slot, rec)
+            or not _targeted_three_way(project_root, slot, rec)
+            or not _full_census_layer(project_root, slot)):
+        # 歧义/哨兵漂移/census 不符 → 整槽重建
+        _rebuild_locked(project_root, pool, slot, rec,
+                        wiring_hash, now)
+        _farm_after_rebuild(slot, project_root,
+                            "freshness_ambiguity")
+        return slot
+    _sync_repo_delta(project_root, slot, rec)
+    gen = _sync_generated_dirs(project_root, slot, required_globs)
+    if gen["status"] == "rebuild":
+        slot.freshness.append(
+            f"generated_dirs:missing({','.join(gen['missing'])})")
+        _rebuild_locked(project_root, pool, slot, rec,
+                        wiring_hash, now)
+        slot.freshness.insert(0, "warm:reused")
+        _farm_after_rebuild(slot, project_root,
+                            "generated_dirs_missing")
+        still = _missing_required(project_root, slot.root, required_globs)
+        if still:
+            rec["in_use"] = False
+            _save_pool(project_root, pool)
+            _release_slot_lock(slot)
+            raise SlotProvisionError(
+                "warm slot generated selection dirs unavailable "
+                f"after rebuild: {still} (project_root="
+                f"{project_root})")
+        return slot
+    if gen["synced"] or gen["pruned"]:
+        slot.freshness.append(
+            f"generated_dirs:synced({gen['synced']},"
+            f"pruned={gen['pruned']})")
+    rec["last_used_at"] = now
+    rec["wiring_hash"] = wiring_hash
+    rec["sentinel"] = shadow.godot_sentinel(project_root)
+    _save_pool(project_root, pool)
+    _proof_guard_or_rebuild(project_root, pool, slot, rec, wiring_hash, now,
+                            gen)
+    return slot
+
+
+def _create_warm_slot(project_root: str, pool: dict, targets: list[str],
+                      wiring_hash: str, kind: str, now: float,
+                      targeted_only: bool) -> MutationSlot:
+    """无可复用槽 → 新建（id 含 uuid：同秒同 PID 的并发 acquire 不得碰撞）
+    + B2a §4.2 新建枝 proof 双绑定（失配重建一次）。"""
+    slot_id = f"slot-{int(now)}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    fd = _try_slot_lock(project_root, slot_id)
+    root, provision = shadow.create_slot(
+        project_root, kind,
+        slot_dir=_pool_dir(project_root) / "slots" / slot_id)
+    rec = _new_record(project_root, str(root), wiring_hash, targets, now)
+    pool["slots"][slot_id] = rec
+    # 插入后再 prune（预算/槽数不变式对新态成立）——旧槽不被误删。
+    _prune_pool_locked(project_root, pool, now)
+    _save_pool(project_root, pool)
+    slot = MutationSlot(root=str(root), project_root=project_root,
+                        kind=kind, mode="warm", targets=targets,
+                        targeted_only=targeted_only)
+    slot.slot_id = slot_id
+    slot._slot_lock_fd = fd
+    slot.provision = provision
+    slot.freshness.append(
+        f"warm:created(linked={provision['linked']},"
+        f"copied={provision['copied']})")
+    from . import prewarm_proof
+
+    ok, reason = prewarm_proof.guard_baseline_root(slot.root, project_root)
+    if not ok:
+        slot.freshness.append(f"proof-drift:{reason}→rebuild")
+        shutil.rmtree(slot.root, ignore_errors=True)
+        root, provision = shadow.create_slot(
+            project_root, kind,
+            slot_dir=_pool_dir(project_root) / "slots" / slot_id)
+        slot.root = str(root)
+        slot.provision = provision
+        ok, reason = prewarm_proof.guard_baseline_root(slot.root,
+                                                       project_root)
+        slot.freshness.append("proof-bound" if ok
+                              else f"proof-drift-persists:{reason}")
+    _set_farm(slot, "created", "warm_created",
+              linked=provision["linked"], copied=provision["copied"],
+              proof_binding="bound" if ok else "drift_persisted",
+              proof_reason=reason, validation=list(slot.freshness))
+    return slot
+
+
 def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
                   targeted_only: bool, kind: str = "win64",
                   required_globs: list[str] | None = None) -> MutationSlot:
+    """持久 warm 池取槽：分层新鲜度门（树/哨兵/census/generated/proof）
+    → 复用或新建；池锁串行化（fresh farm 仅池锁不可用时的降级通道）。"""
     with _PoolLock(project_root):
         pool = _load_pool(project_root)
         now = time.time()
@@ -459,120 +597,10 @@ def _acquire_warm(project_root: str, targets: list[str], wiring_hash: str,
             slot.slot_id = slot_id
             slot._slot_lock_fd = fd
             rec["in_use"] = True
-            # D-1（hardener P6 实证）：标死记录 path="" 经 Path("")→'.'
-            # 使 is_dir() 恒真，「缺失树→整槽重建」通道不触发——槽以 CWD
-            # 为根复活并做 CWD 相对重链，写穿真实仓根。空 path 必须显式
-            # 走重建通道。
-            if not rec.get("path") or not Path(slot.root).is_dir():
-                slot.freshness.append("slot_tree:missing")
-                _rebuild_locked(project_root, pool, slot, rec,
-                                wiring_hash, now)
-                _farm_after_rebuild(slot, project_root, "slot_tree_missing")
-                return slot
-            if (not _sentinel_layer(project_root, slot, rec)
-                    or not _targeted_three_way(project_root, slot, rec)
-                    or not _full_census_layer(project_root, slot)):
-                # 歧义/哨兵漂移/census 不符 → 整槽重建（终案：任何歧义整槽重建）
-                _rebuild_locked(project_root, pool, slot, rec,
-                                wiring_hash, now)
-                _farm_after_rebuild(slot, project_root,
-                                    "freshness_ambiguity")
-                return slot
-            _sync_repo_delta(project_root, slot, rec)
-            gen = _sync_generated_dirs(project_root, slot, required_globs)
-            if gen["status"] == "rebuild":
-                slot.freshness.append(
-                    f"generated_dirs:missing({','.join(gen['missing'])})")
-                _rebuild_locked(project_root, pool, slot, rec,
-                                wiring_hash, now)
-                slot.freshness.insert(0, "warm:reused")
-                _farm_after_rebuild(slot, project_root,
-                                    "generated_dirs_missing")
-                still = _missing_required(project_root, slot.root, required_globs)
-                if still:
-                    rec["in_use"] = False
-                    _save_pool(project_root, pool)
-                    if slot._slot_lock_fd is not None:
-                        try:
-                            if fcntl is not None:
-                                fcntl.flock(slot._slot_lock_fd, fcntl.LOCK_UN)
-                        finally:
-                            os.close(slot._slot_lock_fd)
-                            slot._slot_lock_fd = None
-                    raise SlotProvisionError(
-                        "warm slot generated selection dirs unavailable "
-                        f"after rebuild: {still} (project_root="
-                        f"{project_root})")
-                return slot
-            if gen["synced"] or gen["pruned"]:
-                slot.freshness.append(
-                    f"generated_dirs:synced({gen['synced']},"
-                    f"pruned={gen['pruned']})")
-            rec["last_used_at"] = now
-            rec["wiring_hash"] = wiring_hash
-            rec["sentinel"] = shadow.godot_sentinel(project_root)
-            _save_pool(project_root, pool)
-            # B2a §4.2：win64 warm 复用枝 proof 双绑定——失配整槽重建一次
-            # （既有歧义整槽重建纪律不变，本守卫只加不改）。
-            from . import prewarm_proof
-            ok, reason = prewarm_proof.guard_baseline_root(slot.root,
-                                                           project_root)
-            if not ok:
-                slot.freshness.append(f"proof-drift:{reason}→rebuild")
-                _rebuild_locked(project_root, pool, slot, rec,
-                                wiring_hash, now)
-                slot.freshness.insert(0, "warm:reused")
-                _farm_after_rebuild(slot, project_root, "proof_drift_rebuild")
-            else:
-                slot.freshness.insert(0, "warm:reused")
-                _set_farm(slot, "reused", "warm_reused",
-                          proof_binding="bound", proof_reason=reason,
-                          generated_dirs={"synced": gen["synced"],
-                                          "pruned": gen["pruned"]},
-                          validation=list(slot.freshness))
-            return slot
-        # 无可复用槽 → 新建（id 含 uuid：同秒同 PID 的并发 acquire 不得碰撞）
-        slot_id = f"slot-{int(now)}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        fd = _try_slot_lock(project_root, slot_id)
-        root, provision = shadow.create_slot(
-            project_root, kind,
-            slot_dir=_pool_dir(project_root) / "slots" / slot_id)
-        rec = _new_record(project_root, str(root), wiring_hash, targets, now)
-        pool["slots"][slot_id] = rec
-        # 插入后再 prune（预算/槽数不变式对新态成立）——旧槽不被误删，
-        # 新槽超额时最久未用者先出。
-        _prune_pool_locked(project_root, pool, now)
-        _save_pool(project_root, pool)
-        slot = MutationSlot(root=str(root), project_root=project_root,
-                            kind=kind, mode="warm", targets=targets,
-                            targeted_only=targeted_only)
-        slot.slot_id = slot_id
-        slot._slot_lock_fd = fd
-        slot.provision = provision
-        slot.freshness.append(
-            f"warm:created(linked={provision['linked']},"
-            f"copied={provision['copied']})")
-        # B2a §4.2：warm 新建枝 proof 双绑定（失配重建一次）。
-        from . import prewarm_proof
-        ok, reason = prewarm_proof.guard_baseline_root(slot.root, project_root)
-        if not ok:
-            slot.freshness.append(f"proof-drift:{reason}→rebuild")
-            shutil.rmtree(slot.root, ignore_errors=True)
-            root, provision = shadow.create_slot(
-                project_root, kind,
-                slot_dir=_pool_dir(project_root) / "slots" / slot_id)
-            slot.root = str(root)
-            slot.provision = provision
-            ok, reason = prewarm_proof.guard_baseline_root(slot.root,
-                                                           project_root)
-            slot.freshness.append("proof-bound" if ok
-                                  else f"proof-drift-persists:{reason}")
-        _set_farm(slot, "created", "warm_created",
-                  linked=provision["linked"], copied=provision["copied"],
-                  proof_binding="bound" if ok else "drift_persisted",
-                  proof_reason=reason, validation=list(slot.freshness))
-        return slot
-
+            return _reuse_candidate(project_root, pool, rec, slot,
+                                    wiring_hash, now, required_globs)
+        return _create_warm_slot(project_root, pool, targets, wiring_hash,
+                                 kind, now, targeted_only)
 
 def _rebuild_locked(project_root: str, pool: dict, slot: MutationSlot,
                     rec: dict, wiring_hash: str, now: float) -> None:

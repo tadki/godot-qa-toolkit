@@ -584,15 +584,11 @@ def prewarm_with_proof(project_root: str) -> dict:
         return out
 
 
-def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
-    _, proof_path = _proof_paths(project_root)
-    cert, load_reason = _load_proof(project_root)
-    state = None
-    if cert is not None:
-        try:
-            state = _scan_state(project_root)
-        except TreeAmbiguity as e:
-            print(f"prewarm: re-import (tree ambiguity: {e})", file=sys.stderr)
+def _locked_fresh_check(project_root: str, load_reason: str | None,
+                        cert: dict | None, state: dict | None,
+                        out: dict, t0: float) -> "tuple[bool, str | None]":
+    """新鲜证明判定：input/output 双摘要全等 → fresh_skip（零导入）；
+    失效原因 stderr 具名披露。返回 (fresh, invalidate_reason_or_None)。"""
     if cert is not None and state is not None:
         if state["input_digest"] == cert["input_digest"] \
                 and state["output_digest"] == cert["output_seal"]:
@@ -603,45 +599,70 @@ def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
                   f"input={cert['input_digest'][:8]} "
                   f"output={cert['output_seal'][:8]} "
                   f"probe_s={out['probe_s']}", file=sys.stderr)
-            return out
+            return True, None
         reason = load_reason or "digest mismatch"
         print(f"prewarm: re-import (stale: {reason})", file=sys.stderr)
-    else:
-        print(f"prewarm: re-import (no usable proof: {load_reason})",
-              file=sys.stderr)
-    # 失效先行 → 双导入定点 → 原子发布
-    invalidate = _invalidate_proof(project_root)
+        return False, None
+    print(f"prewarm: re-import (no usable proof: {load_reason})",
+          file=sys.stderr)
+    return False, None
+
+
+def _locked_double_import(project_root: str, out: dict) -> "tuple[dict | None, str | None]":
+    """失效先行 → 双导入定点收敛（S2/O2 逐 digest 相等才继续）；任何
+    失败/不收敛 → 具名 out.reason + stderr，返回 (None, 原因)。"""
     ok, reason, import_s1 = _timed_import(project_root)
     out["import_calls"] = 1
     out["import_wall_s"] = import_s1
     if not ok:
         out["reason"] = f"first import failed: {reason}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)
-        return out
+        return None, out["reason"]
     try:
         s1 = _scan_state(project_root)
     except TreeAmbiguity as e:
         out["reason"] = f"post-import scan ambiguous: {e}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)
-        return out
+        return None, out["reason"]
     ok2, reason2, import_s2 = _timed_import(project_root)
     out["import_calls"] = 2
     out["import_wall_s"] = round(import_s1 + import_s2, 3)
     if not ok2:
         out["reason"] = f"verification import failed: {reason2}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)
-        return out
+        return None, out["reason"]
     try:
         s2 = _scan_state(project_root)
     except TreeAmbiguity as e:
         out["reason"] = f"post-verify scan ambiguous: {e}"
         print(f"prewarm: no cert ({out['reason']})", file=sys.stderr)
-        return out
+        return None, out["reason"]
     if (s2["input_digest"], s2["output_digest"]) \
             != (s1["input_digest"], s1["output_digest"]):
         out["reason"] = "double import did not converge"
         print("prewarm: no cert (S2/O2 != S1/O1 — outputs still changing)",
               file=sys.stderr)
+        return None, out["reason"]
+    return s2, None
+
+
+def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
+    """锁内流程：新鲜判定 → 失效先行 → 双导入定点 → 原子发布。"""
+    _, proof_path = _proof_paths(project_root)
+    cert, load_reason = _load_proof(project_root)
+    state = None
+    if cert is not None:
+        try:
+            state = _scan_state(project_root)
+        except TreeAmbiguity as e:
+            print(f"prewarm: re-import (tree ambiguity: {e})", file=sys.stderr)
+    fresh, _why = _locked_fresh_check(project_root, load_reason, cert, state,
+                                      out, t0)
+    if fresh:
+        return out
+    invalidate = _invalidate_proof(project_root)
+    s2, fail_reason = _locked_double_import(project_root, out)
+    if s2 is None:
         return out
     try:
         identity = _engine_identity(check_version=True)
@@ -664,7 +685,6 @@ def _locked_flow(project_root: str, t0: float, out: dict) -> dict:
                reason=f"invalidate={invalidate}",
                probe_s=round(time.perf_counter() - t0, 3))
     return out
-
 
 def reissue_after_drift(project_root: str) -> dict:
     """MUST_REBUILD 通道：废弃旧证 → 重导入重签证（baseline 前调用）。"""

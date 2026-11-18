@@ -339,6 +339,22 @@ def _legs_parity(c: dict, target_res: str, closure, parity_inject_fn) -> None:
         raise
 
 
+def _legs_drift_disqualify(c: dict, seq, leg) -> None:
+    """漂移致命 = 腿间状态污染被实证（D-DVP 扩面实测：与 canary 失配同族）
+    → 通道资格否证：窗口冷权威 + 剩余全部冷降级（不再 respawn 后继续
+    worker，同 canary 否证语义）。"""
+    c["fatal_events"].append(leg.fatal_reason)
+    print(f"mutation worker: SESSION FATAL at leg {seq} — "
+          f"{leg.fatal_reason}; channel disqualified for this "
+          f"file: window invalidated and ALL remaining legs "
+          f"degraded to cold (disclosed, equivalence preserved)",
+          file=sys.stderr)
+    _legs_recast_cold(c, c["window_start"])
+    _legs_harvest_boot(c, c["session"])
+    c["session"].close()
+    c["degrade_all"] = True
+
+
 def _legs_one(c: dict, seq, m, target_res: str, closure,
               prev_leg_gut_ran: bool) -> bool:
     """单腿状态迁移（inject → canary 决策 → 致命处置 → 判定记录）。
@@ -347,9 +363,8 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
     if inject_error is not None:
         _legs_record(c, m, inject_error)
         return prev_leg_gut_ran
-    # D-DVP：非 GUT 腿（位点级 compile-invalid 跳过 GUT）之后的腿，
-    # wipe+部分再生的 user:// 态与冷全新目录不等价——该腿强制双通道
-    # canary（否则产生无证据假 kill）。周期 canary 照旧叠加。
+    # D-DVP：非 GUT 腿之后的腿，wipe+部分再生的 user:// 态与冷全新目录
+    # 不等价——该腿强制双通道 canary（否则产生无证据假 kill）。
     force_canary = not prev_leg_gut_ran
     canary_cold = (c["cold_runner"](m, seq)
                    if (canary_due(seq) or force_canary) else None)
@@ -363,19 +378,7 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
                                c["tests_glob"])
     leg_elapsed = time.monotonic() - t_leg
     if leg.fatal and leg.state_drift:
-        # 漂移致命 = 腿间状态污染被实证（D-DVP 扩面实测：与 canary
-        # 失配同族）→ 通道资格否证：窗口冷权威 + 剩余全部冷降级，
-        # 不再 respawn 后继续 worker（同 canary 否证语义）。
-        c["fatal_events"].append(leg.fatal_reason)
-        print(f"mutation worker: SESSION FATAL at leg {seq} — "
-              f"{leg.fatal_reason}; channel disqualified for this "
-              f"file: window invalidated and ALL remaining legs "
-              f"degraded to cold (disclosed, equivalence preserved)",
-              file=sys.stderr)
-        _legs_recast_cold(c, c["window_start"])
-        _legs_harvest_boot(c, c["session"])
-        c["session"].close()
-        c["degrade_all"] = True
+        _legs_drift_disqualify(c, seq, leg)
         verdict, elapsed = _legs_run_cold(c, m, seq)
         _legs_record(c, m, verdict, elapsed)
         return prev_leg_gut_ran
@@ -395,7 +398,6 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
         c["degrade_all"] = True
     _legs_record(c, m, verdict, leg_elapsed)
     return leg.gut_ran
-
 
 def _legs_mutants(c: dict, mutants, target_res: str, closure) -> None:
     """逐 mutant 编排循环（状态迁移见 _legs_one）。"""

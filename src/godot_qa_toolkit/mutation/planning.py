@@ -253,6 +253,21 @@ def _plan_make_ctx(plan, executed_list, untouched, header_hash, scope_hashes,
     }
 
 
+def _plan_serial_fallback(f, project_root, budget, timeout_s, glob,
+                          binary_kind, timeout_factor, mutate_all,
+                          selection_meta, select_mode, raw_total, attention,
+                          run_id, executed_list, identity, worker_channel,
+                          baseline_failures) -> list[dict]:
+    """baseline 快照失败 → 整卷退串行单任务（SEE-1525 显式降级告警）。"""
+    if glob is not None:
+        _warn_serial_fallback(f, (baseline_failures or {}).get(glob))
+    return [_plan_serial_chunk(
+        f, project_root, budget, timeout_s, glob, binary_kind,
+        timeout_factor, mutate_all, selection_meta, select_mode,
+        raw_total, attention, run_id, executed_list, identity,
+        worker_channel)]
+
+
 def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       binary_kind, mutation_warning, timeout_factor,
                       mutate_all, reuse_coverage, baselines,
@@ -262,8 +277,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       clock: StageClock | None = None,
                       auto_selection: dict | None = None,
                       select_mode: str = "full"):
-    """单文件规划：收集 → 差分 plan（killed 证书门）→ P2 覆盖过滤 →
-    budget → 分片（返回 chunks, v2ctx_or_None, settled_or_None）。"""
+    """单文件规划：收集 → 差分 plan → prefilter → budget → 分片。"""
     clock = clock or StageClock()
     src, collected, raw_total, settled = _plan_collect(f)
     if settled is not None:
@@ -286,14 +300,11 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             timeout_factor, mutate_all, baseline, run_id, reuse_coverage,
             identity, worker_channel, select_mode, selection_meta)
     if baseline is None:
-        # baseline 快照失败 → 整卷退串行单任务（SEE-1525 显式降级告警）。
-        if glob is not None:
-            _warn_serial_fallback(f, (baseline_failures or {}).get(glob))
-        return [_plan_serial_chunk(
+        return _plan_serial_fallback(
             f, project_root, budget, timeout_s, glob, binary_kind,
             timeout_factor, mutate_all, selection_meta, select_mode,
             raw_total, attention, run_id, executed_list, identity,
-            worker_channel)], None, None
+            worker_channel, baseline_failures), None, None
     ctx = _plan_make_ctx(plan, executed_list, untouched, header_hash,
                          scope_hashes, store2, src, mutants,
                          uncovered_mutants, selection_meta, select_mode,
@@ -312,7 +323,6 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                               worker_channel=worker_channel,
                               select_mode=select_mode)
     return chunks, ctx, None
-
 def _fid_of_line(registry: dict, line: int) -> str | None:
     for entry in (registry or {}).get("entries") or []:
         if not entry.get("instrumentable"):

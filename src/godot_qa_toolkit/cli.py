@@ -665,6 +665,20 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
         performance_input = json.loads(
             Path(args.performance_file).read_text(encoding="utf-8")
         )
+    # SEE-1605 §SPEC-001：首触 auto 生成须一次覆盖全部请求文件的首层目录——
+    # 车道内逐文件 ensure_map 只绑定当前文件目录，跨目录文件会退化为逐车道
+    # 增量（virgin 上即 QA 实测的静默落空）。预温生成失败 = 本轮测量面不可
+    # 用，具名中止（台账已留痕），不带病进入车道循环。
+    if not args.skip_measure:
+        from .mutation.truth_select import MutationSelectionError, ensure_map
+        try:
+            ensure_map(args.project_root, [str(p) for p in paths])
+        except MutationSelectionError as e:
+            msg = (f"attribution map auto-generation failed: {e}; "
+                   "aborting before measurement lanes")
+            return _emit({"tool": "measure.risk", "ok": False,
+                          "summary": {"error": msg},
+                          "failures": [{"reason": msg}]})
     report = run_shadow_from_paths(
         paths=paths,
         project_root=args.project_root,
@@ -685,6 +699,25 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
         return _emit({"tool": "measure.risk", "ok": False,
                       "summary": {"error": msg},
                       "failures": [{"reason": msg}]})
+    # SEE-1605 §SPEC-002：auto 生成/重建失败时禁止假 `ok:true`——报告仍
+    # 落盘供诊断，但 CLI 信封具名失败并退出非零。台账是生成是否成功的唯一
+    # 出处（显式 map/mode=off/warmed 复用不产生 generate/rebuild 事件，
+    # skip-measure 不消费映射，均不受影响）。
+    if not args.skip_measure:
+        from .mutation.truth_select import ledger
+        gen_error = next(
+            (e.get("error") or "attribution map auto-generation failed"
+             for e in ledger()["events"]
+             if e.get("action") in ("generate", "rebuild")
+             and not e.get("ok", False)),
+            None)
+        if gen_error is not None:
+            msg = (f"attribution map auto-generation failed: {gen_error}; "
+                   f"coverage lanes are run_error — see {report_path}")
+            return _emit({"tool": "measure.risk", "ok": False,
+                          "summary": {"error": msg,
+                                      "report": str(report_path)},
+                          "failures": [{"reason": msg}]})
     scored = report["ranking"]["top"]
     return _emit(
         {

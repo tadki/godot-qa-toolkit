@@ -10,10 +10,58 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+import pytest
 from godot_qa_toolkit.mutation import runner as mrunner
 from godot_qa_toolkit.mutation.diffengine import budget_on_retry, \
     untouched_ranges
 from godot_qa_toolkit.mutation.ops import Mutant
+
+def _pin_cold(monkeypatch):
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    from godot_qa_toolkit.mutation import worker_channel as wc
+    monkeypatch.setattr(wc, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr(mrunner, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+def _add_gut(proj):
+    (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
+
+
+def _materialize_selection(proj, names):
+    sel_dir = proj / ".gqt-attr-select" / "testsel"
+    sel_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+    return "res://.gqt-attr-select/testsel/"
+
+
+@pytest.fixture(autouse=True)
+def _pin_cold_auto(monkeypatch):
+    _pin_cold(monkeypatch)
+
+
+def _pin_cold(monkeypatch):
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    from godot_qa_toolkit.mutation import worker_channel as wc
+    monkeypatch.setattr(wc, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr(mrunner, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+def _add_gut(proj):
+    (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
+
+
+def _materialize_selection(proj, names):
+    sel_dir = proj / ".gqt-attr-select" / "testsel"
+    sel_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+    return "res://.gqt-attr-select/testsel/"
+
 
 TARGET_SRC = ("func add(a, b):\n"
               "\treturn a + b\n")
@@ -29,6 +77,7 @@ def _write_project(tmp_path, src=TARGET_SRC):
     tests = proj / "tests"
     tests.mkdir()
     (tests / "test_x.gd").write_text("extends GutTest\n\nfunc test_x():\n\tpass\n")
+    _add_gut(proj)
     target = proj / "calc.gd"
     target.write_text(src)
     return proj, target
@@ -67,7 +116,7 @@ class TestDiffDefaultOn:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
         mrunner.run_mutation(str(target), str(proj), budget=10,
-                             tests_glob="res://tests/")
+                             tests_glob=_materialize_selection(proj, ["test_a.gd"]))
         calls2 = {"n": 0}
 
         def counting_kill_all(root, timeout_s=60, tests_glob=None):
@@ -76,7 +125,7 @@ class TestDiffDefaultOn:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", counting_kill_all)
         r2 = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                  tests_glob="res://tests/")
+                                  tests_glob=_materialize_selection(proj, ["test_a.gd"]))
         # 差分默认开启（无 --mutate-all / --resume）：killed 全复用
         assert r2["summary"]["resumed"] == 3
         assert r2["summary"]["executed"] == 0
@@ -90,7 +139,7 @@ class TestDiffDefaultOn:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
         mrunner.run_mutation(str(target), str(proj), budget=10,
-                             tests_glob="res://tests/")
+                             tests_glob=_materialize_selection(proj, ["test_a.gd"]))
         calls2 = {"n": 0}
 
         def counting_kill_all(root, timeout_s=60, tests_glob=None):
@@ -99,7 +148,7 @@ class TestDiffDefaultOn:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", counting_kill_all)
         r2 = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                  tests_glob="res://tests/", mutate_all=True)
+                                  tests_glob=_materialize_selection(proj, ["test_a.gd"]), mutate_all=True)
         # --mutate-all：全部位点重跑（executed == retry_total == 3）
         assert r2["summary"]["executed"] == 3
         assert "resumed" not in r2["summary"]
@@ -124,10 +173,10 @@ class TestDiffDefaultOn:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
         mrunner.run_mutation(str(target), str(proj), budget=10,
-                             tests_glob="res://tests/",
+                             tests_glob=_materialize_selection(proj, ["test_a.gd"]),
                              select_mode="line", reuse_coverage=False)
         r2 = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                  tests_glob="res://tests/",
+                                  tests_glob=_materialize_selection(proj, ["test_a.gd"]),
                                   select_mode="line", reuse_coverage=False)
         skipped = r2["summary"]["diff_skipped"]
         assert len(skipped) == 3
@@ -176,7 +225,7 @@ class TestBudgetOnRetryEndToEnd:
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         _seed_map()
         full = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                    tests_glob="res://tests/",
+                                    tests_glob=_materialize_selection(proj, ["test_a.gd"]),
                                     reuse_coverage=False)
         # 位点数：one = AOR 3 + boundary 2 = 5；two = AOR 3 → 共 8
         assert full["summary"]["killed"] == 8
@@ -185,7 +234,7 @@ class TestBudgetOnRetryEndToEnd:
         _seed_map()
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         r2 = mrunner.run_mutation(str(target), str(proj), budget=1,
-                                  tests_glob="res://tests/",
+                                  tests_glob=_materialize_selection(proj, ["test_a.gd"]),
                                   reuse_coverage=False)
         s = r2["summary"]
         assert s["resumed"] == 5  # one 的 killed 复用

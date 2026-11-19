@@ -133,26 +133,37 @@ class TestColdDirectDecision:
     def test_enabled_selection_dir_with_gut(self, tmp_path):
         proj, _ = _write_project(tmp_path, with_gut=True)
         glob = _materialize_selection(proj, ["test_a.gd"])
-        scripts, kind = mrunner._cold_direct_decision(True, str(proj), glob)
+        scripts, kind, gut_ok = mrunner._cold_direct_decision(
+            True, str(proj), glob, dirty=False)
         assert scripts is not None and kind == "selection_dir"
+        assert gut_ok is True
 
     def test_disabled_by_flag(self, tmp_path):
         proj, _ = _write_project(tmp_path, with_gut=True)
         glob = _materialize_selection(proj, ["test_a.gd"])
-        scripts, kind = mrunner._cold_direct_decision(False, str(proj), glob)
+        # bail off + 干净基线 → 不启用直驱宿主（legacy 形态）
+        scripts, kind, gut_ok = mrunner._cold_direct_decision(
+            False, str(proj), glob, dirty=False)
         assert scripts is None and kind == "selection_dir"
+        # bail off + 基线脏 → 仍启用（P2-R1 物理跳过必须在可控宿主）
+        scripts, kind, gut_ok = mrunner._cold_direct_decision(
+            False, str(proj), glob, dirty=True)
+        assert scripts is not None and gut_ok is True
 
     def test_gut_addon_missing_named(self, tmp_path):
         proj, _ = _write_project(tmp_path, with_gut=False)
         glob = _materialize_selection(proj, ["test_a.gd"])
-        scripts, kind = mrunner._cold_direct_decision(True, str(proj), glob)
+        scripts, kind, gut_ok = mrunner._cold_direct_decision(
+            True, str(proj), glob, dirty=True)
         assert scripts is None and kind == "gut_addon_missing"
+        assert gut_ok is False
 
     def test_explicit_dir_never_direct(self, tmp_path):
         proj, _ = _write_project(tmp_path, with_gut=True)
-        scripts, kind = mrunner._cold_direct_decision(True, str(proj),
-                                                      "res://tests/")
-        assert scripts is None and kind == "unsupported_explicit_or_full"
+        scripts, kind, gut_ok = mrunner._cold_direct_decision(
+            True, str(proj), "res://tests/", dirty=True)
+        assert scripts is None
+        assert kind == "unsupported_explicit_or_full"
 
 
 class TestPlumbing:
@@ -242,9 +253,11 @@ class TestPlumbing:
                 self.canaries += 1
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
-                        tests_scripts=None, baseline_failures=None):
+                        tests_scripts=None, baseline_failures=None,
+                        skip_red_names=None):
                 captured["scripts"] = tests_scripts
                 captured["baseline"] = baseline_failures
+                captured["skip_red"] = skip_red_names
                 return wc.WorkerLegResult(leg=leg, hash_ok=True, gut_ran=True,
                                           fail_count=0, failing_tests=set(),
                                           ok=True)
@@ -264,6 +277,7 @@ class TestPlumbing:
             "res://.gqt-attr-select/s/a.gd"], \
             f"captured={captured} pairs={pairs} fatals={fatals}"
         assert captured.get("baseline") == ["test_old"]
+        assert captured.get("skip_red") == ["test_old"]
         assert pairs
 
     def test_worker_leg_req_without_scripts(self, tmp_path, monkeypatch):
@@ -285,8 +299,10 @@ class TestPlumbing:
                 self.canaries += 1
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
-                        tests_scripts=None, baseline_failures=None):
+                        tests_scripts=None, baseline_failures=None,
+                        skip_red_names=None):
                 captured["scripts"] = tests_scripts
+                captured["skip_red"] = skip_red_names
                 return wc.WorkerLegResult(leg=leg, hash_ok=True, gut_ran=True,
                                           fail_count=0, failing_tests=set(),
                                           ok=True)
@@ -304,6 +320,8 @@ class TestPlumbing:
             kill_bail=False, tests_scripts=["res://should-not-appear.gd"])
         assert captured.get("scripts") is None, \
             f"captured={captured}"
+        assert captured.get("skip_red") == [], \
+            f"skip_red={captured.get('skip_red')}"
 
 
 class TestHostTemplates:

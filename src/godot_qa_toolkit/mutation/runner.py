@@ -518,7 +518,8 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        slot=None, auto_name: str = "",
                        ownership_fn=None, target_rel: str = "",
                        target_res: str = "",
-                       direct_scripts: list[str] | None = None) -> dict:
+                       direct_scripts: list[str] | None = None,
+                       bail_enabled: bool = True) -> dict:
     """磁盘影子注入 → 跑 GUT → 分类；真实仓目标文件全程零写入（SEE-1550）。
 
     - 注入：每 mutant 一次 replace，无恢复步，写失败上抛转 run_error。
@@ -529,7 +530,7 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     injected, cfg_path, user_dir = _sm_inject(
         m, slot, target_rel, target_res, original_src, project_root, path,
         auto_name, direct_scripts=direct_scripts,
-        baseline_failures=baseline_failures)
+        baseline_failures=baseline_failures, bail_enabled=bail_enabled)
     if cfg_path is None:
         return injected  # 注入失败 run_error 契约
     _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
@@ -584,7 +585,7 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
             baseline_failures, baseline_dirty, slot=slot,
             auto_name=auto_name, ownership_fn=ownership_fn,
             target_rel=target_rel, target_res=target_res,
-            direct_scripts=direct_scripts)
+            direct_scripts=direct_scripts, bail_enabled=kill_bail)
         raw_pairs.append((m, verdict))
         # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
         if reporter is not None:
@@ -713,8 +714,17 @@ def _run_mutant_loop(
         # SEE-1606 §SPEC-P3：kill 即退有效开关在此解析（env/flag 单点），
         # 直驱脚本清单按面判定一次并贯穿 cold/worker 两条腿路径。
         bail_effective = killbail.resolve_kill_bail(kill_bail)
-        bail_scripts, bail_face = _cold_direct_decision(
-            bail_effective, str(project_root), tests_glob)
+        dirty = bool(baseline_failures)
+        bail_scripts, bail_face, bail_gut_ok = _cold_direct_decision(
+            bail_effective, str(project_root), tests_glob, dirty=dirty)
+        # §SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
+        # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
+        worker_host = (dirty and _scheme_is_worker(
+            str(project_root), str(path), worker_channel))
+        if dirty and bail_scripts is None and not worker_host:
+            raise _BaselineSkipUnsupportedFace(
+                sorted(baseline_failures), bail_face)
+        skip_applied = dirty and (bail_scripts is not None or worker_host)
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,
@@ -740,26 +750,56 @@ def _run_mutant_loop(
         slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
         slot_info["kill_bail_scripts"] = (
             len(bail_scripts) if bail_scripts is not None else None)
+        # §SPEC-P2-R1 契约：baseline_skip 仅在基线脏（跳过语义在场）时披露。
+        if dirty:
+            slot_info["baseline_skip"] = {
+                "applied": bool(skip_applied), "face": bail_face,
+                "requested": len(baseline_failures)}
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
             slot_info["suspected_orphan"] = _orphan_disclosure(
                 project_root, target_res)
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
 
-def _cold_direct_decision(kb_effective: bool, project_root: str,
-                          tests_glob: str | None
-                          ) -> tuple[list[str] | None, str]:
-    """cold 直驱宿主启用判定（§SPEC-P3 路线 B 单点）。
+def _scheme_is_worker(project_root: str, target_path: str,
+                     worker_channel) -> bool:
+    """§SPEC-P2-R1：目标是否走可控宿主（worker 通道可按单测物理跳过）。"""
+    from .worker_channel import WORKER_SCHEME, resolve_exec_scheme
 
-    返回 (脚本清单|None, face 种类)。清单非 None = 启用直驱宿主；None =
-    既有 beacon+gut_cmdln 路径（face/gut 缺失具名落在 kill_bail_face）。"""
+    scheme, _route = resolve_exec_scheme(
+        project_root, _res_path_of(target_path, project_root), worker_channel)
+    return scheme == WORKER_SCHEME
+
+
+class _BaselineSkipUnsupportedFace(Exception):
+    """§SPEC-P2-R1：基线脏 ∧ 冷通道面无法物理跳过红测试 → 具名拒绝。"""
+
+    def __init__(self, names: list[str], face_kind: str):
+        self.names = sorted(names)
+        self.face_kind = face_kind
+        super().__init__(
+            f"baseline has {len(self.names)} failing test(s); cold legacy "
+            f"face cannot physically skip them (face={face_kind})")
+
+
+def _cold_direct_decision(kb_effective: bool, project_root: str,
+                          tests_glob: str | None, dirty: bool = False,
+                          ) -> tuple[list[str] | None, str, bool]:
+    """cold 直驱宿主启用判定（§SPEC-P3 路线 B + §SPEC-P2-R1 单点）。
+
+    返回 (脚本清单|None, face 种类, gut_ok)。清单非 None = 启用直驱宿主；
+    None = 既有 beacon+gut_cmdln 路径（face/gut 缺失具名落在
+    kill_bail_face）。宿主启用条件：bail 开启，或基线脏（§SPEC-P2-R1
+    红测试物理跳过必须在可控宿主内进行，gut_cmdln 无法按单测过滤）。"""
     from .worker_channel import gut_direct_drive_available
 
     scripts, face_kind = killbail.face_scripts(project_root, tests_glob)
-    if not kb_effective or scripts is None:
-        return None, face_kind
-    if not gut_direct_drive_available(project_root):
-        return None, "gut_addon_missing"
-    return scripts, face_kind
+    gut_ok = gut_direct_drive_available(project_root)
+    if scripts is None or not gut_ok:
+        return None, ("gut_addon_missing" if scripts is not None
+                      else face_kind), gut_ok
+    if not (kb_effective or dirty):
+        return None, face_kind, gut_ok
+    return scripts, face_kind, gut_ok
 
 
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
@@ -801,6 +841,12 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
         # 默认路径不走这里（继续跑 + 失败测试退出 kill 判定）。
         from .reporting import _break_on_baseline_result
         return _break_on_baseline_result(str(path), e.names)
+    except _BaselineSkipUnsupportedFace as e:
+        # §SPEC-P2-R1：基线脏 ∧ 冷通道面无法物理跳过 → 具名拒绝（结构性
+        # 限制的最小可执行方案：拒绝，不退回「跑了但不算」）。
+        from .reporting import _baseline_skip_unsupported_result
+        return _baseline_skip_unsupported_result(str(path), e.names,
+                                                 e.face_kind)
     except _BaselineLaunchFailure as e:
         return _run_error_result(
             str(path),

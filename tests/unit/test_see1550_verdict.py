@@ -26,6 +26,7 @@ def _write_project(tmp_path):
     proj.mkdir()
     (proj / "addons" / "gut").mkdir(parents=True)
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+    (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
     target = proj / "calc.gd"
     target.write_text("func add(a, b):\n\treturn a + b\n")
     return proj, target
@@ -62,6 +63,28 @@ class TestUnreachableNotAVerdict:
         # 全 killed → 无孤儿披露面（披露只挂 survived）
         assert "suspected_orphans" not in r["summary"]
 
+
+
+def _materialize_selection(proj, names):
+    sel_dir = Path(proj) / ".gqt-attr-select" / "testsel"
+    sel_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+    return "res://.gqt-attr-select/testsel/"
+
+
+def _pin_cold(monkeypatch):
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    from godot_qa_toolkit.mutation import worker_channel as wc
+    monkeypatch.setattr(wc, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr("godot_qa_toolkit.mutation.runner.resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+@pytest.fixture(autouse=True)
+def _pin_cold_auto(monkeypatch):
+    _pin_cold(monkeypatch)
 
 class TestVerdictSemanticsUnchanged:
     def test_killed_requires_new_failures(self, tmp_path, monkeypatch):
@@ -116,12 +139,13 @@ class TestVerdictSemanticsUnchanged:
     def test_suspect_on_dirty_baseline_unchanged(self, tmp_path, monkeypatch):
         """suspect（脏 baseline ∧ 差集空）语义不变——不可证杀保守档。"""
         proj, target = _write_project(tmp_path)
+        glob = _materialize_selection(proj, ["test_a.gd"])
 
         def fake(root, timeout_s=60, tests_glob=None):
             return (1, "* test_old\n[Failed] pre-existing")
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
-        r = run_mutation(str(target), str(proj), budget=2)
+        r = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         assert r["summary"]["suspect"] == 2
         assert r["ok"] is False
 

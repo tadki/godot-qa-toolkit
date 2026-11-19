@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from godot_qa_toolkit.cli import build_parser
 from godot_qa_toolkit.mutation import merging
 from godot_qa_toolkit.mutation import runner as mrunner
+from godot_qa_toolkit.mutation import worker_channel as wc
 
 TARGET_SRC = (
     "func add(a, b):\n"
@@ -29,11 +30,32 @@ DIRTY_TAIL = "* test_pre_existing\n[Failed]\n"
 CLEAN_TAIL = "* test_pre_existing\n[passed]\n"
 
 
-def _write_project(tmp_path):
+def _pin_cold(monkeypatch):
+    # 两个 route 解析点（runner route_scan / wc _loop_slot）都钉冷，
+    # 聚焦可控宿主面本身，不拉真 worker 会话。
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    monkeypatch.setattr(wc, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr(mrunner, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+def _materialize_selection(proj: Path, names: list[str]) -> str:
+    sel_dir = proj / ".gqt-attr-select" / "testsel"
+    sel_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n',
+                                 encoding="utf-8")
+    return "res://.gqt-attr-select/testsel/"
+
+
+def _write_project(tmp_path, with_gut=False):
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "addons" / "gut").mkdir(parents=True)
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+    if with_gut:
+        (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
     target = proj / "calc.gd"
     target.write_text(TARGET_SRC)
     return proj, target
@@ -57,7 +79,11 @@ class TestCliSwitch:
 class TestDefaultContinueAndDisclose:
     def test_dirty_baseline_continues_and_discloses(self, tmp_path,
                                                     monkeypatch):
-        proj, target = _write_project(tmp_path)
+        # §SPEC-P2-R1：红测试物理跳过 → 需可控宿主面（物化选择目录）。
+        # 跳过生效后空差集 = 真实存活（不再落 suspect 档）。
+        proj, target = _write_project(tmp_path, with_gut=True)
+        _pin_cold(monkeypatch)
+        glob = _materialize_selection(proj, ["test_a.gd", "test_b.gd"])
         calls = {"mutant_runs": 0}
 
         monkeypatch.setattr(mrunner, "_run_baseline",
@@ -66,36 +92,43 @@ class TestDefaultContinueAndDisclose:
 
         def fake_gut(root, timeout_s=600, tests_glob=None):
             calls["mutant_runs"] += 1
-            # 与基线完全相同的失败集：不得算 killed。
-            return (1, DIRTY_TAIL)
+            # 红测试被宿主移除：流中只剩绿测试结果 + 跳过 marker。
+            return (0, "* test_a_x\n[passed]\n"
+                       "GQT_SKIP_RED marked=1 requested=1 "
+                       "names=test_pre_existing\n")
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake_gut)
         r = mrunner.run_mutation(str(target), str(proj), budget=2,
-                                 tests_glob="res://tests/")
+                                 tests_glob=glob)
         assert calls["mutant_runs"] > 0, "default must keep running mutants"
         s = r["summary"]
-        # 继续跑 ≠ 通过：脏基线 ∧ 差集空 → suspect（既有门禁语义不变）。
-        assert s.get("suspect", 0) > 0
-        assert r["ok"] is False
         assert s.get("baseline_dirty") is True
         assert s.get("baseline_failures") == 1
         assert s.get("baseline_failure_names") == ["test_pre_existing"]
         assert s.get("break_on_baseline_failure") is False
+        assert s.get("baseline_skip") == {"applied": True,
+                                          "face": "selection_dir",
+                                          "requested": 1}
         assert s.get("killed") == 0
+        assert s.get("suspect") == 0, "干净批次空差集 = 存活，不落 suspect"
+        assert r["ok"] is False, "幸存位点仍按门禁判失败"
         assert all(f["verdict"] != "killed" for f in r["failures"])
 
     def test_new_failure_after_dirty_baseline_still_kills(self, tmp_path,
                                                           monkeypatch):
-        proj, target = _write_project(tmp_path)
+        proj, target = _write_project(tmp_path, with_gut=True)
+        _pin_cold(monkeypatch)
+        glob = _materialize_selection(proj, ["test_a.gd"])
         monkeypatch.setattr(mrunner, "_run_baseline",
                             lambda root, tests_glob, timeout_s:
                             (1, DIRTY_TAIL, 10.0))
         monkeypatch.setattr(
             mrunner, "_run_gut_on_project",
             lambda root, timeout_s=600, tests_glob=None:
-            (1, DIRTY_TAIL + "* test_new\n[Failed]\n"))
+            (1, "* test_new\n[Failed]\n"
+                "GQT_SKIP_RED marked=1 requested=1 names=test_pre_existing\n"))
         r = mrunner.run_mutation(str(target), str(proj), budget=2,
-                                 tests_glob="res://tests/")
+                                 tests_glob=glob)
         assert r["summary"].get("killed", 0) > 0
 
 

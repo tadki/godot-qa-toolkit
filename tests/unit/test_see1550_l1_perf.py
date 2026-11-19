@@ -30,6 +30,28 @@ SRC = ("func add(a, b):\n"
 KILL_TAIL = "* test_x\n\t\ttest_x [Failed]"
 
 
+
+
+def _materialize_selection(proj, names):
+    sel_dir = proj / ".gqt-attr-select" / "testsel"
+    sel_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+    return "res://.gqt-attr-select/testsel/"
+
+def _pin_cold(monkeypatch):
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    from godot_qa_toolkit.mutation import worker_channel as wc
+    monkeypatch.setattr(wc, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr(mrunner, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+@pytest.fixture(autouse=True)
+def _pin_cold_auto(monkeypatch):
+    _pin_cold(monkeypatch)
+
 def _write_project(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -46,6 +68,7 @@ def _write_project(tmp_path):
     from godot_qa_toolkit.mutation import truth_select as _truth
     _fx.install_recipe(proj)
     _truth._fresh_recipe_hash.cache_clear()
+    (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
     return proj, target
 
 
@@ -101,11 +124,13 @@ class TestWarmPool:
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         _seed(proj, target, {2}, {2, 5})
         r1 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/", reuse_coverage=False)
+                          tests_glob=_materialize_selection(proj, ["test_a.gd"]),
+                          reuse_coverage=False)
         assert r1["summary"]["killed"] == 6
         assert calls["gut"] == 7, "一轮 = 1 baseline + 6 mutant 轮"
         r2 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/", reuse_coverage=False)
+                          tests_glob=_materialize_selection(proj, ["test_a.gd"]),
+                          reuse_coverage=False)
         # 二轮：全 killed 复用 → 仅 baseline 一次（零执行零额外 baseline）
         assert r2["summary"]["resumed"] == 6
         assert calls["gut"] == 8, "二轮只增 1 次 baseline（复用零 GUT）"
@@ -201,7 +226,8 @@ class TestCoveragePrefilterAuto:
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         r = run_mutation(str(target), str(proj), budget=10,
-                         tests_glob="res://tests/", reuse_coverage=False)
+                         tests_glob=_materialize_selection(proj, ["test_a.gd"]),
+                          reuse_coverage=False)
         assert r["summary"]["killed"] == 6, "--no-reuse-coverage 全跑"
 
 
@@ -223,7 +249,8 @@ class TestKilledCertExactReuse:
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         _seed(proj, target, {2}, {2, 5})
         r1 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/", reuse_coverage=False)
+                          tests_glob=_materialize_selection(proj, ["test_a.gd"]),
+                          reuse_coverage=False)
         assert r1["summary"]["killed"] == 6
         assert r1["summary"].get("killed_by_certificates"), \
             "killed 记录必须携带证书"
@@ -231,7 +258,7 @@ class TestKilledCertExactReuse:
         (proj / "tests" / "test_new_pin.gd").write_text(
             "extends GutTest\n\nfunc test_new_pin():\n\tpass\n")
         r2 = run_mutation(str(target), str(proj), budget=10,
-                          tests_glob="res://tests/")
+                          tests_glob=_materialize_selection(proj, ["test_a.gd"]))
         assert r2["summary"]["resumed"] == 6, \
             "新增测试不失效旧 killed（kill 单调性）"
         assert r2["summary"]["killed"] == 6

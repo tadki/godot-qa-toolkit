@@ -72,6 +72,37 @@ def _run_error_result(file: str, error: str, failure_reason: str,
     }
 
 
+def _baseline_skip_unsupported_result(file: str, names: list[str],
+                                      face_kind: str) -> dict:
+    """§SPEC-P2-R1：基线脏 ∧ 冷通道面无法物理跳过 → 具名拒绝契约。
+
+    结构性限制的最小可执行方案：不退回「红测试跑了但不算」，改指可跳过
+    的面（默认 line/fn 的物化选择目录、卡尺）或显式开关。"""
+    failures = sorted(names)
+    return {
+        "tool": "mutation",
+        "ok": False,
+        "summary": {
+            "file": file,
+            "run_error": True,
+            "error": (f"baseline has {len(failures)} failing test(s) and "
+                      f"this face ({face_kind}) cannot physically skip "
+                      "them on the cold legacy runner"),
+            "baseline_skip_unsupported": True,
+            "baseline_dirty": True,
+            "baseline_failures": len(failures),
+            "baseline_failure_names": failures,
+            "suggested_action": ("rerun with the default line/fn selection "
+                                 "faces, a --mutation/--lines caliper, or "
+                                 "set --break-on-baseline-failure"),
+        },
+        "failures": [{
+            "reason": ("cold legacy runner cannot physically skip baseline "
+                       f"red tests on face={face_kind}: "
+                       f"{failures[:3]}")}],
+    }
+
+
 def _break_on_baseline_result(file: str, names: list[str]) -> dict:
     """SEE-1606 P2：`--break-on-baseline-failure` 的基线脏中止契约。
 
@@ -328,7 +359,7 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
     for key in ("baseline_dirty", "baseline_failures",
                 "baseline_failure_names", "break_on_baseline_failure",
                 "kill_bail", "kill_bail_face", "kill_bail_disabled_by",
-                "kill_bail_scripts"):
+                "kill_bail_scripts", "baseline_skip"):
         if key in info:
             summary[key] = info[key]
     _emit_killed_certificates(summary, results)

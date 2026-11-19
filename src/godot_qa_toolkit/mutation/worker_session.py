@@ -106,9 +106,13 @@ func _run_leg(req: Dictionary) -> void:
 		gut._ignore_pause_before_teardown = true
 		var scripts: Array = req.get("tests_scripts", [])
 		var baseline_names: Array = req.get("baseline_failures", [])
+		var skip_names: Array = req.get("skip_red_test_names", [])
 		if scripts.size() > 0:
 			# SEE-1606 §SPEC-P3 路线 A：脚本顺序执行 + 新增失败早停
 			#（同一 Gut 实例，语义与一次跑全部一致，仅在脚本间插检查）。
+			var skip_out: Dictionary = await _gqt_skip_red_tests(
+				gut, skip_names)
+			resp["skip_red"] = skip_out
 			var seq: Dictionary = await _gqt_run_scripts_sequential(
 				gut, scripts, baseline_names, 600000)
 			resp["gut_ran"] = not bool(seq["hung"])
@@ -120,6 +124,9 @@ func _run_leg(req: Dictionary) -> void:
 				"new_failure": String(seq["bail_new_failure"])}
 		else:
 			_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
+			var skip_out: Dictionary = await _gqt_skip_red_tests(
+				gut, skip_names)
+			resp["skip_red"] = skip_out
 			var done := [false]
 			gut.end_run.connect(func() -> void: done[0] = true)
 			gut.test_scripts()
@@ -257,10 +264,15 @@ func _walk_connections(node: Node, out: Array, depth: int) -> void:
 """ + SEQUENTIAL_RUNNER_GD
 
 
+def _dict_or_none(resp: dict, key: str) -> dict | None:
+    """披露 dict 透传原语（§SPEC-P3-T1 拆分先例的泛化）：缺席/空归一 None。"""
+    return resp.get(key) or None
+
+
 def _bail_info_of(resp: dict) -> dict | None:
     """SEE-1606 P3（§SPEC-P3-T1 零行为拆分）：早停披露原样透传，缺席
     （None/空）归一为 None——取值语义与拆分前逐位一致。"""
-    return resp.get("bail") or None
+    return _dict_or_none(resp, "bail")
 
 
 @dataclass
@@ -285,6 +297,7 @@ class WorkerLegResult:
     connections: list[list] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
     bail_info: dict | None = None
+    skip_red_info: dict | None = None
 
 
 @dataclass
@@ -430,6 +443,7 @@ class WorkerSession:
                 closure: list[str], tests_glob: str | None,
                 tests_scripts: list[str] | None = None,
                 baseline_failures: list[str] | None = None,
+                skip_red_names: list[str] | None = None,
                 ) -> WorkerLegResult:
         """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。
 
@@ -453,6 +467,8 @@ class WorkerSession:
         if tests_scripts:
             req["tests_scripts"] = [str(s) for s in tests_scripts]
             req["baseline_failures"] = sorted(baseline_failures or [])
+        # §SPEC-P2-R1：红测试物理跳过名单与 bail/清单无关，独立生效。
+        req["skip_red_test_names"] = sorted(skip_red_names or [])
         req_name = f"req-{leg}-{uuid.uuid4().hex[:8]}.json"
         (work / req_name).write_text(json.dumps(req), encoding="utf-8")
         resp_path = work / "resp.json"
@@ -512,6 +528,7 @@ class WorkerSession:
             connections=list(resp.get("connections") or []),
             timings=dict(resp.get("timings") or {}),
             bail_info=_bail_info_of(resp),
+            skip_red_info=_dict_or_none(resp, "skip_red"),
         )
         r.target_compile_invalid = self._target_compile_invalid(leg, r.reload)
         r.failing_tests = self._leg_failing_names(leg)

@@ -143,6 +143,16 @@ def test_missing_gutconfig_is_illegal(tmp_path: Path):
     assert "gutconfig" in error
 
 
+def test_empty_dirs_face_is_illegal(tmp_path: Path):
+    """§SPEC-068：gutconfig dirs 为空列表 → 非法（空 GUT face 不是有效
+    测量面，fail-loud 不静默降级为缺省面）。"""
+    (tmp_path / _gutconfig_name()).write_text(
+        json.dumps({"dirs": []}), encoding="utf-8")
+    recipe, error = build_recipe(tmp_path)
+    assert recipe is None
+    assert "no dirs" in error
+
+
 def test_missing_acceptance_features_is_illegal(tmp_path: Path):
     (tmp_path / _gutconfig_name()).write_text(
         json.dumps(GUTCONFIG), encoding="utf-8")

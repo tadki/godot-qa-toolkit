@@ -255,6 +255,24 @@ class TestS63LazyBaselineRunMeasurement:
         assert meta and meta["method"] == "explicit_param"
         assert meta["count"] == 2
 
+    def test_explicit_baseline_nonabsorbing_no_lazy(self, project, tmp_path):
+        """显式基线在场但不吸收观测失败 → 懒获取零触发（显式提供即终局，
+        不二次兜底），观测失败保持具名新增、臂 invalid。"""
+        fake = LazyScenarioGodot(project, scenario="absorb")
+        sp.run = fake
+        report = run_measurement(project, _targets(project),
+                                 _recipe(project, tmp_path),
+                                 test_attribution=True,
+                                 attribution_out=str(tmp_path / "map.json"),
+                                 baseline_failures={("", "test_other_fail")})
+        assert fake.lazy_calls == [], \
+            "显式基线在场（即使未吸收）不得懒获取"
+        meta = _map_doc(tmp_path).get("baseline_failures_meta")
+        assert meta and meta["method"] == "explicit_param"
+        gut = report["arms"][0]
+        assert gut["state"] == "invalid"
+        assert gut["test_failures"]["new"] == ["test_font_row"]
+
     def test_green_arm_zero_extra_gut(self, project, tmp_path):
         """绿臂（零观测失败）→ 懒获取零触发（不给正常仓加基线成本）。"""
         fake = LazyScenarioGodot(project, scenario="absorb")
@@ -282,6 +300,46 @@ class TestS63LazyBaselineRunMeasurement:
         assert report["arms"][0]["state"] == "valid"
         assert fake.lazy_calls == [], "绿臂零额外 GUT（懒获取不触发）"
         assert "baseline_failures_meta" not in _map_doc(tmp_path)
+
+
+class TestS63LazyBaselineMergeGuard:
+    """门控守卫单元面：_lazy_baseline_merge 触发条件逐参钉死
+    （acceptance 臂永不懒获取；gut_full 观测到失败才触发）。"""
+
+    def _drive(self, monkeypatch, *, name):
+        from godot_qa_toolkit.measurement import arms as arms_mod
+        calls: list[list[str]] = []
+
+        def _spy_acquire(root, gut_args, timeout_s):
+            calls.append(list(gut_args))
+            return set(), {"method": "uninstrumented_run", "lazy": True,
+                           "count": 0, "sha256": "0" * 64, "wall_s": 0.0}
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.measurement.orchestrator."
+            "_acquire_lazy_baseline", _spy_acquire)
+        out = arms_mod._lazy_baseline_merge(
+            name, Path("/proj"),
+            {"gut_face": {"dirs": ["res://tests/"]}}, 60,
+            {("res://t/g.gd", "test_x"), ("", "test_x")},
+            set(), set(), {("res://t/g.gd", "test_x"), ("", "test_x")},
+            None, None)
+        return calls, out
+
+    def test_acceptance_arm_never_lazy_acquires(self, monkeypatch):
+        """acceptance 臂不取懒基线——其失败保持可见（债归独立 issue）；
+        门控守卫按臂名拒绝，而非依赖观测面巧合为空。"""
+        calls, (eff, meta, new_pairs) = self._drive(
+            monkeypatch, name="acceptance")
+        assert calls == [], "acceptance 臂不得触发懒获取"
+        assert meta is None
+        assert new_pairs, "acceptance 臂失败保持未吸收"
+
+    def test_gut_full_arm_lazy_acquires_on_failure(self, monkeypatch):
+        """对照：同参数下 gut_full 臂懒获取触发（守卫差异仅在臂名）。"""
+        calls, (_eff, meta, _np) = self._drive(monkeypatch, name="gut_full")
+        assert len(calls) == 1, "gut_full 臂观测到失败时懒获取恰一次"
+        assert meta and meta["lazy"] is True
 
 
 class TestS63EnsureMapEntry:

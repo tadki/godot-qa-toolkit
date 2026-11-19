@@ -68,6 +68,23 @@ class TestRetiredScan:
                    and v["pattern"] == "structural_ownership"
                    and "never_written.py" in v["entry"] for v in violations)
 
+    def test_carrier_text_reason_zero_hits_not_stale(self, tree):
+        """载体文本条目（reason 前缀「载体文本」）零命中不算 stale；
+        同一条目换普通理由 → 零命中即 stale（养死条目钉的边界两侧）。"""
+        mod = _load_scanner()
+        mod.ALLOWLIST["derive_tests_glob"] = [
+            ("src/pkg/never_written.py", "载体文本：随用例增删而变，免 stale 检查")]
+        violations, _ = mod.scan_retired(tree)
+        assert not [v for v in violations
+                    if v.get("kind") == "stale_allowlist"
+                    and v["pattern"] == "derive_tests_glob"]
+        mod.ALLOWLIST["derive_tests_glob"] = [
+            ("src/pkg/never_written.py", "普通具名豁免（非载体文本）")]
+        violations, _ = mod.scan_retired(tree)
+        assert any(v.get("kind") == "stale_allowlist"
+                   and v["pattern"] == "derive_tests_glob"
+                   for v in violations)
+
     def test_clean_tree_ok(self, tree):
         mod = _load_scanner()
         for p in mod.ALLOWLIST:

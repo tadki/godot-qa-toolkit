@@ -170,9 +170,12 @@ class TestColdAbortOnUnsupportedFace:
             return path
 
         monkeypatch.setattr(directdrive, "write_direct_cfg", spy_write)
+        # 基线尾需带脚本标题（D2：红身份=脚本+名）。
+        baseline_tail = ("res://.gqt-attr-select/sel/test_a.gd\n"
+                         "* test_red\n[Failed]\n")
         monkeypatch.setattr(mrunner, "_run_baseline",
                             lambda root, tests_glob, timeout_s:
-                            (1, DIRTY_TAIL, 1.0))
+                            (1, baseline_tail, 1.0))
         tail = ("* test_green_new\n[Failed]\n"
                 "GQT_SKIP_RED marked=1 requested=1 names=test_red\n")
         monkeypatch.setattr(
@@ -186,7 +189,7 @@ class TestColdAbortOnUnsupportedFace:
                                           "face": "selection_dir",
                                           "requested": 1}
         cfg = captured["cfg"]
-        assert cfg["skip_red_test_names"] == ["test_red"]
+        assert cfg["skip_red_tests"] == [["res://.gqt-attr-select/sel/test_a.gd", "test_red"]]
         assert cfg["bail_enabled"] is True
 
 
@@ -209,9 +212,9 @@ class TestWorkerSkip:
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
                         tests_scripts=None, baseline_failures=None,
-                        skip_red_names=None):
+                        skip_red_tests=None):
                 captured.setdefault("legs", []).append(
-                    {"leg": leg, "skip": skip_red_names})
+                    {"leg": leg, "skip": skip_red_tests})
                 return wc.WorkerLegResult(leg=leg, hash_ok=True, gut_ran=True,
                                           fail_count=0, failing_tests=set(),
                                           ok=True)
@@ -227,10 +230,13 @@ class TestWorkerSkip:
             record_fn=lambda m, v, e=0.0: None,
             classify_fn=lambda m, leg: {"verdict": "survived"},
             leg_timeout_s=10, baseline_failures={"test_red"},
-            kill_bail=False, tests_scripts=None)
+            kill_bail=False, tests_scripts=None,
+            red_pairs=[("res://.gqt-attr-select/sel/test_a.gd", "test_red")])
         # mutant 腿全带红名单（物理跳过，test 粒度）。
         assert captured["legs"], "no legs captured"
-        assert all(entry["skip"] == ["test_red"] for entry in captured["legs"])
+        assert all(entry["skip"] == [("res://.gqt-attr-select/sel/test_a.gd",
+                                      "test_red")]
+                   for entry in captured["legs"])
 
 
 class TestMergeAndTemplate:
@@ -254,15 +260,15 @@ class TestMergeAndTemplate:
     def test_hosts_contain_skip_red_contract(self):
         assert killbail.SKIP_RED_MARKER in directdrive.COLD_DIRECT_GD_TEMPLATE
         assert killbail.SKIP_RED_MARKER in worker_session.WORKER_HOST_GD
-        assert "skip_red_test_names" in directdrive.COLD_DIRECT_GD_TEMPLATE
-        assert "skip_red_test_names" in worker_session.WORKER_HOST_GD
+        assert "skip_red_tests" in directdrive.COLD_DIRECT_GD_TEMPLATE
+        assert "skip_red_tests" in worker_session.WORKER_HOST_GD
 
     def test_direct_cfg_skip_and_bail_fields(self, tmp_path):
         path = directdrive.write_direct_cfg(
             str(tmp_path), "res://calc.gd", "sha", "Calc",
             ["res://s/a.gd"], ["test_red"], bail_enabled=False,
-            skip_red_names=["test_red"])
+            skip_red_tests=[("res://.gqt-attr-select/sel/test_a.gd", "test_red")])
         cfg = json.loads(Path(path).read_text())
-        assert cfg["skip_red_test_names"] == ["test_red"]
+        assert cfg["skip_red_tests"] == [["res://.gqt-attr-select/sel/test_a.gd", "test_red"]]
         assert cfg["bail_enabled"] is False
         assert cfg["bail_baseline_failures"] == ["test_red"]

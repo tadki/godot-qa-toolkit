@@ -441,7 +441,8 @@ def _fake_cold_legs(path, project_root, original_src, backup, mutants,
                     tests_glob, baseline_failures, baseline_dirty, slot,
                     auto_name, target_rel, target_res, ownership_fn,
                     reporter, store2, prior_entries, scopes,
-                    kill_bail=False, direct_scripts=None):
+                    kill_bail=False, direct_scripts=None,
+                    red_pairs=None):
     from godot_qa_toolkit.mutation.reporting import _mutant_record
     return [(m, _mutant_record(m, "killed", "", src=original_src))
             for m in mutants]
@@ -533,7 +534,7 @@ class _FakeSession:
 
     def run_leg(self, seq, target_res, mutant_sha, closure, tests_glob,
                 tests_scripts=None, baseline_failures=None,
-                skip_red_names=None):
+                skip_red_tests=None):
         return self._leg
 
 
@@ -597,7 +598,8 @@ def test_runner_worker_boot_harvest_counted(tmp_path, monkeypatch):
              baseline_failures, baseline_dirty, slot, auto_name,
              target_rel, target_res, kind, reporter, store2,
              prior_entries, scopes, ownership_fn, timings_out=None,
-             kill_bail=False, tests_scripts=None):
+             kill_bail=False, tests_scripts=None,
+             red_pairs=None, baseline_red_map=None):
         if timings_out is not None:
             timings_out["worker_boot_s"] = 2.5
         return _fake_cold_legs(
@@ -769,7 +771,8 @@ def test_d1_parent_identity_honors_worker_flag(tmp_path, monkeypatch):
              baseline_failures, baseline_dirty, slot, auto_name,
              target_rel, target_res, kind, reporter, store2,
              prior_entries, scopes, ownership_fn, timings_out=None,
-             kill_bail=False, tests_scripts=None):
+             kill_bail=False, tests_scripts=None,
+             red_pairs=None, baseline_red_map=None):
         raw = runner_mod._run_cold_legs(
             path, project_root, original_src, "", mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,

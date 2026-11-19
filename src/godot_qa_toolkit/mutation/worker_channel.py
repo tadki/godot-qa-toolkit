@@ -268,7 +268,8 @@ def _legs_ctx(*, slot, kind, tests_glob, leg_timeout_s, timings_out,
             "leg_timeout_s": leg_timeout_s, "timings_out": timings_out,
             "inject_fn": inject_fn, "cold_runner": cold_runner,
             "record_fn": record_fn, "classify_fn": classify_fn,
-            "kill_bail": False, "tests_scripts": None}
+            "kill_bail": False, "tests_scripts": None,
+            "red_pairs": None, "baseline_red_map": None}
 
 
 def _legs_harvest_boot(c: dict, s) -> None:
@@ -384,8 +385,7 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
                                               if c["kill_bail"] else None),
                                baseline_failures=sorted(
                                    c["baseline_failures"] or ()),
-                               skip_red_names=sorted(
-                                   c["baseline_failures"] or ()))
+                               skip_red_tests=(c["red_pairs"] or []))
     leg_elapsed = time.monotonic() - t_leg
     if leg.fatal and leg.state_drift:
         _legs_drift_disqualify(c, seq, leg)
@@ -427,7 +427,9 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                     baseline_failures=None, parity_inject_fn=None,
                     timings_out: dict | None = None,
                     kill_bail: bool = False,
-                    tests_scripts: list[str] | None = None):
+                    tests_scripts: list[str] | None = None,
+                    red_pairs: list[tuple[str, str]] | None = None,
+                    baseline_red_map=None):
     """§SPEC-020 W 通道逐腿执行（R-C 硬序 + 门消费 + 会话致命处置）。
 
     会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门 fire / autoload
@@ -449,6 +451,8 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
     c["baseline_failures"] = baseline_failures
     c["kill_bail"] = kill_bail
     c["tests_scripts"] = tests_scripts
+    c["red_pairs"] = red_pairs
+    c["baseline_red_map"] = baseline_red_map
     _legs_parity(c, target_res, closure, parity_inject_fn)
     _legs_mutants(c, mutants, target_res, closure)
     return c["raw_pairs"], c["fatal_events"]
@@ -478,8 +482,9 @@ def _wb_inject(m, slot, target_rel, original_src, target_res):
 def _wb_cold(m, seq, *, path, project_root, original_src, tests_glob,
              baseline_failures, baseline_dirty, slot, auto_name,
              ownership_fn, target_rel, target_res,
-             direct_scripts: list[str] | None = None):
-    """冷通道单点重跑（runner 注入语义）；kill 即退随主腿同面生效。"""
+             direct_scripts: list[str] | None = None,
+             red_pairs: list[tuple[str, str]] | None = None):
+    """冷通道单点重跑（runner 注入语义）；kill 即退与红测跳过随主腿生效。"""
     from . import runner as _runner
 
     return _runner._run_single_mutant(
@@ -487,7 +492,7 @@ def _wb_cold(m, seq, *, path, project_root, original_src, tests_glob,
         baseline_failures, baseline_dirty, slot=slot,
         auto_name=auto_name, ownership_fn=ownership_fn,
         target_rel=target_rel, target_res=target_res,
-        direct_scripts=direct_scripts)
+        direct_scripts=direct_scripts, red_pairs=red_pairs)
 
 
 def _wb_parity_inject(slot, target_rel, original_src, target_res):
@@ -519,7 +524,9 @@ def execute_worker_branch(path, project_root, original_src, mutants,
                           reporter, store2, prior_entries, scopes,
                           ownership_fn, timings_out: dict | None = None,
                           kill_bail: bool = False,
-                          tests_scripts: list[str] | None = None):
+                          tests_scripts: list[str] | None = None,
+                          red_pairs: list[tuple[str, str]] | None = None,
+                          baseline_red_map=None):
     """§SPEC-020 W 通道接线（薄层）：注入/冷跑/记录/分类回调注入编排层。
 
     runner 域符号在函数体内延迟 import（baseline.py 先例）——避免
@@ -540,14 +547,17 @@ def execute_worker_branch(path, project_root, original_src, mutants,
             slot=slot, auto_name=auto_name, ownership_fn=ownership_fn,
             target_rel=target_rel, target_res=target_res,
             direct_scripts=(tests_scripts if (kill_bail or
-                                              baseline_failures) else None)),
+                                              baseline_failures) else None),
+            red_pairs=red_pairs),
         record_fn=_wb_record_factory(reporter, store2, prior_entries, scopes),
         classify_fn=lambda m, leg: classify_worker_leg(
             m, leg, baseline_failures, baseline_dirty, ownership_fn,
-            project_root, original_src),
+            project_root, original_src,
+            baseline_red_map=baseline_red_map),
         leg_timeout_s=max(60, int(_adaptive_timeout_ref() or 60)),
         baseline_failures=set(baseline_failures or ()),
         parity_inject_fn=lambda: _wb_parity_inject(slot, target_rel,
                                                    original_src, target_res),
         timings_out=timings_out,
-        kill_bail=kill_bail, tests_scripts=tests_scripts)
+        kill_bail=kill_bail, tests_scripts=tests_scripts,
+        red_pairs=red_pairs, baseline_red_map=baseline_red_map)

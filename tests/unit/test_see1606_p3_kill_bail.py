@@ -254,10 +254,10 @@ class TestPlumbing:
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
                         tests_scripts=None, baseline_failures=None,
-                        skip_red_names=None):
+                        skip_red_tests=None):
                 captured["scripts"] = tests_scripts
                 captured["baseline"] = baseline_failures
-                captured["skip_red"] = skip_red_names
+                captured["skip_red"] = skip_red_tests
                 return wc.WorkerLegResult(leg=leg, hash_ok=True, gut_ran=True,
                                           fail_count=0, failing_tests=set(),
                                           ok=True)
@@ -272,12 +272,14 @@ class TestPlumbing:
             record_fn=lambda m, v, e=0.0: None,
             classify_fn=lambda m, leg: {"verdict": "survived"},
             leg_timeout_s=10, baseline_failures={"test_old"},
-            kill_bail=True, tests_scripts=["res://.gqt-attr-select/s/a.gd"])
+            kill_bail=True, tests_scripts=["res://.gqt-attr-select/s/a.gd"],
+            red_pairs=[("res://.gqt-attr-select/s/a.gd", "test_old")])
         assert captured.get("scripts") == [
             "res://.gqt-attr-select/s/a.gd"], \
             f"captured={captured} pairs={pairs} fatals={fatals}"
         assert captured.get("baseline") == ["test_old"]
-        assert captured.get("skip_red") == ["test_old"]
+        assert captured.get("skip_red") == [
+            ("res://.gqt-attr-select/s/a.gd", "test_old")]
         assert pairs
 
     def test_worker_leg_req_without_scripts(self, tmp_path, monkeypatch):
@@ -300,9 +302,9 @@ class TestPlumbing:
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
                         tests_scripts=None, baseline_failures=None,
-                        skip_red_names=None):
+                        skip_red_tests=None):
                 captured["scripts"] = tests_scripts
-                captured["skip_red"] = skip_red_names
+                captured["skip_red"] = skip_red_tests
                 return wc.WorkerLegResult(leg=leg, hash_ok=True, gut_ran=True,
                                           fail_count=0, failing_tests=set(),
                                           ok=True)

@@ -215,7 +215,8 @@ def _exec_finalize(path, results, raw_pairs, prior_entries, scope_hashes,
 def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
                path, auto_name, direct_scripts: list[str] | None = None,
                baseline_failures: set[str] | None = None,
-               bail_enabled: bool = True) -> tuple:
+               bail_enabled: bool = True,
+               red_pairs: list[tuple[str, str]] | None = None) -> tuple:
     """mutant 注入影子槽（临时文件 + os.replace，引擎启动前落盘）+ beacon/
     直驱配置与进程 env 准备。返回 (mutated_src, cfg_path, user_dir)。
 
@@ -239,7 +240,7 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
         cfg_path = directdrive.write_direct_cfg(
             slot.root, target_res, mutant_sha, auto_name, direct_scripts,
             sorted(baseline_failures or ()), bail_enabled=bail_enabled,
-            skip_red_names=sorted(baseline_failures or ()))
+            skip_red_tests=list(red_pairs or ()))
     else:
         cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
                                            auto_name)

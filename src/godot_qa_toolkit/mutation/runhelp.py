@@ -75,12 +75,14 @@ def _auto_scan_tests_glob(file_path: str, project_root: str,
 def _resolve_auto_glob(tests_glob: str | None, file_path: str,
                        project_root: str,
                        selection_meta: dict,
-                       select_mode: str = "full") -> tuple[str | None, dict]:
+                       select_mode: str = "full",
+                       allow_renew: bool = True) -> tuple[str | None, dict]:
     """显式 `--tests` 直过（选测未发生，披露 meta 原样保留）；否则自动选测。
 
     §SPEC-613 判据唯一出处的守门形态：并行规划/串行门共用，禁止按 CLI
     参数推断选测是否发生。select_mode: line/fn/file（严格真值选面，不可用
-    即 fail-loud）| full（显式审计全脸）。
+    即 fail-loud）| full（显式审计全脸）。allow_renew=False（dry-run）抑制
+    auto 续新（零 GUT），不可用映射仍 fail-loud（不静默全脸）。
 
     SEE-1587：显式 `--tests` 表示用户接管测试面——在 line/fn 模式下必须
     披露「未使用行级选面」（source=explicit_tests），不得静默。"""
@@ -97,12 +99,14 @@ def _resolve_auto_glob(tests_glob: str | None, file_path: str,
     from godot_qa_toolkit.mutation import runner as _r
 
     return _r._auto_scan_tests_glob_meta(file_path, project_root,
-                                         select_mode=select_mode)
+                                         select_mode=select_mode,
+                                         allow_renew=allow_renew)
 
 
 def _auto_scan_tests_glob_meta(file_path: str,
                                project_root: str,
-                               select_mode: str = "full"
+                               select_mode: str = "full",
+                               allow_renew: bool = True
                                ) -> tuple[str | None, dict]:
     """SEE-1581：选面改运行时真值映射（A09 后静态归属/静态选面零消费者）。
 
@@ -111,6 +115,8 @@ def _auto_scan_tests_glob_meta(file_path: str,
     - 映射说零测试 → zero_ref=True（零引用短路以真值为准）；
     - fn/file 面：无映射 / 过期 / 歧义 → resolve_selection fail-loud 拒跑
       （唯 `--select full` 显式审计面 tests_glob=None，不再派生静态 glob）。
+    allow_renew=False（SEE-1604 D2，dry-run）：仅抑制 auto 续新（零 GUT）；
+    不可用映射仍 fail-loud（不静默全脸，既有契约不动）。
     meta 由调用方挂入 summary.test_selection（source/reason/mapping 披露）。
     """
     from .truth_select import MutationSelectionError, resolve_selection
@@ -118,8 +124,9 @@ def _auto_scan_tests_glob_meta(file_path: str,
         return None, {"source": "full_face", "reason": "explicit_full_face",
                       "tests": [], "zero_ref": False, "mapping": None,
                       "ambiguous_names": []}
-    # Owner 定稿：映射不可用 → fail-loud 拒跑（全脸仅显式审计开关）
-    sel = resolve_selection(project_root, file_path)
+    # Owner 定稿：映射不可用 → fail-loud 拒跑（全脸仅显式审计开关）。
+    # dry-run 只关续新（renew=False），不改 fail-loud 语义。
+    sel = resolve_selection(project_root, file_path, renew=allow_renew)
     meta = {"source": sel["source"], "reason": sel["reason"],
             "mapping": sel.get("mapping"), "tests": sel.get("tests", []),
             "zero_ref": sel.get("zero_ref", False),

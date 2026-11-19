@@ -224,7 +224,7 @@ def run_mutation(file_path: str, project_root: str, budget: int = 50,
 
 def _core_setup(file_path, project_root, tests_glob, binary_kind,
                 worker_channel, identity, selection_meta, select_mode, clock,
-                mutation_warning) -> tuple:
+                mutation_warning, dry_run=False) -> tuple:
     """core 前置：目标锚定、选面解析、源码/身份/路由、收集与 manifest 标定。
     返回 (error_result_or_None, ctx)；error 在场时 ctx 为空（目标缺失 /
     收集异常 → error 契约）。"""
@@ -236,10 +236,12 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
     # SEE-1583 §SPEC-012：串行/卡尺路径与编排路径同源遵守 select_mode
     # （SEE-1587 默认 line）——不可用映射 fail-loud，无静默全脸路径。
     # SEE-1587：显式 --tests 也经同一守门函数，披露「未使用行级选面」。
+    # SEE-1604 D2：dry-run 抑制映射续新（allow_renew=False）——清点操作
+    # 绝不拉起全链 GUT；陈旧/自锁映射降级未圈定清点。
     with clock.stage("test_scan"):
         tests_glob, selection_meta = _resolve_auto_glob(
             tests_glob, str(path), project_root, selection_meta,
-            select_mode=select_mode)
+            select_mode=select_mode, allow_renew=not dry_run)
     original_src = path.read_text(encoding="utf-8")
     kind = binary_kind or detect_binary_kind()
     target_res_early = _res_path_of(str(path), str(project_root))
@@ -416,7 +418,8 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
     clock = StageClock()
     setup_error, c = _core_setup(
         file_path, project_root, tests_glob, binary_kind, worker_channel,
-        identity, selection_meta, select_mode, clock, mutation_warning)
+        identity, selection_meta, select_mode, clock, mutation_warning,
+        dry_run=dry_run)
     if setup_error is not None:
         return setup_error
     path, original_src, identity = c["path"], c["original_src"], c["identity"]

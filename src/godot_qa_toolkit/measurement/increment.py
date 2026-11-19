@@ -253,14 +253,13 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                             for k, v in sorted(file_to_scripts.items())},
         **_line_facts_views(test_to_lines, script_to_lines, line_to_tests),
     }
-def _increment_decision(root: Path, recipe: dict, raw_recipe: dict,
-                        baseline: dict, changed_files: list[str],
-                        since_full: int, calibration_every: int,
+def _increment_decision(root: Path, recipe: dict, baseline: dict,
+                        changed_files: list[str], since_full: int,
+                        calibration_every: int,
                         rerun_full_face_ratio: float) -> tuple:
     """增量资格判定：hash 守恒 + 变更分类 + 失效计算 + fallback 仲裁。
-    `recipe` 是已注入 toolchain 的配方（hash 判据用），`raw_recipe` 是注入前
-    的原始配方（回退全脸重建用，D1）。
-    返回 (raw_recipe, classes, invalidation, rerun, reason)。"""
+    `recipe` 是已注入 toolchain 的配方（hash 判据用）。
+    返回 (classes, invalidation, rerun, reason)。"""
     classes = classify_changes(root, changed_files, baseline)
     invalidation = {"rerun": set(), "dropped": set(), "sources": {}}
     hash_ok = (baseline.get("report_recipe_hash")
@@ -278,7 +277,7 @@ def _increment_decision(root: Path, recipe: dict, raw_recipe: dict,
     reason = _fallback_reason(hash_ok, classes, since_full,
                               calibration_every, ratio,
                               rerun_full_face_ratio)
-    return raw_recipe, classes, invalidation, rerun, reason
+    return classes, invalidation, rerun, reason
 
 def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
                     classes: dict, rerun: set, invalidation: dict,
@@ -327,9 +326,9 @@ def run_attribution_increment(project_root: str | Path,
     recipe = _inject_toolchain(root, dict(recipe))
     prev = baseline.get("increment") or {}
     since_full = int(prev.get("increments_since_full") or 0)
-    raw_recipe, classes, invalidation, rerun, reason = _increment_decision(
-        root, recipe, raw_recipe, baseline, changed_files, since_full,
-        calibration_every, rerun_full_face_ratio)
+    classes, invalidation, rerun, reason = _increment_decision(
+        root, recipe, baseline, changed_files, since_full, calibration_every,
+        rerun_full_face_ratio)
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射

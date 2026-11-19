@@ -196,6 +196,32 @@ def test_direct_ensure_map_keeps_cross_directory_targets(project, rec):
         "autoload/economy_manager.gd", "systems/economy/lcps_calculator.gd"}
 
 
+def test_direct_ensure_map_rebuild_bootstraps_import(project, rec):
+    """重建路径（默认位置旧 map 不可用）同样须导入引导：generate 与 rebuild
+    在「首个插桩 GUT 前完成导入」上不得有行为分叉。"""
+    stale = Path(ts.default_map_path(str(project)))
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}", encoding="utf-8")
+    targets = [str(project / "autoload" / "economy_manager.gd"),
+               str(project / "systems" / "economy" / "lcps_calculator.gd")]
+    out = ensure_map(project, targets)
+    assert rec.events == ["import", "measure"], (
+        f"重建路径必须先导入后测量，实际顺序: {rec.events}")
+    assert load_map(out)["schema_version"] == SCHEMA
+
+
+def test_direct_ensure_map_incomplete_cache_still_bootstraps(project, rec):
+    """`.godot` 目录在场但导入产物不全 → 仍须调用导入引导（存在 ≠ 完整）。"""
+    (project / ".godot").mkdir()
+    targets = [str(project / "autoload" / "economy_manager.gd"),
+               str(project / "systems" / "economy" / "lcps_calculator.gd")]
+    ensure_map(project, targets)
+    assert rec.events == ["import", "measure"], (
+        f"不完整缓存不得跳过导入引导，实际顺序: {rec.events}")
+    assert (project / ".godot" / "uid_cache.bin").is_file(), \
+        "导入引导须真实执行并补全产物"
+
+
 def test_warmed_reuse_skips_import_and_measurement(project, rec):
     """warmed 路径：产物已在场且新鲜 → 直接复用，零导入零测量。"""
     targets = [str(project / "autoload" / "economy_manager.gd"),

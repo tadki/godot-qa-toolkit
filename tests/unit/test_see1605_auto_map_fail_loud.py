@@ -132,8 +132,15 @@ def _run_risk(project: Path, tmp_path: Path, capsys):
         "--report", str(report_path),
     ])
     rc = cmd_measure_risk(args)
-    out = json.loads(capsys.readouterr().out)
-    return rc, out, report_path
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    return rc, out, report_path, captured.err
+
+
+def _assert_stderr_named(err: str) -> None:
+    """§SPEC-009：stderr 非空且含与 stdout 同源的具名原因。"""
+    assert err.strip(), "空 stderr 仅留机器信封（§SPEC-009 禁止）"
+    assert "attribution map auto-generation failed" in err, err
 
 
 def test_direct_ensure_map_import_failure_named(project, monkeypatch):
@@ -170,10 +177,11 @@ def test_cli_import_failure_fails_loud(project, cli_seams, monkeypatch,
             "(auto import needs godot)")
 
     monkeypatch.setattr(pr_mod, "ensure_import_cache", boom)
-    rc, out, _report = _run_risk(project, tmp_path, capsys)
+    rc, out, _report, err = _run_risk(project, tmp_path, capsys)
     assert rc != 0 and out["ok"] is False, f"假成功被禁止: {out}"
     reasons = json.dumps(out["failures"], ensure_ascii=False)
     assert "auto import failed" in reasons, reasons
+    _assert_stderr_named(err)
     _assert_no_half_product(project)
 
 
@@ -187,10 +195,11 @@ def test_cli_incomplete_import_named(project, cli_seams, monkeypatch,
             f"{project_root}: uid_cache.bin missing")
 
     monkeypatch.setattr(pr_mod, "ensure_import_cache", partial)
-    rc, out, _report = _run_risk(project, tmp_path, capsys)
+    rc, out, _report, err = _run_risk(project, tmp_path, capsys)
     assert rc != 0 and out["ok"] is False
     reasons = json.dumps(out["failures"], ensure_ascii=False)
     assert "complete import cache" in reasons, reasons
+    _assert_stderr_named(err)
     _assert_no_half_product(project)
 
 
@@ -211,12 +220,13 @@ def test_cli_measurement_artifact_missing_named(project, cli_seams,
         return None
 
     monkeypatch.setattr(orch_mod, "run_measurement", no_output)
-    rc, out, _report = _run_risk(project, tmp_path, capsys)
+    rc, out, _report, err = _run_risk(project, tmp_path, capsys)
     assert seen["n"] >= 1
     assert rc != 0 and out["ok"] is False
     reasons = json.dumps(out["failures"], ensure_ascii=False)
     assert "attribution_generate_failed" in reasons or \
         "attribution_map_build_failed" in reasons, reasons
+    _assert_stderr_named(err)
     _assert_no_half_product(project)
 
 
@@ -239,12 +249,43 @@ def test_cli_arms_invalid_named(project, cli_seams, monkeypatch, tmp_path,
         return None
 
     monkeypatch.setattr(orch_mod, "run_measurement", invalid_arms)
-    rc, out, _report = _run_risk(project, tmp_path, capsys)
+    rc, out, _report, err = _run_risk(project, tmp_path, capsys)
     assert rc != 0 and out["ok"] is False
     reasons = json.dumps(out["failures"], ensure_ascii=False)
     assert "invalid arms" in reasons or "no execution evidence" in reasons, \
         reasons
+    _assert_stderr_named(err)
     _assert_no_half_product(project)
+
+
+def test_cli_ledger_flip_failure_stderr_named(project, cli_seams, monkeypatch,
+                                              tmp_path, capsys):
+    """运行后台账 generate/rebuild 失败翻转终局 ok 时，stderr 同步具名
+    （§SPEC-009 第二失败出口）。"""
+    import godot_qa_toolkit.measurement.orchestrator as orch_mod
+    from godot_qa_toolkit import projectroot as pr_mod
+    from godot_qa_toolkit.mutation import coverlink as cl_mod
+
+    monkeypatch.setattr(pr_mod, "ensure_import_cache",
+                        lambda root, **kw: None)
+    monkeypatch.setattr(cl_mod, "project_coverage_from_map",
+                        lambda *a, **k: ({2}, None))
+
+    def ok_run(root, targets, recipe, *, attribution_out, **_kw):
+        Path(attribution_out).write_text(
+            json.dumps(_fresh_doc(Path(root), list(targets))),
+            encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(orch_mod, "run_measurement", ok_run)
+    # 预温成功后运行中期的生成/重建失败事件（模拟车道内 rebuild 失败留痕）。
+    ts._record({"action": "rebuild", "ok": False,
+                "error": "mid-run rebuild boom"})
+    rc, out, report_path, err = _run_risk(project, tmp_path, capsys)
+    assert rc != 0 and out["ok"] is False
+    reasons = json.dumps(out["failures"], ensure_ascii=False)
+    assert "mid-run rebuild boom" in reasons, reasons
+    _assert_stderr_named(err)
 
 
 def test_skip_measure_stays_static_ok(project, cli_seams, monkeypatch,
@@ -266,5 +307,8 @@ def test_skip_measure_stays_static_ok(project, cli_seams, monkeypatch,
         "--report", str(report_path), "--skip-measure",
     ])
     rc = cmd_measure_risk(args)
-    out = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
     assert rc == 0 and out["ok"] is True
+    # §SPEC-009：非生成失败路径（含 skip-measure 成功臂）不得新增错误输出。
+    assert "auto-generation failed" not in captured.err, captured.err

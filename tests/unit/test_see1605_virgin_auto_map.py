@@ -222,8 +222,11 @@ def test_cli_measure_risk_virgin_first_touch_succeeds(project, rec,
         "--report", str(report_path),
     ])
     rc = cmd_measure_risk(args)
-    out = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
     assert rc == 0 and out["ok"] is True and out["tool"] == "measure.risk"
+    # §SPEC-009：成功路径不得新增错误输出（stderr 披露仅限生成失败臂）。
+    assert "auto-generation failed" not in captured.err, captured.err
     assert rec.events and rec.events.index("import") < \
         rec.events.index("measure"), f"导入须先于测量: {rec.events}"
     doc = json.loads(report_path.read_text(encoding="utf-8"))

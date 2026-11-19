@@ -674,8 +674,11 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
         try:
             ensure_map(args.project_root, [str(p) for p in paths])
         except MutationSelectionError as e:
+            # §SPEC-009：具名原因同步走 stderr 披露，不得以空 stderr 仅留
+            # 机器信封（stdout JSON 契约不变）。
             msg = (f"attribution map auto-generation failed: {e}; "
                    "aborting before measurement lanes")
+            print(msg, file=sys.stderr)
             return _emit({"tool": "measure.risk", "ok": False,
                           "summary": {"error": msg},
                           "failures": [{"reason": msg}]})
@@ -712,8 +715,10 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
              and not e.get("ok", False)),
             None)
         if gen_error is not None:
+            # §SPEC-009：同上——运行后台账翻转出口的 stderr 同步披露。
             msg = (f"attribution map auto-generation failed: {gen_error}; "
                    f"coverage lanes are run_error — see {report_path}")
+            print(msg, file=sys.stderr)
             return _emit({"tool": "measure.risk", "ok": False,
                           "summary": {"error": msg,
                                       "report": str(report_path)},

@@ -247,8 +247,11 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
         from .gutrun import parse_failures_with_scripts
         qualified = parse_failures_with_scripts(tail)
         if qualified:
+            # D2-R1：Run Summary 段（脚本上下文丢失，记作 ("*", n)）是运行
+            # 流同名失败的重复回显——不计入新失败，否则同名基线红被误判为
+            # mutant 新失败（QA 假 kill 根因）。
             new_names = {n for _s, n in qualified
-                         if (_s, n) not in red_map and ("*", n) not in red_map}
+                         if _s != "*" and (_s, n) not in red_map}
         else:
             new_names = bare - baseline_failures
     else:
@@ -440,12 +443,12 @@ def _script_aware_new(failing_names, failing_scripts, baseline_names,
     base_map = baseline_red_map or set()
     new = set()
     for name in failing_names:
-        qualified = {(scr, n) for (scr, n) in base_map if n == name}
-        if not qualified:
-            new.add(name)
-            continue
-        covered = any(scr == "*" or (scr, name) in base_map
-                      for scr, _n in failing_scripts)
+        # D2-R1：通配 ("*", name) 条目是 Run Summary 的重复回显，不授予
+        # 豁免——只有「脚本归属 + 名」精确命中基线红的失败才是既有失败；
+        # 其它（含同名绿脚本 killer 的失败）都是真新失败 → killed。
+        covered = any((scr, name) in base_map
+                      for scr, n in failing_scripts
+                      if n == name and scr != "*")
         if not covered:
             new.add(name)
     return new

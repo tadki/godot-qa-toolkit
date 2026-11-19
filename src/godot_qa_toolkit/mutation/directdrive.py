@@ -112,10 +112,17 @@ func _gqt_skip_red_tests(gut: Node, red_tests: Array) -> Dictionary:
 		return out
 	var wanted := {}
 	for pair in red_tests:
-		var parts := String(pair).split("::", true, 1)
-		if parts.size() == 2:
-			wanted[parts[0]] = (wanted.get(parts[0], []) as Array)
-			(wanted[parts[0]] as Array).append(parts[1])
+		# cfg JSON 往返后 pair 为 Array [script, name]（不再含 "::" 字面量）。
+		if typeof(pair) == TYPE_ARRAY and pair.size() == 2:
+			var sid := String(pair[0])
+			var tname := String(pair[1])
+			wanted[sid] = (wanted.get(sid, []) as Array)
+			(wanted[sid] as Array).append(tname)
+		elif typeof(pair) == TYPE_STRING:
+			var parts := String(pair).split("::", true, 1)
+			if parts.size() == 2:
+				wanted[parts[0]] = (wanted.get(parts[0], []) as Array)
+				(wanted[parts[0]] as Array).append(parts[1])
 	var scripts: Array = gut._test_collector.get_scripts()
 	for s in scripts:
 		var script_id := String(s.path)

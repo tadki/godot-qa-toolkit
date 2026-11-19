@@ -49,7 +49,17 @@ elif _gut_addon_source() is None:
 if _skip:
     pytest.skip(_skip, allow_module_level=True)
 
+from godot_qa_toolkit.mutation import runner as mrunner  # noqa: E402
 from godot_qa_toolkit.mutation.runner import run_mutation  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clear_baseline_red_map():
+    """§SPEC-P2-R1-D3：battery 在进程内写入模块态 _BASELINE_RED_MAP
+    （真实脏基线），teardown 清场——直调分类器的隔离用例不得读取
+    陈旧全局（测试套件环境无关确定性）。"""
+    yield
+    mrunner._BASELINE_RED_MAP = set()
 
 TARGET_SRC = (
     "extends RefCounted\n\n\n"

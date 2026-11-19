@@ -124,7 +124,11 @@ def _accumulate_chunk(agg: dict, cr: dict,
 # §SPEC-010/§SPEC-006/§SPEC-002/008/SEE-1589：随分片透出的 passthrough 键
 _PASSTHROUGH_KEYS = (
     "adaptive_timeout_s", "timing_source", "samples_n", "baseline_p90",
-    "run_error", "error", "inject_scheme", "slot_mode", "exec_scheme",
+    "run_error", "error",
+    # SEE-1604 D3：baseline 超时中止的机器可执行补救键必须活过分片合并——
+    # 串行回退 chunk 的 run_error 经父层聚合，缺此两项 summary 少键。
+    "suggested_action", "suggested_action_kind",
+    "inject_scheme", "slot_mode", "exec_scheme",
     # SEE-1581：真值选面披露随分片结果透出（只增不改）
     "test_selection",
     # SEE-1587 §SPEC-006：prefilter 来源披露随分片透出（计数经

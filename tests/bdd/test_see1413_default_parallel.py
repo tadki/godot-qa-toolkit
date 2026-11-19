@@ -180,6 +180,11 @@ def then_summary_keys(bdd_state: dict) -> None:
         "worker_channel",
         "farm",
         "stage_reconciliation",
+        # SEE-1606 P2：基线失败登记披露（只加不改）
+        "baseline_dirty",
+        "baseline_failures",
+        "baseline_failure_names",
+        "break_on_baseline_failure",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

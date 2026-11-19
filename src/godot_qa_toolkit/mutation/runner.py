@@ -91,6 +91,7 @@ from .runhelp import (  # noqa: F401
     _attach_killed_certificate,
     _auto_scan_tests_glob,
     _auto_scan_tests_glob_meta,
+    _BaselineDirtyFailure,
     _BaselineLaunchFailure,
     _caliper_lines,
     _exec_finalize,
@@ -137,7 +138,7 @@ def _gut_extra_args(tests_glob: str | None) -> list[str]:
         ]
     return [f"-gdir={gdir}"]
 
-def _run_gut_on_project(project_root: str, timeout_s: int = 60,
+def _run_gut_on_project(project_root: str, timeout_s: int = 600,
                         tests_glob: str | None = None) -> tuple[int, str]:
     """在项目里 headless 跑 GUT；返回 (exit_code, 输出尾部)。
 
@@ -178,7 +179,7 @@ _ACTIVE_GATE_ROOT: str | None = None
 _TIMEOUT_SCALE = 2.0
 
 def run_mutation(file_path: str, project_root: str, budget: int = 50,
-    timeout_s: int = 60, dry_run: bool = False,
+    timeout_s: int = 600, dry_run: bool = False,
     tests_glob: str | None = None,
     precomputed_baseline: dict | None = None,
     mutant_slice: tuple[int, int] | None = None, timing_store=None,
@@ -189,6 +190,7 @@ def run_mutation(file_path: str, project_root: str, budget: int = 50,
     reuse_coverage: bool = True, progress: dict | None = None,
     identity: dict | None = None, worker_channel: bool | None = None,
     select_mode: str = "full", selection_meta: dict | None = None,
+    break_on_baseline_failure: bool = False,
 ) -> dict:
     """单文件 mutation 入口（§SPEC-202 单位级测量面挂载点）。
 
@@ -208,7 +210,8 @@ def run_mutation(file_path: str, project_root: str, budget: int = 50,
         resume2_store=resume2_store, select_ids=select_ids,
         select_lines=select_lines, reuse_coverage=reuse_coverage,
         progress=progress, identity=identity, worker_channel=worker_channel,
-        select_mode=select_mode, selection_meta=selection_meta)
+        select_mode=select_mode, selection_meta=selection_meta,
+        break_on_baseline_failure=break_on_baseline_failure)
     s = result.get("summary") if isinstance(result, dict) else None
     if isinstance(s, dict):
         # SEE-1589 A：有效选面唯一判别点（串行/卡尺/显式 --tests 同源）。
@@ -401,7 +404,7 @@ def _core_plan(c: dict, path: Path, project_root: str, original_src: str, *,
 
 
 def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
-    timeout_s: int = 60, dry_run: bool = False,
+    timeout_s: int = 600, dry_run: bool = False,
     tests_glob: str | None = None,
     precomputed_baseline: dict | None = None,
     mutant_slice: tuple[int, int] | None = None, timing_store=None,
@@ -411,7 +414,8 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
     select_ids: list[str] | None = None, select_lines: list[int] | None = None,
     reuse_coverage: bool = True, progress: dict | None = None,
     identity: dict | None = None, worker_channel: bool | None = None,
-    select_mode: str = "full", selection_meta: dict | None = None) -> dict:
+    select_mode: str = "full", selection_meta: dict | None = None,
+    break_on_baseline_failure: bool = False) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。分解见 _core_setup/
     _core_caliper_and_early/_core_plan + _execute_planned。"""
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
@@ -450,7 +454,8 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
         c["header_hash"], retry_ids, scoped, c["total_sites"],
         progress=progress, identity=identity,
         targeted_only=bool(select_ids or select_lines),
-        worker_channel=worker_channel, clock=clock)
+        worker_channel=worker_channel, clock=clock,
+        break_on_baseline_failure=break_on_baseline_failure)
 def _execute_planned(path, project_root, original_src, backup, mutants,
                      executed_list, reused, results_uncovered, prior_entries,
                      scope_hashes, disclosures, budget, tests_glob,
@@ -458,7 +463,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      timeout_factor, header_hash, retry_ids, scoped,
                      total_sites, progress=None, identity=None,
                      targeted_only=False, worker_channel=None,
-                     clock: StageClock | None = None):
+                     clock: StageClock | None = None,
+                     break_on_baseline_failure: bool = False):
     """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
     clock = clock or StageClock()
     if not executed_list and not reused:
@@ -484,7 +490,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
         tests_glob, effective_timeout, precomputed_baseline,
         store2, prior_entries, scope_hashes, timeout_factor,
         reporter=reporter, identity=identity, targeted_only=targeted_only,
-        worker_channel=worker_channel, clock=clock)
+        worker_channel=worker_channel, clock=clock,
+        break_on_baseline_failure=break_on_baseline_failure)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
     raw_pairs, baseline_reused, baseline_elapsed, slot_info = outcome
@@ -576,7 +583,8 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
     return raw_pairs
 
 def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
-                   precomputed_baseline, timeout_factor) -> tuple:
+                   precomputed_baseline, timeout_factor,
+                   break_on_baseline_failure: bool = False) -> tuple:
     """workdir 备份 + baseline 实测/复用 + 自适应 timeout 锚 + 启动失败守卫。
     baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。"""
     backup_path = os.path.join(workdir, "original.gd")
@@ -599,6 +607,10 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     if baseline_rc != 0 and _looks_like_godot_launch_failure(baseline_tail):
         raise _BaselineLaunchFailure(baseline_tail)
     baseline_failures = _parse_failing_tests(baseline_tail)
+    # SEE-1606 P2：开关关闭（默认）时继续跑并只做披露；打开时 fail-loud，
+    # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
+    if break_on_baseline_failure and baseline_failures:
+        raise _BaselineDirtyFailure(baseline_failures)
     return baseline_failures, bool(baseline_failures), baseline_reused, \
         baseline_elapsed
 
@@ -660,6 +672,7 @@ def _run_mutant_loop(
     timeout_factor: float | None = None, reporter=None,
     identity: dict | None = None, targeted_only: bool = False,
     worker_channel=None, clock: StageClock | None = None,
+    break_on_baseline_failure: bool = False,
 ) -> tuple[list, bool, float, dict]:
     """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
     baseline_elapsed, slot_info)。verdict 记录不在此处进 results——D5 streak
@@ -669,7 +682,8 @@ def _run_mutant_loop(
          baseline_elapsed) = _loop_baseline(workdir, path, project_root,
                                             tests_glob, timeout_s,
                                             precomputed_baseline,
-                                            timeout_factor)
+                                            timeout_factor,
+                                            break_on_baseline_failure)
         clock = clock or StageClock()
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
@@ -683,6 +697,13 @@ def _run_mutant_loop(
         slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
         slot_info["slot_mode"] = slot.mode
         slot_info["freshness"] = list(slot.freshness)
+        # SEE-1606 P2：基线失败登记披露（默认继续跑；失败测试不参与 kill
+        # 判定——判定侧 `- baseline_failures` 差集保证）。
+        slot_info["baseline_dirty"] = baseline_dirty
+        slot_info["baseline_failures"] = len(baseline_failures)
+        slot_info["baseline_failure_names"] = sorted(baseline_failures)
+        slot_info["break_on_baseline_failure"] = bool(
+            break_on_baseline_failure)
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
             slot_info["suspected_orphan"] = _orphan_disclosure(
                 project_root, target_res)
@@ -697,7 +718,8 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  reporter=None, identity=None,
                                  targeted_only: bool = False,
                                  worker_channel=None,
-                                 clock: StageClock | None = None):
+                                 clock: StageClock | None = None,
+                                 break_on_baseline_failure: bool = False):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
@@ -707,6 +729,7 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             timeout_factor, reporter=reporter, identity=identity,
             targeted_only=targeted_only, worker_channel=worker_channel,
             clock=clock,
+            break_on_baseline_failure=break_on_baseline_failure,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。
@@ -718,6 +741,11 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             hint=suggested_action(timeout_s),
             action_kind=suggested_action_kind(timeout_s),
         )
+    except _BaselineDirtyFailure as e:
+        # SEE-1606 P2：显式 --break-on-baseline-failure 下的基线脏中止。
+        # 默认路径不走这里（继续跑 + 失败测试退出 kill 判定）。
+        from .reporting import _break_on_baseline_result
+        return _break_on_baseline_result(str(path), e.names)
     except _BaselineLaunchFailure as e:
         return _run_error_result(
             str(path),

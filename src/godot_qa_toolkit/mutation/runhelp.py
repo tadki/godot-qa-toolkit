@@ -57,6 +57,19 @@ class _BaselineLaunchFailure(Exception):
         super().__init__(tail[:200])
 
 
+class _BaselineDirtyFailure(Exception):
+    """SEE-1606 P2：`--break-on-baseline-failure` 下基线自带失败 → 中止。
+
+    默认（开关关闭）不抛：继续跑变异批次，基线失败测试仅退出 kill 判定并
+    在报告登记，对齐 Stryker `break-on-initial-test-failure=false`。
+    """
+
+    def __init__(self, names: list[str]):
+        self.names = sorted(names)
+        super().__init__(
+            f"baseline has {len(self.names)} failing test(s)")
+
+
 
 def _auto_scan_tests_glob(file_path: str, project_root: str,
                           select_mode: str = "full") -> str | None:

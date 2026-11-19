@@ -105,6 +105,10 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   `coverage_prefilter`, `lines_selection`, `selection_mode`, `selection_groups`,
   `jobs_limit_reason`, `test_selection`, `attribution`,
   `zero_ref_short_circuit`, `short_circuit_reason`.
+- Baseline-failure keys (SEE-1606 P2): `baseline_dirty`, `baseline_failures`,
+  `baseline_failure_names`, `break_on_baseline_failure` — always present on the
+  normal path; a dirty baseline adds its failing tests to this registry and
+  they never count toward a kill.
 - Mechanism keys: `worker_channel` (`requested` / `route` / `exec_scheme` /
   `decision` / `reason` / `route_reasons` / `reason_counts` / `closure_size` /
   `override_refused`; degraded adds `fatal_events` / `equivalence`), `farm`
@@ -182,7 +186,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `<files...>` (positional) | git diff HEAD when omitted | `.gd` files, or one compact `<file>.gd#<lines>` address; omitted = tracked changes plus untracked `.gd` files, excluding hidden/tool/vendor paths |
 | `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins and invalid values fail loud |
 | `--budget <n>` | 50 | Max mutants; with diff reuse present, counted on the post-diff retry set (order-preserving truncation) |
-| `--timeout <s>` | 60 | Single GUT wall-clock limit |
+| `--timeout <s>` | 600 | Single GUT wall-clock limit; default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade |
 | `--dry-run` | off | List mutation sites without running GUT; emits a diff estimate when a manifest exists |
 | `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping and discloses `explicit_tests` |
 | `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value |
@@ -192,6 +196,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--no-attribution-auto` | off | Disable automatic map generation/incremental refresh; with no usable map the run fails loud |
 | `--mutation-warning <n>` | 50 | Warn on stderr + `summary.attention` when the pre-truncation site count exceeds N |
 | `--timeout-factor <f>` | 2.0 | Adaptive per-mutant timeout = `max(timeout, baseline×f+1)`; only widened, never tightened |
+| `--break-on-baseline-failure` | off | Aligns with Stryker `break-on-initial-test-failure`: when off (default) a dirty baseline keeps running, its failing tests are excluded from kill determination and disclosed via `summary.baseline_dirty` / `baseline_failures` / `baseline_failure_names`; when on, a dirty baseline aborts fail-loud before any mutant GUT |
 | `--mutate-all` | off | Force full execution (the only escape from diff reuse) |
 | `--mutation <file>#<scope_id>#<n>` | omitted | Single-site caliper (single file): fresh execution using that site's line-level tests; bypasses diff reuse and prefilter |
 | `--lines <spec>` | omitted | Single line `42`, range `10-20`, or multi-segment `10-20,30,35-40`; intersects actual sites, discloses no-site lines, and uses the selected lines' test union |

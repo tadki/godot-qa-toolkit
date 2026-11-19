@@ -64,7 +64,10 @@ class TestTimeoutFactorEndToEnd:
 
         monkeypatch.setattr(mrunner, "_run_baseline", fake_baseline)
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake_gut)
+        # timeout_s 显式给 60：本用例验 factor 推导，不依赖 CLI 默认值
+        # （SEE-1606 起 mutation 默认 600）。
         r = mrunner.run_mutation(str(target), str(proj), budget=4,
+                                 timeout_s=60,
                                  tests_glob="res://tests/",
                                  timeout_factor=3.0)
         assert r["summary"]["adaptive_timeout_s"] == 151
@@ -82,6 +85,8 @@ class TestTimeoutFactorEndToEnd:
                             lambda root, timeout_s=60, tests_glob=None:
                             (0, "all passed"))
         r = mrunner.run_mutation(str(target), str(proj), budget=4,
+                                 timeout_s=60,
                                  tests_glob="res://tests/")
-        # 默认 2.0 不动：max(60, 50×2.0+1) = 101
+        # factor 默认 2.0 不动：max(60, 50×2.0+1) = 101（timeout_s 显式 60，
+        # 与 SEE-1606 的 CLI 默认 600 解耦）
         assert r["summary"]["adaptive_timeout_s"] == 101

@@ -185,6 +185,11 @@ def then_summary_keys(bdd_state: dict) -> None:
         "baseline_failures",
         "baseline_failure_names",
         "break_on_baseline_failure",
+        # SEE-1606 P3：kill 即退披露（只加不改）
+        "kill_bail",
+        "kill_bail_face",
+        "kill_bail_disabled_by",
+        "kill_bail_scripts",
     }
     if set(summary) != expected:
         _fail(f"summary keys changed: {sorted(summary)}")

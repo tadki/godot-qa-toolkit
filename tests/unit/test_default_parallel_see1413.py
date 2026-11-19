@@ -133,6 +133,9 @@ class TestDefaultParallelRouting:
             # SEE-1606 P2：基线失败登记披露（只加不改）
             "baseline_dirty", "baseline_failures", "baseline_failure_names",
             "break_on_baseline_failure",
+            # SEE-1606 P3：kill 即退披露（只加不改）
+            "kill_bail", "kill_bail_face", "kill_bail_disabled_by",
+            "kill_bail_scripts",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")

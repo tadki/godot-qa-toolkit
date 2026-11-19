@@ -37,6 +37,7 @@ def _chunk_worker(payload: dict) -> dict:
     select_mode = payload.get("selection_mode") or "full"
     break_on_baseline_failure = bool(
         payload.get("break_on_baseline_failure", False))
+    kill_bail = payload.get("kill_bail")
     if payload.get("serial"):
         return _x("run_mutation")(
             payload["file"], payload["project_root"], budget=payload["budget"],
@@ -49,7 +50,8 @@ def _chunk_worker(payload: dict) -> dict:
             worker_channel=payload.get("worker_channel"),
             select_mode=select_mode,
             selection_meta=payload.get("selection_meta"),
-            break_on_baseline_failure=break_on_baseline_failure)
+            break_on_baseline_failure=break_on_baseline_failure,
+            kill_bail=kill_bail)
     return _x("run_mutation")(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -63,6 +65,7 @@ def _chunk_worker(payload: dict) -> dict:
         select_mode=select_mode,
         selection_meta=payload.get("selection_meta"),
         break_on_baseline_failure=break_on_baseline_failure,
+        kill_bail=kill_bail,
     )
 def _merge_prefilter_disclosure(cur, pf) -> object:
     """SEE-1587：prefilter 披露跨分片合并——dict 计数求和、source 取首个
@@ -136,6 +139,9 @@ _PASSTHROUGH_KEYS = (
     # 各分片值一致，最后写入者为准）。
     "baseline_dirty", "baseline_failures", "baseline_failure_names",
     "break_on_baseline_failure",
+    # SEE-1606 P3：kill 即退披露随分片透出（面判定跨分片一致）
+    "kill_bail", "kill_bail_face", "kill_bail_disabled_by",
+    "kill_bail_scripts",
     "inject_scheme", "slot_mode", "exec_scheme",
     # SEE-1581：真值选面披露随分片结果透出（只增不改）
     "test_selection",

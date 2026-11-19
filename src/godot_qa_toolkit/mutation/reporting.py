@@ -326,7 +326,9 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
         summary["worker_fatal_events"] = info["worker_fatal_events"]
     # SEE-1606 P2：基线失败登记披露（默认继续跑时的机器可读面）。
     for key in ("baseline_dirty", "baseline_failures",
-                "baseline_failure_names", "break_on_baseline_failure"):
+                "baseline_failure_names", "break_on_baseline_failure",
+                "kill_bail", "kill_bail_face", "kill_bail_disabled_by",
+                "kill_bail_scripts"):
         if key in info:
             summary[key] = info[key]
     _emit_killed_certificates(summary, results)
@@ -334,7 +336,9 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
 
 
 def _emit_killed_certificates(summary: dict, results: list[dict]) -> None:
-    certs = [{"id": r["id"], "killed_by": r["killed_by"]}
+    certs = [{"id": r["id"], "killed_by": r["killed_by"],
+              **({"kill_bail": r["kill_bail_info"]}
+                 if r.get("kill_bail_info") else {})}
              for r in results
              if r.get("verdict") == "killed" and r.get("killed_by")]
     if certs:
@@ -375,6 +379,18 @@ def _leg_killed_record(m, new_failures, ownership_fn, project_root,
 
 def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
                         ownership_fn, project_root, original_src) -> dict:
+    verdict = _classify_worker_leg_impl(m, leg, baseline_failures,
+                                        baseline_dirty, ownership_fn,
+                                        project_root, original_src)
+    # SEE-1606 §SPEC-P3：worker 腿早停信息随 verdict 披露（marker 契约与
+    # 冷通道一致——宿主在首个新增失败处中断后续脚本）。
+    if getattr(leg, "bail_info", None):
+        verdict = {**verdict, "kill_bail_info": dict(leg.bail_info)}
+    return verdict
+
+
+def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
+                              ownership_fn, project_root, original_src) -> dict:
     """worker 腿 → verdict（与冷通道同一 kill 语义：失败名差集 + 同档分类）。
 
     worker 腿的 L1/L4 beacon 失败 → run_error（数据不可信，绝不 killed/

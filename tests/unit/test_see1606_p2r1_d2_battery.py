@@ -217,3 +217,67 @@ class TestD2SkipRedScriptQualified:
                               worker_channel=True, **common)
         assert _verdict_map(cold) == _verdict_map(worker)
         assert cold["summary"].get("killed") == worker["summary"].get("killed")
+
+
+@pytest.fixture(scope="module")
+def h1_project(tmp_path_factory):
+    """H1 证据链专用项目：h1 测试文件在 godot --import 之前创建（独立
+    module 项目，不与 D1/D2 的模块项目共享状态）。"""
+    proj = tmp_path_factory.mktemp("see1606_h1") / "proj"
+    shutil.copytree(FORMS_TEMPLATE, proj)
+    shutil.copytree(_gut_addon_source(), proj / "addons" / "gut")
+    (proj / "calc_sign.gd").write_text(TARGET_SRC, encoding="utf-8")
+    tests = proj / "tests" / "h1"
+    tests.mkdir(parents=True)
+    (tests / "test_1_killer.gd").write_text(
+        "extends GutTest\n\n\n"
+        "func test_h1_killer() -> void:\n"
+        "\tvar t := load(\"res://calc_sign.gd\")\n"
+        "\tvar inst: RefCounted = t.new()\n"
+        "\tassert_eq(inst.sign(0), false)\n", encoding="utf-8")
+    (tests / "test_2_filler.gd").write_text(
+        "extends GutTest\n\n\n"
+        "func test_h1_filler() -> void:\n"
+        "\tassert_eq(true, true)\n", encoding="utf-8")
+    sel_dir = proj / ".gqt-attr-select" / "h1sel"
+    sel_dir.mkdir(parents=True)
+    for wrapper, orig in (("s1_killer.gd", "test_1_killer.gd"),
+                          ("s2_filler.gd", "test_2_filler.gd")):
+        (sel_dir / wrapper).write_text(
+            f'extends "res://tests/h1/{orig}"\n', encoding="utf-8")
+    godot = os.environ.get("GQT_GODOT_BIN") or shutil.which("godot")
+    subprocess.run([godot, "--headless", "--import", "--path", str(proj)],
+                   capture_output=True, text=True, timeout=300,
+                   cwd=str(proj), check=False)
+    return proj
+
+
+class TestH1BailEvidenceChain:
+    """§SPEC-H1 硬化判据：kill 即退证据链（cold stderr marker + summary
+    披露）。证书面在显式 tests 面按设计被 attribution 旁路（ownership
+    不可用）——bail 的机器证据面为 marker 与 disclosure。全量上下文曾出现
+    负载敏感 timeout（工具自身标记 suspected infra run）——按硬化手册该
+    形态不可信，作废并重跑一次。"""
+
+    def _cold_run(self, proj):
+        glob = "res://.gqt-attr-select/h1sel/"
+        target_fs = str(proj / "calc_sign.gd")
+        r = run_mutation(target_fs, str(proj), budget=10, mutate_all=True,
+                         tests_glob=glob, timeout_s=120,
+                         worker_channel=False)
+        s = r.get("summary") or {}
+        if s.get("killed", 0) == 0 and s.get("timeout", 0):
+            r = run_mutation(target_fs, str(proj), budget=10,
+                             mutate_all=True, tests_glob=glob,
+                             timeout_s=120, worker_channel=False)
+        return r
+
+    def test_cold_bail_marker_and_disclosure(self, h1_project, capsys):
+        cold = self._cold_run(h1_project)
+        s = cold["summary"]
+        assert s.get("killed", 0) >= 1, s
+        assert s.get("kill_bail") is True
+        assert s.get("kill_bail_face") == "selection_dir"
+        assert s.get("kill_bail_scripts") == 2
+        err = capsys.readouterr().err
+        assert "kill-bail scripts=2/2 new_fail=test_h1_killer" in err, err

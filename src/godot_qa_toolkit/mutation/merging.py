@@ -35,6 +35,8 @@ def _chunk_worker(payload: dict) -> dict:
     # §SPEC-012：worker 与父层同源遵守 select_mode（payload 携带父层
     # 派发值；tests_glob=None 的显式全脸 chunk 不得被 worker 侧重扫降级）。
     select_mode = payload.get("selection_mode") or "full"
+    break_on_baseline_failure = bool(
+        payload.get("break_on_baseline_failure", False))
     if payload.get("serial"):
         return _x("run_mutation")(
             payload["file"], payload["project_root"], budget=payload["budget"],
@@ -46,7 +48,8 @@ def _chunk_worker(payload: dict) -> dict:
             identity=identity,
             worker_channel=payload.get("worker_channel"),
             select_mode=select_mode,
-            selection_meta=payload.get("selection_meta"))
+            selection_meta=payload.get("selection_meta"),
+            break_on_baseline_failure=break_on_baseline_failure)
     return _x("run_mutation")(
         payload["file"], payload["project_root"], budget=payload["budget"],
         timeout_s=payload["timeout_s"], tests_glob=payload["tests_glob"],
@@ -59,6 +62,7 @@ def _chunk_worker(payload: dict) -> dict:
         worker_channel=payload.get("worker_channel"),
         select_mode=select_mode,
         selection_meta=payload.get("selection_meta"),
+        break_on_baseline_failure=break_on_baseline_failure,
     )
 def _merge_prefilter_disclosure(cur, pf) -> object:
     """SEE-1587：prefilter 披露跨分片合并——dict 计数求和、source 取首个
@@ -128,6 +132,10 @@ _PASSTHROUGH_KEYS = (
     # SEE-1604 D3：baseline 超时中止的机器可执行补救键必须活过分片合并——
     # 串行回退 chunk 的 run_error 经父层聚合，缺此两项 summary 少键。
     "suggested_action", "suggested_action_kind",
+    # SEE-1606 P2：基线失败登记与开关回显随分片透出（基线跨分片共享，
+    # 各分片值一致，最后写入者为准）。
+    "baseline_dirty", "baseline_failures", "baseline_failure_names",
+    "break_on_baseline_failure",
     "inject_scheme", "slot_mode", "exec_scheme",
     # SEE-1581：真值选面披露随分片结果透出（只增不改）
     "test_selection",

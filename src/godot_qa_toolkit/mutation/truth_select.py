@@ -48,6 +48,14 @@ def mode() -> str:
     return (os.environ.get(ENV_MODE) or "auto").strip().lower()
 
 
+def map_event_counts_stale(doc: dict) -> bool:
+    """SEE-1604 D4：增量产物的车道事件计数未重测（increment 块唯一出处）。
+
+    结构边/行事实在增量中已刷新，但事件计数（hit_events/rates/phases/
+    hotspots）不重测——消费侧不得把它当新鲜证据（显式产物具名拒绝）。"""
+    return bool((doc.get("increment") or {}).get("event_counts_stale"))
+
+
 def ledger() -> dict:
     """自动更新/回退台账（mutation summary 的 attribution 块唯一出处）。"""
     return {"events": list(_LEDGER),
@@ -605,9 +613,10 @@ def resolve_selection(project_root: str | Path, target_file: str,
     映射过期自动增量/重建一次后重判（台账披露）；strict=False 供证书
     归属等只读旁路（返回 full_face 描述，不抛）。
 
-    SEE-1604 D5：显式映射默认路径（`--attribution-map` / ENV_MAP）只读
-    透传——过期绝不续新/重建/改写（fail-loud 具名）；auto 管理的默认映射
-    才走续新。renew=False（dry-run）抑制全部续新（零 GUT）。"""
+    SEE-1604 D5/D4：显式映射默认路径（`--attribution-map` / ENV_MAP）只读
+    透传——过期绝不续新/重建/改写（fail-loud 具名），且拒绝 event_counts_stale
+    的增量产物；auto 管理的默认映射才走续新。renew=False（dry-run）抑制
+    全部续新（零 GUT）。"""
     root = str(Path(project_root).resolve())
     base = {"source": "full_face", "reason": None, "tests": [],
             "tests_glob": None, "zero_ref": False, "mapping": None,
@@ -621,6 +630,11 @@ def resolve_selection(project_root: str | Path, target_file: str,
     if done is not None:
         return done
     doc, rel = loaded
+    if explicit and map_event_counts_stale(doc):
+        # 显式增量产物的事件计数未重测——不得当新鲜证据消费（具名拒绝，
+        # 零续新/零 GUT；结构事实虽新但不是本轮可认证的事件证据）。
+        base["reason"] = "event_counts_stale"
+        return _finish(base, strict)
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path

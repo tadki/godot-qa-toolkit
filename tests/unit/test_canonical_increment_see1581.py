@@ -389,3 +389,35 @@ def test_increment_falls_back_on_new_prod_file(tmp_path: Path):
     doc = json.loads(inc_artifact.read_text(encoding="utf-8"))
     assert doc["increment"]["mode"] == "new_prod_file_fallback"
     assert doc["increment"]["increments_since_full"] == 0
+
+
+def test_increment_fallback_keeps_raw_pristine_and_includes_prod_new(
+        tmp_path: Path):
+    """SEE-1604 D1：全脸回退必须传 **raw recipe**（不自锁 pristine），
+    且把 classes.prod_new 并入重建 targets（否则新文件永不入图）。"""
+    from godot_qa_toolkit.measurement.recipe import recipe_hash
+
+    project = _project(tmp_path)
+    recipe, targets = _recipe_and_targets(project, tmp_path)
+    sp.run = BareNameFakeGodot(project)
+    raw_pristine = recipe_hash({k: v for k, v in recipe.items()
+                                if k != "recipe_hash"})
+    base_artifact = tmp_path / "base.attribution.json"
+    run_measurement(project, targets, recipe, test_attribution=True,
+                  attribution_out=str(base_artifact))
+    base_doc = json.loads(base_artifact.read_text(encoding="utf-8"))
+    # 健康基线：pristine 绑定 raw recipe（注入前）
+    assert base_doc["recipe_hash_pristine"] == raw_pristine
+
+    new_prod = project / "src_game" / "brand_new.gd"
+    new_prod.write_text("extends RefCounted\nfunc x() -> void:\n\tpass\n")
+    inc_artifact = tmp_path / "inc.attribution.json"
+    report = run_attribution_increment(
+        project, targets, recipe, base_artifact, ["src_game/brand_new.gd"],
+        inc_artifact)
+    assert report["mode"] == "new_prod_file_fallback"
+    doc = json.loads(inc_artifact.read_text(encoding="utf-8"))
+    # D1-a：回退传 raw recipe → pristine 保持 raw，不再永久"不新鲜"自锁
+    assert doc["recipe_hash_pristine"] == raw_pristine
+    # D1-b：新生产文件并入重建 target 面 → 新文件真实入图
+    assert "src_game/brand_new.gd" in doc["target_files"]

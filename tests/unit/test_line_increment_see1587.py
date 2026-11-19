@@ -393,9 +393,9 @@ def test_increment_fallback_artifact_is_line_primary(tmp_path, monkeypatch):
     assert doc["schema_version"] == "test-attribution/6"
     arm = doc["arms"]["gut_full"]
     assert arm["test_to_lines"]["res://tests/unit/test_game.gd::test_ok"]
-    # 回退全脸按契约测量基线目标宇宙（runbook：roots 必须与基线一致）——
-    # 新文件不在 universe 内，探针面只含基线目标
-    assert "src_game/brand_new.gd" not in doc["instrumentable_lines"]
+    # SEE-1604 D1：new_prod_file_fallback 必须把 classes.prod_new 并入重建
+    # targets——新文件入探针面（旧行为"新文件永不进图"即 QA D1 缺陷）。
+    assert "src_game/brand_new.gd" in doc["instrumentable_lines"]
     assert doc["instrumentable_lines"]["src_game/cell.gd"]
     assert doc["increment"]["increments_since_full"] == 0
 

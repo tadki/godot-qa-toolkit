@@ -253,13 +253,14 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                             for k, v in sorted(file_to_scripts.items())},
         **_line_facts_views(test_to_lines, script_to_lines, line_to_tests),
     }
-def _increment_decision(root: Path, recipe: dict, baseline: dict,
-                        changed_files: list[str], since_full: int,
-                        calibration_every: int,
+def _increment_decision(root: Path, recipe: dict, raw_recipe: dict,
+                        baseline: dict, changed_files: list[str],
+                        since_full: int, calibration_every: int,
                         rerun_full_face_ratio: float) -> tuple:
     """增量资格判定：hash 守恒 + 变更分类 + 失效计算 + fallback 仲裁。
+    `recipe` 是已注入 toolchain 的配方（hash 判据用），`raw_recipe` 是注入前
+    的原始配方（回退全脸重建用，D1）。
     返回 (raw_recipe, classes, invalidation, rerun, reason)。"""
-    raw_recipe = dict(recipe)
     classes = classify_changes(root, changed_files, baseline)
     invalidation = {"rerun": set(), "dropped": set(), "sources": {}}
     hash_ok = (baseline.get("report_recipe_hash")
@@ -319,12 +320,16 @@ def run_attribution_increment(project_root: str | Path,
     t0 = time.monotonic()
     root = Path(project_root).resolve()
     baseline = load_baseline(baseline_path)
+    # D1：先存 raw recipe（toolchain 注入前）。回退全脸重建必须用它——
+    # run_measurement 自行注入并据此计算 pristine hash；若传已注入配方，
+    # pristine 会被写成注入域 hash → 映射永久"不新鲜"自锁。
+    raw_recipe = dict(recipe)
     recipe = _inject_toolchain(root, dict(recipe))
     prev = baseline.get("increment") or {}
     since_full = int(prev.get("increments_since_full") or 0)
     raw_recipe, classes, invalidation, rerun, reason = _increment_decision(
-        root, recipe, baseline, changed_files, since_full, calibration_every,
-        rerun_full_face_ratio)
+        root, recipe, raw_recipe, baseline, changed_files, since_full,
+        calibration_every, rerun_full_face_ratio)
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
@@ -476,7 +481,14 @@ def _merged_instrumentable_lines(root: Path, baseline: dict,
 def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
                         out_path: str | Path, classes: dict, reason: str,
                         causal: bool, timeout_s: int, t0: float) -> dict:
-    report = run_measurement(root, target_files, recipe,
+    # D1：新增生产文件必须并入重建 target 面——否则 brand_new.gd 永远
+    # 不进图（回退仅重建基线 targets 时新文件被静默漏测）。
+    targets = list(target_files)
+    for rel in classes.get("prod_new") or []:
+        abs_path = str((Path(root) / rel).resolve())
+        if abs_path not in targets:
+            targets.append(abs_path)
+    report = run_measurement(root, targets, recipe,
                            timeout_s=timeout_s, test_attribution=True,
                            attribution_causal=causal,
                            attribution_out=str(out_path))

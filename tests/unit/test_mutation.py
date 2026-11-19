@@ -14,6 +14,22 @@ from godot_qa_toolkit.mutation.runner import (
     run_mutation,
 )
 
+from godot_qa_toolkit.mutation import worker_channel as _wc_mod
+from godot_qa_toolkit.mutation import runner as _runner_mod
+
+
+def _pin_cold(monkeypatch):
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    monkeypatch.setattr(_wc_mod, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr(_runner_mod, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+@pytest.fixture(autouse=True)
+def _pin_cold_auto(monkeypatch):
+    _pin_cold(monkeypatch)
+
 GD_WITH_OPS = """extends Node
 
 func add(a: int, b: int) -> int:
@@ -78,6 +94,7 @@ class TestRunMutation:
         (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
         target = proj / "calc.gd"
         target.write_text("func add(a, b):\n\treturn a + b\n")
+        (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
         return proj, target
 
     def test_all_killed_returns_ok_true(self, tmp_path, monkeypatch):
@@ -225,12 +242,21 @@ class TestRunMutation:
         from godot_qa_toolkit.mutation import runner as m
         assert m.GUT_SCRIPT_RES_PATH == "res://addons/gut/gut_cmdln.gd"
 
+
+    def _materialize_selection(self, proj, names):
+        sel_dir = Path(proj) / ".gqt-attr-select" / "testsel"
+        sel_dir.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+        return "res://.gqt-attr-select/testsel/"
+
     def test_preexisting_failures_do_not_count_as_killed(self, tmp_path, monkeypatch):
         # KOL baseline GUT has pre-existing failures (headless virtual-cursor
         # E2E): rc=1 even with the ORIGINAL file. Kill must be decided by the
         # FAILING-TEST-NAME DIFF vs baseline, not by the exit code — otherwise
         # every mutant on such a project is falsely "killed".
         proj, target = self._write_project(tmp_path)
+        glob = self._materialize_selection(proj, ["test_a.gd"])
         baseline = (1, "---- 2 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
         mutant_same = (1, "---- 2 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
 
@@ -242,7 +268,7 @@ class TestRunMutation:
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
         )
-        result = run_mutation(str(target), str(proj), budget=2)
+        result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         s = result["summary"]
         assert s["killed"] == 0, f"pre-existing failures must not be kills: {s}"
         # SEE-1312 suspect：baseline 脏 ∧ 差集空 → suspect（不再归 survived）
@@ -258,11 +284,12 @@ class TestRunMutation:
             if calls["n"] == 1:
                 return (1, "---- 1 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
             return (1, "---- 2 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n* test_add\n    [Failed]: new\n")
+        glob = self._materialize_selection(proj, ["test_a.gd"])
 
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
         )
-        result = run_mutation(str(target), str(proj), budget=2)
+        result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         s = result["summary"]
         assert s["killed"] == s["mutants"]
         assert s["survived"] == 0
@@ -446,6 +473,7 @@ class TestLaunchFailureGuard:
         proj.mkdir()
         (proj / "addons" / "gut").mkdir(parents=True)
         (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+        (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
         target = proj / "calc.gd"
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
@@ -509,18 +537,27 @@ class TestLaunchFailureGuard:
         assert s["run_errors"] == s["mutants"] > 0
         assert result["ok"] is False
 
+    def _materialize_selection(self, proj, names):
+        sel_dir = Path(proj) / ".gqt-attr-select" / "testsel"
+        sel_dir.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+        return "res://.gqt-attr-select/testsel/"
+
     def test_dirty_baseline_with_noise_proceeds_not_aborts(
             self, tmp_path, monkeypatch):
         """baseline 侧一致性：baseline rc=1（既有失败）+ 告警噪声 + 测试流
         在场 → 不得中止（diff 分类路径照常，无法区分者落 suspect）。"""
         proj, target = self._write_project(tmp_path)
+        glob = self._materialize_selection(proj, ["test_a.gd"])
 
         def fake(root, timeout_s=60, tests_glob=None):
             return (1, self.NOISE + "* test_old\n  [Failed] pre-existing\n")
 
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
-        result = run_mutation(str(target), str(proj), budget=3)
+        result = run_mutation(str(target), str(proj), budget=3,
+                              tests_glob=glob)
         s = result["summary"]
         assert s.get("run_error") is not True, "脏 baseline + 告警不得中止"
         # 失败集合与 baseline 相同（差集空）→ 保守 suspect（不可证杀）

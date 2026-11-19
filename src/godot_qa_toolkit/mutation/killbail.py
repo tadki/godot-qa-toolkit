@@ -24,6 +24,9 @@ ENV_KILL_BAIL = "GQT_MUTATION_KILL_BAIL"
 SELECT_ROOT = ".gqt-attr-select"  # 与 truth_select.SELECT_ROOT 同值（字符串面）
 BAIL_MARKER = "GQT_KILL_BAIL"
 DIRECT_SCRIPTS_MARKER = "GQT_DIRECT_SCRIPTS"
+# SEE-1606 §SPEC-P2-R1：基线红测试物理跳过 marker（宿主从 collector 移除
+# 红测试后打点；Python 分类侧据此区分「干净批次」与「跑过但不算」）。
+SKIP_RED_MARKER = "GQT_SKIP_RED"
 
 # 顺序执行 chunk 大小：性能门实测（SEE-1606 DoD）——per-script 逐脚本调
 # 用 `_test_the_scripts([i])` 的固定开销 ~0.46s/次，286 脚本宽面幸存腿
@@ -88,6 +91,20 @@ def face_scripts(project_root: str,
                 for p in sel_dir.glob("*.gd") if p.suffix == ".gd")
             return scripts, FACE_SELECTION_DIR
     return None, FACE_UNSUPPORTED
+
+
+_SKIP_RED_RE = re.compile(
+    rf"{SKIP_RED_MARKER} marked=(\d+) requested=(\d+) names=(\S*)")
+
+
+def parse_skip_red_marker(tail: str) -> dict | None:
+    """红测试物理跳过 marker → 披露 dict；缺席 = 本腿未发生跳过（None）。"""
+    m = _SKIP_RED_RE.search(tail or "")
+    if m is None:
+        return None
+    names = [n for n in m.group(3).split(",") if n]
+    return {"marked": int(m.group(1)), "requested": int(m.group(2)),
+            "names": names}
 
 
 def parse_bail_marker(tail: str) -> dict | None:

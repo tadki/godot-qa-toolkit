@@ -25,6 +25,7 @@ def _write_project(tmp_path, target_src="func add(a, b):\n\treturn a + b\n"):
     proj.mkdir()
     (proj / "addons" / "gut").mkdir(parents=True)
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
+    (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
     target = proj / "target.gd"
     target.write_text(target_src)
     return proj, target
@@ -239,6 +240,28 @@ class TestH8RealFileInstrumentation:
         gdtoolkit_parser.parse(instrumented)
 
 
+
+def _materialize_selection(proj, names):
+    sel_dir = Path(proj) / ".gqt-attr-select" / "testsel"
+    sel_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
+    return "res://.gqt-attr-select/testsel/"
+
+
+def _pin_cold(monkeypatch):
+    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+    from godot_qa_toolkit.mutation import worker_channel as wc
+    monkeypatch.setattr(wc, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr("godot_qa_toolkit.mutation.runner.resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
+
+
+@pytest.fixture(autouse=True)
+def _pin_cold_auto(monkeypatch):
+    _pin_cold(monkeypatch)
+
 class TestH5SuspectGatesOk:
     """H5: suspect>0 时 ok 必须为 False（suspect = 无法证明被杀死）。"""
 
@@ -251,7 +274,8 @@ class TestH5SuspectGatesOk:
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: dirty,
         )
-        result = run_mutation(str(target), str(proj), budget=2)
+        glob = _materialize_selection(proj, ["test_a.gd"])
+        result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         assert result["summary"].get("suspect", 0) > 0
         assert result["ok"] is False, "suspect must gate ok (cannot prove killed)"
 

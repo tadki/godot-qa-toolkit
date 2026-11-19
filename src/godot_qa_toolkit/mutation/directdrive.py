@@ -18,7 +18,8 @@ import os
 import uuid
 from pathlib import Path
 
-from .killbail import BAIL_MARKER, DIRECT_SCRIPTS_MARKER
+from .killbail import (BAIL_MARKER, DIRECT_SCRIPTS_MARKER,
+                        SKIP_RED_MARKER)
 
 DIRECT_HOST_NAME = ".gqt_direct_host_{pid}.gd"
 
@@ -99,7 +100,30 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 	print("@SCRIPTS@=" + str(out["scripts_run"])
 		+ "/" + str(out["scripts_total"]) + " bail=" + str(out["bail"]))
 	return out
-""".replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER)
+
+
+func _gqt_skip_red_tests(gut: Node, red_names: Array) -> Dictionary:
+	# SEE-1606 §SPEC-P2-R1：基线红测试从 collector 物理移除（test 粒度），
+	# 混合红绿脚本的红测试不再被 GUT 执行；标记数/名单经 marker 透出供
+	# Python 侧机器核验。红测试名缺席于面（未命中）如实计数披露。
+	var out := {"requested": red_names.size(), "marked": 0, "names": []}
+	if red_names.is_empty():
+		return out
+	var scripts: Array = gut._test_collector.get_scripts()
+	for s in scripts:
+		var kept: Array = []
+		for t in s.tests:
+			if red_names.has(String(t.name)):
+				out["marked"] = int(out["marked"]) + 1
+				if out["names"].size() < 5:
+					out["names"].append(String(t.name))
+			else:
+				kept.append(t)
+		s.tests = kept
+	print("@SKIPRED@ marked=" + str(out["marked"]) + " requested="
+		+ str(out["requested"]) + " names=" + ",".join(out["names"]))
+	return out
+""".replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER).replace("@SKIPRED@", SKIP_RED_MARKER)
 
 # cold 直驱宿主：beacon L1-L3 逐字节同构（failure 码 3/4 + marker 契约不变）
 # → 顺序执行原语。cfg 增量键：tests_scripts / baseline_failures。
@@ -170,8 +194,16 @@ func _init() -> void:
 	gut._ignore_pause_before_teardown = true
 	for s in scripts:
 		gut.add_script(String(s))
+	# SEE-1606 §SPEC-P2-R1：基线红测试物理跳过（test 粒度，collector 移除）。
+	var skip_red: Dictionary = await _gqt_skip_red_tests(
+		gut, cfg.get("skip_red_test_names", []))
+	# kill 即退只在开关开启时生效；bail 基线名单与跳过名单同源但语义独立。
+	var bail_on: bool = bool(cfg.get("bail_enabled", false))
+	var bail_names: Array = (cfg.get("bail_baseline_failures", [])
+		if bail_on else [])
 	var seq: Dictionary = await _gqt_run_scripts_sequential(
-		gut, scripts, cfg.get("baseline_failures", []), 600000)
+		gut, scripts, bail_names, 600000)
+	seq["skip_red"] = skip_red
 	get_root().remove_child(gut)
 	gut.free()
 	quit(1 if int(seq["fail"]) > 0 else 0)
@@ -196,12 +228,20 @@ def host_script_res(slot_root: str) -> str:
 
 def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                      autoload_name: str, scripts: list[str],
-                     baseline_failures: list[str]) -> Path:
-    """单 mutant 直驱 cfg（beacon cfg 超集）；调用方 finally 删除。"""
+                     baseline_failures: list[str],
+                     bail_enabled: bool = True,
+                     skip_red_names: list[str] | None = None) -> Path:
+    """单 mutant 直驱 cfg（beacon cfg 超集）；调用方 finally 删除。
+
+    bail_baseline_failures 仅在 bail_enabled 时被宿主消费（kill 即退）；
+    skip_red_test_names 独立生效（§SPEC-P2-R1 物理跳过，与 bail 无关）。"""
     path = Path(slot_root) / f".gqt_beacon_cfg_{uuid.uuid4().hex[:12]}.json"
     payload = {"target_res": target_res, "mutant_sha256": mutant_sha256,
                "autoload": autoload_name,
                "tests_scripts": list(scripts),
-               "baseline_failures": sorted(baseline_failures or [])}
+               "baseline_failures": sorted(baseline_failures or []),
+               "bail_enabled": bool(bail_enabled),
+               "bail_baseline_failures": sorted(baseline_failures or []),
+               "skip_red_test_names": sorted(skip_red_names or [])}
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

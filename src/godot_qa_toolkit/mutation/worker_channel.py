@@ -383,6 +383,8 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
                                tests_scripts=(c["tests_scripts"]
                                               if c["kill_bail"] else None),
                                baseline_failures=sorted(
+                                   c["baseline_failures"] or ()),
+                               skip_red_names=sorted(
                                    c["baseline_failures"] or ()))
     leg_elapsed = time.monotonic() - t_leg
     if leg.fatal and leg.state_drift:
@@ -537,7 +539,8 @@ def execute_worker_branch(path, project_root, original_src, mutants,
             baseline_failures=baseline_failures, baseline_dirty=baseline_dirty,
             slot=slot, auto_name=auto_name, ownership_fn=ownership_fn,
             target_rel=target_rel, target_res=target_res,
-            direct_scripts=(tests_scripts if kill_bail else None)),
+            direct_scripts=(tests_scripts if (kill_bail or
+                                              baseline_failures) else None)),
         record_fn=_wb_record_factory(reporter, store2, prior_entries, scopes),
         classify_fn=lambda m, leg: classify_worker_leg(
             m, leg, baseline_failures, baseline_dirty, ownership_fn,

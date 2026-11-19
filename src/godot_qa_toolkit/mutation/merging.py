@@ -142,6 +142,8 @@ _PASSTHROUGH_KEYS = (
     # SEE-1606 P3：kill 即退披露随分片透出（面判定跨分片一致）
     "kill_bail", "kill_bail_face", "kill_bail_disabled_by",
     "kill_bail_scripts",
+    # SEE-1606 P2-R1：基线跳过披露随分片透出
+    "baseline_skip",
     "inject_scheme", "slot_mode", "exec_scheme",
     # SEE-1581：真值选面披露随分片结果透出（只增不改）
     "test_selection",

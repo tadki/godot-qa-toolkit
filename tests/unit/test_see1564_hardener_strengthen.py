@@ -532,7 +532,8 @@ class _FakeSession:
         self.closed = True
 
     def run_leg(self, seq, target_res, mutant_sha, closure, tests_glob,
-                tests_scripts=None, baseline_failures=None):
+                tests_scripts=None, baseline_failures=None,
+                skip_red_names=None):
         return self._leg
 
 

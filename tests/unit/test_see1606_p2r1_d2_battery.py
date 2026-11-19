@@ -136,6 +136,31 @@ class TestD1WorkerSequentialBailRealHost:
         assert r["summary"].get("killed", 0) >= 1
         assert r["ok"] is True
 
+    def test_worker_canary_cold_leg_direct_host_seeded(self, d2_project):
+        """D1-R1：worker 分支的 cold canary/cold 腿走直驱宿主时，宿主文件
+        必须已播种（此前未播种 → run_error → 通道降级）。"""
+        from godot_qa_toolkit.mutation import runner as mrunner
+        from godot_qa_toolkit.mutation import directdrive
+        target_fs = str(d2_project / "calc_sign.gd")
+        glob = _materialize(d2_project, ["test_a_red.gd", "test_b_green.gd"])
+        # 干净项目 + 默认 bail：QA D1 复现形态（clean baseline 不跳过，
+        # 但 kill_bail 仍会传 direct_scripts 给 cold canary 腿）。
+        r = run_mutation(target_fs, str(d2_project), worker_channel=True,
+                         tests_glob=glob, budget=1, mutate_all=True,
+                         timeout_s=120)
+        s = r["summary"]
+        # 不得出现降级/会话致命（D1-R1 判据）
+        wc = s.get("worker_channel") or {}
+        assert s.get("run_error") is None, s
+        assert wc.get("decision") not in ("worker_degraded_cold",), s
+        assert wc.get("reason") != "session_fatal", s
+        # 播种机证：槽内存在 per-PID 直驱宿主文件
+        pool_slots = d2_project / ".qa-cache" / "mutation-pool" / "slots"
+        seeded = list(pool_slots.rglob(".gqt_direct_host_*.gd")) \
+            if pool_slots.is_dir() else []
+        assert seeded, "direct host must be seeded for worker cold legs"
+        assert s.get("exec_scheme") in ("worker-reset/1",)
+
     def test_worker_sequential_bail_parity_with_no_bail(self, d2_project):
         """bail on/off verdict 集一致（早停只省成本不改判定）。"""
         target_fs = str(d2_project / "forms" / "runtime_load.gd")

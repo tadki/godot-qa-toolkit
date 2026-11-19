@@ -667,9 +667,11 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
     timings_out: dict = {}
     try:
         beacon.seed_beacon_script(slot.root)
-        if direct_scripts is not None and not use_worker:
-            # §SPEC-P3 路线 B：cold 直驱宿主随 run 播种（per-PID，与 beacon
-            # 同款隔离）。
+        if direct_scripts is not None:
+            # §SPEC-P3 路线 B + D1-R1：cold 直驱宿主随 run 播种（per-PID，
+            # 与 beacon 同款隔离）。播种不得区分 worker/冷分支——worker 分
+            # 支的 cold canary/cold 腿同样可能走直驱宿主（D1-R1 未播种挂
+            # 死路径）。
             from . import directdrive
             directdrive.seed_direct_host(slot.root)
         if use_worker:

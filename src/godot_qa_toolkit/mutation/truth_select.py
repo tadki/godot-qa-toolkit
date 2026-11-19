@@ -229,7 +229,10 @@ def _ensure_generate(root: str, out: str, files: list[str],
     """`measure run --test-attribution` 一次（原子写）；台账披露。"""
     from ..measurement.orchestrator import run_measurement
     from ..measurement.recipe import build_recipe
-
+    from ..projectroot import ensure_import_cache
+    # SEE-1605：缺 `.godot` 缓存的插桩 GUT 零命中致生成落空——首个插桩 GUT
+    # 前强制导入引导；warmed 时缓存校验廉价通过，失败由 ensure_map 具名外抛。
+    ensure_import_cache(root)
     recipe, error = build_recipe(Path(root))
     if error is not None:
         raise SelectionError(f"recipe unavailable: {error}")
@@ -670,12 +673,6 @@ def function_tests(project_root: str, doc: dict, rel: str,
 # SEE-1587 §SPEC-004：默认 mutation 选面语义——行事实反查 line→tests，
 # 同签名行集合共享一个选择目录 glob；无映射测试的行默认标 uncovered、
 # 卡尺显式披露 no_mapped_tests 后执行（公平重跑通道，不静默丢弃）。
-
-
-
-
-
-
 
 
 def _line_group_load(root, target_file, file_sel) -> tuple:

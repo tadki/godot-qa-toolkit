@@ -154,12 +154,13 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   machine-readable `farm` reason (`warm_reused` / `freshness_ambiguity` /
   `generated_dirs_missing` / `proof_drift_rebuild` / …). A four-level beacon
   proves the engine actually executed the mutant.
-- Coverage prefilter resolves in order: manual `/1` store → persisted `/2`
-  projection → live projection from the fresh `/6` map. The projection uses the
-  scripts carried by the actual `tests_glob`; it adds no second instrumentation
-  or GUT run. Source, test-face, recipe, schema, binary or identity drift
-  invalidates the affected layer and is disclosed; if all layers are unusable,
-  execution continues unfiltered rather than producing false coverage.
+- Coverage prefilter resolves in order: persisted `/2` projection → live
+  projection from the fresh `/6` map. The projection uses the scripts carried
+  by the actual `tests_glob`; it adds no second instrumentation or GUT run.
+  The retired manual `/1` layer is never read; source, test-face, recipe,
+  schema, binary or identity drift invalidates the affected layer and is
+  disclosed. If all layers are unusable, execution continues unfiltered rather
+  than producing false coverage.
 - Differential resume is on by default: unchanged scopes with
   killed/suspect/invalid verdicts are reused; survived/timeout/run_error sites
   always re-run (red line); `--mutate-all` forces full execution. The
@@ -174,12 +175,12 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 
 ## Command reference (aligned with v0.3.0 `--help`)
 
-`gqt mutation <files...> --project-root <root> [all options]`
+`gqt mutation [<files...>] [--project-root <root>] [all options]`
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `<files...>` (positional) | required, one or more | The `.gd` file(s) to mutate |
-| `--project-root <root>` | required | Project root containing `addons/gut/` |
+| `<files...>` (positional) | git diff HEAD when omitted | `.gd` files, or one compact `<file>.gd#<lines>` address; omitted = tracked changes plus untracked `.gd` files, excluding hidden/tool/vendor paths |
+| `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins and invalid values fail loud |
 | `--budget <n>` | 50 | Max mutants; with diff reuse present, counted on the post-diff retry set (order-preserving truncation) |
 | `--timeout <s>` | 60 | Single GUT wall-clock limit |
 | `--dry-run` | off | List mutation sites without running GUT; emits a diff estimate when a manifest exists |

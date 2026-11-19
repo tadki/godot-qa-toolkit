@@ -13,9 +13,10 @@
 
 `gqt` is an independent CLI that answers *"does this project pass, and where is
 the risk?"* with verdicts a machine can act on. It drives the **tested
-project's own GUT suite** headlessly, emits exactly one JSON object per
-command, and never guesses at your project layout: the target project enters
-only through an explicit `--project-root`.
+project's own GUT suite** headlessly and emits exactly one JSON object per
+command. An explicit `--project-root` wins; when omitted, mutation and
+measurement commands discover the nearest `project.godot` by walking up from
+the target path or CWD, and fail loudly if none exists.
 
 ## Why gqt
 
@@ -81,9 +82,11 @@ sight is skipped gracefully, not reported as an error).
 **Prerequisites for the GUT-driven commands** (`mutation`, `measure coverage`,
 `measure run`, `gherkin run|mutate`):
 
-- `--project-root` points at a Godot project containing
-  `addons/gut/gut_cmdln.gd` — gqt consumes the tested project's own GUT and
-  ships zero Godot assets itself.
+- The project root contains `addons/gut/gut_cmdln.gd`. Pass `--project-root`
+  explicitly for an unambiguous target; otherwise mutation and measurement
+  commands discover the nearest `project.godot` from the target path or CWD.
+  A fresh real Godot project with an incomplete `.godot` cache is automatically
+  imported once; set `GQT_AUTO_IMPORT=0` to disable that bootstrap.
 - A resolvable Godot binary: per-command `--godot-bin` wins, then
   `GQT_GODOT_BIN`, then the first `godot` on `PATH`.
 - For the Gherkin pipeline: the thin adapter at
@@ -101,6 +104,10 @@ gqt gherkin mutate --project-root . --key foo
 
 # Mutation testing (default: line-level truth-map selection)
 gqt mutation src/save/save_manager.gd --project-root . --budget 50
+
+# Changed .gd files from git diff HEAD, or compact line-level addressing
+gqt mutation --project-root .
+gqt mutation src/save/save_manager.gd#10-20,30 --project-root .
 
 # Caliper rerun by line range / multi-segment range / stable mutant id
 gqt mutation src/save/save_manager.gd --project-root . --lines 10-20,30,35-40
@@ -189,5 +196,7 @@ suite's own imports.
   skips are structural failures, never swallowed.
 - **Honest degradation** — caches, locks and resume stores degrade to safe,
   explicitly-disclosed behavior instead of wrong answers.
-- **Zero discovery** — no environment sniffing, no project-structure
-  inference; the caller wires everything explicitly.
+- **Bounded discovery** — an explicit `--project-root` wins; otherwise the
+  nearest `project.godot` is discovered by walking up from the target/CWD.
+  Invalid explicit roots and discovery failures are loud; unrelated directory
+  or repository layouts are never guessed.

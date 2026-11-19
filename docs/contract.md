@@ -13,13 +13,13 @@ godot-qa-toolkit 是一个**Godot 项目专用的确定性 QA 测试工具插件
 | | godot-mcp（① 运行时库） | godot-qa-toolkit（② 工具库，本库） |
 |---|---|---|
 | 职责 | 运行时驱动：addon 内核 + node proxy/server + launch/ 控制面（启动/驱动真实 editor） | 测试手段：对任何 Godot 项目做测试度量与判定 |
-| 与被测项目关系 | 以运行时身份接入项目（MCP 端口、lease、协议） | 以**只读离线工具**身份消费项目（`--project-root` 显式传入） |
+| 与被测项目关系 | 以运行时身份接入项目（MCP 端口、lease、协议） | 以**离线测试工具**身份消费项目（显式 `--project-root` 或受控向上发现 `project.godot`） |
 | Godot/GUT 依赖 | 通过被驱动 editor 运行 | 通过被测项目自带的 `addons/gut/` 跑测试；工具自身零 Godot 依赖 |
 
 解耦红线（本库自我约束）：
 
-- **零代码级耦合**：`src/` 不引用、不探测任何具体游戏项目（无环境变量探测、无向上找配置文件）。被测项目的一切信息只经 CLI 参数进入。
-- **消费方显式传参**：`--project-root` 是唯一的被测项目入口；调用方自己知道项目在哪，本库不做任何发现式猜测。
+- **零项目耦合**：`src/` 不引用任何具体游戏项目。被测项目根可由显式 `--project-root` 指定，或从目标路径/CWD 向上发现最近的 `project.godot`；显式非法或发现失败均 fail-loud。
+- **消费方显式可控**：需要消除环境歧义时传 `--project-root`；发现只回答项目根，不推断无关目录或仓库布局。
 - 历史注释中的具体项目实证（SEE-1268 Revy QA）已改中性表述（AC-DECPL-005：`grep -rn KOL src/` = 0）。
 
 ## 2. 调用形态
@@ -111,7 +111,9 @@ gqt
 - 输出：`summary.{feature, feature_key, ops_version, mutants, killed, survived, run_errors, full_matrix, worker, exempt_cases, exempt_results}`；`failures` = survived（含 target/kind/original/mutated/rationale）+ run_errors。`exempt_cases` == 源 .feature 内 `# mutation: exempt` 指令行数（V4 机器判据），`exempt_results` 逐 case 具名披露（`exempt_verified` / `run_error: ...`）。
 
 - **W 通道（§SPEC-020，worker-reset/1，默认启用；D-W1/D-W2 修复轮 + R-DW4 Owner 裁决 + 默认化实测轮修订）**：常驻 GUT 直驱 worker 对 statically eligible 目标**默认启用**（Owner 裁决实测轮：无旗标即 worker，全部自动降级护栏保留——parity 前置 / 状态漂移 / canary 失配=通道资格否证 / 会话致命整批作废 / 两连失败冷降级）；`--worker-channel` 保留为诊断性强制；env `GQT_MUTATION_WORKER=0|false|no` 为**关断逃生门**（整体回退冷通道，全部执行路径一致生效）；baseline 永远实测走冷通道（红线不变）。静态路由判 worker 的目标（非 autoload/接线链/GUT 域/场景持有者；引用图含 **class_name 裸名使用边** 与 **`closure_scene_cached` 场景持有者谓词**——闭包任一成员被 `.tscn/.tres` ext_resource 引用即冷，Owner 裁决 R-DW4：PackedScene 缓存持有加载时脚本对象、腿间重置不可达，指针旁路彻底退役，§SPEC-001「take_over_path 零命中」判据原样成立）在每 run 单进程内逐 mutant 执行 R-C 硬序（IGNORE 原位刷码 → LIFO teardown → 逐闭包 reload（reload 集收敛 .gd，compile-time 绑定唯一载体）→ 顺序门 → fresh Gut 直驱（**error_tracker 注册对齐 GutRunner**，headless pause 跳过）→ beacon）。等价性门（D-W2）：① **parity 前置门**——会话首腿以原始源执行，直驱失败集必须逐位等于冷 baseline 失败集，失配 → stderr 披露 + 整文件冷降级；② **状态漂移门**——连接指纹 / `user://` 树（每腿清场）相对首腿基线漂移 → 会话致命；③ **canary 失配 = 通道资格否证**——窗口改冷权威 + 剩余全部冷降级（不再作废窗口后继续 worker）；会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门失配 / autoload 交叠 / 腿挂死）仍走 respawn + 自上次 canary 窗口整批作废 + 冷重跑 + stderr 披露。summary 增 `exec_scheme`（`cold-shadow/1` vs `worker-reset/1`，只加不改；并行合并面 passthrough 同步在场），killed 证书按 scheme 隔离（身份包入 file_key）。canary 粒度 env `GQT_WORKER_CANARY_EVERY`（缺省 25：首 mutant 强制双通道预检）。**每轮通道披露（SEE-1589 B §SPEC-002）**：`summary.worker_channel` 恒给出 `requested` / `route` / `exec_scheme` / `decision` / `reason` / `route_reasons` / `reason_counts` / `closure_size` / `override_refused`。`decision` 枚举 `worker` / `cold_route_excluded` / `cold_worker_disabled` / `cold_gut_direct_unavailable` / `cold_unknown` / `worker_degraded_cold`；`reason` 对应 `worker_reset_session` / `route_reason_present` / `worker_flag_or_env_off` / `gut_addon_missing` / `unresolved`，会话致命降级另给 `user_state_drift` / `connection_drift` / `parity_mismatch` / `session_fatal`，并附 `fatal_events` 与 `equivalence=cold_rerun_all_remaining_legs`。路由 reason 码为 `target_in_autoload_table` / `closure_member_in_autoload_table:<member>` / `target_in_gut_domain` / `closure_intersects_gut_domain:<member>` / `closure_scene_cached:<member>` / `eligible_worker`；`reason_counts` 按冒号前码折叠计数。显式 `--worker-channel` 但路由判冷 → `requested=true` 且 `override_refused=true`；禁止无解释的静默冷通道。
-### 4.3 `gqt mutation <file.gd> --project-root <root> [--budget 50] [--timeout 60] [--tests <res://glob>] [--select {line,fn,file,full}] [--attribution-map <path>] [--no-attribution-auto] [--dry-run] [--mutation-warning N] [--timeout-factor F] [--mutate-all] [--mutation <id>] [--lines SPEC] [--no-reuse-coverage] [--godot-bin <path>]`（`--resume`/`--reuse-coverage` 已退役：差分与 prefilter 均默认开启，SEE-1594 A13）
+### 4.3 `gqt mutation [<files...>] [--project-root <root>] [--budget 50] [--timeout 60] [--tests <res://glob>] [--select {line,fn,file,full}] [--attribution-map <path>] [--no-attribution-auto] [--dry-run] [--mutation-warning N] [--timeout-factor F] [--mutate-all] [--mutation <id>] [--lines SPEC] [--no-reuse-coverage] [--godot-bin <path>]`（`--resume`/`--reuse-coverage` 已退役：差分与 prefilter 均默认开启，SEE-1594 A13）
+
+- **目标入口（SEE-1594 §SPEC-019/020）**：显式文件可为普通 `.gd` 路径或单个 `<file>.gd#<lines>` 紧凑卡尺（与不同值的 `--lines` 冲突即 fail-loud，不与其他目标混用）；位置参数全省略时按 `git diff HEAD` 的已跟踪改动并上未跟踪 `.gd` 文件推导目标，排除子模块、隐藏/工具产物与 vendored `addons/`。非 Git、git 失败或无匹配目标均 fail-loud。`--project-root` 显式优先，缺省从目标路径/CWD 向上发现最近的 `project.godot`，发现失败同样 fail-loud。
 
 - **磁盘影子注入（SEE-1550 M0，OPS `see1550/1` 一次性失效）**：注入机制由内存注入改为磁盘影子注入——每 worker 持有隔离 hardlink COW 影子槽（无硬链接 FS 退真拷贝；`.godot` 每槽整树实拷贝；建槽前置先写 `.qa-cache/.gitignore` 为 `*`，失败 fail-loud），mutant 经「临时文件 + `os.replace`」于引擎启动前写入影子内目标 `.gd`（每 mutant 一次 replace、无恢复步；槽归还还原目标并断言 ==原码）；真实仓目标文件全程零写入。影子槽统一走 `<root>/.qa-cache/mutation-pool/slots/` 的持久 warm 池（Linux 与 win64 同机制，SEE-1589 B 起；池锁不可用才回退一次 fresh ext4 农场 `<tmp>/gqt-mutation-farm/<slug>`，归还即删）。四级注入可达性 beacon（磁盘读回哈希 → load 编译 → autoload 同源 → GUT 运行证据）：哈希/实例不符 → `run_error`；load-null/parse → `invalid_mutant`；无 GUT 运行流不得 killed/survived。现行内存注入生产路径已物理删除（`--injection` 开关不存在）。旧 resume/coverage store（OPS `see1420/1`）不读不写不删、静默忽略（A14 已退役一次性失效披露面），首跑全量重跑（Owner 裁决菜单 B）。
 - **缓存身份包（SEE-1550）**：resume file-key 增身份包成分——`inject_scheme`（`disk-farm/1`）、精确 Godot 版本串（`--version`，按二进制 path+mtime 缓存；不可解析按路径界定）、boot/wiring hash（规范化 `project.godot` + autoload/ 清单 + tests 引用 `.tscn` 清单）、GUT addon 内容哈希。任一漂移 = 旧 key 永不再命中（store 不迁移不脏合并）。coverage store 同步入档（A13 后 prefilter 旗标已退役，见 §4.3 coverage prefilter 条）。
@@ -165,7 +167,7 @@ gqt
   - `--mutation-warning N`（默认 50）：按**截断前**全量位点数判定，超阈值 stderr 告警 + `summary.attention`（建议拆分字符串）。不进任何 resume key。
   - `--timeout-factor F`（默认 2.0）：覆盖内置 `_TIMEOUT_SCALE`，自适应 per-mutant 上限 = `max(timeout, baseline×F+1)`（只放大不收紧；`summary.adaptive_timeout_s` 可查）。不进任何 resume key。
   - `--mutation <file>#<scope_id>#<n>` / `--lines SPEC`（P3 卡尺，单文件；SEE-1587 行级化）：强制新执行，绕过差分复用与 coverage 前置过滤；默认使用选中位点所在行的测试集合并集，显式 `--tests` 才由用户接管。`SPEC` 支持单行/区间/多段，命中与无位点行分别披露；无映射测试的选中位点披露后执行。全部无位点或稳定 id 无命中 = 显式错误（ok=false），绝不静默空跑。
-  - `--reuse-coverage`（P2；SEE-1550 L1 起默认自动启用、`--no-reuse-coverage` 显式关断——见上「coverage prefilter 自动启用」条）：统一经 `resolve_coverage_for_prefilter` 按 **`/2` 投影 store → 现场投影** 取值（SEE-1594 S2 A04：手动 `/1` store 已退役，盘上残留 `/1` 条目按 schema 分流永不命中）。`/2` 由 `/6` map 中实际 `tests_glob` 所承载测试的行事实并集投影（派生缓存，非第二真源），现场投影使用 selection 已解析的同一映射（A06）与同一数据源且零第二次插桩/GUT；两层共享同一次映射加载（A05 合并读取）。`/2` 绑定包含映射内容 sha 与执行证据 sha（A05）——map 任一内容/证据变化即显式失效；其余路径、源码、tests_glob、binary/identity 及 map/recipe/tests-face 绑定匹配同前，漂移原因逐层聚合披露。全部失效 = 告警 + 不过滤。跳过锚 = **可插桩 ∧ 未覆盖**：`uncovered` 不执行、不进 ok 门禁、不消耗 budget；不可插桩行上的位点一律留在执行面，可插桩集不可得也不过滤。成功 `coverage_prefilter` 披露 `source=projection_store|projection_live` 与 uncovered/covered_executed 计数。
+  - `--reuse-coverage`（已退役；SEE-1550 L1 起默认自动启用、`--no-reuse-coverage` 显式关断——见上「coverage prefilter 自动启用」条）：统一经 `resolve_coverage_for_prefilter` 按 **`/2` 投影 store → 现场投影** 取值（SEE-1594 S2 A04：手动 `/1` store 已退役，盘上残留 `/1` 条目按 schema 分流永不命中）。`/2` 由 `/6` map 中实际 `tests_glob` 所承载测试的行事实并集投影（派生缓存，非第二真源），现场投影使用 selection 已解析的同一映射（A06）与同一数据源且零第二次插桩/GUT；两层共享同一次映射加载（A05 合并读取）。`/2` 绑定包含映射内容 sha 与执行证据 sha（A05）——map 任一内容/证据变化即显式失效；其余路径、源码、tests_glob、binary/identity 及 map/recipe/tests-face 绑定匹配同前，漂移原因逐层聚合披露。全部失效 = 告警 + 不过滤。跳过锚 = **可插桩 ∧ 未覆盖**：`uncovered` 不执行、不进 ok 门禁、不消耗 budget；不可插桩行上的位点一律留在执行面，可插桩集不可得也不过滤。成功 `coverage_prefilter` 披露 `source=projection_store|projection_live` 与 uncovered/covered_executed 计数。
 - **运行进度面（SEE-1525，非判据面）**：每个变异体判定完成时向 **stderr** 输出一行 `[<done>/<total>] <verdict> L<line> <stable_id> <elapsed>s`（并行分片追加 ` worker=wN`，基线降级串行分片追加 ` worker=serial`；`total` 为整 run 的执行面，非单 worker 切片——静态 invalid 位点计入分母也计入 done，故每个 worker 都能走到 `[n/n]`）——串行与并行路径同一计数点，**stdout 恒为恰好一个 JSON**（进度绝不进 stdout）。机器可读面同步原子更新：`<root>/.qa-cache/gqt-mutation-progress/<run-id>/<file-slug>.<worker>.<pid>.json`，字段 `done / total / killed / survived / timeout / run_errors / suspect / invalid_mutants / elapsed_s / started_at / updated_at`。分片按 worker 进程私有（文件名含 worker 槽位与 pid，各写各的路径；写盘 = 同目录 tmp + `os.replace`），聚合只在读侧发生（`godot_qa_toolkit.mutation.progress.read_progress(root[, file])`：按 file 分组，计数求和、`total`/`elapsed_s` 取 max、时间取极值，只取 `updated_at` 最新的 run）——**无共享写者、无文件锁、无读-改-写，故无并行写竞争**。写失败（只读盘 / `.qa-cache` 被占 / Windows 上读者持有目标文件）一次 stderr 告警后放弃进度面；进度面不进 `summary`、不参与 ok 门禁、不影响判定。
 - **基线快照失败降级告警（SEE-1525）**：父层共享 baseline 预跑失败（异常 / 非零 rc）→ 该文件整卷退单 worker 串行（既有兜底语义不变），并向 stderr 发 `mutation: baseline snapshot failed for <file>: <reason> — this file falls back to serial single-worker execution (continuing)`；**只披露、不失败、不改变判定**。`tests_glob` 未解析（全量面不预跑 baseline）不在此列。
 - 中止契约（baseline 本身不可信时，mutant 数据不产出）：
@@ -196,23 +198,16 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 # → 1 baseline + 1 mutant；ok/verdict 秒级确认
 ```
 
-### 4.4 `gqt measure coverage <file.gd> --project-root <root> [--min-percent 80] [--timeout 120] [--tests <res://dir-or-.gd>] [--godot-bin <path>]`
+### 4.4 `gqt measure coverage [file.gd] [--project-root <root>] [--min-percent 80] [--timeout 120] [--tests <res://dir-or-.gd>] [--evidence-out <dir>] [--prune-sinks] [--retain-days N] [--godot-bin <path>]`
 
-- 前置与 mutation 相同（GUT + 同源 Godot 二进制定位，见 §6；SEE-1525 起 `GQT_GODOT_BIN` / `--godot-bin` 对 coverage 同样生效，未设变量行为与 SEE-1525 前逐字节一致）。
-- `--tests`（SEE-1367 §SPEC-017）：受影响测试子集（目录如 `res://tests/unit/time/`，或单脚本路径——走 `-gselect`，GUT 9.6 实测 `-gtest` 会全量展开），替代全量 `-gdir=res://tests/` 以支持逐套件归因度量；省略 = 全量（行为不变）。与 mutation `--tests` 同语义。
-- 执行：目标 .gd **AST 语句级插桩**（每可执行语句前插探针调用 + 文件尾部探针函数；语句跨多行时探针只落起始行——SEE-1312 修复跨行分组表达式 parse error；**内部类 class_def 整体不插桩**——探针函数在外层类作用域，内部类方法的 self 无法解析，插进去 = 目标文件整体拒载，SEE-1367 硬化 反例实证）→ 生成期 re-parse 预检 → headless GUT → 读 sink 命中 → 行覆盖%。原文件运行后恢复。
-- **capability 契约**（SEE-1312）：
-  - 插桩产物不合法 → 生成期即 `run_error`（拒绝落盘跑假数据），`failures[0].reason` 含 `instrumentation produced unparseable source`。
-  - 探针数据面为 **ID-keyed**（整数 probe_id → runner 侧 manifest 行号映射）；sink 路径移出数据面。
-  - sink：`user://qa-coverage-hits-<pid>.txt`（run 唯一，追加写语义）。runner 按平台标准 user 目录读取（Linux `~/.local/share/godot/app_userdata/<project name>/`，win64 `%APPDATA%\Godot\app_userdata\<project name>\`），并兼容项目根同名文件回退。
-- 哨兵（SEE-1312）：
-  - GUT 正常退出但探针未点火（sink 缺失/空）→ `ok=false` + `summary.run_error: true` + `probes_fired: 0`——「探针从未点火」与「真实 0% 覆盖」必须可区分。
-  - 零可执行行 → `ok=true` + `summary.vacuous: true`（空集覆盖不是满分证据）。
-- **comparability 契约**（SEE-1312 分支覆盖 v1 = 纯推导层，observational 不进 ok 判定）：`summary` 新增 `branch_total / branch_covered / branch_coverage_percent`（行探针命中 + AST 分支结构推导；if/elif/else/match case 各计 1 分支）。语义只回答「分支是否被执行」，不回答「是否被断言守护」。
-- godot 进程级失败（脚本没加载）≠ 真实 0% 覆盖 → `summary.run_error: true`，与 mutation 同款中止契约。**§SPEC-1420-21 收紧**：中止判定 = `rc≠0 ∧ 无 GUT 测试流证据`（错误 marker 不再是必要条件——godot 加载早期退出无输出无 marker 的形态同样中止，不再降级为 `probes_fired: 0` 哨兵掩盖根因）；项目资源告警在场但 GUT 证据正则命中的正常轮不受影响。
-- **行级事实落盘（SEE-1420 P2 → SEE-1594 S2 退役改写）**：手动 `see1420-coverage/1` store 已退役（A04）——`measure coverage` 现由行级映射投影（`/2` 派生缓存，绑定映射内容与执行证据），不再产出/消费 `/1` 条目；盘上残留 `/1` 文件按 schema 分流拒绝。行事实唯一真源 = `test-attribution/6` 映射；`/2` 条目（`<root>/.qa-cache/gqt-coverage/<key>.json`）携带 provenance（项目内相对路径/源码 sha1/tests_glob/binary_kind/身份包）与投影绑定包（map schema/recipe pristine/文件 sha/测试面摘要/**映射内容 sha/执行证据 sha**），任一漂移 = 显式失效并可再投影（绝不假过滤）。stdout 契约零变化。
-- 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent}` + SEE-1312 新增 `{probes_fired, branch_total, branch_covered, branch_coverage_percent}`；未达标时 `failures[0]` 附 `covered/total/uncovered_lines`（截断 20 行）。
-- `ok = coverage_percent >= min_percent`（probes_fired=0 与 run_error 时强制 ok=false）。
+- **行级映射唯一真源（SEE-1594 §SPEC-025）**：`run_coverage` 经 `coverage/mapping.py::project_file_coverage` 消费 `test-attribution/6`；不再有逐文件 direct GUT 插桩执行路径。已有新鲜映射时覆盖投影零 GUT、零第二次插桩；映射缺失或漂移时可经 `truth_select.ensure_map` 构建/增量刷新，失败具名 `CoverageMappingError` 并转统一 JSON，绝不回退旧 direct 路径。
+- `--project-root` 显式优先，缺省从目标文件/CWD 向上发现最近的 `project.godot`；显式非法或发现失败均 fail-loud。真实 Godot 项目导入缓存不全时默认自动导入一次（`GQT_AUTO_IMPORT=0` 可关断）；已有新鲜投影无需执行引擎。
+- `--timeout` 作用于映射构建/增量刷新阶段，不是新鲜投影的 GUT 预算。`--tests` 以目录边界或单文件精确匹配过滤映射中的测试脚本，再按这些脚本的行事实投影；省略即使用完整映射测试面。
+- **执行证据**：`probes_fired` 取自映射 `arms_state.gut_full`，`probes_source=map_arms_state`，不是本次伪造的探针计数。映射无有效 arms、缺 `probes_fired`、非 vacuous 面却零探针均 run_error；零可执行行才走 `vacuous=true` 终态。
+- `--evidence-out` 由投影结果写 `coverage-evidence/2` bundle；hits_lines 来自映射，probes_fired 来自 arms_state，不新增第二次 GUT。写失败具名 fail-loud。旧 sink-recovery 入口与旧 run-record 消费已退役。
+- `--prune-sinks` 只清理遗留 `qa-coverage-hits-*` 文件，不产生覆盖答案；`file` 仅在该模式下可省略。
+- 正常输出：`summary: {file, total_lines, covered_lines, coverage_percent, min_percent, probes_fired, probes_source, branch_total, branch_covered, branch_coverage_percent, hits_lines, coverage_source, attribution_map, selection_scripts, vacuous}`；`coverage_source=line_mapping_projection`。分支覆盖仍为源码结构 + 命中行的 observational 推导，不进 ok 判定。
+- `ok = coverage_percent >= min_percent`；映射/证据错误强制 `ok=false`。未达标 failure 附 `covered/total/uncovered_lines`（最多 20 行）。
 
 ### 4.5 `gqt doctor`（SEE-1463 契约登记）
 
@@ -233,10 +228,10 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 
 ## 6. `--project-root` 边界约定
 
-- 必填于 `mutation` / `coverage`；必须指向含 `addons/gut/gut_cmdln.gd` 的 Godot 项目根。
+- `mutation` / `measure` 各测量面：显式 `--project-root` 优先；缺省从目标路径（无目标则 CWD）向上发现最近的 `project.godot`。显式值不存在/非目录、或发现失败均 fail-loud。`gherkin` 仍按各叶子契约显式传根。根目录必须含 `addons/gut/gut_cmdln.gd`。
 - **Godot 二进制定位（SEE-1525）**：三级优先 = `--godot-bin <path>`（命令级覆盖，`mutation` / `measure coverage` / `gherkin run|mutate` 同语义）> 环境变量 `GQT_GODOT_BIN` > `PATH` 首匹配（均无 → 字面量 `godot`）。显式路径（env 或 flag）不存在/不可读/不可执行 → `BinaryConfigError` → 统一 JSON 错误契约（`ok:false`，消息含来源标签与路径）。**`--path` 形态随二进制类型同源**（`detect_binary_kind()` 判定）：win64 通道 `/mnt/` 绝对路径经 `wslpath -w` 转 Windows 形式（不可转换原样），linux 通道一律原生形态不转换——转换原语单一出处（`mutation/inject.py`），mutation 与 coverage 共用。**未设变量且未传 flag 时全部子命令行为与 SEE-1525 前逐字节一致（opt-in 冻结）**。
 - 工具在该 root 下运行 `<godot> --headless --path <root> -s res://addons/gut/gut_cmdln.gd [-gdir=<tests_glob>] -gexit`（`<godot>` 为上述解析结果；`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
-- 工具可能写入的路径仅限：coverage 插桩的临时改写目标 .gd（运行后必然恢复；**mutation 侧 SEE-1550 起零写入真实仓**——mutant 只写影子槽内目标，见 §4.3 M0 条）、coverage 探针 sink（`user://qa-coverage-hits-<pid>.txt`，SEE-1312 起为 user:// 优先 + run 唯一；兼容读项目根同名文件）、影子槽池 `<root>/.qa-cache/mutation-pool/slots/`（Linux/win64 同机制；池锁不可用时回退项目外 fresh ext4 农场 `gqt-mutation-farm`，XDG/tmp 下、归还即删），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目；SEE-1550 起 file-key 含身份包成分）、**mutation-pool 持久 warm 池**（SEE-1550；SEE-1589 B 起 Linux/win64 同机制；池 schema `see1550-pool/1`：槽位 hardlink COW 影子树 + `.godot` 实拷贝 + 池账本/每槽 flock；槽数上限 8、磁盘预算 `GQT_MUTATION_POOL_BUDGET_MB`（缺省 512）LRU/prune）、gqt-mutation-resume（v1，代码已随 SEE-1463 删除；目录不读不写不删，在场由 resume2 一次性披露）、gqt-coverage 行级覆盖事实（SEE-1420 P2；SEE-1550 起含身份包）、gqt-godot-slots 并发闸锁文件、gqt-mutation-progress 运行进度分片（SEE-1525，per-worker 分片 + 读侧聚合，见 §4.3）、gqt-mutation-cost-priors.json 成本感知四键先验（SEE-1571，收尾方单点原子写）、gqt-prewarm 新鲜度证明与项目级锁（SEE-1571，proof.json / prewarm.lock / 失效侧写 .stale）——均自含 .gitignore；建槽前置先写 `.qa-cache/.gitignore` 为 `*`，失败 fail-loud）。
+- 工具可能写入的路径仅限：`measure run` 映射构建的临时插桩目标（finally 恢复；direct coverage 已改行级映射投影，不再单独改写目标文件；**mutation 侧 SEE-1550 起零写入真实仓**——mutant 只写影子槽内目标，见 §4.3 M0 条）、遗留 coverage sink 的显式清理（`--prune-sinks`；不再作为 `measure coverage` 数据源）、影子槽池 `<root>/.qa-cache/mutation-pool/slots/`（Linux/win64 同机制；池锁不可用时回退项目外 fresh ext4 农场 `gqt-mutation-farm`，XDG/tmp 下、归还即删），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目；SEE-1550 起 file-key 含身份包成分）、**mutation-pool 持久 warm 池**（SEE-1550；SEE-1589 B 起 Linux/win64 同机制；池 schema `see1550-pool/1`：槽位 hardlink COW 影子树 + `.godot` 实拷贝 + 池账本/每槽 flock；槽数上限 8、磁盘预算 `GQT_MUTATION_POOL_BUDGET_MB`（缺省 512）LRU/prune）、gqt-mutation-resume（v1，代码已随 SEE-1463 删除；目录不读不写不删、静默忽略）、gqt-coverage 行级覆盖事实（SEE-1420 P2；SEE-1550 起含身份包）、gqt-godot-slots 并发闸锁文件、gqt-mutation-progress 运行进度分片（SEE-1525，per-worker 分片 + 读侧聚合，见 §4.3）、gqt-mutation-cost-priors.json 成本感知四键先验（SEE-1571，收尾方单点原子写）、gqt-prewarm 新鲜度证明与项目级锁（SEE-1571，proof.json / prewarm.lock / 失效侧写 .stale）——均自含 .gitignore；建槽前置先写 `.qa-cache/.gitignore` 为 `*`，失败 fail-loud）。
 - **生成类持久写入档（SEE-1426，Owner 批准的 §6 首次扩张）**：`gqt gherkin compile --write` 可写 `<root>/acceptance/ir/` 与 `<root>/acceptance/generated/` 两目录（gitignored 一次性产物；先清空再生成；写入 opt-in，`summary.wrote` 逐文件披露；写入前置校验 `<root>/addons/gut/gut_cmdln.gd` 在场）。除此之外零写入。
 - timeout 语义：单次 GUT 全套测试的 wall-clock 上限；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = max(显式 timeout, baseline 实测耗时 × F)（SEE-1420 起 F 可由 `--timeout-factor` 覆盖，默认 2.0 不变；只放大不收紧，`summary.adaptive_timeout_s` 可查）。SEE-1400 起全部 godot 子进程（mutation baseline/per-mutant 与 coverage）经跨进程 flock 槽位闸（容量 env `GQT_GLOBAL_GODOT_SLOTS`，缺省 max(2,cpu//2)；等槽时间不计入 timeout；fcntl 缺失平台告警一次后放行不阻塞）。
 
@@ -289,29 +284,28 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 
 上列三面均为 **capability**（新能力面，加法向后兼容）；`coverage/runner.py` 与 mutation 零改动（§SPEC-021 零漂移承诺）。
 
-## 10. coverage evidence 契约（SEE-1546 WP2 PR-B，diagnostic-only）
+## 10. coverage evidence 契约（诊断面；SEE-1594 行级映射收口）
 
-### 10.1 `gqt measure coverage <file> --project-root <root> --evidence-out <dir>`
+### 10.1 `gqt measure coverage [file] [--project-root <root>] --evidence-out <dir>`
 
-开启 `coverage-evidence/2` 生命周期（可选旁路；不传则 stdout 契约与 011b87d 逐字节一致——零漂移承诺，§SPEC-026 冻结门）：
+`--evidence-out` 由当前行级映射投影生成 `coverage-evidence/2` bundle，不重跑 GUT、不新增插桩：
 
-- sink 升级为 per-run UUID：`qa-coverage-hits-{run_uuid}.txt`（同进程顺序 run/并发进程/CLI 与 risk 内嵌全部互斥，修 D-候选-1）；
-- GUT 前原子写 run 记录 `{run_uuid}.record.json`（status=started，含 probe manifest inline 与 sink_path）；status 生命周期 started→gut_done→bundle_written（或 run_error/timeout/no_probe 终态）；
-- bundle `<run_uuid>.json`：evidence_version=coverage-evidence/2，逐条目 T/I/C（T/I 来自 probe-manifest/2，C=hits 按 fid 归属）、census_gaps、sentinels（probes_fired/vacuous/run_error/timeout/zero_tests/gut_ok/transport_anomaly）、entry_states（measured/partial_instrumentation/attribution_gap）、file_state；**无 score 字段**（纯证据，unknown 不出分纪律）；
-- bundle 落盘后删除本 run sink；失败路径保留 sink 供恢复；
-- 四异常态（run_error/timeout/zero_tests/vacuous）bundle 仍落盘且不出分。
+- `hits_lines` 来自 `test-attribution/6` 行事实；`probes_fired` 来自映射 `arms_state.gut_full`，不得伪造本次执行证据。
+- bundle 保留 `evidence_version`、target identity、T/I/C、census_gaps、sentinels、entry_states 与 file_state；无 score 字段，unknown/vacuous 不出分。
+- 映射不可用或证据缺失时仍可写具名失败 bundle（run_error、空 hits），供 `measure risk` 降级披露；evidence 写失败本身也须具名失败。
+- 不传 `--evidence-out` 时只输出既有 coverage JSON 契约。
 
-### 10.2 `gqt measure coverage --recover <evidence-dir>`
+### 10.2 退役面
 
-重读 started/bundle_written 之外的 record + 对应 UUID sink，按 record 内 probe manifest 重新归属产出 bundle（recovered=true），**不重跑 GUT**；status 迁移至 bundle_written。sink 缺失的 run 记入 errors（fail-loud）。
+旧 direct 插桩的 PID/UUID sink 生产、`--recover <evidence-dir>` 和 started→bundle_written 的 run-record 恢复链已随行级映射单一真源退役；不再作为 `measure coverage` 参数或覆盖来源。`measure run` 自身的双臂插桩/证据链仍在 §13 管辖，二者不得混写。
 
 ### 10.3 `gqt measure coverage --prune-sinks [--retain-days N]`
 
-显式清理（W1 裁决：user:// 在用户 HOME 下，不做隐式清扫）：只删 `qa-coverage-hits-*` 前缀且 mtime 超保留期（默认 7 天）的文件；user:// 目录与项目根两处都扫。
+显式清理旧 `qa-coverage-hits-*` sink：只处理 mtime 超保留期（默认 7 天）的文件；不产生覆盖答案，也不读取旧 sink 作为当前行事实。
 
 ### 10.4 契约增量分类
 
-sink 名 PID→UUID 属私有传输面变更（对外 stdout 契约零影响——§10 冻结门兜底）= **comparability**（PR-B 前的 run 间数据不可比，PR-B 起可比较）；evidence bundle/生命周期/恢复/清理 = **capability**（加法）。`coverage/runner.py` 的插桩判定面（EXECUTABLE_NODE_NAMES/括号深度/class_def 剪枝）语义不变；行收集符号反向公开化至 `registry/lines.py`（§SPEC-029 债务收敛，runner 保留向后兼容别名）。
+映射投影 evidence 输出 = **capability**；旧 sink/recovery 物理退役 = 既有契约收口。行级插桩与符号收集的实现归 `coverage/instrument.py` / `registry/lines.py`，不再是 direct coverage 的第二执行路径。
 
 ## 11. measurement suite 契约（SEE-1546 WP3 PR-A，只读构建器；原 canonical recipe）
 

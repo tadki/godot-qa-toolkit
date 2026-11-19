@@ -106,12 +106,16 @@ func _run_leg(req: Dictionary) -> void:
 		gut._ignore_pause_before_teardown = true
 		var scripts: Array = req.get("tests_scripts", [])
 		var baseline_names: Array = req.get("baseline_failures", [])
-		var skip_names: Array = req.get("skip_red_test_names", [])
+		var skip_tests: Array = req.get("skip_red_tests", [])
+		for s2 in scripts:
+			# D1 根因修复：顺序分支此前从未 add_script——collector 为空，
+			# _test_the_scripts 越界中断且 end_run 永不发射 → 腿挂死。
+			gut.add_script(String(s2))
 		if scripts.size() > 0:
 			# SEE-1606 §SPEC-P3 路线 A：脚本顺序执行 + 新增失败早停
-			#（同一 Gut 实例，语义与一次跑全部一致，仅在脚本间插检查）。
+			#（同一 Gut 实例，语义与一次跑全部一致，仅在 chunk 间插检查）。
 			var skip_out: Dictionary = await _gqt_skip_red_tests(
-				gut, skip_names)
+				gut, skip_tests)
 			resp["skip_red"] = skip_out
 			var seq: Dictionary = await _gqt_run_scripts_sequential(
 				gut, scripts, baseline_names, 600000)
@@ -125,7 +129,7 @@ func _run_leg(req: Dictionary) -> void:
 		else:
 			_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
 			var skip_out: Dictionary = await _gqt_skip_red_tests(
-				gut, skip_names)
+				gut, skip_tests)
 			resp["skip_red"] = skip_out
 			var done := [false]
 			gut.end_run.connect(func() -> void: done[0] = true)
@@ -293,6 +297,7 @@ class WorkerLegResult:
     pass_count: int = 0
     fail_count: int = 0
     failing_tests: set[str] = field(default_factory=set)
+    failing_scripts: set[tuple[str, str]] = field(default_factory=set)
     user_files: list[str] = field(default_factory=list)
     connections: list[list] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
@@ -443,7 +448,7 @@ class WorkerSession:
                 closure: list[str], tests_glob: str | None,
                 tests_scripts: list[str] | None = None,
                 baseline_failures: list[str] | None = None,
-                skip_red_names: list[str] | None = None,
+                skip_red_tests: list[tuple[str, str]] | None = None,
                 ) -> WorkerLegResult:
         """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。
 
@@ -467,8 +472,8 @@ class WorkerSession:
         if tests_scripts:
             req["tests_scripts"] = [str(s) for s in tests_scripts]
             req["baseline_failures"] = sorted(baseline_failures or [])
-        # §SPEC-P2-R1：红测试物理跳过名单与 bail/清单无关，独立生效。
-        req["skip_red_test_names"] = sorted(skip_red_names or [])
+        # §SPEC-P2-R1/D2：红测试物理跳过（脚本+名定位）与 bail/清单无关。
+        req["skip_red_tests"] = [list(p) for p in (skip_red_tests or [])]
         req_name = f"req-{leg}-{uuid.uuid4().hex[:8]}.json"
         (work / req_name).write_text(json.dumps(req), encoding="utf-8")
         resp_path = work / "resp.json"
@@ -532,6 +537,7 @@ class WorkerSession:
         )
         r.target_compile_invalid = self._target_compile_invalid(leg, r.reload)
         r.failing_tests = self._leg_failing_names(leg)
+        r.failing_scripts = self._leg_failing_scripts(leg)
         reason = self._fatal_reason(r)
         if not reason:
             drift = self._state_drift(r)
@@ -600,6 +606,7 @@ class WorkerSession:
     def _leg_failing_names(self, leg: int) -> set[str]:
         """从 worker 日志文件抽取该腿分段并解析失败测试名（M0 同判据）。"""
         from .gutrun import _parse_failing_tests
+
         seg: list[str] = []
         begin = f"GQT_WORKER_LEG_BEGIN {leg}"
         end = f"GQT_WORKER_LEG_END {leg} "
@@ -618,6 +625,32 @@ class WorkerSession:
         except OSError:
             return set()
         return _parse_failing_tests("\n".join(seg))
+
+    def _leg_failing_scripts(self, leg: int) -> set[tuple[str, str]]:
+        """同分段的脚本限定失败集 {(script_res_path, test_name)}（D2）。
+
+        GUT 9.6 每脚本先打印完整 res:// 路径标题；无标题（截断/Summary
+        段）的失败归属通配 "*"。"""
+        from .gutrun import parse_failures_with_scripts
+
+        seg: list[str] = []
+        begin = f"GQT_WORKER_LEG_BEGIN {leg}"
+        end = f"GQT_WORKER_LEG_END {leg} "
+        try:
+            for line in self._log_path.read_text(encoding="utf-8",
+                                                 errors="replace").splitlines():
+                if end in line:
+                    if seg:
+                        break
+                    continue
+                if begin in line:
+                    seg = [line]
+                    continue
+                if seg:
+                    seg.append(line)
+        except OSError:
+            return set()
+        return parse_failures_with_scripts("\n".join(seg))
 
     def _mark_dead(self, reason: str) -> None:
         self.dead = True

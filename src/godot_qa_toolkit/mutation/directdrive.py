@@ -102,21 +102,34 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 	return out
 
 
-func _gqt_skip_red_tests(gut: Node, red_names: Array) -> Dictionary:
-	# SEE-1606 §SPEC-P2-R1：基线红测试从 collector 物理移除（test 粒度），
-	# 混合红绿脚本的红测试不再被 GUT 执行；标记数/名单经 marker 透出供
-	# Python 侧机器核验。红测试名缺席于面（未命中）如实计数披露。
-	var out := {"requested": red_names.size(), "marked": 0, "names": []}
-	if red_names.is_empty():
+func _gqt_skip_red_tests(gut: Node, red_tests: Array) -> Dictionary:
+	# SEE-1606 §SPEC-P2-R1 + D2：基线红测试从 collector 物理移除。身份 =
+	# 脚本归属 + 测试名（red_tests 元素 "script_path::test_name"）——
+	# 绝不按裸测试名跨脚本删除（D2：同名绿测是合法 killer）。仅命中
+	# 脚本与名都匹配的测试；未命中的请求对如实计数披露。
+	var out := {"requested": red_tests.size(), "marked": 0, "names": []}
+	if red_tests.is_empty():
 		return out
+	var wanted := {}
+	for pair in red_tests:
+		var parts := String(pair).split("::", true, 1)
+		if parts.size() == 2:
+			wanted[parts[0]] = (wanted.get(parts[0], []) as Array)
+			(wanted[parts[0]] as Array).append(parts[1])
 	var scripts: Array = gut._test_collector.get_scripts()
 	for s in scripts:
+		var script_id := String(s.path)
+		var base := String(s.path).get_file()
+		var names: Array = (wanted.get(script_id, [])
+			+ wanted.get(base, [])) as Array
+		if names.is_empty():
+			continue
 		var kept: Array = []
 		for t in s.tests:
-			if red_names.has(String(t.name)):
+			if names.has(String(t.name)):
 				out["marked"] = int(out["marked"]) + 1
 				if out["names"].size() < 5:
-					out["names"].append(String(t.name))
+					out["names"].append(base + "::" + String(t.name))
 			else:
 				kept.append(t)
 		s.tests = kept
@@ -194,9 +207,9 @@ func _init() -> void:
 	gut._ignore_pause_before_teardown = true
 	for s in scripts:
 		gut.add_script(String(s))
-	# SEE-1606 §SPEC-P2-R1：基线红测试物理跳过（test 粒度，collector 移除）。
+	# SEE-1606 §SPEC-P2-R1/D2：基线红测试物理跳过（脚本+名定位）。
 	var skip_red: Dictionary = await _gqt_skip_red_tests(
-		gut, cfg.get("skip_red_test_names", []))
+		gut, cfg.get("skip_red_tests", []))
 	# kill 即退只在开关开启时生效；bail 基线名单与跳过名单同源但语义独立。
 	var bail_on: bool = bool(cfg.get("bail_enabled", false))
 	var bail_names: Array = (cfg.get("bail_baseline_failures", [])
@@ -230,11 +243,11 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                      autoload_name: str, scripts: list[str],
                      baseline_failures: list[str],
                      bail_enabled: bool = True,
-                     skip_red_names: list[str] | None = None) -> Path:
+                     skip_red_tests: list[tuple[str, str]] | None = None) -> Path:
     """单 mutant 直驱 cfg（beacon cfg 超集）；调用方 finally 删除。
 
     bail_baseline_failures 仅在 bail_enabled 时被宿主消费（kill 即退）；
-    skip_red_test_names 独立生效（§SPEC-P2-R1 物理跳过，与 bail 无关）。"""
+    skip_red_tests（脚本+名配对）独立生效（§SPEC-P2-R1 物理跳过，与 bail 无关）。"""
     path = Path(slot_root) / f".gqt_beacon_cfg_{uuid.uuid4().hex[:12]}.json"
     payload = {"target_res": target_res, "mutant_sha256": mutant_sha256,
                "autoload": autoload_name,
@@ -242,6 +255,6 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                "baseline_failures": sorted(baseline_failures or []),
                "bail_enabled": bool(bail_enabled),
                "bail_baseline_failures": sorted(baseline_failures or []),
-               "skip_red_test_names": sorted(skip_red_names or [])}
+               "skip_red_tests": [list(p) for p in (skip_red_tests or [])]}
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

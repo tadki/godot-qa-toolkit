@@ -512,6 +512,11 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
 # 报告构建已迁 reporting.py，经参数传入读取时刻同值）。
 _adaptive_timeout = 0
 
+# §SPEC-P2-R1-D2：本轮 baseline 红测试的脚本限定身份集 {(script, name)}，
+# 由 _loop_baseline 每轮重置；供（1）宿主红测跳过配对（2）同名列 kill 判
+# 定的保守豁免。空集 = 基线流无脚本标题可解析 → 回退裸名语义。
+_BASELINE_RED_MAP: set[tuple[str, str]] = set()
+
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
                        baseline_failures: set[str], baseline_dirty: bool,
@@ -519,7 +524,8 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        ownership_fn=None, target_rel: str = "",
                        target_res: str = "",
                        direct_scripts: list[str] | None = None,
-                       bail_enabled: bool = True) -> dict:
+                       bail_enabled: bool = True,
+                       red_pairs: list[tuple[str, str]] | None = None) -> dict:
     """磁盘影子注入 → 跑 GUT → 分类；真实仓目标文件全程零写入（SEE-1550）。
 
     - 注入：每 mutant 一次 replace，无恢复步，写失败上抛转 run_error。
@@ -530,7 +536,8 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
     injected, cfg_path, user_dir = _sm_inject(
         m, slot, target_rel, target_res, original_src, project_root, path,
         auto_name, direct_scripts=direct_scripts,
-        baseline_failures=baseline_failures, bail_enabled=bail_enabled)
+        baseline_failures=baseline_failures, bail_enabled=bail_enabled,
+        red_pairs=red_pairs)
     if cfg_path is None:
         return injected  # 注入失败 run_error 契约
     _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
@@ -575,7 +582,7 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
                    tests_glob, baseline_failures, baseline_dirty, slot,
                    auto_name, target_rel, target_res, ownership_fn, reporter,
                    store2, prior_entries, scopes, kill_bail=False,
-                   direct_scripts=None):
+                   direct_scripts=None, red_pairs=None):
     """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
     raw_pairs: list[tuple] = []
     for seq, m in enumerate(mutants):
@@ -585,7 +592,8 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
             baseline_failures, baseline_dirty, slot=slot,
             auto_name=auto_name, ownership_fn=ownership_fn,
             target_rel=target_rel, target_res=target_res,
-            direct_scripts=direct_scripts, bail_enabled=kill_bail)
+            direct_scripts=direct_scripts, bail_enabled=kill_bail,
+            red_pairs=red_pairs)
         raw_pairs.append((m, verdict))
         # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
         if reporter is not None:
@@ -625,6 +633,13 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     if baseline_rc != 0 and _looks_like_godot_launch_failure(baseline_tail):
         raise _BaselineLaunchFailure(baseline_tail)
     baseline_failures = _parse_failing_tests(baseline_tail)
+    # §SPEC-P2-R1-D2：红测试身份 = 脚本归属 + 测试名（裸名跨脚本删除是
+    # D2 缺陷根因）。脚本限定集供跳过与同名列 kill 判定使用。
+    global _BASELINE_RED_MAP
+    from .gutrun import parse_failures_with_scripts
+    qualified = parse_failures_with_scripts(baseline_tail)
+    _BASELINE_RED_MAP = {(scr, name) for scr, name in qualified
+                         if scr and scr != "*"}
     # SEE-1606 P2：开关关闭（默认）时继续跑并只做披露；打开时 fail-loud，
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
@@ -636,7 +651,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                baseline_failures, baseline_dirty, slot, auto_name, target_rel,
                target_res, kind, idpack, exec_scheme_resolved, worker_channel,
                reporter, store2, prior_entries, scopes, clock, slot_info,
-               t_slot, kill_bail=False, direct_scripts=None) -> list:
+               t_slot, kill_bail=False, direct_scripts=None,
+               red_pairs=None) -> list:
     """beacon 播种 → worker/冷腿执行 → 槽归还断言与 slot_sync 计时。"""
     ownership_holder: list = []
 
@@ -665,7 +681,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     target_rel, target_res, kind, reporter, store2,
                     prior_entries, scopes, _ownership,
                     timings_out=timings_out, kill_bail=kill_bail,
-                    tests_scripts=direct_scripts)
+                    tests_scripts=direct_scripts, red_pairs=red_pairs,
+                    baseline_red_map=_BASELINE_RED_MAP)
             clock.add("worker_boot",
                       timings_out.get("worker_boot_s", 0.0))
             if fatal_events:
@@ -679,7 +696,7 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     tests_glob, baseline_failures, baseline_dirty, slot,
                     auto_name, target_rel, target_res, _ownership, reporter,
                     store2, prior_entries, scopes, kill_bail=kill_bail,
-                    direct_scripts=direct_scripts)
+                    direct_scripts=direct_scripts, red_pairs=red_pairs)
     finally:
         release_problems = shadowpool.release_slot(slot)
         # §SPEC-202 slot_sync = 槽获取→归还断言全程；槽位固定成本 = 其与
@@ -729,12 +746,14 @@ def _run_mutant_loop(
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,
             worker_channel, targeted_only, clock)
+        red_pairs = sorted(_BASELINE_RED_MAP) if (dirty and skip_applied) \
+            else []
         raw_pairs = _loop_legs(
             path, project_root, original_src, backup, mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,
             target_res, detect_binary_kind(), idpack, scheme, worker_channel,
             reporter, store2, prior_entries, scopes, clock, slot_info, t_slot,
-            bail_effective, bail_scripts)
+            bail_effective, bail_scripts, red_pairs)
         slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
         slot_info["slot_mode"] = slot.mode
         slot_info["freshness"] = list(slot.freshness)
@@ -750,7 +769,6 @@ def _run_mutant_loop(
         slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
         slot_info["kill_bail_scripts"] = (
             len(bail_scripts) if bail_scripts is not None else None)
-        # §SPEC-P2-R1 契约：baseline_skip 仅在基线脏（跳过语义在场）时披露。
         if dirty:
             slot_info["baseline_skip"] = {
                 "applied": bool(skip_applied), "face": bail_face,

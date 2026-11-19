@@ -43,6 +43,39 @@ def _looks_like_godot_launch_failure(output: str) -> bool:
     return _GUT_RUN_EVIDENCE.search(output) is None
 
 
+def parse_failures_with_scripts(gut_output: str) -> set[tuple[str, str]]:
+    """§SPEC-P2-R1-D2：脚本限定的失败集合 {(script, test_name)}。
+
+    GUT 运行流中每个脚本先打印完整路径（`res://…/test_x.gd`，可选
+    `.Inner` 后缀），其后的 `* test` / `[Failed]` 归属该脚本。回到
+    Run Summary 段（`- test` 无脚本上下文）时归属降级为通配 `*`——
+    通配仅用于「同名绿测豁免」的保守回退，绝不用于跨脚本误删。
+    无任何脚本标题时返回空集（调用方回退裸名语义）。"""
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    out: set[tuple[str, str]] = set()
+    current_script = ""
+    current_test = None
+    in_summary = False
+    for raw in gut_output.splitlines():
+        line = ansi.sub("", raw).replace("\r", "")
+        stripped = line.strip()
+        if stripped.startswith("res://") and ".gd" in stripped:
+            current_script = stripped
+            current_test = None
+            continue
+        if "Run Summary" in stripped or stripped.startswith("Totals"):
+            in_summary = True
+            current_test = None
+            continue
+        m = re.match(r"^[*-]\s+(test_\S+)", stripped)
+        if m:
+            current_test = m.group(1)
+            continue
+        if "[Failed]" in line and current_test:
+            out.add((current_script if not in_summary else "*", current_test))
+    return out
+
+
 def _parse_failing_tests(gut_output: str) -> set[str]:
     """从 GUT 输出解析失败测试名集合。
 

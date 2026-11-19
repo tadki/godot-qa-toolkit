@@ -233,7 +233,27 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
         return _mutant_record(m, "survived",
                               f"tests passed after {m.kind} {m.original}→{m.mutated}",
                               src=None)
-    new_failures = _parse_failing_tests(tail) - baseline_failures
+    bare = _parse_failing_tests(tail)
+    # §SPEC-P2-R1-D2：同名脚本限定豁免（runner 每轮写入的脚本限定红集合；
+    # 空 = 无脚本标题 → 回退裸名差集语义）。
+    lazy = None
+    try:
+        from . import runner as _runner_mod
+        lazy = getattr(_runner_mod, "_BASELINE_RED_MAP", None)
+    except Exception:
+        lazy = None
+    red_map = lazy if lazy else None
+    if red_map:
+        from .gutrun import parse_failures_with_scripts
+        qualified = parse_failures_with_scripts(tail)
+        if qualified:
+            new_names = {n for _s, n in qualified
+                         if (_s, n) not in red_map and ("*", n) not in red_map}
+        else:
+            new_names = bare - baseline_failures
+    else:
+        new_names = bare - baseline_failures
+    new_failures = new_names
     if new_failures:
         return _mutant_record(m, "killed",
                               f"new failures after {m.kind} {m.original}→{m.mutated}: "
@@ -408,11 +428,36 @@ def _leg_killed_record(m, new_failures, ownership_fn, project_root,
     return record
 
 
+def _script_aware_new(failing_names, failing_scripts, baseline_names,
+                      baseline_red_map) -> set:
+    """§SPEC-P2-R1-D2：裸名差集的脚本限定精化。
+
+    - baseline_red_map 非 None：逐 (script, name) 精确豁免；同名脚本不在
+      基线红集合 → 该失败是真新失败（绿脚本同名 killer 照杀）。
+    - map 为 None（旧路径/无脚本标题）或腿无脚本标题 → 回退裸名差集。"""
+    if baseline_red_map is None or not failing_scripts:
+        return failing_names - baseline_names
+    base_map = baseline_red_map or set()
+    new = set()
+    for name in failing_names:
+        qualified = {(scr, n) for (scr, n) in base_map if n == name}
+        if not qualified:
+            new.add(name)
+            continue
+        covered = any(scr == "*" or (scr, name) in base_map
+                      for scr, _n in failing_scripts)
+        if not covered:
+            new.add(name)
+    return new
+
+
 def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
-                        ownership_fn, project_root, original_src) -> dict:
+                        ownership_fn, project_root, original_src,
+                        baseline_red_map=None) -> dict:
     verdict = _classify_worker_leg_impl(m, leg, baseline_failures,
                                         baseline_dirty, ownership_fn,
-                                        project_root, original_src)
+                                        project_root, original_src,
+                                        baseline_red_map=baseline_red_map)
     # SEE-1606 §SPEC-P3：worker 腿早停信息随 verdict 披露（marker 契约与
     # 冷通道一致——宿主在首个新增失败处中断后续脚本）。
     if getattr(leg, "bail_info", None):
@@ -421,7 +466,8 @@ def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
 
 
 def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
-                              ownership_fn, project_root, original_src) -> dict:
+                              ownership_fn, project_root, original_src,
+                              baseline_red_map=None) -> dict:
     """worker 腿 → verdict（与冷通道同一 kill 语义：失败名差集 + 同档分类）。
 
     worker 腿的 L1/L4 beacon 失败 → run_error（数据不可信，绝不 killed/
@@ -446,7 +492,10 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
     if leg.fail_count == 0:
         return _mutant_record(
             m, "survived", f"tests passed after {tag} (worker leg)", src=src)
-    new_failures = leg.failing_tests - baseline_failures
+    new_failures = _script_aware_new(leg.failing_tests,
+                                     leg.failing_scripts,
+                                     baseline_failures,
+                                     baseline_red_map)
     if new_failures:
         return _leg_killed_record(m, new_failures, ownership_fn,
                                   project_root, src)

@@ -288,6 +288,33 @@ def test_cli_ledger_flip_failure_stderr_named(project, cli_seams, monkeypatch,
     _assert_stderr_named(err)
 
 
+def test_skip_measure_ignores_stale_generation_failure_ledger(
+        project, cli_seams, monkeypatch, tmp_path, capsys):
+    """负控：--skip-measure 不消费映射——同进程台账已有生成失败事件时，
+    静态 dry run 仍须 ok:true（台账翻转仅在测量模式下生效）。"""
+    from godot_qa_toolkit import projectroot as pr_mod
+
+    def must_not_run(project_root, **_kw):
+        raise AssertionError("skip-measure 不得触发导入引导")
+
+    monkeypatch.setattr(pr_mod, "ensure_import_cache", must_not_run)
+    ts._record({"action": "generate", "ok": False, "error": "earlier boom"})
+    report_path = tmp_path / "shadow-report.json"
+    from godot_qa_toolkit.cli import build_parser, cmd_measure_risk
+
+    args = build_parser().parse_args([
+        "measure", "risk",
+        "autoload/economy_manager.gd", "systems/economy/lcps_calculator.gd",
+        "--project-root", str(project),
+        "--report", str(report_path), "--skip-measure",
+    ])
+    rc = cmd_measure_risk(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert rc == 0 and out["ok"] is True, out
+    assert "auto-generation failed" not in captured.err, captured.err
+
+
 def test_skip_measure_stays_static_ok(project, cli_seams, monkeypatch,
                                       tmp_path, capsys):
     """负控：--skip-measure 静态 dry run 不触发导入/生成，保持 ok:true。"""

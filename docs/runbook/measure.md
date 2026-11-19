@@ -125,22 +125,22 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 ### measure suite
 
-`gqt measure suite --project-root <root> [--out recipe.json] [--exclude scope:entry:reason ...]`
+`gqt measure suite [--project-root <root>] [--out recipe.json] [--exclude scope:entry:reason ...]`
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `--project-root <root>` | required | Target Godot project root |
+| `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
 | `--out <path>` | `./recipe.json` | Recipe JSON output path |
 | `--exclude <scope:entry:reason>` | repeatable | Exclude a GUT dir or acceptance feature; an empty reason fails loud |
 
 ### measure run
 
-`gqt measure run <roots...> --project-root <root> --recipe <recipe.json> --out <report.json> [all options]`
+`gqt measure run <roots...> [--project-root <root>] --recipe <recipe.json> --out <report.json> [all options]`
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `<roots...>` (positional) | required | Target `.gd` roots (recursive glob); arms run the full gutconfig face + acceptance suite over them |
-| `--project-root <root>` | required | Project root containing `addons/gut` + `.gutconfig.json` |
+| `--project-root <root>` | discover from roots/CWD | Project root containing `addons/gut` + `.gutconfig.json`; explicit value wins |
 | `--recipe <path>` | required | `measurement-suite/2` JSON from `gqt measure suite` |
 | `--out <path>` | required | `measurement-report/2` output JSON path |
 | `--baseline-failures <path>` | omitted | JSON of pre-existing un-instrumented failing `(script, test)` pairs; new failing pairs gate the arm; bare names are rejected as ambiguous |
@@ -181,12 +181,12 @@ For per-shard raw GUT logs, pass `--shard-log-dir <dir>` and follow the files:
 
 ### measure diagnose
 
-`gqt measure diagnose <roots...> --project-root <root> --recipe <recipe.json> --features <k1,k2> --out <diagnose.json> [--timeout 480] [--godot-bin <path>]`
+`gqt measure diagnose <roots...> [--project-root <root>] --recipe <recipe.json> --features <k1,k2> --out <diagnose.json> [--timeout 480] [--godot-bin <path>]`
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `<roots...>` (positional) | required | Directories whose `.gd` files are instrumented |
-| `--project-root <root>` | required | Target Godot project root |
+| `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
 | `--recipe <path>` | required | Measurement suite JSON (verify + feature lookup) |
 | `--features <k1,k2>` | required | Comma-separated acceptance feature keys |
 | `--out <path>` | required | Diagnostic report JSON path (progress written after each feature) |
@@ -195,12 +195,12 @@ For per-shard raw GUT logs, pass `--shard-log-dir <dir>` and follow the files:
 
 ### measure map-update
 
-`gqt measure map-update <roots...> --project-root <root> --recipe <recipe.json> --baseline <map.json> [--changed <path>] --out <map.json> [--timeout 180] [--calibration-every 5] [--attribution-causal] [--godot-bin <path>]`
+`gqt measure map-update <roots...> [--project-root <root>] --recipe <recipe.json> --baseline <map.json> [--changed <path>] --out <map.json> [--timeout 180] [--calibration-every 5] [--attribution-causal] [--godot-bin <path>]`
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `<roots...>` (positional) | required | Target `.gd` roots — must be the same universe as the baseline artifact |
-| `--project-root <root>` | required | Target Godot project root |
+| `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
 | `--recipe <path>` | required | `measurement-suite/2` JSON (same content as the baseline run) |
 | `--baseline <path>` | required | Prior line-primary attribution artifact (`test-attribution/6`) |
 | `--changed <path>` | omitted, repeatable | Changed/new/removed file path |

@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | L1 | 单文件靶向 + `--scan` + 大文件警告熔断 | 先算清要跑多少，别盲跑 | **部分采纳**：拒绝单文件靶向（多文件 + worker 池是 gqt 既有优势）；`--dry-run` 升级为差分计数预估；新增 `--mutation-warning`（默认 50，截断前全量计数）+ 截断 N/M 强制披露 | 警告熔断的语义保留；靶向的机制与 gqt 域优势冲突 |
 | L2 | 函数级 SHA-256 差分 + 快照持久化 | 没变的东西不重跑 | **采纳（核心）**：scope 级哈希差分 + per-file manifest + 差分跳过规则 + survived 永不缓存信任 | 语义完全同构；哈希粒度按 GDScript 结构重定义（见 §2） |
-| L3 | 覆盖率前置过滤（历史形态挂 `--reuse-coverage` 旗标——该旗标已随 SEE-1594 A13 退役） | 没被测试覆盖的 mutant 不用跑 | **采纳并升级为同源投影**：手动 `measure coverage` `/1` store → 行事实 `/2` 投影 store → 新鲜 `/6` map 现场投影；provenance/绑定校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 同一轮插桩的行事实服务选面与过滤；无需为默认 mutation 再跑一次 coverage |
+| L3 | 覆盖率前置过滤（历史形态挂 `--reuse-coverage` 旗标——该旗标已随 SEE-1594 A13 退役） | 没被测试覆盖的 mutant 不用跑 | **采纳并升级为同源投影**：`/2` 派生缓存（绑定映射内容与执行证据）→ 新鲜 `/6` map 现场投影；手动 `/1` store 已退役；provenance/绑定校验 + 可插桩锚语义（不可插桩行 ≠ uncovered） | 同一轮插桩的行事实服务选面与过滤；无需为默认 mutation 再跑一次 coverage |
 | L4 | 沙盒目录克隆 + 多进程 worker 池 | 隔离变异副作用 + 并行执行 | **SEE-1420 拒绝沙盒（内存注入）；SEE-1550 反转为 per-worker 隔离磁盘影子槽**（hardlink COW，无硬链接 FS 退真拷贝；`.godot` 整树实拷贝） | take_over_path 内存注入存在可达性缺口：启动前完成的 autoload / preload / 组合根装配继续持有旧 Script（KOL 23 autoload 实证，假 survived）；hardlink COW 把拷贝税压到被改写文件本身，槽归还断言保留「中断无残骸」性质 |
 | L5 | baseline 动态超时熔断 | 超时判定要随基线耗时自适应 | **采纳（小改）**：自适应上限 = `max(timeout, baseline×F+1)`，`--timeout-factor` 默认 2.0 只放大不收紧；**拒绝 UB 默认 10**（JVM 抖动所迫，gqt 域无此噪声） | 倍数是环境参数不是语义 |
 | L6 | Babashka 快启动 / no-mutate / 常驻热 worker | 削启动税 + 跳过不可变区域 | **no-mutate 采纳**（`# gqt: no-mutate` 函数级 + 行级）；**Babashka 不适用**（gqt 是 Python 常驻 CLI，无冷启动问题）；**常驻热 worker 拒绝本轮降 backlog**（Godot 引擎级状态泄漏风险，重启条件量化见定案 §五） | 快启动语义在 gqt 域不存在；热 worker 的假 verdict 代价不对称 |
@@ -52,14 +52,14 @@
 - 默认并行（jobs = `max(2, cpu//2)`），单文件同样 per-mutant 分片；变异点 ≤ jobs 自动退串行；共享 baseline 快照（worker 自跑 baseline 会 N 倍放大启动税且污染 timeout 锚）。
 - 磁盘影子注入（SEE-1550 M0，反转 SEE-1420 内存注入）：每 worker 隔离 hardlink COW 影子槽（`.godot` 整树实拷贝），mutant 经「临时文件 + `os.replace`」于引擎启动前写入影子内目标 `.gd`，真实仓零写入；四级 beacon（磁盘读回哈希 → load 编译 → autoload 同源 → GUT 运行证据）钉住全加载形态可达性；Linux/win64 统一持久 warm 池（池锁不可用时才回退 fresh ext4 农场），分层新鲜度权威 + 每轮具名 reason（`shadow.py` / `shadowpool.py` / `beacon.py`）。
 - kill 判定 = 失败测试名集合相对 baseline 的差集（不看 exit code）；`godot_gate` 跨进程 flock 槽位闸统一 mutation/coverage 的 Godot 并发上限。
-- `gutrun.py` 承担 GUT 子进程调用与 launch-failure 甄别（毒条目防护：启动失败类 run_error 不落盘，防 `--resume` 误复用）。
+- `gutrun.py` 承担 GUT 子进程调用与 launch-failure 甄别（毒条目防护：启动失败类 run_error 不落盘，后续差分/续跑不得误复用）。
 
 ### ⑤ resume v2 持久化 — `resume2.py`（+ `coverlink.py` 覆盖事实）
 
 - 落盘 `<root>/.qa-cache/gqt-mutation-resume-v2/<file-key>/`：manifest.json（per-file 索引层：schema/header hash/含位点 scope hash 表，收尾方单点写）+ `<stable-id>.json`（per-mutant 条目：verdict + 全签名五元组 + scope_hash + timeout_streak）。
 - tmp + `os.replace` 原子写；各 worker 各写各 id，无跨 worker 竞态；损坏/身份不符条目 = 拒收重跑，绝不脏合并。
 - timeout_streak：复用位点重判仍 timeout → +1；streak ≥ 2 → 独立 verdict `timeout_pinned`（永不并入 killed、不计 ok 门禁、持续可见）；任一后续 run 非超时 → 解除清零。毒 run 守卫：单 run timeout ≥50% 且 ≥5 条 → 本窗口 streak 挂起并披露。
-- `coverlink.py` 统一 prefilter 数据源：显式 `measure coverage` 仍写 `/1` 手动条目；默认行级选面可把同一轮 `/6` 行事实按实际 `tests_glob` 投影成 `/2` 条目，或在新鲜 map 上现场投影。`/1` 与 `/2` 按 schema 分流、互不冒充；源码、recipe、测试面或身份绑定漂移即失效，全部层不可用时回退不过滤，宁多跑不假阴性。
+- `coverlink.py` 统一 prefilter 数据源：手动 `/1` store 已物理退役；默认行级选面把同一轮 `/6` 行事实按实际 `tests_glob` 投影成 `/2` 派生缓存，或在新鲜 map 上现场投影。`/2` 绑定映射内容与执行证据；源码、recipe、测试面或身份绑定漂移即失效，全部层不可用时回退不过滤，宁多跑不假阴性。
 
 ## 3. 优化思想提炼（抽象层）
 

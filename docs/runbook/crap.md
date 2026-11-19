@@ -85,12 +85,12 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 
 ### measure risk
 
-`gqt measure risk <files...> --project-root <root> [--core-tests D] [--full-tests D] [--report shadow-report.json] [--performance-file F] [--skip-measure] [--godot-bin <path>]`
+`gqt measure risk <files...> [--project-root <root>] [--core-tests D] [--full-tests D] [--report shadow-report.json] [--performance-file F] [--skip-measure] [--godot-bin <path>]`
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `<files...>` (positional) | required | Candidate `.gd` files (eligible ones are measured; lambda/inner-class/var-def files route to measurement-gap lanes) |
-| `--project-root <root>` | required | Target Godot project root |
+| `--project-root <root>` | discover from candidate files/CWD | Target Godot project root; explicit value wins and invalid values fail loud |
 | `--core-tests <dir>` | `res://tests/unit/` | GUT dir for the core recipe |
 | `--full-tests <dir>` | `res://tests/` (via `.gutconfig` dirs) | GUT dir for the full recipe |
 | `--report <path>` | `./shadow-report.json` | Shadow JSON output path |
@@ -100,17 +100,16 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 
 ### measure coverage (CRAP coverage input)
 
-`gqt measure coverage [file] --project-root <root> [--min-percent 80] [--timeout 120] [--tests D] [--evidence-out D] [--recover D] [--prune-sinks] [--retain-days 7] [--godot-bin <path>]`
+`gqt measure coverage [file] [--project-root <root>] [--min-percent 80] [--timeout 120] [--tests D] [--evidence-out D] [--prune-sinks] [--retain-days 7] [--godot-bin <path>]`
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `file` (positional) | — | The `.gd` file to measure (omit for `--recover` / `--prune-sinks`) |
-| `--project-root <root>` | required | Project root containing `addons/gut/` |
+| `file` (positional) | required except `--prune-sinks` | The `.gd` file to measure from the line-level map |
+| `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins |
 | `--min-percent <p>` | 80 | Minimum line coverage percent |
-| `--timeout <s>` | 120 | Single GUT wall-clock limit |
-| `--tests <res://dir-or-.gd>` | omitted = full `res://tests/` | Affected test subset (dir or single script), same semantics as mutation `--tests` |
-| `--evidence-out <dir>` | omitted | Write `coverage-evidence/2` bundles + run records here; omit for the legacy stdout-only contract |
-| `--recover <dir>` | omitted | Recover started-but-unfinished runs from this evidence dir without re-running GUT |
+| `--timeout <s>` | 120 | Timeout for map build / incremental refresh; a fresh projection starts no process |
+| `--tests <res://dir-or-.gd>` | omitted = full mapped test face | Restrict mapped test scripts by directory boundary or exact file |
+| `--evidence-out <dir>` | omitted | Write a `coverage-evidence/2` bundle from the line map; no second GUT run |
 | `--prune-sinks` | off | Delete `qa-coverage-hits-*` sinks older than `--retain-days` under `user://` and project root |
 | `--retain-days <n>` | 7 | Retention period for `--prune-sinks` |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override |

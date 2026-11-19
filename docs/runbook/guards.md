@@ -101,12 +101,12 @@ No other options; rules v1 = `core/extends-whitelist` / `no-engine-api` /
 
 ### measure parity
 
-`gqt measure parity <paths...> --project-root <root> [--report parity.json] [--registry-out reg.json]`
+`gqt measure parity <paths...> [--project-root <root>] [--report parity.json] [--registry-out reg.json]`
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `<paths...>` (positional) | required | Directories or `.gd` files to scan (same roots as the complexity gate) |
-| `--project-root <root>` | required | Project root for relative fids |
+| `--project-root <root>` | discover from paths/CWD | Project root for relative fids; explicit value wins |
 | `--report <path>` | `./parity.json` | Parity report output path |
 | `--registry-out <path>` | omitted | Optional multi-file registry snapshot output path |
 

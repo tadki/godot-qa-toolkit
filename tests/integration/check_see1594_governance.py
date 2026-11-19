@@ -55,8 +55,6 @@ ALLOWLIST = {
     "flag_resume": [
         ("docs/contract.md", "历史台账/退役声明（A13 --resume retired 标注）"),
         ("docs/runbook/mutation.md", "退役标注行（retired SEE-1594 A13）"),
-        ("docs/mutation-architecture.md",
-         "退役标注（防 --resume 误复用的毒条目防护描述）"),
         ("src/godot_qa_toolkit/mutation/diffengine.py",
          "历史台账注释（v1 --resume 既有语义溯源）"),
         ("tests/unit/test_see1594_semantic_retirement.py",
@@ -142,7 +140,6 @@ ALLOWLIST = {
     "coverage_store_v1": [
         ("src/godot_qa_toolkit/mutation/coverlink.py",
          "/1 拒绝守卫常量（盘上残留条目拒绝，零读写路径；A04）"),
-        ("docs/contract.md", "历史台账（S2 /1 store 层退役声明）"),
         ("docs/runbook/measure.md", "退役声明（manual /1 store retired A04）"),
         ("docs/runbook/mutation.md",
          "退役声明（manual /1 store layer retired）"),
@@ -158,6 +155,8 @@ ALLOWLIST = {
     "sink_recovery_source": [
         ("src/godot_qa_toolkit/coverage/runner.py",
          "sink-recovery 已退役声明注释（非覆盖来源）"),
+        ("docs/contract.md",
+         "历史台账/退役声明（§4.4 旧 sink-recovery 入口退役标注）"),
         ("tests/unit/test_see1594_semantic_retirement.py",
          "退役防复发 pin"),
         ("tests/integration/check_see1594_governance.py",

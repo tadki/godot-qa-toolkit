@@ -257,6 +257,12 @@ func _walk_connections(node: Node, out: Array, depth: int) -> void:
 """ + SEQUENTIAL_RUNNER_GD
 
 
+def _bail_info_of(resp: dict) -> dict | None:
+    """SEE-1606 P3（§SPEC-P3-T1 零行为拆分）：早停披露原样透传，缺席
+    （None/空）归一为 None——取值语义与拆分前逐位一致。"""
+    return resp.get("bail") or None
+
+
 @dataclass
 class WorkerLegResult:
     """单腿结果（引擎回报 + Python 侧解析）。"""
@@ -505,7 +511,7 @@ class WorkerSession:
             user_files=list(resp.get("user_files") or []),
             connections=list(resp.get("connections") or []),
             timings=dict(resp.get("timings") or {}),
-            bail_info=resp.get("bail") or None,
+            bail_info=_bail_info_of(resp),
         )
         r.target_compile_invalid = self._target_compile_invalid(leg, r.reload)
         r.failing_tests = self._leg_failing_names(leg)

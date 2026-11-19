@@ -604,6 +604,50 @@ def _resolve_entry_doc(root, path, target_file, base, strict) -> tuple:
     return (doc, rel), None
 
 
+def _explicit_map_source(map_path_override: str | None) -> bool:
+    """显式映射判定（`--attribution-map` / ENV_MAP）——D5 只读透传契约的
+    适用面唯一出处。"""
+    return bool(map_path_override) or bool(os.environ.get(ENV_MAP))
+
+
+def _explicit_stale_gate(explicit: bool, doc: dict, base: dict,
+                         strict: bool) -> "dict | None":
+    """D4 显式事件计数门：显式产物带 increment.event_counts_stale 时具名
+    拒绝——事件计数未重测，不得当新鲜证据消费（结构事实虽新但不是本轮
+    可认证的事件证据；零续新/零 GUT）。返回终态 base，放行返回 None。"""
+    if explicit and map_event_counts_stale(doc):
+        base["reason"] = "event_counts_stale"
+        return _finish(base, strict)
+    return None
+
+
+def _auto_renew_step(root, path, doc, rel, evaluation, *, explicit, auto,
+                     renew, timeout_s, base, strict) -> "tuple[dict, dict | None]":
+    """过期映射的 auto 续新一步（D2/D5 语义固定于此）：显式产物绝不续新
+    （只读透传），renew=False（dry-run）抑制全部续新——零 GUT；续新成功
+    返回刷新后的 evaluation，续新后装载失败返回终态 base。"""
+    if evaluation["ok"] or not (auto and renew and not explicit):
+        return evaluation, None
+    if not _resolve_renew(root, path, doc, rel, timeout_s):
+        return evaluation, None
+    try:
+        renewed = _evaluate(root, rel, load_map(path))
+        renewed["mapping"]["path"] = path
+        return renewed, None
+    except SelectionError as e:
+        base["reason"] = f"auto_update_reload_failed:{e}"
+        return evaluation, _finish(base, strict)
+
+
+def _stale_decision_reason(evaluation_reason: str, *, explicit: bool,
+                           auto: bool) -> str:
+    """过期终态 reason 合成：显式产物只读透传契约要求具名 explicit_map_stale
+    （绝不原地重建）；auto 管理的默认映射标注 still_stale（续新已试无效）。"""
+    if explicit:
+        return f"explicit_map_stale:{evaluation_reason}"
+    return ("auto_update_still_stale:" if auto else "") + evaluation_reason
+
+
 def resolve_selection(project_root: str | Path, target_file: str,
                       map_path_override: str | None = None,
                       strict: bool = True,
@@ -616,7 +660,8 @@ def resolve_selection(project_root: str | Path, target_file: str,
     SEE-1604 D5/D4：显式映射默认路径（`--attribution-map` / ENV_MAP）只读
     透传——过期绝不续新/重建/改写（fail-loud 具名），且拒绝 event_counts_stale
     的增量产物；auto 管理的默认映射才走续新。renew=False（dry-run）抑制
-    全部续新（零 GUT）。"""
+    全部续新（零 GUT）。语义分驻 `_explicit_stale_gate` / `_auto_renew_step`
+    / `_stale_decision_reason`。"""
     root = str(Path(project_root).resolve())
     base = {"source": "full_face", "reason": None, "tests": [],
             "tests_glob": None, "zero_ref": False, "mapping": None,
@@ -625,36 +670,26 @@ def resolve_selection(project_root: str | Path, target_file: str,
     if path is None:
         base["reason"] = "no_attribution_map"
         return _finish(base, strict)
-    explicit = bool(map_path_override) or bool(os.environ.get(ENV_MAP))
+    explicit = _explicit_map_source(map_path_override)
     loaded, done = _resolve_entry_doc(root, path, target_file, base, strict)
     if done is not None:
         return done
     doc, rel = loaded
-    if explicit and map_event_counts_stale(doc):
-        # 显式增量产物的事件计数未重测——不得当新鲜证据消费（具名拒绝，
-        # 零续新/零 GUT；结构事实虽新但不是本轮可认证的事件证据）。
-        base["reason"] = "event_counts_stale"
-        return _finish(base, strict)
+    terminal = _explicit_stale_gate(explicit, doc, base, strict)
+    if terminal is not None:
+        return terminal
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path
-    if not evaluation["ok"] and auto and renew and not explicit:
-        if _resolve_renew(root, path, doc, rel, timeout_s):
-            try:
-                doc = load_map(path)
-                evaluation = _evaluate(root, rel, doc)
-                evaluation["mapping"]["path"] = path
-            except SelectionError as e:
-                base["reason"] = f"auto_update_reload_failed:{e}"
-                return _finish(base, strict)
+    evaluation, terminal = _auto_renew_step(
+        root, path, doc, rel, evaluation, explicit=explicit, auto=auto,
+        renew=renew, timeout_s=timeout_s, base=base, strict=strict)
+    if terminal is not None:
+        return terminal
     base["mapping"] = evaluation["mapping"]
     if not evaluation["ok"]:
-        if explicit:
-            # 显式产物过期：只读透传的契约要求 fail-loud，绝不原地重建
-            base["reason"] = f"explicit_map_stale:{evaluation['reason']}"
-        else:
-            base["reason"] = ("auto_update_still_stale:" if auto else "") + \
-                evaluation["reason"]
+        base["reason"] = _stale_decision_reason(
+            evaluation["reason"], explicit=explicit, auto=auto)
         return _finish(base, strict)
     if evaluation["ambiguous"]:
         # 同名跨脚本 → 身份不可判定：不猜（严格模式 fail-loud）
@@ -667,6 +702,8 @@ def resolve_selection(project_root: str | Path, target_file: str,
                      "reason": "mapping_says_no_tests"})
         return base
     return _resolve_materialize(root, base, scripts, strict)
+
+
 def function_tests(project_root: str, doc: dict, rel: str,
                    fid: str) -> tuple[list[str], list[str]]:
     """映射内 function→tests（test 车道；多轮并集口径即产物边集本身）。

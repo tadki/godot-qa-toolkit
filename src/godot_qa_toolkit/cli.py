@@ -574,7 +574,8 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         worker_channel=True if getattr(args, "worker_channel", False) else None,
         select_mode=getattr(args, "select_mode", "line"),
         break_on_baseline_failure=getattr(
-            args, "break_on_baseline_failure", False))
+            args, "break_on_baseline_failure", False),
+        kill_bail=None if not getattr(args, "no_kill_bail", False) else False)
     if len(files) == 1:
         # SEE-1589 A-M3：单文件对外恒为 flat CLI 契约（--jobs 1 不得套用
         # 多文件 results[] 信封）；信封仅限多文件编排层。
@@ -627,6 +628,7 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         select_mode=getattr(args, "select_mode", "line"),
         break_on_baseline_failure=getattr(
             args, "break_on_baseline_failure", False),
+        kill_bail=None if not getattr(args, "no_kill_bail", False) else False,
     )
     result["summary"].setdefault("jobs", 1)
     return result
@@ -1408,6 +1410,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "instead of continuing (default: continue; failing "
                         "baseline tests are excluded from kill determination "
                         "and disclosed in summary.baseline_failures/names)")
+    # SEE-1606 P3（对齐 Stryker disableBail，默认 false = kill 即退默认开启）。
+    m.add_argument("--no-kill-bail", action="store_true",
+                   help="disable script-granularity kill bail: with bail on "
+                        "(default) each mutant's selection face runs script "
+                        "by script in one engine process and stops at the "
+                        "first script whose failures are NEW vs baseline; "
+                        "env GQT_MUTATION_KILL_BAIL=0 also disables")
     m.add_argument("--mutation", default=None, metavar="ID",
                    help="single-site rerun: '<file>#<scope_id>#<n>' (SEE-1420 "
                         "P3 caliper) — forces fresh execution of that one "

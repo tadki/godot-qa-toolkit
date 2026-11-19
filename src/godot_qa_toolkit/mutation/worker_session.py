@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import shadow
 from . import worker_channel as _wc
+from .directdrive import SEQUENTIAL_RUNNER_GD
 
 WORKER_DIRNAME = ".gqt-worker"
 HOST_SCRIPT_NAME = ".gqt_worker_host.gd"
@@ -103,17 +104,32 @@ func _run_leg(req: Dictionary) -> void:
 		var GutErrorTracker = load("res://addons/gut/error_tracker.gd")
 		GutErrorTracker.register_logger(GutUtils.get_error_tracker())
 		gut._ignore_pause_before_teardown = true
-		_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
-		var done := [false]
-		gut.end_run.connect(func() -> void: done[0] = true)
-		gut.test_scripts()
-		var waited := 0
-		while not done[0] and waited < 60000:
-			await create_timer(0.01).timeout
-			waited += 1
-		resp["gut_ran"] = done[0]
-		resp["pass"] = gut.get_pass_count()
-		resp["fail"] = gut.get_fail_count()
+		var scripts: Array = req.get("tests_scripts", [])
+		var baseline_names: Array = req.get("baseline_failures", [])
+		if scripts.size() > 0:
+			# SEE-1606 §SPEC-P3 路线 A：脚本顺序执行 + 新增失败早停
+			#（同一 Gut 实例，语义与一次跑全部一致，仅在脚本间插检查）。
+			var seq: Dictionary = await _gqt_run_scripts_sequential(
+				gut, scripts, baseline_names, 600000)
+			resp["gut_ran"] = not bool(seq["hung"])
+			resp["pass"] = int(seq["pass"])
+			resp["fail"] = int(seq["fail"])
+			resp["bail"] = {"scripts_run": int(seq["scripts_run"]),
+				"scripts_total": int(seq["scripts_total"]),
+				"bail": bool(seq["bail"]), "bail_at": int(seq["bail_at"]),
+				"new_failure": String(seq["bail_new_failure"])}
+		else:
+			_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
+			var done := [false]
+			gut.end_run.connect(func() -> void: done[0] = true)
+			gut.test_scripts()
+			var waited := 0
+			while not done[0] and waited < 60000:
+				await create_timer(0.01).timeout
+				waited += 1
+			resp["gut_ran"] = done[0]
+			resp["pass"] = gut.get_pass_count()
+			resp["fail"] = gut.get_fail_count()
 		get_root().remove_child(gut)
 		gut.free()
 	resp["timings"]["gut_ms"] = Time.get_ticks_msec() - t_gut
@@ -238,7 +254,7 @@ func _walk_connections(node: Node, out: Array, depth: int) -> void:
 			out.append([owner_id, sig_name, String(cb.get_method())])
 	for child in node.get_children():
 		_walk_connections(child, out, depth + 1)
-"""
+""" + SEQUENTIAL_RUNNER_GD
 
 
 @dataclass
@@ -262,6 +278,7 @@ class WorkerLegResult:
     user_files: list[str] = field(default_factory=list)
     connections: list[list] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
+    bail_info: dict | None = None
 
 
 @dataclass
@@ -404,8 +421,15 @@ class WorkerSession:
     # -- 单腿执行 -------------------------------------------------------
 
     def run_leg(self, leg: int, target_res: str, mutant_sha256: str,
-                closure: list[str], tests_glob: str | None) -> WorkerLegResult:
-        """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。"""
+                closure: list[str], tests_glob: str | None,
+                tests_scripts: list[str] | None = None,
+                baseline_failures: list[str] | None = None,
+                ) -> WorkerLegResult:
+        """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。
+
+        tests_scripts 在场（SEE-1606 §SPEC-P3 路线 A）= 脚本顺序执行 +
+        新增失败早停；缺席 = 既有单次 add_directory/test_scripts 形态。
+        """
         if not self.dead:
             self.start()  # 惰性启动（同一 run 进程只 spawn 一次）
         if self.dead:
@@ -420,6 +444,9 @@ class WorkerSession:
             "closure": list(closure),
             "tests_glob": tests_glob or "res://tests/",
         }
+        if tests_scripts:
+            req["tests_scripts"] = [str(s) for s in tests_scripts]
+            req["baseline_failures"] = sorted(baseline_failures or [])
         req_name = f"req-{leg}-{uuid.uuid4().hex[:8]}.json"
         (work / req_name).write_text(json.dumps(req), encoding="utf-8")
         resp_path = work / "resp.json"
@@ -478,6 +505,7 @@ class WorkerSession:
             user_files=list(resp.get("user_files") or []),
             connections=list(resp.get("connections") or []),
             timings=dict(resp.get("timings") or {}),
+            bail_info=resp.get("bail") or None,
         )
         r.target_compile_invalid = self._target_compile_invalid(leg, r.reload)
         r.failing_tests = self._leg_failing_names(leg)

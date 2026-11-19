@@ -150,7 +150,8 @@ def _plan_serial_finish(f, project_root, budget, timeout_s, glob,
                         binary_kind, timeout_factor, mutate_all, baseline,
                         run_id, reuse_coverage, identity, worker_channel,
                         select_mode, selection_meta,
-                        break_on_baseline_failure: bool = False):
+                        break_on_baseline_failure: bool = False,
+                        kill_bail: bool | None = None):
     """差分后零执行（全 reused / budget=0）：串行路径收尾（零 mutant
     GUT + 1 baseline 锚）。父层已预跑的共享 baseline 快照必须注入
     （SEE-1420 QA 实证：不注入则 run_mutation「永远实测」再跑一轮）。"""
@@ -167,7 +168,8 @@ def _plan_serial_finish(f, project_root, budget, timeout_s, glob,
         identity=identity,
         worker_channel=worker_channel,
         select_mode=select_mode,
-        break_on_baseline_failure=break_on_baseline_failure)
+        break_on_baseline_failure=break_on_baseline_failure,
+        kill_bail=kill_bail)
     r["summary"].setdefault("jobs", 1)
     from .testscan import selection_disclosure
     r["summary"].update(selection_disclosure(selection_meta))
@@ -300,7 +302,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
                       clock: StageClock | None = None,
                       auto_selection: dict | None = None,
                       select_mode: str = "full",
-                      break_on_baseline_failure: bool = False):
+                      break_on_baseline_failure: bool = False,
+                      kill_bail: bool | None = None):
     """单文件规划（收集→差分→prefilter→budget→分片）。"""
     clock = clock or StageClock()
     src, collected, raw_total, settled = _plan_collect(f)
@@ -323,7 +326,7 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
             f, project_root, budget, timeout_s, glob, binary_kind,
             timeout_factor, mutate_all, baseline, run_id, reuse_coverage,
             identity, worker_channel, select_mode, selection_meta,
-            break_on_baseline_failure)
+            break_on_baseline_failure, kill_bail)
     if baseline is None:
         return _plan_serial_fallback(
             f, project_root, budget, timeout_s, glob, binary_kind,

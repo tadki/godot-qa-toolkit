@@ -213,9 +213,14 @@ def _exec_finalize(path, results, raw_pairs, prior_entries, scope_hashes,
 
 
 def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
-               path, auto_name) -> tuple:
-    """mutant 注入影子槽（临时文件 + os.replace，引擎启动前落盘）+ beacon
-    配置与进程 env 准备。返回 (mutated_src, cfg_path, user_dir)。"""
+               path, auto_name, direct_scripts: list[str] | None = None,
+               baseline_failures: set[str] | None = None) -> tuple:
+    """mutant 注入影子槽（临时文件 + os.replace，引擎启动前落盘）+ beacon/
+    直驱配置与进程 env 准备。返回 (mutated_src, cfg_path, user_dir)。
+
+    direct_scripts 在场（SEE-1606 §SPEC-P3 路线 B）= cold 一次性直驱宿主：
+    cfg 换 directdrive.write_direct_cfg（含脚本清单 + baseline 失败名），
+    宿主 .gd 由调用方经 directdrive.host_script_res 取。"""
     mutated_src = _apply_mutation(original_src, m)
     if target_res == "":
         target_res = _res_path_of(str(path), str(Path(project_root)))
@@ -228,8 +233,14 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
             m, "run_error",
             f"disk injection failed for {target_res}: {e}",
             src=original_src), None, None
-    cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
-                                       auto_name)
+    if direct_scripts is not None:
+        from . import directdrive
+        cfg_path = directdrive.write_direct_cfg(
+            slot.root, target_res, mutant_sha, auto_name, direct_scripts,
+            sorted(baseline_failures or ()))
+    else:
+        cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
+                                           auto_name)
     register_temp(cfg_path)
     from godot_qa_toolkit.mutation import runner as _r
 
@@ -267,6 +278,16 @@ def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
             src=original_src)
     _attach_killed_certificate(verdict, tail, baseline_failures,
                                ownership_fn, project_root)
+    # SEE-1606 §SPEC-P3：早停 marker → 机器可读披露（宿主在首个新增失败
+    # 处中断后续脚本；verdict 判定仍由差集语义完成，marker 只作披露）。
+    from . import killbail
+
+    bail_info = killbail.parse_bail_marker(tail)
+    if bail_info is not None:
+        verdict = {**verdict, "kill_bail_info": bail_info}
+        print(f"mutation: kill-bail scripts="
+              f"{bail_info['scripts_run']}/{bail_info['scripts_total']} "
+              f"new_fail={bail_info['new_failure']}", file=sys.stderr)
     return verdict
 
 

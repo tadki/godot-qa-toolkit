@@ -65,7 +65,8 @@ class FakeSession:
         self.closed += 1
         self.dead = False
 
-    def run_leg(self, leg, target_res, sha, closure, tests_glob):
+    def run_leg(self, leg, target_res, sha, closure, tests_glob,
+                tests_scripts=None, baseline_failures=None):
         item = self.script.pop(0) if self.script else _leg(leg)
         if getattr(item, "fatal", False):
             self.dead = True

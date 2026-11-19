@@ -198,7 +198,8 @@ def canary_due(leg_index: int, every: int | None = None) -> bool:
 
 
 def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
-                     baseline_failures, parity_inject_fn):
+                     baseline_failures, parity_inject_fn,
+                     tests_scripts: list[str] | None = None):
     """会话前置 parity 门（D-W2）：直驱失败集必须逐位等于冷 baseline 失败集。
 
     返回 (degrade_all, fatal_event)；披露（stderr）在本函数内完成，事件串
@@ -213,7 +214,8 @@ def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
         return True, (f"parity leg unavailable: "
                       f"{parity_err or session.dead_reason}")
     pleg = session.run_leg(-1, target_res, parity_sha, list(closure),
-                           tests_glob)
+                           tests_glob, tests_scripts=tests_scripts,
+                           baseline_failures=sorted(baseline_failures or ()))
     if pleg.fatal:
         print(f"mutation worker: PARITY GATE fatal — "
               f"{pleg.fatal_reason}; degrading this file to the "
@@ -265,7 +267,8 @@ def _legs_ctx(*, slot, kind, tests_glob, leg_timeout_s, timings_out,
             "slot": slot, "kind": kind, "tests_glob": tests_glob,
             "leg_timeout_s": leg_timeout_s, "timings_out": timings_out,
             "inject_fn": inject_fn, "cold_runner": cold_runner,
-            "record_fn": record_fn, "classify_fn": classify_fn}
+            "record_fn": record_fn, "classify_fn": classify_fn,
+            "kill_bail": False, "tests_scripts": None}
 
 
 def _legs_harvest_boot(c: dict, s) -> None:
@@ -329,7 +332,8 @@ def _legs_parity(c: dict, target_res: str, closure, parity_inject_fn) -> None:
     try:
         degrade_all, parity_event = _parity_gate_leg(
             c["session"], c["slot"], target_res, closure, c["tests_glob"],
-            c["baseline_failures"], parity_inject_fn)
+            c["baseline_failures"], parity_inject_fn,
+            tests_scripts=(c["tests_scripts"] if c["kill_bail"] else None))
         if parity_event is not None:
             c["fatal_events"].append(parity_event)
         c["degrade_all"] = degrade_all
@@ -375,7 +379,11 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
         return prev_leg_gut_ran
     t_leg = time.monotonic()
     leg = c["session"].run_leg(seq, target_res, mutant_sha, list(closure),
-                               c["tests_glob"])
+                               c["tests_glob"],
+                               tests_scripts=(c["tests_scripts"]
+                                              if c["kill_bail"] else None),
+                               baseline_failures=sorted(
+                                   c["baseline_failures"] or ()))
     leg_elapsed = time.monotonic() - t_leg
     if leg.fatal and leg.state_drift:
         _legs_drift_disqualify(c, seq, leg)
@@ -415,7 +423,9 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                     tests_glob, inject_fn, cold_runner, record_fn,
                     classify_fn, leg_timeout_s,
                     baseline_failures=None, parity_inject_fn=None,
-                    timings_out: dict | None = None):
+                    timings_out: dict | None = None,
+                    kill_bail: bool = False,
+                    tests_scripts: list[str] | None = None):
     """§SPEC-020 W 通道逐腿执行（R-C 硬序 + 门消费 + 会话致命处置）。
 
     会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门 fire / autoload
@@ -435,6 +445,8 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                   inject_fn=inject_fn, cold_runner=cold_runner,
                   record_fn=record_fn, classify_fn=classify_fn)
     c["baseline_failures"] = baseline_failures
+    c["kill_bail"] = kill_bail
+    c["tests_scripts"] = tests_scripts
     _legs_parity(c, target_res, closure, parity_inject_fn)
     _legs_mutants(c, mutants, target_res, closure)
     return c["raw_pairs"], c["fatal_events"]
@@ -463,15 +475,17 @@ def _wb_inject(m, slot, target_rel, original_src, target_res):
 
 def _wb_cold(m, seq, *, path, project_root, original_src, tests_glob,
              baseline_failures, baseline_dirty, slot, auto_name,
-             ownership_fn, target_rel, target_res):
-    """冷通道单点重跑（runner 注入语义）。"""
+             ownership_fn, target_rel, target_res,
+             direct_scripts: list[str] | None = None):
+    """冷通道单点重跑（runner 注入语义）；kill 即退随主腿同面生效。"""
     from . import runner as _runner
 
     return _runner._run_single_mutant(
         m, path, project_root, original_src, "", tests_glob, seq,
         baseline_failures, baseline_dirty, slot=slot,
         auto_name=auto_name, ownership_fn=ownership_fn,
-        target_rel=target_rel, target_res=target_res)
+        target_rel=target_rel, target_res=target_res,
+        direct_scripts=direct_scripts)
 
 
 def _wb_parity_inject(slot, target_rel, original_src, target_res):
@@ -501,7 +515,9 @@ def execute_worker_branch(path, project_root, original_src, mutants,
                           tests_glob, baseline_failures, baseline_dirty,
                           slot, auto_name, target_rel, target_res, kind,
                           reporter, store2, prior_entries, scopes,
-                          ownership_fn, timings_out: dict | None = None):
+                          ownership_fn, timings_out: dict | None = None,
+                          kill_bail: bool = False,
+                          tests_scripts: list[str] | None = None):
     """§SPEC-020 W 通道接线（薄层）：注入/冷跑/记录/分类回调注入编排层。
 
     runner 域符号在函数体内延迟 import（baseline.py 先例）——避免
@@ -520,7 +536,8 @@ def execute_worker_branch(path, project_root, original_src, mutants,
             original_src=original_src, tests_glob=tests_glob,
             baseline_failures=baseline_failures, baseline_dirty=baseline_dirty,
             slot=slot, auto_name=auto_name, ownership_fn=ownership_fn,
-            target_rel=target_rel, target_res=target_res),
+            target_rel=target_rel, target_res=target_res,
+            direct_scripts=(tests_scripts if kill_bail else None)),
         record_fn=_wb_record_factory(reporter, store2, prior_entries, scopes),
         classify_fn=lambda m, leg: classify_worker_leg(
             m, leg, baseline_failures, baseline_dirty, ownership_fn,
@@ -529,4 +546,5 @@ def execute_worker_branch(path, project_root, original_src, mutants,
         baseline_failures=set(baseline_failures or ()),
         parity_inject_fn=lambda: _wb_parity_inject(slot, target_rel,
                                                    original_src, target_res),
-        timings_out=timings_out)
+        timings_out=timings_out,
+        kill_bail=kill_bail, tests_scripts=tests_scripts)

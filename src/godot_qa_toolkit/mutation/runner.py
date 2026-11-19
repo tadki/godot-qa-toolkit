@@ -108,6 +108,7 @@ from .runhelp import (  # noqa: F401
     _tally,
     adaptive_timeout_for,
 )
+from . import killbail
 from .gutrun import (  # noqa: F401,E402
     GUT_SCRIPT_RES_PATH,
     _GUT_RUN_EVIDENCE,
@@ -191,6 +192,7 @@ def run_mutation(file_path: str, project_root: str, budget: int = 50,
     identity: dict | None = None, worker_channel: bool | None = None,
     select_mode: str = "full", selection_meta: dict | None = None,
     break_on_baseline_failure: bool = False,
+    kill_bail: bool | None = None,
 ) -> dict:
     """单文件 mutation 入口（§SPEC-202 单位级测量面挂载点）。
 
@@ -211,7 +213,8 @@ def run_mutation(file_path: str, project_root: str, budget: int = 50,
         select_lines=select_lines, reuse_coverage=reuse_coverage,
         progress=progress, identity=identity, worker_channel=worker_channel,
         select_mode=select_mode, selection_meta=selection_meta,
-        break_on_baseline_failure=break_on_baseline_failure)
+        break_on_baseline_failure=break_on_baseline_failure,
+        kill_bail=kill_bail)
     s = result.get("summary") if isinstance(result, dict) else None
     if isinstance(s, dict):
         # SEE-1589 A：有效选面唯一判别点（串行/卡尺/显式 --tests 同源）。
@@ -415,7 +418,8 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
     reuse_coverage: bool = True, progress: dict | None = None,
     identity: dict | None = None, worker_channel: bool | None = None,
     select_mode: str = "full", selection_meta: dict | None = None,
-    break_on_baseline_failure: bool = False) -> dict:
+    break_on_baseline_failure: bool = False,
+    kill_bail: bool | None = None) -> dict:
     """对单个 .gd 文件做变异测试并出统一 JSON 契约。分解见 _core_setup/
     _core_caliper_and_early/_core_plan + _execute_planned。"""
     _require_baseline_snapshot(mutant_slice, retry_ids, precomputed_baseline)
@@ -455,7 +459,8 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
         progress=progress, identity=identity,
         targeted_only=bool(select_ids or select_lines),
         worker_channel=worker_channel, clock=clock,
-        break_on_baseline_failure=break_on_baseline_failure)
+        break_on_baseline_failure=break_on_baseline_failure,
+        kill_bail=kill_bail)
 def _execute_planned(path, project_root, original_src, backup, mutants,
                      executed_list, reused, results_uncovered, prior_entries,
                      scope_hashes, disclosures, budget, tests_glob,
@@ -464,7 +469,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
                      total_sites, progress=None, identity=None,
                      targeted_only=False, worker_channel=None,
                      clock: StageClock | None = None,
-                     break_on_baseline_failure: bool = False):
+                     break_on_baseline_failure: bool = False,
+                     kill_bail: bool | None = None):
     """执行规划面 → D5 streak 落定 → 统一 JSON 报告（run_mutation 的执行尾）。"""
     clock = clock or StageClock()
     if not executed_list and not reused:
@@ -491,7 +497,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
         store2, prior_entries, scope_hashes, timeout_factor,
         reporter=reporter, identity=identity, targeted_only=targeted_only,
         worker_channel=worker_channel, clock=clock,
-        break_on_baseline_failure=break_on_baseline_failure)
+        break_on_baseline_failure=break_on_baseline_failure,
+        kill_bail=kill_bail)
     if isinstance(outcome, dict):
         return outcome  # baseline 中止契约（timeout / launch failure）
     raw_pairs, baseline_reused, baseline_elapsed, slot_info = outcome
@@ -510,19 +517,27 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        baseline_failures: set[str], baseline_dirty: bool,
                        slot=None, auto_name: str = "",
                        ownership_fn=None, target_rel: str = "",
-                       target_res: str = "") -> dict:
+                       target_res: str = "",
+                       direct_scripts: list[str] | None = None) -> dict:
     """磁盘影子注入 → 跑 GUT → 分类；真实仓目标文件全程零写入（SEE-1550）。
 
     - 注入：每 mutant 一次 replace，无恢复步，写失败上抛转 run_error。
-    - 四级 beacon：任何一级失败都不得产出 killed/survived。"""
+    - 四级 beacon：任何一级失败都不得产出 killed/survived。
+    - direct_scripts 在场（§SPEC-P3 路线 B）= cold 一次性直驱宿主：进程数
+      不变，宿主内按脚本顺序执行并新增失败早停。"""
     global _ACTIVE_ENV, _ACTIVE_SCRIPT
     injected, cfg_path, user_dir = _sm_inject(
         m, slot, target_rel, target_res, original_src, project_root, path,
-        auto_name)
+        auto_name, direct_scripts=direct_scripts,
+        baseline_failures=baseline_failures)
     if cfg_path is None:
         return injected  # 注入失败 run_error 契约
     _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
-    _ACTIVE_SCRIPT = beacon.beacon_script_res(slot.root)
+    if direct_scripts is not None:
+        from . import directdrive
+        _ACTIVE_SCRIPT = directdrive.host_script_res(slot.root)
+    else:
+        _ACTIVE_SCRIPT = beacon.beacon_script_res(slot.root)
     try:
         try:
             rc, tail = _run_gut_on_project(
@@ -558,7 +573,8 @@ def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
 def _run_cold_legs(path, project_root, original_src, backup, mutants,
                    tests_glob, baseline_failures, baseline_dirty, slot,
                    auto_name, target_rel, target_res, ownership_fn, reporter,
-                   store2, prior_entries, scopes):
+                   store2, prior_entries, scopes, kill_bail=False,
+                   direct_scripts=None):
     """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
     raw_pairs: list[tuple] = []
     for seq, m in enumerate(mutants):
@@ -567,7 +583,8 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
             m, path, project_root, original_src, backup, tests_glob, seq,
             baseline_failures, baseline_dirty, slot=slot,
             auto_name=auto_name, ownership_fn=ownership_fn,
-            target_rel=target_rel, target_res=target_res)
+            target_rel=target_rel, target_res=target_res,
+            direct_scripts=direct_scripts)
         raw_pairs.append((m, verdict))
         # SEE-1525 进度面唯一计数点：人眼进度行 + 机器可读分片。
         if reporter is not None:
@@ -618,7 +635,7 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                baseline_failures, baseline_dirty, slot, auto_name, target_rel,
                target_res, kind, idpack, exec_scheme_resolved, worker_channel,
                reporter, store2, prior_entries, scopes, clock, slot_info,
-               t_slot) -> list:
+               t_slot, kill_bail=False, direct_scripts=None) -> list:
     """beacon 播种 → worker/冷腿执行 → 槽归还断言与 slot_sync 计时。"""
     ownership_holder: list = []
 
@@ -633,6 +650,11 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
     timings_out: dict = {}
     try:
         beacon.seed_beacon_script(slot.root)
+        if direct_scripts is not None and not use_worker:
+            # §SPEC-P3 路线 B：cold 直驱宿主随 run 播种（per-PID，与 beacon
+            # 同款隔离）。
+            from . import directdrive
+            directdrive.seed_direct_host(slot.root)
         if use_worker:
             from .worker_channel import execute_worker_branch
             with clock.stage("per_mutant"):
@@ -641,7 +663,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     baseline_failures, baseline_dirty, slot, auto_name,
                     target_rel, target_res, kind, reporter, store2,
                     prior_entries, scopes, _ownership,
-                    timings_out=timings_out)
+                    timings_out=timings_out, kill_bail=kill_bail,
+                    tests_scripts=direct_scripts)
             clock.add("worker_boot",
                       timings_out.get("worker_boot_s", 0.0))
             if fatal_events:
@@ -654,7 +677,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     path, project_root, original_src, backup, mutants,
                     tests_glob, baseline_failures, baseline_dirty, slot,
                     auto_name, target_rel, target_res, _ownership, reporter,
-                    store2, prior_entries, scopes)
+                    store2, prior_entries, scopes, kill_bail=kill_bail,
+                    direct_scripts=direct_scripts)
     finally:
         release_problems = shadowpool.release_slot(slot)
         # §SPEC-202 slot_sync = 槽获取→归还断言全程；槽位固定成本 = 其与
@@ -673,6 +697,7 @@ def _run_mutant_loop(
     identity: dict | None = None, targeted_only: bool = False,
     worker_channel=None, clock: StageClock | None = None,
     break_on_baseline_failure: bool = False,
+    kill_bail: bool | None = None,
 ) -> tuple[list, bool, float, dict]:
     """逐 mutant 跑 GUT 并分类判定；返回 (raw_pairs, baseline_reused,
     baseline_elapsed, slot_info)。verdict 记录不在此处进 results——D5 streak
@@ -685,6 +710,11 @@ def _run_mutant_loop(
                                             timeout_factor,
                                             break_on_baseline_failure)
         clock = clock or StageClock()
+        # SEE-1606 §SPEC-P3：kill 即退有效开关在此解析（env/flag 单点），
+        # 直驱脚本清单按面判定一次并贯穿 cold/worker 两条腿路径。
+        bail_effective = killbail.resolve_kill_bail(kill_bail)
+        bail_scripts, bail_face = _cold_direct_decision(
+            bail_effective, str(project_root), tests_glob)
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,
@@ -693,7 +723,8 @@ def _run_mutant_loop(
             path, project_root, original_src, backup, mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,
             target_res, detect_binary_kind(), idpack, scheme, worker_channel,
-            reporter, store2, prior_entries, scopes, clock, slot_info, t_slot)
+            reporter, store2, prior_entries, scopes, clock, slot_info, t_slot,
+            bail_effective, bail_scripts)
         slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
         slot_info["slot_mode"] = slot.mode
         slot_info["freshness"] = list(slot.freshness)
@@ -704,10 +735,32 @@ def _run_mutant_loop(
         slot_info["baseline_failure_names"] = sorted(baseline_failures)
         slot_info["break_on_baseline_failure"] = bool(
             break_on_baseline_failure)
+        slot_info["kill_bail"] = bail_effective
+        slot_info["kill_bail_face"] = bail_face
+        slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
+        slot_info["kill_bail_scripts"] = (
+            len(bail_scripts) if bail_scripts is not None else None)
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
             slot_info["suspected_orphan"] = _orphan_disclosure(
                 project_root, target_res)
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
+
+def _cold_direct_decision(kb_effective: bool, project_root: str,
+                          tests_glob: str | None
+                          ) -> tuple[list[str] | None, str]:
+    """cold 直驱宿主启用判定（§SPEC-P3 路线 B 单点）。
+
+    返回 (脚本清单|None, face 种类)。清单非 None = 启用直驱宿主；None =
+    既有 beacon+gut_cmdln 路径（face/gut 缺失具名落在 kill_bail_face）。"""
+    from .worker_channel import gut_direct_drive_available
+
+    scripts, face_kind = killbail.face_scripts(project_root, tests_glob)
+    if not kb_effective or scripts is None:
+        return None, face_kind
+    if not gut_direct_drive_available(project_root):
+        return None, "gut_addon_missing"
+    return scripts, face_kind
+
 
 def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  executed_list, tests_glob, timeout_s,
@@ -719,7 +772,8 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
                                  targeted_only: bool = False,
                                  worker_channel=None,
                                  clock: StageClock | None = None,
-                                 break_on_baseline_failure: bool = False):
+                                 break_on_baseline_failure: bool = False,
+                                 kill_bail: bool | None = None):
     """baseline 中止形态转统一 JSON（timeout / godot 启动失败）；否则返回 raw。"""
     try:
         return _run_mutant_loop(
@@ -730,6 +784,7 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             targeted_only=targeted_only, worker_channel=worker_channel,
             clock=clock,
             break_on_baseline_failure=break_on_baseline_failure,
+            kill_bail=kill_bail,
         )
     except subprocess.TimeoutExpired:
         # SEE-1356 L1 (§SPEC-L1-03)：预算超时附机器可执行的补救指令。

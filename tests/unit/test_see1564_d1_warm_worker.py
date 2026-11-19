@@ -69,7 +69,8 @@ def _install_worker_fakes(monkeypatch):
     def shim(path, project_root, original_src, mutants, tests_glob,
              baseline_failures, baseline_dirty, slot, auto_name,
              target_rel, target_res, kind, reporter, store2,
-             prior_entries, scopes, ownership_fn, timings_out=None):
+             prior_entries, scopes, ownership_fn, timings_out=None,
+             kill_bail=False, tests_scripts=None):
         raw = runner_mod._run_cold_legs(
             path, project_root, original_src, "", mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,

@@ -130,6 +130,9 @@ class TestDefaultParallelRouting:
             "selection_mode",
             # SEE-1589 B：三项机制具名 reason + 阶段对账（只加不改）
             "worker_channel", "farm", "stage_reconciliation",
+            # SEE-1606 P2：基线失败登记披露（只加不改）
+            "baseline_dirty", "baseline_failures", "baseline_failure_names",
+            "break_on_baseline_failure",
         }
         collected = len(executor._collect_mutations(GD_PARALLEL_TARGET, target))
         assert summary["file"].endswith("calc.gd")

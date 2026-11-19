@@ -572,7 +572,9 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         mutate_all=args.mutate_all,
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
-        select_mode=getattr(args, "select_mode", "line"))
+        select_mode=getattr(args, "select_mode", "line"),
+        break_on_baseline_failure=getattr(
+            args, "break_on_baseline_failure", False))
     if len(files) == 1:
         # SEE-1589 A-M3：单文件对外恒为 flat CLI 契约（--jobs 1 不得套用
         # 多文件 results[] 信封）；信封仅限多文件编排层。
@@ -623,6 +625,8 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         # §SPEC-012：串行/卡尺与编排路径同源遵守 --select（SEE-1587 默认
         # line），不可静默退化全脸（HIGH-1 修复点）。
         select_mode=getattr(args, "select_mode", "line"),
+        break_on_baseline_failure=getattr(
+            args, "break_on_baseline_failure", False),
     )
     result["summary"].setdefault("jobs", 1)
     return result
@@ -1347,7 +1351,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "discover the nearest project.godot walking up from "
                         "the target (or CWD)")
     m.add_argument("--budget", type=int, default=50, help="max mutants (default 50)")
-    m.add_argument("--timeout", type=int, default=60, help="GUT timeout seconds (default 60)")
+    # SEE-1606 P1（Owner 2026-11-19 已决）：默认值 = BUDGET_CAP_S。旧 60s
+    # 短于 autoload 项目的文件级并集面（KOL 159 脚本实测 ~77s），必然触发
+    # baseline 快照超时→串行降级；600s 给全量面 4-8 倍余量。
+    m.add_argument("--timeout", type=int, default=600,
+                   help="GUT timeout seconds (default 600)")
     m.add_argument("--dry-run", action="store_true",
                    help="list mutation sites without running GUT (SPEC-009)")
     m.add_argument("--tests", default=None,
@@ -1394,6 +1402,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "diff is ON by default when a v2 resume manifest exists "
                         "(unchanged killed sites are reused, survived/timeout "
                         "always re-run); this flag forces full execution")
+    # SEE-1606 P2（对齐 Stryker break-on-initial-test-failure，默认 false）。
+    m.add_argument("--break-on-baseline-failure", action="store_true",
+                   help="abort when the baseline run has failing tests, "
+                        "instead of continuing (default: continue; failing "
+                        "baseline tests are excluded from kill determination "
+                        "and disclosed in summary.baseline_failures/names)")
     m.add_argument("--mutation", default=None, metavar="ID",
                    help="single-site rerun: '<file>#<scope_id>#<n>' (SEE-1420 "
                         "P3 caliper) — forces fresh execution of that one "

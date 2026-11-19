@@ -72,6 +72,32 @@ def _run_error_result(file: str, error: str, failure_reason: str,
     }
 
 
+def _break_on_baseline_result(file: str, names: list[str]) -> dict:
+    """SEE-1606 P2：`--break-on-baseline-failure` 的基线脏中止契约。
+
+    与 baseline 超时/启动失败同档（run_error 中止形态），但带具名基线
+    失败清单供机器消费；此路径零 mutant GUT。
+    """
+    failures = sorted(names)
+    return {
+        "tool": "mutation",
+        "ok": False,
+        "summary": {
+            "file": file,
+            "run_error": True,
+            "error": (f"baseline has {len(failures)} failing test(s) and "
+                      "--break-on-baseline-failure is set"),
+            "break_on_baseline_failure": True,
+            "baseline_dirty": True,
+            "baseline_failures": len(failures),
+            "baseline_failure_names": failures,
+        },
+        "failures": [{
+            "reason": ("baseline failures present with "
+                       f"--break-on-baseline-failure: {failures[:3]}")}],
+    }
+
+
 def _dry_run_result(file: str, mutants: list["Mutant"], budget: int,
                     scoped: bool | None = None,
                     total_sites: int | None = None,
@@ -298,6 +324,11 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
         summary["farm"] = info["farm"]
     if info.get("worker_fatal_events"):
         summary["worker_fatal_events"] = info["worker_fatal_events"]
+    # SEE-1606 P2：基线失败登记披露（默认继续跑时的机器可读面）。
+    for key in ("baseline_dirty", "baseline_failures",
+                "baseline_failure_names", "break_on_baseline_failure"):
+        if key in info:
+            summary[key] = info[key]
     _emit_killed_certificates(summary, results)
     _emit_suspected_orphans(summary, results, info)
 

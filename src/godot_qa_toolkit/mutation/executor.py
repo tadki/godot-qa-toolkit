@@ -82,7 +82,8 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                       tests_glob, binary_kind, timing_store,
                       mutation_warning, timeout_factor, reuse_coverage,
                       identity, worker_channel=None,
-                      select_mode: str = "full") -> dict:
+                      select_mode: str = "full",
+                      break_on_baseline_failure: bool = False) -> dict:
     """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。"""
     r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
                      dry_run=dry_run, tests_glob=tests_glob,
@@ -90,7 +91,8 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
                      reuse_coverage=reuse_coverage, identity=identity,
-                     worker_channel=worker_channel, select_mode=select_mode)
+                     worker_channel=worker_channel, select_mode=select_mode,
+                     break_on_baseline_failure=break_on_baseline_failure)
     r["summary"].setdefault("jobs", 1)
     return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
 
@@ -200,7 +202,7 @@ def run_mutation_files(
     files: list[str],
     project_root: str,
     budget: int = 50,
-    timeout_s: int = 60,
+    timeout_s: int = 600,
     dry_run: bool = False,
     tests_glob: str | None = None,
     jobs: int | None = None,
@@ -212,6 +214,7 @@ def run_mutation_files(
     reuse_coverage: bool = True,
     worker_channel: bool | None = None,
     select_mode: str = "full",
+    break_on_baseline_failure: bool = False,
 ) -> dict:
     """多文件 / 多 mutant 编排入口（§SPEC-202 运行级测量面挂载点）。
 
@@ -228,7 +231,8 @@ def run_mutation_files(
             mutation_warning=mutation_warning,
             timeout_factor=timeout_factor, mutate_all=mutate_all,
             reuse_coverage=reuse_coverage, worker_channel=worker_channel,
-            select_mode=select_mode)
+            select_mode=select_mode,
+            break_on_baseline_failure=break_on_baseline_failure)
     clock = StageClock()
     knob_state: dict = {}
     disk_before = qa_disk_bytes(project_root)
@@ -240,7 +244,8 @@ def run_mutation_files(
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, reuse_coverage=reuse_coverage,
         worker_channel=worker_channel, clock=clock, knob_state=knob_state,
-        select_mode=select_mode)
+        select_mode=select_mode,
+        break_on_baseline_failure=break_on_baseline_failure)
     return _finalize_run_envelope(envelope, files, project_root, clock,
                                   knob_state, t0, disk_before)
 
@@ -347,7 +352,9 @@ def _gate_serial_dispatch(files, project_root, *, budget, timeout_s,
                           tests_glob, jobs, total, binary_kind, timing_store,
                           mutation_warning, timeout_factor, mutate_all,
                           worker_channel, select_mode,
-                          selection_meta) -> dict | None:
+                          selection_meta,
+                          break_on_baseline_failure: bool = False
+                          ) -> dict | None:
     """E6-5（§SPEC-502）：成本感知仲裁，仍锚定在 prewarm/baseline 之前
     （退串行判定前置纪律不回退）。total > jobs 才需仲裁；无先验/先验
     不可用 = 并行缺省（KOL 量级不误降级）。"""
@@ -367,7 +374,8 @@ def _gate_serial_dispatch(files, project_root, *, budget, timeout_s,
                          select_mode=select_mode,
                          # 与门内扫描同源：避免二次扫描并把 zero_ref 语义
                          # 在改用例路径上丢失（SEE-1589 A-L2 实测）。
-                         selection_meta=selection_meta)
+                         selection_meta=selection_meta,
+                         break_on_baseline_failure=break_on_baseline_failure)
         r["summary"].setdefault("jobs", 1)
         from .testscan import selection_disclosure
         r["summary"].update(selection_disclosure(selection_meta))
@@ -384,7 +392,9 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
                              timeout_factor: float | None,
                              mutate_all: bool,
                              worker_channel: bool | None,
-                             select_mode: str = "full") -> tuple[
+                             select_mode: str = "full",
+                             break_on_baseline_failure: bool = False
+                             ) -> tuple[
         dict | None, str | None, dict]:
     """单文件门（判定先于任何 GUT 调用的前置纪律在调用方保持）。
 
@@ -410,7 +420,8 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
         binary_kind=binary_kind, timing_store=timing_store,
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, worker_channel=worker_channel,
-        select_mode=select_mode, selection_meta=selection_meta)
+        select_mode=select_mode, selection_meta=selection_meta,
+        break_on_baseline_failure=break_on_baseline_failure)
     if ret is not None:
         return ret, tests_glob, selection_meta
     return None, tests_glob, selection_meta
@@ -418,7 +429,8 @@ def _single_file_serial_gate(files: list[str], project_root: str, *,
 def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                     tests_glob, binary_kind, timing_store, mutation_warning,
                     timeout_factor, reuse_coverage, identity,
-                    worker_channel, select_mode, jobs) -> dict | None:
+                    worker_channel, select_mode, jobs,
+                    break_on_baseline_failure: bool = False) -> dict | None:
     """显式串行（--jobs 1）与 dry_run 快路径（判定先于 prewarm/baseline）。"""
     if len(files) == 1 and jobs == 1:
         return _serial_fast_path(files[0], project_root, budget, timeout_s,
@@ -426,7 +438,9 @@ def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                                  timing_store, mutation_warning,
                                  timeout_factor, reuse_coverage, identity,
                                  worker_channel=worker_channel,
-                                 select_mode=select_mode)
+                                 select_mode=select_mode,
+                                 break_on_baseline_failure=
+                                 break_on_baseline_failure)
     if dry_run:
         return _dry_run_list(files, project_root, budget, timeout_s,
                              tests_glob, binary_kind, mutation_warning,
@@ -438,7 +452,8 @@ def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
 def _impl_serial_gate(files, project_root, *, budget, timeout_s, tests_glob,
                       jobs, dry_run, binary_kind, timing_store,
                       mutation_warning, timeout_factor, mutate_all,
-                      worker_channel, select_mode, clock) -> tuple:
+                      worker_channel, select_mode, clock,
+                      break_on_baseline_failure: bool = False) -> tuple:
     """SEE-1413 退串行判定：必须在任何 GUT 调用（prewarm / 共享 baseline
     预跑）之前——变异点太少时走并发路径反而比纯串行慢。判定对缺省与
     显式 jobs 一体生效（§SPEC-002：总数 ≤ jobs 即退）；--jobs 1 在快路径
@@ -452,7 +467,8 @@ def _impl_serial_gate(files, project_root, *, budget, timeout_s, tests_glob,
                 binary_kind=binary_kind,
                 timing_store=timing_store, mutation_warning=mutation_warning,
                 timeout_factor=timeout_factor, mutate_all=mutate_all,
-                worker_channel=worker_channel, select_mode=select_mode)
+                worker_channel=worker_channel, select_mode=select_mode,
+                break_on_baseline_failure=break_on_baseline_failure)
         if ret is not None:
             return ret, tests_glob, selection_meta
     return None, tests_glob, selection_meta
@@ -462,7 +478,8 @@ def _impl_parallel_envelope(files, project_root, budget, timeout_s,
                             mutation_warning, timeout_factor, mutate_all,
                             reuse_coverage, identity, worker_channel, clock,
                             knob_state, selection_meta, select_mode,
-                            prewarm_info, pool_factory) -> dict:
+                            prewarm_info, pool_factory,
+                            break_on_baseline_failure: bool = False) -> dict:
     """并行分片执行与多文件信封组装（P1 差分父层单点注入 + settled 留痕
     + SEE-1416 attention 投影）。"""
     chunks, settled, v2ctx = _build_chunks(files, project_root, budget,
@@ -477,7 +494,9 @@ def _impl_parallel_envelope(files, project_root, budget, timeout_s,
                                            clock=clock,
                                            knob_state=knob_state,
                                            selection_meta=selection_meta,
-                                           select_mode=select_mode)
+                                           select_mode=select_mode,
+                                           break_on_baseline_failure=
+                                           break_on_baseline_failure)
     chunk_results = []
     if chunks:
         # pool_factory = 模块变量 `_worker_pool` seam（可被替身注入）
@@ -515,7 +534,7 @@ def _run_mutation_files_impl(
     files: list[str],
     project_root: str,
     budget: int = 50,
-    timeout_s: int = 60,
+    timeout_s: int = 600,
     dry_run: bool = False,
     tests_glob: str | None = None,
     jobs: int | None = None,
@@ -529,6 +548,7 @@ def _run_mutation_files_impl(
     clock: StageClock | None = None,
     knob_state: dict | None = None,
     select_mode: str = "full",
+    break_on_baseline_failure: bool = False,
 ) -> dict:
     """多文件 / 多 mutant 编排：统一 JSON 契约摘要输出。
 
@@ -540,7 +560,8 @@ def _run_mutation_files_impl(
     fast = _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                            tests_glob, binary_kind, timing_store,
                            mutation_warning, timeout_factor, reuse_coverage,
-                           identity, worker_channel, select_mode, jobs)
+                           identity, worker_channel, select_mode, jobs,
+                           break_on_baseline_failure)
     if fast is not None:
         return fast
     jobs = default_jobs(jobs)
@@ -550,7 +571,8 @@ def _run_mutation_files_impl(
         binary_kind=binary_kind, timing_store=timing_store,
         mutation_warning=mutation_warning, timeout_factor=timeout_factor,
         mutate_all=mutate_all, worker_channel=worker_channel,
-        select_mode=select_mode, clock=clock)
+        select_mode=select_mode, clock=clock,
+        break_on_baseline_failure=break_on_baseline_failure)
     if ret is not None:
         return ret
     with clock.stage("prewarm"):
@@ -560,7 +582,8 @@ def _run_mutation_files_impl(
         binary_kind, mutation_warning, timeout_factor, mutate_all,
         reuse_coverage, identity, worker_channel, clock, knob_state,
         selection_meta, select_mode, prewarm_info,
-        pool_factory=lambda max_workers: _worker_pool(max_workers=max_workers))
+        pool_factory=lambda max_workers: _worker_pool(max_workers=max_workers),
+        break_on_baseline_failure=break_on_baseline_failure)
 
 def _settled_error(file: str, err) -> dict:
     """收集异常（如不可解析 GDScript）的定终态 error 契约——
@@ -616,6 +639,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
                   knob_state: dict | None = None,
                   selection_meta: dict | None = None,
                   select_mode: str = "full",
+                  break_on_baseline_failure: bool = False,
                   ) -> tuple[list[dict], list[dict], dict]:
     """父层：per-file 收集 → 差分规划 → 分片；同样 glob 共享一份 baseline。
 
@@ -645,12 +669,17 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
             binary_kind, mutation_warning, timeout_factor, mutate_all,
             reuse_coverage, baselines, baseline_failures, run_id,
             identity=identity, worker_channel=worker_channel, clock=clock,
-            auto_selection=selection_meta, select_mode=select_mode)
+            auto_selection=selection_meta, select_mode=select_mode,
+            break_on_baseline_failure=break_on_baseline_failure)
         chunks.extend(file_chunks)
         if file_ctx is not None:
             v2ctx[f] = file_ctx
         if file_settled is not None:
             settled.append(file_settled)
+    # SEE-1606 P2：开关随每个分片穿透到 worker（单点盖章，避免各分片构造
+    # 函数各写一遍）。
+    for chunk in chunks:
+        chunk["break_on_baseline_failure"] = break_on_baseline_failure
     return chunks, settled, v2ctx
 
 def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:

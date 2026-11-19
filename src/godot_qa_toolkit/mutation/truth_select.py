@@ -599,10 +599,15 @@ def _resolve_entry_doc(root, path, target_file, base, strict) -> tuple:
 def resolve_selection(project_root: str | Path, target_file: str,
                       map_path_override: str | None = None,
                       strict: bool = True,
-                      timeout_s: int | None = None) -> dict:
+                      timeout_s: int | None = None,
+                      renew: bool = True) -> dict:
     """目标 → 文件级选面决策（严格模式不可用即 fail-loud）。mode=auto：
     映射过期自动增量/重建一次后重判（台账披露）；strict=False 供证书
-    归属等只读旁路（返回 full_face 描述，不抛）。"""
+    归属等只读旁路（返回 full_face 描述，不抛）。
+
+    SEE-1604 D5：显式映射默认路径（`--attribution-map` / ENV_MAP）只读
+    透传——过期绝不续新/重建/改写（fail-loud 具名）；auto 管理的默认映射
+    才走续新。renew=False（dry-run）抑制全部续新（零 GUT）。"""
     root = str(Path(project_root).resolve())
     base = {"source": "full_face", "reason": None, "tests": [],
             "tests_glob": None, "zero_ref": False, "mapping": None,
@@ -611,6 +616,7 @@ def resolve_selection(project_root: str | Path, target_file: str,
     if path is None:
         base["reason"] = "no_attribution_map"
         return _finish(base, strict)
+    explicit = bool(map_path_override) or bool(os.environ.get(ENV_MAP))
     loaded, done = _resolve_entry_doc(root, path, target_file, base, strict)
     if done is not None:
         return done
@@ -618,7 +624,7 @@ def resolve_selection(project_root: str | Path, target_file: str,
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path
-    if not evaluation["ok"] and auto:
+    if not evaluation["ok"] and auto and renew and not explicit:
         if _resolve_renew(root, path, doc, rel, timeout_s):
             try:
                 doc = load_map(path)
@@ -629,8 +635,12 @@ def resolve_selection(project_root: str | Path, target_file: str,
                 return _finish(base, strict)
     base["mapping"] = evaluation["mapping"]
     if not evaluation["ok"]:
-        base["reason"] = ("auto_update_still_stale:" if auto else "") + \
-            evaluation["reason"]
+        if explicit:
+            # 显式产物过期：只读透传的契约要求 fail-loud，绝不原地重建
+            base["reason"] = f"explicit_map_stale:{evaluation['reason']}"
+        else:
+            base["reason"] = ("auto_update_still_stale:" if auto else "") + \
+                evaluation["reason"]
         return _finish(base, strict)
     if evaluation["ambiguous"]:
         # 同名跨脚本 → 身份不可判定：不猜（严格模式 fail-loud）

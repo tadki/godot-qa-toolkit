@@ -59,6 +59,19 @@ class TestS62LazyAcquireBaseline:
         with pytest.raises(orch.MeasurementError, match="fail-loud"):
             orch._acquire_lazy_baseline(tmp_path, [], 60)
 
+    def test_flow_evidence_without_summary_fails_loud(self, monkeypatch,
+                                                      tmp_path):
+        """6c 补形：输出含 GUT 运行流证据（`* test_x` 行，不被启动失败
+        判定捕获）但无 Run Summary / [Failed] / [Passed] 任一标记 →
+        无运行流 fail-loud，不得当空基线静默继续。"""
+        from godot_qa_toolkit.measurement import orchestrator as orch
+        noise = ("Godot Engine v4.4.1\n"
+                 "res://tests/unit/test_game.gd\n"
+                 "- test_ok\n")
+        monkeypatch.setattr(orch, "_run_one_gut", _fake_gut(0, noise))
+        with pytest.raises(orch.MeasurementError, match="no run stream"):
+            orch._acquire_lazy_baseline(tmp_path, [], 60)
+
     def test_meta_shape_contract(self, monkeypatch, tmp_path):
         """6d：meta 形状 = {method, lazy, face, pairs, count, sha256,
         wall_s}；pairs 为 (script, test) 字符串对；count == len(pairs)。"""
@@ -104,6 +117,34 @@ class TestS62LazyAcquireBaseline:
             == ["-gdir=res://tests/a,res://tests/b"]
         assert _gutconfig_face_args({"gut_face": {"dirs": []}}) == []
         assert _gutconfig_face_args({}) == []
+
+
+class TestS63LazyMergeEchoAbsorption:
+    """§SPEC-064a：懒合并重算 new_pairs 时，归因实例被基线吸收的
+    Run Summary 裸名回显随同覆盖（基线仅含归因对形态仍成立）。"""
+
+    def test_bare_summary_echo_absorbed_after_lazy_merge(self,
+                                                         monkeypatch):
+        from godot_qa_toolkit.measurement import arms as arms_mod
+        monkeypatch.setattr(
+            "godot_qa_toolkit.measurement.orchestrator."
+            "_acquire_lazy_baseline",
+            lambda root, gut_args, t: (
+                {("res://t/g.gd", "test_x")},
+                {"method": "uninstrumented_run", "lazy": True,
+                 "face": "res://tests/", "pairs": [["res://t/g.gd",
+                                                    "test_x"]],
+                 "count": 1, "sha256": "0" * 64, "wall_s": 0.0}))
+        _eff, meta, new_pairs = arms_mod._lazy_baseline_merge(
+            "gut_full", Path("/proj"), {"gut_face": {"dirs": []}}, 60,
+            # 臂失败含归因对 + 同失败裸名回显两种披露形态
+            {("res://t/g.gd", "test_x"), ("", "test_x")},
+            set(), set(),
+            # 门控初算的未吸收对（懒合并的触发前提：new_pairs 非空）
+            {("res://t/g.gd", "test_x"), ("", "test_x")},
+            None, None)
+        assert new_pairs == set(), "裸名回显随归因实例吸收（不判新增）"
+        assert meta and meta["lazy"] is True
 
 
 class TestS62IncrementCarry:

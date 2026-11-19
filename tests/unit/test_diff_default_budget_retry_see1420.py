@@ -55,14 +55,6 @@ def _add_gut(proj):
     (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
 
 
-def _materialize_selection(proj, names):
-    sel_dir = proj / ".gqt-attr-select" / "testsel"
-    sel_dir.mkdir(parents=True, exist_ok=True)
-    for n in names:
-        (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
-    return "res://.gqt-attr-select/testsel/"
-
-
 TARGET_SRC = ("func add(a, b):\n"
               "\treturn a + b\n")
 

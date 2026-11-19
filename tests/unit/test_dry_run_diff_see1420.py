@@ -71,23 +71,24 @@ class TestDryRunDiffEstimate:
 
     def test_zero_change_second_run_estimates_zero_retry(self, tmp_path,
                                                          monkeypatch):
+        _pin_cold(monkeypatch)
         proj, target = _write_project(tmp_path)
 
         def kill_all(root, timeout_s=60, tests_glob=None):
             return (1, KILL_TAIL)
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", kill_all)
+        glob = _materialize_selection(proj, ["test_a.gd"])
         mrunner.run_mutation(str(target), str(proj), budget=10,
-                             tests_glob=_materialize_selection(proj, ["test_a.gd"]))
-        from godot_qa_toolkit.mutation import resume2 as r2mod
-        st = r2mod.ResumeStoreV2(str(proj), str(target),
-                                 _materialize_selection(proj, ["test_a.gd"]))
-        ents = st.load_entries()
-        import sys as _s
-        print("DBG entries:", {k: v.get("verdict") for k, v in ents.items()},
-              "manifest:", st.load_manifest() is not None, file=_s.stderr)
+                             tests_glob=glob)
+        # 二轮同 stub：suspect 条目复用（SKIP_VERDICTS）→ resumed == 3
+        r2 = mrunner.run_mutation(str(target), str(proj), budget=10,
+                                  tests_glob=glob)
+        assert r2["summary"].get("resumed") == 6, \
+            f"resumed={r2['summary'].get('resumed')}"
+        # 三轮 dry-run：全复用 → retry_estimate 0
         r = mrunner.run_mutation(str(target), str(proj), budget=10,
-                                 tests_glob=_materialize_selection(proj, ["test_a.gd"]), dry_run=True)
+                                 tests_glob=glob, dry_run=True)
         s = r["summary"]
         assert s["diff_available"] is True
         assert s["retry_estimate"] == 0

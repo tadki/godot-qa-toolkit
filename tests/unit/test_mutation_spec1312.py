@@ -160,7 +160,6 @@ class TestCostControl:
         proj.mkdir()
         (proj / "addons" / "gut").mkdir(parents=True)
         (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
-        (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
         target = proj / "calc.gd"
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
@@ -221,6 +220,7 @@ class TestValidityClassification:
         (proj / "addons" / "gut").mkdir(parents=True)
         (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
         target = proj / "calc.gd"
+        (proj / "addons" / "gut" / "gut.gd").write_text("extends Node\n")
         target.write_text("func add(a, b):\n\treturn a + b\n")
         return proj, target
 
@@ -231,19 +231,15 @@ class TestValidityClassification:
             (sel_dir / n).write_text(f'extends "res://tests/{n}"\n', encoding="utf-8")
         return "res://.gqt-attr-select/testsel/"
 
-
-def _pin_cold(monkeypatch):
-    from godot_qa_toolkit.mutation.identity import COLD_SCHEME
-    from godot_qa_toolkit.mutation import worker_channel as wc
-    monkeypatch.setattr(wc, "resolve_exec_scheme",
-                        lambda *a, **k: (COLD_SCHEME, None))
-    monkeypatch.setattr("godot_qa_toolkit.mutation.runner.resolve_exec_scheme",
-                        lambda *a, **k: (COLD_SCHEME, None))
-
-
-@pytest.fixture(autouse=True)
-def _pin_cold_auto(monkeypatch):
-    _pin_cold(monkeypatch)
+    @pytest.fixture(autouse=True)
+    def _pin_cold(self, monkeypatch):
+        from godot_qa_toolkit.mutation.identity import COLD_SCHEME
+        from godot_qa_toolkit.mutation import worker_channel as wc
+        monkeypatch.setattr(wc, "resolve_exec_scheme",
+                            lambda *a, **k: (COLD_SCHEME, None))
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner.resolve_exec_scheme",
+            lambda *a, **k: (COLD_SCHEME, None))
 
     def test_suspect_when_mutant_run_matches_dirty_baseline(self, tmp_path, monkeypatch):
         # baseline 已红 ∧ mutant run 失败集合 == baseline（差集为空）→ suspect
@@ -259,7 +255,10 @@ def _pin_cold_auto(monkeypatch):
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake_run
         )
-        result = run_mutation(str(target), str(proj), budget=2)
+        # §SPEC-P2-R1：可跳过面（物化选择目录）上，无 marker 的脏流仍落
+        # suspect（物理跳过仅在有 marker 时抑制 suspect）。
+        glob = self._materialize_selection(proj, ["test_a.gd"])
+        result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         s = result["summary"]
         assert s.get("suspect", 0) == s["mutants"], s
         assert s["killed"] == 0

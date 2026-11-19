@@ -521,6 +521,13 @@ def _selection_error_payload(args: argparse.Namespace, e) -> int:
                   "failures": [{"reason": reason}]})
 
 
+def _kill_bail_flag(args: argparse.Namespace) -> bool | None:
+    """SEE-1606 P3（§SPEC-P3-T1 零行为拆分）：无 `--no-kill-bail` 时交由
+    env `GQT_MUTATION_KILL_BAIL` 决定（None）；显式关断为 False（env 逃生
+    门仍可叠加）。取值语义与拆分前逐位一致。"""
+    return None if not getattr(args, "no_kill_bail", False) else False
+
+
 def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
     """mutation 子命令派发（串行 / 并发编排两径，<800/复杂度纪律拆分）。"""
     from .timing import TimingStore
@@ -575,7 +582,7 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         select_mode=getattr(args, "select_mode", "line"),
         break_on_baseline_failure=getattr(
             args, "break_on_baseline_failure", False),
-        kill_bail=None if not getattr(args, "no_kill_bail", False) else False)
+        kill_bail=_kill_bail_flag(args))
     if len(files) == 1:
         # SEE-1589 A-M3：单文件对外恒为 flat CLI 契约（--jobs 1 不得套用
         # 多文件 results[] 信封）；信封仅限多文件编排层。
@@ -628,7 +635,7 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         select_mode=getattr(args, "select_mode", "line"),
         break_on_baseline_failure=getattr(
             args, "break_on_baseline_failure", False),
-        kill_bail=None if not getattr(args, "no_kill_bail", False) else False,
+        kill_bail=_kill_bail_flag(args),
     )
     result["summary"].setdefault("jobs", 1)
     return result

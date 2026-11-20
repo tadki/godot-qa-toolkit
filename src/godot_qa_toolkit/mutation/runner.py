@@ -307,6 +307,8 @@ def _core_caliper(project_root, path, mutants, select_ids, select_lines,
         "tests": sel.get("tests") or [],
         "lines": sel.get("lines") or sorted(caliper_lines),
         "no_mapped_tests": sel.get("no_mapped_tests") or [],
+        # SEE-1610 §SPEC-IMPL：组内 allowlist 透传（resolve 侧已组装）。
+        "tests_allow": sel.get("tests_allow"),
     }
     if sel.get("tests_glob"):
         tests_glob = sel["tests_glob"]

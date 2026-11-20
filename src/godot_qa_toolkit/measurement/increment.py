@@ -10,6 +10,12 @@
 - 新增生产文件 / recipe_hash 失配 / 校准到期 / 重跑面过大 → 回退全脸
   （内部转调 run_measurement，provenance.mode 标注原因）；
 - 删除测试脚本 → 仅删边不重跑；改名 = 旧脚本删边 + 新脚本重跑。
+- 删除生产文件（SEE-1610 §SPEC-N1，`prod_removed`）→ 失效面 = 行事实
+  反查触达测试 ∪ 静态直连消费者，重跑并整体替换其行事实；旧图该文件
+  死边从行事实主真值 purge（派生视图单源重算自动干净）；target 面/
+  文件哈希/可插桩面同步剔除；
+- 其余路径（非 .gd、无基线边的删除文件等）→ 具名 `IncrementError`
+  fail-loud 拒绝（不静默披露后照跑）。
 
 SEE-1587：行事实是主真值——file/function 视图与 line→tests 反查从合并后
 行事实单源重算（`_derive_views_from_line_facts`），不独立拼接。
@@ -95,7 +101,8 @@ def classify_changes(root: Path, changed: list[str],
     - test：`tests/` 下的 test_*.gd；存在且在基线=changed、存在不在基线
       =new、不在盘上且在基线=removed；
     - prod：目标面内 .gd 且有基线边（file 边或 fn 边前缀）=changed，
-      无基线边=new（触发全脸回退——不猜失效面）；
+      无基线边=new（触发全脸回退——不猜失效面），有基线边且不在盘上
+      =prod_removed（SEE-1610 §SPEC-N1，清死边 + 触达面重跑）；
     - 其余路径拒绝（unknown，fail-loud 不静默）。"""
     arm = baseline["arms"]["gut_full"]
     edge_files = (set(arm.get("file_to_tests") or {})
@@ -106,9 +113,15 @@ def classify_changes(root: Path, changed: list[str],
                    .values() for fid in ids}
     test_identities = set(arm.get("test_to_functions") or {}) | set(
         arm.get("script_to_functions") or {})
+    # SEE-1610 §SPEC-N1：行事实是主真值（SEE-1587）——身份全集并入行事实
+    # 身份；否则行级基线（fn 边缺席）会把 test_changed/removed 误判
+    # unknown 被 fail-loud 拒跑。
+    test_identities |= set(arm.get("test_to_lines") or {})
+    test_identities |= set(arm.get("script_to_lines") or {})
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],
-                                 "prod_new": [], "unknown": []}
+                                 "prod_new": [], "prod_removed": [],
+                                 "unknown": []}
     for raw in changed:
         verdict = _classify_one(root, raw, edge_files, known_fids,
                                 test_identities)
@@ -141,6 +154,8 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
             return "prod_changed", rel
         if p.is_file():
             return "prod_new", rel
+        if has_edges:
+            return "prod_removed", rel
     return "unknown", raw
 
 def _static_candidates(root: Path, rel: str,
@@ -155,6 +170,20 @@ def _static_candidates(root: Path, rel: str,
             continue
         names.add(c["res"].rsplit("/", 1)[-1])
     return names
+
+def _line_fact_touchers(arm: dict, rel: str) -> set[str]:
+    """行事实反查：触达 rel 的脚本 basename 集（test 车道身份 ∪ script
+    车道）。SEE-1610 §SPEC-N1 prod_removed 失效面的主来源——文件已删，
+    fn/file 视图不可信，行事实是唯一反查面。"""
+    touch: set[str] = set()
+    for identity, by_rel in (arm.get("test_to_lines") or {}).items():
+        if rel in by_rel:
+            touch.add(_script_name_of(identity))
+    for script, by_rel in (arm.get("script_to_lines") or {}).items():
+        if rel in by_rel:
+            touch.add(script)
+    return touch
+
 
 def compute_invalidation(root: Path, baseline: dict,
                          classes: dict[str, list[str]],
@@ -187,6 +216,17 @@ def compute_invalidation(root: Path, baseline: dict,
         for name in static:
             sources.setdefault(name, []).append(f"static:{rel}")
         rerun |= static
+    for rel in classes.get("prod_removed", []):
+        # SEE-1610 §SPEC-N1：删除文件不可信 fn/file 视图，失效面走行事实
+        # 反查（test 车道 ∪ script 车道）∪ 静态直连消费者。
+        touch = _line_fact_touchers(arm, rel)
+        for name in touch:
+            sources.setdefault(name, []).append(f"prod_removed_lines:{rel}")
+        rerun |= touch
+        static = _static_candidates(root, rel, index)
+        for name in static:
+            sources.setdefault(name, []).append(f"static:{rel}")
+        rerun |= static
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
             "explicit_rerun": explicit_rerun}
 
@@ -204,11 +244,13 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
     return base
 
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
-               fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None
-               ) -> dict:
+               fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
+               removed_rels: "set[str] | None" = None) -> dict:
     """按脚本名替换/删边合并一张臂级映射；行事实同语义合并（重跑脚本
     整体替换、删除脚本删边、其余身份原样保留），file/function 视图与
     line→tests 反查从合并后行事实单源重算（SEE-1587：视图永不独立拼接）。
+    `removed_rels`（SEE-1610 §SPEC-N1）＝已删除生产文件：从合并后行事实
+    purge 该文件的全部边（触达身份已整体替换，purge 是死边兜底）。
     结构性统计精确重算。"""
     replace_names = {_script_name_of(i) for i in
                      (fresh.get("test_to_files") or {})}
@@ -218,6 +260,13 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
         lambda i: i.split("::", 1)[0])
     script_to_lines = _merged_identities(
         "script_to_lines", arm, fresh, dropped, replace_names, lambda i: i)
+    if removed_rels:
+        test_to_lines = {i: {r: ls for r, ls in by_rel.items()
+                             if r not in removed_rels}
+                         for i, by_rel in test_to_lines.items()}
+        script_to_lines = {i: {r: ls for r, ls in by_rel.items()
+                               if r not in removed_rels}
+                           for i, by_rel in script_to_lines.items()}
     # file/function 边不再独立合并：从合并后行事实派生（行事实是主真值）。
     derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
                                             fid_by_line_by_rel)
@@ -261,6 +310,16 @@ def _increment_decision(root: Path, recipe: dict, baseline: dict,
     `recipe` 是已注入 toolchain 的配方（hash 判据用）。
     返回 (classes, invalidation, rerun, reason)。"""
     classes = classify_changes(root, changed_files, baseline)
+    if classes["unknown"]:
+        # SEE-1610 §SPEC-N1：对齐模块 docstring——不可分类路径具名拒绝，
+        # 绝不披露后照跑（旧图死边 + 零重跑是静默失真）。
+        unk = classes["unknown"]
+        sample = ", ".join(sorted(unk)[:8])
+        more = f" (+{len(unk) - 8} more)" if len(unk) > 8 else ""
+        raise IncrementError(
+            f"unknown_changed_paths: {len(unk)} changed path(s) cannot be "
+            f"classified as test/prod change (non-.gd or no baseline edges) "
+            f"— failing loud per module contract: {sample}{more}")
     invalidation = {"rerun": set(), "dropped": set(), "sources": {}}
     hash_ok = (baseline.get("report_recipe_hash")
                == recipe["recipe_hash"])
@@ -336,10 +395,14 @@ def run_attribution_increment(project_root: str | Path,
         return _fallback_full_face(root, target_files, raw_recipe, out_path,
                                    classes, reason, attribution_causal,
                                    timeout_s, t0)
+    removed = set(classes.get("prod_removed") or [])
+    # 删除文件不进插桩臂（无源码可模板化）；其边由合并侧 purge。
+    arm_targets = [t for t in target_files if Path(t).is_file()]
     arm_exec_s, fresh, executions, fid_by_line_by_rel = _run_increment_arm(
-        root, target_files, recipe, rerun, timeout_s, attribution_causal)
+        root, arm_targets, recipe, rerun, timeout_s, attribution_causal)
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,
-                        invalidation["dropped"], fid_by_line_by_rel)
+                        invalidation["dropped"], fid_by_line_by_rel,
+                        removed_rels=removed)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
@@ -404,6 +467,13 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               invalidation: dict, since_full: int,
                               arm_exec_s: float,
                               executions: list[dict] | None = None) -> dict:
+    removed = set(classes.get("prod_removed") or [])
+    # SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
+    # target_files 存储格式随入口不同）。
+    removed_abs = {str((root / r).resolve()) for r in removed}
+    targets = [t for t in (baseline.get("target_files")
+                           or sorted((baseline.get("file_sha256") or {})))
+               if t not in removed and str(Path(t).resolve()) not in removed_abs]
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
@@ -412,8 +482,7 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "identity": baseline.get("identity"),
         "causal": baseline.get("causal"),
         "file_sha256": _merged_file_sha(root, baseline, classes),
-        "target_files": list(baseline.get("target_files")
-                             or sorted((baseline.get("file_sha256") or {}))),
+        "target_files": targets,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
@@ -431,7 +500,9 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
             "increments_since_full": since_full + 1,
             "calibration_policy": ("full face every N increments or on "
                                    "hash mismatch / new prod file / "
-                                   "oversized rerun surface"),
+                                   "oversized rerun surface (deleted prod "
+                                   "files stay incremental: edge purge + "
+                                   "toucher rerun, SEE-1610 §SPEC-N1)"),
             "event_counts_stale": True,
             "arm_exec_s": arm_exec_s,
             "rerun_executions": executions or [],
@@ -452,12 +523,15 @@ def _merged_tests_face(root: Path, baseline: dict,
 
 def _merged_file_sha(root: Path, baseline: dict,
                      classes: dict) -> dict:
-    """基线文件哈希继承 + 变更生产文件按当前内容重算（增量新鲜绑定）。"""
+    """基线文件哈希继承 + 变更生产文件按当前内容重算、删除文件剔除
+    （增量新鲜绑定）。"""
     shas = dict(baseline.get("file_sha256") or {})
     for rel in classes.get("prod_changed", []) + classes.get("prod_new", []):
         p = Path(root) / rel
         if p.is_file():
             shas[rel] = sha256_file(p)
+    for rel in classes.get("prod_removed", []):
+        shas.pop(rel, None)
     return shas
 
 def _merged_instrumentable_lines(root: Path, baseline: dict,
@@ -475,6 +549,8 @@ def _merged_instrumentable_lines(root: Path, baseline: dict,
         _tpl, probe_lines, block_map = _instrument_blocks(
             src, "gqt-surface-computation.txt", runtime_sink=False)
         surface[rel] = _probe_surface_lines(probe_lines, block_map)
+    for rel in classes.get("prod_removed", []):
+        surface.pop(rel, None)
     return surface
 
 def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
@@ -482,7 +558,9 @@ def _fallback_full_face(root: Path, target_files: list[str], recipe: dict,
                         causal: bool, timeout_s: int, t0: float) -> dict:
     # D1：新增生产文件必须并入重建 target 面——否则 brand_new.gd 永远
     # 不进图（回退仅重建基线 targets 时新文件被静默漏测）。
-    targets = list(target_files)
+    # SEE-1610 §SPEC-N1：已删除文件从重建 target 面剔除（基线继承的
+    # target 列表可能仍含删除 rel——auto 续新路径以基线 target_files 为入参）。
+    targets = [t for t in target_files if Path(t).is_file()]
     for rel in classes.get("prod_new") or []:
         abs_path = str((Path(root) / rel).resolve())
         if abs_path not in targets:

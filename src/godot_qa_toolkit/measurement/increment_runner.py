@@ -65,7 +65,12 @@ def prepare_attr_templates(root: Path, target_files: list[str],
     """每目标文件准备 attr 模板（prep 缓存优先，未命中现建）；返回
     {rel: {abs, src, template(占位符形态), probe_lines, block_map, key8,
     registry}}。模板构建单源：fresh 路径与全量 run_measurement 共用
-    orchestrator._instrument_pair（SEE-1585 教训）。"""
+    orchestrator._instrument_pair（SEE-1585 教训）。
+    SEE-1610 §SPEC-N1：单文件插桩解析失败逐文件隔离（stderr 具名披露后
+    跳过）——与全量路径 unmeasured 口径对称；绝不整体硬抛（一个不可插桩
+    文件不得炸掉整个增量臂），也不静默（无披露的缩面 = 假新鲜）。"""
+    import sys
+
     algo = _algo_for(causal)
     out: dict[str, dict] = {}
     for path_str in target_files:
@@ -76,8 +81,16 @@ def prepare_attr_templates(root: Path, target_files: list[str],
         rel = str(p.resolve().relative_to(root))
         key8 = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:8]
         src_sha = sha256_text(src)
-        template, probe_lines, block_map, registry = _attr_template_entry(
-            root, rel, src, src_sha, recipe, algo, causal)
+        try:
+            template, probe_lines, block_map, registry = _attr_template_entry(
+                root, rel, src, src_sha, recipe, algo, causal)
+        except Exception as e:  # noqa: BLE001 — 逐文件隔离，与全量
+            # _prepare_fresh 的 BLE001 同宽：lark 原始异常不穿透增量臂
+            print(f"measure: increment attr template skipped for {rel}: "
+                  f"{type(e).__name__}: {e} — file excluded from this "
+                  f"increment arm (unmeasured, same as full-face "
+                  f"isolation)", file=sys.stderr)
+            continue
         out[rel] = {
             "abs": str(p.resolve()), "src": src, "template": template,
             "probe_lines": probe_lines, "block_map": block_map,

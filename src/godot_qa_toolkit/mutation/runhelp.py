@@ -307,14 +307,25 @@ def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
                 "skipped (clean batch)")
         print(f"mutation: baseline skip-red marked="
               f"{skip_red['marked']}/{skip_red['requested']}", file=sys.stderr)
-    # SEE-1610 §SPEC-JSON：test_face 披露（kept/removed/whole_script_fallback）。
+    # SEE-1610 §SPEC-JSON/D2：test_face 披露（kept/removed/whole_script_fallback）。
+    # 过滤启用但宿主未及打点（timeout/run_error 类）→ marker_missing 兜底键，
+    # 保证所有 verdict 档机器落点在场且可对账。
     test_face = killbail.parse_test_face_marker(tail)
     if test_face is not None:
         verdict = {**verdict, "test_face": test_face}
         print(f"mutation: test-face kept={test_face['kept']} "
               f"removed={test_face['removed']} "
               f"whole={test_face['whole_script_fallback']}", file=sys.stderr)
+    elif getattr(_runner_mod_allow(), "_ACTIVE_ALLOW_TESTS", None):
+        verdict = {**verdict, "test_face": {
+            "requested": None, "kept": None, "removed": None,
+            "whole_script_fallback": None, "marker_missing": True}}
     return verdict
+
+
+def _runner_mod_allow():
+    from godot_qa_toolkit.mutation import runner as _r
+    return _r
 
 
 def _res_path_of(file_path: str, project_root: str) -> str:

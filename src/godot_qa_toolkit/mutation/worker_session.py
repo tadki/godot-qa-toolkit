@@ -119,7 +119,8 @@ func _run_leg(req: Dictionary) -> void:
 			resp["skip_red"] = skip_out
 			# SEE-1610 §SPEC-IMPL：test 级 allowlist（skip_red 后、执行前）。
 			var allow_out: Dictionary = await _gqt_allow_tests(
-				gut, req.get("allow_tests", []))
+				gut, req.get("allow_tests", []),
+				req.get("skip_red_tests", []))
 			resp["allow"] = allow_out
 			var seq: Dictionary = await _gqt_run_scripts_sequential(
 				gut, scripts, baseline_names, 600000)
@@ -136,7 +137,8 @@ func _run_leg(req: Dictionary) -> void:
 				gut, skip_tests)
 			resp["skip_red"] = skip_out
 			var allow_out2: Dictionary = await _gqt_allow_tests(
-				gut, req.get("allow_tests", []))
+				gut, req.get("allow_tests", []),
+				req.get("skip_red_tests", []))
 			resp["allow"] = allow_out2
 			var done := [false]
 			gut.end_run.connect(func() -> void: done[0] = true)

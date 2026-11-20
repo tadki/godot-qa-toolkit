@@ -242,7 +242,9 @@ def _attribution_counts_head(arm: str, derived: dict,
 def _attribution_lane_block(events: tuple, lane_total: int,
                             phase_lane: dict, hotspots: list,
                             unmapped: list,
-                            files_with_unattributed: int) -> dict:
+                            files_with_unattributed: int,
+                            unattributed_files: "list[str] | None" = None
+                            ) -> dict:
     """臂级 payload 中段：车道/相位/热点/速率/未归属披露（键序保持）。"""
     test_events, script_events, unattributed_events = events
     return {
@@ -262,6 +264,9 @@ def _attribution_lane_block(events: tuple, lane_total: int,
         "script_rate": _hit_rate(script_events, lane_total),
         "unattributed_rate": _hit_rate(unattributed_events, lane_total),
         "files_with_unattributed": files_with_unattributed,
+        # SEE-1610 D1：有未归属命中（窗口归因有损）的文件名单——行级地图
+        # 对这些文件欠近似，消费侧（mutation test 筛选闭包）据此整文件面。
+        "unattributed_files": list(unattributed_files or []),
         "unmapped_test_indices": unmapped[:200],
         "unmapped_count": len(unmapped),
         # 组合注册表下单一天窗：未知槽位只在 unmapped 单列一次（不按车道猜）
@@ -292,7 +297,9 @@ def _attribution_view_block(derived: dict) -> dict:
 def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
                          derived: dict, unmapped: list, events: tuple,
                          lane_total: int, phase_lane: dict, hotspots: list,
-                         files_with_unattributed: int) -> dict:
+                         files_with_unattributed: int,
+                         unattributed_files: "list[str] | None" = None
+                         ) -> dict:
     """臂级映射产物（test-attribution/6 的 arms 条目）。
 
     行事实为主真值：`test_to_lines` / `script_to_lines` 保存 per 身份
@@ -302,7 +309,8 @@ def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
         **_attribution_counts_head(arm, derived, test_to_lines,
                                    script_to_lines, events),
         **_attribution_lane_block(events, lane_total, phase_lane, hotspots,
-                                  unmapped, files_with_unattributed),
+                                  unmapped, files_with_unattributed,
+                                  unattributed_files),
         # 行级主真值（line-primary）：身份 → {文件 → sorted covered lines}
         # 与行→测试反查（消费面：变异位点所在行的测试集合）
         **_attribution_view_block(derived),
@@ -354,6 +362,7 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
     script_events = 0
     phases_total = [0, 0, 0, 0]
     files_with_unattributed = 0
+    unattributed_files: list[str] = []
     hotspot_counts: dict[str, dict[int, int]] = {}
     for rel, per_pid in sorted(attr_by_rel.items()):
         _ft, _fs, te, se, um = _file_lane_slots(
@@ -371,6 +380,7 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
             phases_total[i] += v
         if sum(phases):
             files_with_unattributed += 1
+            unattributed_files.append(rel)
         slot = hotspot_counts.setdefault(rel, {})
         for probe_id, n in counts.items():
             slot[probe_id] = slot.get(probe_id, 0) + n
@@ -385,7 +395,8 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
     return _attribution_payload(
         arm, test_to_lines, script_to_lines, derived, unmapped,
         (test_events, script_events, unattributed_events), lane_total,
-        phase_lane, hotspots, files_with_unattributed)
+        phase_lane, hotspots, files_with_unattributed,
+        sorted(unattributed_files))
 
 
 def _fid_by_line_from_registry(registry: dict) -> dict[int, str]:

@@ -102,6 +102,9 @@ _SKIP_RED_RE = re.compile(
 _TEST_FACE_RE = re.compile(
     rf"{TEST_FACE_MARKER} requested=(\d+) kept=(\d+) removed=(\d+) "
     rf"whole=(\d+)")
+_TEST_FACE_RE_V2 = re.compile(
+    rf"{TEST_FACE_MARKER} requested=(\d+) kept=(\d+) removed=(\d+) "
+    rf"whole=(\d+) matched=(\d+) overlap_red=(\d+)")
 
 
 def parse_skip_red_marker(tail: str) -> dict | None:
@@ -117,6 +120,15 @@ def parse_skip_red_marker(tail: str) -> dict | None:
 def parse_test_face_marker(tail: str) -> dict | None:
     """test 级 allowlist 过滤 marker → 披露 dict（§SPEC-JSON test_face）；
     缺席 = 本腿未启用过滤（None）。"""
+    m = _TEST_FACE_RE_V2.search(tail or "")
+    if m is not None:
+        return {"requested": int(m.group(1)), "kept": int(m.group(2)),
+                "removed": int(m.group(3)),
+                "whole_script_fallback": int(m.group(4)),
+                # SEE-1610 L1：对账闭合桶（matched + overlap_red == requested
+                # 的配对数口径；red 先删后留的重叠单列）。
+                "matched_pairs": int(m.group(5)),
+                "overlap_red": int(m.group(6))}
     m = _TEST_FACE_RE.search(tail or "")
     if m is None:
         return None

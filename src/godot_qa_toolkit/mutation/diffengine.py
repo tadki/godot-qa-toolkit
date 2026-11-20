@@ -214,6 +214,9 @@ def make_entry(m, record: dict, verdict: str, streak: int,
     }
     if record.get("killed_by") is not None:
         entry["killed_by"] = record["killed_by"]
+    # SEE-1610 D2：test_face 随条目落盘（killed 场景机器面）。
+    if record.get("test_face") is not None:
+        entry["test_face"] = record["test_face"]
     return entry
 
 

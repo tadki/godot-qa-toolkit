@@ -451,6 +451,8 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
             [[str(i).partition("::")[0], str(i).partition("::")[2]]
              for i in (_ta.get("identities") or [])]
             + [[str(s2), "*"] for s2 in (_ta.get("script_lane") or [])])
+    global _ACTIVE_ALLOW_SCOPE
+    _ACTIVE_ALLOW_SCOPE = str(_ta.get("scope") or "line") if _ta else None
     scoped = tests_glob is not None
     plan = _core_plan(
         c, path, project_root, original_src, tests_glob=tests_glob,
@@ -535,6 +537,8 @@ _BASELINE_RED_MAP: set[tuple[str, str]] = set()
 # 关断 / 非 line 选面 / 组内无映射）。per-run 进程级上下文，与
 # _BASELINE_RED_MAP 同款（chunk 进程各自在 run_mutation 入口重置）。
 _ACTIVE_ALLOW_TESTS: list | None = None
+# 闭包形态（"line"|"file"；None=未启用）。file = 归因有损文件的整文件面。
+_ACTIVE_ALLOW_SCOPE: str | None = None
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
@@ -558,6 +562,11 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
         baseline_failures=baseline_failures, bail_enabled=bail_enabled,
         red_pairs=red_pairs)
     if cfg_path is None:
+        # D2：注入失败腿（宿主未跑）在过滤启用时同样携带 test_face 兜底键。
+        if _ACTIVE_ALLOW_TESTS:
+            injected = {**injected, "test_face": {
+                "requested": None, "kept": None, "removed": None,
+                "whole_script_fallback": None, "marker_missing": True}}
         return injected  # 注入失败 run_error 契约
     _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
     if direct_scripts is not None:
@@ -577,6 +586,10 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
             verdict = _mutant_record(m, "timeout",
                                      f"GUT timed out after {m.kind} {m.original}→{m.mutated}",
                                      src=original_src)
+            if _ACTIVE_ALLOW_TESTS:
+                verdict["test_face"] = {
+                    "requested": None, "kept": None, "removed": None,
+                    "whole_script_fallback": None, "marker_missing": True}
     finally:
         _ACTIVE_ENV = None
         _ACTIVE_SCRIPT = GUT_SCRIPT_RES_PATH
@@ -737,7 +750,9 @@ def _test_filter_disclosure(active_allow) -> dict:
         "disabled_by": killbail.test_filter_disabled_by(None),
         "applied": bool(at),
         "allow_identities": sum(1 for p in at if p[1] != "*"),
-        "script_lane_fallback": sum(1 for p in at if p[1] == "*")}
+        "script_lane_fallback": sum(1 for p in at if p[1] == "*"),
+        # SEE-1610 D1：闭包形态（file = 归因有损文件整文件面回退）。
+        "scope": _ACTIVE_ALLOW_SCOPE if at else None}
 
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,

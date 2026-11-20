@@ -149,12 +149,20 @@ func _gqt_skip_red_tests(gut: Node, red_tests: Array) -> Dictionary:
 # allow 元素 [script_id_or_basename, test_name]；test_name=="*" = 整脚本保留
 # （script 车道语义，before_all 等脚本级触达不可 test 级收窄）。未命中脚本
 # 的测试全部物理移除；kill 判定仍由差集语义完成（marker 只作披露对账）。
-func _gqt_allow_tests(gut: Node, allow: Array) -> Dictionary:
+func _gqt_allow_tests(gut: Node, allow: Array,
+		red_pairs: Array = []) -> Dictionary:
+	# SEE-1610 D1/L1：requested/kept/removed 以「对」为账（L1 闭合桶）——
+	# matched = 命中 collector 的对数；overlap_red = 其中已被 skip_red 物理
+	# 移除（先删后留的重叠）的对数；stale = 其余未命中（陈旧/改名）。
 	var out := {"requested": allow.size(), "kept": 0, "removed": 0,
-		"whole": 0}
+		"whole": 0, "matched_pairs": 0, "overlap_red": 0}
 	if allow.is_empty():
 		return out
 	var wanted := {}
+	var red_names := {}
+	for rp in red_pairs:
+		if typeof(rp) == TYPE_ARRAY and rp.size() == 2:
+			red_names[String(rp[0]) + "::" + String(rp[1])] = true
 	for pair in allow:
 		if typeof(pair) == TYPE_ARRAY and pair.size() == 2:
 			var sid := String(pair[0])
@@ -174,17 +182,30 @@ func _gqt_allow_tests(gut: Node, allow: Array) -> Dictionary:
 		if names.has("*"):
 			out["kept"] = int(out["kept"]) + s.tests.size()
 			out["whole"] = int(out["whole"]) + 1
+			out["matched_pairs"] = int(out["matched_pairs"]) + names.size()
 			continue
 		var kept: Array = []
 		for t in s.tests:
 			if names.has(String(t.name)):
 				kept.append(t)
+				out["matched_pairs"] = int(out["matched_pairs"]) + 1
 		out["kept"] = int(out["kept"]) + kept.size()
 		out["removed"] = int(out["removed"]) + (s.tests.size() - kept.size())
 		s.tests = kept
+	# 未命中对：区分「红测重叠（skip_red 已物理移除）」与陈旧/改名
+	var unmatched := int(out["requested"]) - int(out["matched_pairs"])
+	if unmatched > 0:
+		for sid in wanted:
+			for tname in wanted[sid]:
+				if tname == "*":
+					continue
+				if red_names.has(String(sid) + "::" + String(tname)):
+					out["overlap_red"] = int(out["overlap_red"]) + 1
 	print("@TESTFACE@ requested=" + str(out["requested"]) + " kept="
 		+ str(out["kept"]) + " removed=" + str(out["removed"])
-		+ " whole=" + str(out["whole"]))
+		+ " whole=" + str(out["whole"]) + " matched="
+		+ str(out["matched_pairs"]) + " overlap_red="
+		+ str(out["overlap_red"]))
 	return out
 """.replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER).replace("@SKIPRED@", SKIP_RED_MARKER).replace("@TESTFACE@", TEST_FACE_MARKER)
 
@@ -262,7 +283,8 @@ func _init() -> void:
 		gut, cfg.get("skip_red_tests", []))
 	# SEE-1610 §SPEC-IMPL：test 级 allowlist 过滤（skip_red 之后、执行前）。
 	var allow: Dictionary = await _gqt_allow_tests(
-		gut, cfg.get("allow_tests", []))
+		gut, cfg.get("allow_tests", []),
+		cfg.get("skip_red_tests", []))
 	# kill 即退只在开关开启时生效；bail 基线名单与跳过名单同源但语义独立。
 	var bail_on: bool = bool(cfg.get("bail_enabled", false))
 	var bail_names: Array = (cfg.get("bail_baseline_failures", [])

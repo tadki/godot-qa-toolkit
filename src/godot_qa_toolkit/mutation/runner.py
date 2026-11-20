@@ -728,6 +728,17 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
             slot_info["release_problems"] = release_problems
     return raw_pairs
 
+def _test_filter_disclosure(active_allow) -> dict:
+    """SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
+    逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。"""
+    at = active_allow or []
+    return {
+        "enabled": killbail.resolve_test_filter(),
+        "disabled_by": killbail.test_filter_disabled_by(None),
+        "applied": bool(at),
+        "allow_identities": sum(1 for p in at if p[1] != "*"),
+        "script_lane_fallback": sum(1 for p in at if p[1] == "*")}
+
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
@@ -793,13 +804,7 @@ def _run_mutant_loop(
             len(bail_scripts) if bail_scripts is not None else None)
         # SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
         # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
-        _at = _ACTIVE_ALLOW_TESTS or []
-        slot_info["test_filter"] = {
-            "enabled": killbail.resolve_test_filter(),
-            "disabled_by": killbail.test_filter_disabled_by(None),
-            "applied": bool(_at),
-            "allow_identities": sum(1 for p in _at if p[1] != "*"),
-            "script_lane_fallback": sum(1 for p in _at if p[1] == "*")}
+        slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
         if dirty:
             slot_info["baseline_skip"] = {
                 "applied": bool(skip_applied), "face": bail_face,

@@ -152,16 +152,25 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
         if known:
             return "test_removed", rel
         return "unknown", raw
-    if p.suffix == ".gd":
-        has_edges = rel in edge_files or any(
-            _fid_file_of(fid) == rel for fid in known_fids)
-        if p.is_file() and has_edges:
-            return "prod_changed", rel
-        if p.is_file():
-            return "prod_new", rel
-        if has_edges:
-            return "prod_removed", rel
+    prod = _classify_prod_entry(p, rel, edge_files, known_fids)
+    if prod is not None:
+        return prod
     return "unknown", raw
+
+def _classify_prod_entry(p: Path, rel: str, edge_files: set[str],
+                         known_fids: set[str]) -> "tuple[str, str] | None":
+    """生产文件分类（SEE-1610 §SPEC-N1）：盘上+基线边=changed、盘上无
+    边=new、已删+有边=prod_removed；非 .gd 或无边的删除文件返回 None
+    （由调用方归 unknown 具名 fail-loud）。"""
+    if p.suffix != ".gd":
+        return None
+    has_edges = rel in edge_files or any(
+        _fid_file_of(fid) == rel for fid in known_fids)
+    if p.is_file():
+        return ("prod_changed" if has_edges else "prod_new"), rel
+    if has_edges:
+        return "prod_removed", rel
+    return None
 
 def _static_candidates(root: Path, rel: str,
                        index: dict | None) -> set[str]:
@@ -248,6 +257,16 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
         base[identity] = value
     return base
 
+def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
+                        removed_rels: set[str]) -> tuple[dict, dict]:
+    """SEE-1610 §SPEC-N1：从合并后行事实剔除已删除生产文件的全部边
+    （触达身份已整体替换，purge 是死边兜底）。"""
+    def strip(by_ident: dict) -> dict:
+        return {i: {r: ls for r, ls in by_rel.items()
+                    if r not in removed_rels}
+                for i, by_rel in by_ident.items()}
+    return strip(test_to_lines), strip(script_to_lines)
+
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
                removed_rels: "set[str] | None" = None) -> dict:
@@ -266,12 +285,8 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
     script_to_lines = _merged_identities(
         "script_to_lines", arm, fresh, dropped, replace_names, lambda i: i)
     if removed_rels:
-        test_to_lines = {i: {r: ls for r, ls in by_rel.items()
-                             if r not in removed_rels}
-                         for i, by_rel in test_to_lines.items()}
-        script_to_lines = {i: {r: ls for r, ls in by_rel.items()
-                               if r not in removed_rels}
-                           for i, by_rel in script_to_lines.items()}
+        test_to_lines, script_to_lines = _purge_removed_rels(
+            test_to_lines, script_to_lines, removed_rels)
     # file/function 边不再独立合并：从合并后行事实派生（行事实是主真值）。
     derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
                                             fid_by_line_by_rel)

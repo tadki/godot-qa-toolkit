@@ -84,8 +84,10 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                       identity, worker_channel=None,
                       select_mode: str = "full",
                       break_on_baseline_failure: bool = False,
-                      kill_bail: bool | None = None) -> dict:
-    """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。"""
+                      kill_bail: bool | None = None,
+                      mutate_all: bool = False) -> dict:
+    """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。
+    SEE-1610 D3：补传 mutate_all（此前静默丢弃 → 差分复用照旧）。"""
     r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
                      dry_run=dry_run, tests_glob=tests_glob,
                      binary_kind=binary_kind, timing_store=timing_store,
@@ -94,7 +96,7 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                      reuse_coverage=reuse_coverage, identity=identity,
                      worker_channel=worker_channel, select_mode=select_mode,
                      break_on_baseline_failure=break_on_baseline_failure,
-                     kill_bail=kill_bail)
+                     kill_bail=kill_bail, mutate_all=mutate_all)
     r["summary"].setdefault("jobs", 1)
     return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
 
@@ -438,7 +440,8 @@ def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                     timeout_factor, reuse_coverage, identity,
                     worker_channel, select_mode, jobs,
                     break_on_baseline_failure: bool = False,
-                    kill_bail: bool | None = None) -> dict | None:
+                    kill_bail: bool | None = None,
+                    mutate_all: bool = False) -> dict | None:
     """显式串行（--jobs 1）与 dry_run 快路径（判定先于 prewarm/baseline）。"""
     if len(files) == 1 and jobs == 1:
         return _serial_fast_path(files[0], project_root, budget, timeout_s,
@@ -449,7 +452,8 @@ def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                                  select_mode=select_mode,
                                  break_on_baseline_failure=
                                  break_on_baseline_failure,
-                                 kill_bail=kill_bail)
+                                 kill_bail=kill_bail,
+                                 mutate_all=mutate_all)
     if dry_run:
         return _dry_run_list(files, project_root, budget, timeout_s,
                              tests_glob, binary_kind, mutation_warning,
@@ -575,7 +579,7 @@ def _run_mutation_files_impl(
                            tests_glob, binary_kind, timing_store,
                            mutation_warning, timeout_factor, reuse_coverage,
                            identity, worker_channel, select_mode, jobs,
-                           break_on_baseline_failure, kill_bail)
+                           break_on_baseline_failure, kill_bail, mutate_all)
     if fast is not None:
         return fast
     jobs = default_jobs(jobs)

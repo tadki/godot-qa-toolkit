@@ -388,12 +388,41 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
             summary[key] = info[key]
     _emit_killed_certificates(summary, results)
     _emit_suspected_orphans(summary, results, info)
+    _emit_test_face_aggregate(summary, results)
+
+
+def _emit_test_face_aggregate(summary: dict, results: list[dict]) -> None:
+    """SEE-1610 D2：test_face 全 verdict 档机器聚合（与执行计数一致）。
+
+    对账口径：kept+removed 只累加 marker 在场腿；marker_missing 腿单列
+    （宿主未及打点，如 timeout/注入失败），by_verdict 给各档腿数。"""
+    legs = [r for r in results if r.get("test_face")]
+    if not legs:
+        return
+    agg = {"applied_legs": len(legs), "kept": 0, "removed": 0,
+           "whole_script_fallback": 0, "marker_missing_legs": 0,
+           "overlap_red": 0, "by_verdict": {}}
+    for r in legs:
+        tf = r["test_face"]
+        if tf.get("marker_missing"):
+            agg["marker_missing_legs"] += 1
+        else:
+            agg["kept"] += int(tf.get("kept") or 0)
+            agg["removed"] += int(tf.get("removed") or 0)
+            agg["whole_script_fallback"] += int(
+                tf.get("whole_script_fallback") or 0)
+            agg["overlap_red"] += int(tf.get("overlap_red") or 0)
+        v = r.get("verdict", "")
+        agg["by_verdict"][v] = agg["by_verdict"].get(v, 0) + 1
+    summary["test_face"] = agg
 
 
 def _emit_killed_certificates(summary: dict, results: list[dict]) -> None:
     certs = [{"id": r["id"], "killed_by": r["killed_by"],
               **({"kill_bail": r["kill_bail_info"]}
-                 if r.get("kill_bail_info") else {})}
+                 if r.get("kill_bail_info") else {}),
+              **({"test_face": r["test_face"]}
+                 if r.get("test_face") else {})}
              for r in results
              if r.get("verdict") == "killed" and r.get("killed_by")]
     if certs:
@@ -467,13 +496,20 @@ def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
     if getattr(leg, "bail_info", None):
         verdict = {**verdict, "kill_bail_info": dict(leg.bail_info)}
     # SEE-1610 §SPEC-JSON：worker 腿 test_face 披露（与冷通道同键）。
-    if getattr(leg, "allow_info", None):
+    info = getattr(leg, "allow_info", None)
+    if info:
         verdict = {**verdict, "test_face": {
-            "requested": int(leg.allow_info.get("requested") or 0),
-            "kept": int(leg.allow_info.get("kept") or 0),
-            "removed": int(leg.allow_info.get("removed") or 0),
-            "whole_script_fallback":
-                int(leg.allow_info.get("whole") or 0)}}
+            "requested": int(info.get("requested") or 0),
+            "kept": int(info.get("kept") or 0),
+            "removed": int(info.get("removed") or 0),
+            "whole_script_fallback": int(info.get("whole") or 0),
+            "overlap_red": int(info.get("overlap_red") or 0)}}
+    else:
+        from godot_qa_toolkit.mutation import runner as _r
+        if getattr(_r, "_ACTIVE_ALLOW_TESTS", None):
+            verdict = {**verdict, "test_face": {
+                "requested": None, "kept": None, "removed": None,
+                "whole_script_fallback": None, "marker_missing": True}}
     return verdict
 
 

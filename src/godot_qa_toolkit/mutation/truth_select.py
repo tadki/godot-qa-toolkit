@@ -782,15 +782,17 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
     if ambiguous:
         raise MutationSelectionError("ambiguous_test_names",
                                      str(sorted(ambiguous)[:5]))
-    # SEE-1610 §SPEC-IMPL：组内 test 级 allowlist（--lines 串行路径与
-    # planning 并行 chunk 同源；runner 入口按开关解析后下发宿主）。
+    # SEE-1610 §SPEC-IMPL/D1：组内 test 级 allowlist（--lines 串行路径与
+    # planning 并行 chunk 同源；闭包阶梯见 truth_lines.line_identity_sets）。
     from .truth_lines import line_identity_sets
-    idents, lane = line_identity_sets(doc, rel, want)
+    registry = _line_fid_index(root, rel)
+    idents, lane, scope = line_identity_sets(doc, rel, want,
+                                             registry=registry)
     ident_set: set[str] = set()
     for ls in idents.values():
         ident_set.update(ls)
     tests_allow = {"identities": sorted(ident_set),
-                   "script_lane": sorted(lane)}
+                   "script_lane": sorted(lane), "scope": scope}
     base = {"no_mapped_tests": no_mapped, "lines": sorted(want),
             "mapping": file_sel.get("mapping"), "zero_ref": False,
             "ambiguous_names": [],
@@ -806,6 +808,18 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
                                      str(e)) from e
     return {**base, "source": "line_mapping", "reason": "line_mapping_fresh",
             "tests": scripts, "tests_glob": sel_dir}
+
+def _line_fid_index(root: str, rel: str) -> "dict[int, str] | None":
+    """行→fid 索引（闭包 fn 级回退用；解析失败返回 None → 直接文件面）。"""
+    try:
+        from ..registry.functions import build_file_registry
+        from ..measurement.attribution import _fid_by_line_from_registry
+        src = (Path(root) / rel).read_text(encoding="utf-8")
+        return _fid_by_line_from_registry(
+            build_file_registry(src, file_label=rel))
+    except Exception:  # noqa: BLE001 — 解析不可用则闭包直接下级（文件面）
+        return None
+
 
 def _fn_group_load(root, target_file, file_sel) -> tuple:
     """runtime_mapping 守卫（S2.2）+ 映射装载与 rel 解析（fn 面）。"""

@@ -506,7 +506,15 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
-        "arms": {"gut_full": merged},
+        "arms": {"gut_full": {
+            **merged,
+            # SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
+            # ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
+            "unattributed_files": sorted(
+                set((baseline.get("arms", {}).get("gut_full") or {})
+                    .get("unattributed_files") or ())
+                | set(classes.get("prod_changed") or [])
+                | set(classes.get("prod_new") or []))}},
         "arms_state": dict(baseline.get("arms_state") or {}),
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),

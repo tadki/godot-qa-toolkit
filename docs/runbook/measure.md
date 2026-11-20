@@ -49,6 +49,9 @@ gqt measure diagnose autoload systems --project-root . --recipe recipe.json \
   --features feature_a,feature_b --out diagnose.json
 
 # 4) Incremental attribution rebuild (roots must match the baseline universe)
+# --changed accepts changed/new/removed paths. Removing a production file with
+# baseline edges is `prod_removed`: its dead edges are purged and tests that
+# touched it plus depth-1 static consumers are rerun.
 gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   --baseline attribution-map.json --changed systems/example.gd \
   --out attribution-map.v2.json
@@ -74,8 +77,14 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   not count) it still exits 1 with `reason="union invalid or arms invalid"`.
 - map-update: a `test-attribution/6` artifact; changed production files replace
   their related line facts, changed tests replace the whole test identity, and
-  file/function/reverse views are recomputed from the merged lines.
-  `--calibration-every` (default 5) forces a full rebuild after N increments.
+  file/function/reverse views are recomputed from the merged lines. A deleted
+  production file with baseline edges is `prod_removed`: its line facts and
+  derived edges are purged, tests that touched it plus depth-1 static consumers
+  are rerun, and its target/file-hash/instrumentable entries are removed.
+  Non-`.gd` paths and deleted files without baseline edges are `unknown` and
+  rejected by name (`IncrementError`); they never become a silent zero-rerun
+  disclosure bucket. `--calibration-every` (default 5) forces a full rebuild
+  after N increments.
 - exit `0` = complete execution (including `measure run` with a usable
   attribution map whose union is uncertified); `1` = verdict/validation
   failure; `2` = argument error. On diagnostic lanes `ok` only means the
@@ -120,6 +129,18 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   line-level map (single source of truth).
 - Schema upgrades are fail-loud. Auto-managed old or unusable maps are rebuilt;
   an explicit old-schema `--attribution-map` is rejected without being rewritten.
+- The internal `DEFAULT_RERUN_FULL_FACE_RATIO` is `0.05`: if the candidate
+  rerun scripts exceed 5% of the baseline script face, map-update falls back to
+  a full-face rebuild. This was calibrated on a warm KOL copy (824 files / 285
+  scripts): incremental cost was approximately `16.16s + 8.878s × rerun
+  scripts`, full-face cost was `223–227s`, and the crossover was about 23.6
+  scripts (8.3%). The 5% cap estimates about 140.5s at the boundary, below the
+  225.25s full-face midpoint and with noise-band headroom.
+- Each arm carries `unattributed_files`: production files with unattributed
+  hits, for which test-window attribution is lossy. Incremental artifacts carry
+  the union of the baseline list and this round's changed/new production files.
+  Mutation's test-level filter treats a listed file (or a missing key) as a
+  conservative whole-file allow scope instead of trusting line/fn precision.
 
 ## Command reference (aligned with v0.3.0 `--help`)
 

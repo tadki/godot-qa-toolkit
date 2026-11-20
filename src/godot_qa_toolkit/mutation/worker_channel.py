@@ -385,7 +385,8 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
                                               if c["kill_bail"] else None),
                                baseline_failures=sorted(
                                    c["baseline_failures"] or ()),
-                               skip_red_tests=(c["red_pairs"] or []))
+                               skip_red_tests=(c["red_pairs"] or []),
+                               allow_tests=(c["allow_tests"] or None))
     leg_elapsed = time.monotonic() - t_leg
     if leg.fatal and leg.state_drift:
         _legs_drift_disqualify(c, seq, leg)
@@ -429,7 +430,8 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
                     kill_bail: bool = False,
                     tests_scripts: list[str] | None = None,
                     red_pairs: list[tuple[str, str]] | None = None,
-                    baseline_red_map=None):
+                    baseline_red_map=None,
+                    allow_tests: list | None = None):
     """§SPEC-020 W 通道逐腿执行（R-C 硬序 + 门消费 + 会话致命处置）。
 
     会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门 fire / autoload
@@ -453,6 +455,7 @@ def run_worker_legs(mutants, slot, target_rel, target_res, closure, kind,
     c["tests_scripts"] = tests_scripts
     c["red_pairs"] = red_pairs
     c["baseline_red_map"] = baseline_red_map
+    c["allow_tests"] = allow_tests
     _legs_parity(c, target_res, closure, parity_inject_fn)
     _legs_mutants(c, mutants, target_res, closure)
     return c["raw_pairs"], c["fatal_events"]
@@ -526,7 +529,8 @@ def execute_worker_branch(path, project_root, original_src, mutants,
                           kill_bail: bool = False,
                           tests_scripts: list[str] | None = None,
                           red_pairs: list[tuple[str, str]] | None = None,
-                          baseline_red_map=None):
+                          baseline_red_map=None,
+                          allow_tests: list | None = None):
     """§SPEC-020 W 通道接线（薄层）：注入/冷跑/记录/分类回调注入编排层。
 
     runner 域符号在函数体内延迟 import（baseline.py 先例）——避免
@@ -555,6 +559,7 @@ def execute_worker_branch(path, project_root, original_src, mutants,
             project_root, original_src,
             baseline_red_map=baseline_red_map),
         leg_timeout_s=max(60, int(_adaptive_timeout_ref() or 60)),
+        allow_tests=allow_tests,
         baseline_failures=set(baseline_failures or ()),
         parity_inject_fn=lambda: _wb_parity_inject(slot, target_rel,
                                                    original_src, target_res),

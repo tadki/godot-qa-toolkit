@@ -465,6 +465,14 @@ def classify_worker_leg(m, leg, baseline_failures, baseline_dirty,
     # 冷通道一致——宿主在首个新增失败处中断后续脚本）。
     if getattr(leg, "bail_info", None):
         verdict = {**verdict, "kill_bail_info": dict(leg.bail_info)}
+    # SEE-1610 §SPEC-JSON：worker 腿 test_face 披露（与冷通道同键）。
+    if getattr(leg, "allow_info", None):
+        verdict = {**verdict, "test_face": {
+            "requested": int(leg.allow_info.get("requested") or 0),
+            "kept": int(leg.allow_info.get("kept") or 0),
+            "removed": int(leg.allow_info.get("removed") or 0),
+            "whole_script_fallback":
+                int(leg.allow_info.get("whole") or 0)}}
     return verdict
 
 

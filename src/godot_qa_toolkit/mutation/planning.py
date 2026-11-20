@@ -427,9 +427,13 @@ def _line_map_sets(f, project_root, selection_meta, executed_list) -> tuple:
             "line_selection_map_unusable", str(e)) from e
     by_line = truth_select._line_script_sets(
         doc, rel, {getattr(m, "line", -1) for m in executed_list})
+    # SEE-1610 §SPEC-IMPL：test 级 allowlist 数据（身份 + script 车道）。
+    from .truth_lines import line_identity_sets
+    idents, lane = line_identity_sets(
+        doc, rel, {getattr(m, "line", -1) for m in executed_list})
     by_name = truth_select._test_scripts_by_name(
         str(Path(project_root).resolve()))
-    return by_line, by_name
+    return by_line, by_name, idents, lane
 
 
 def _line_partitions(executed_list: list, by_line: dict) -> tuple:
@@ -449,7 +453,8 @@ def _line_chunk_for(f, project_root, file_glob, binary_kind, names, mutants,
                     *, baseline, timeout_factor, timeout_s, budget,
                     mutate_all, attention, run_id, identity, worker_channel,
                     total_sites, selection_meta, by_name, seq,
-                    executed_list) -> tuple:
+                    executed_list, allow_identities=None,
+                    allow_lane=None) -> tuple:
     """单签名组 → 物化选择目录 glob → chunk。脚本漂移（行事实指向的脚本
     不在 tests 树）按 uncovered 口径返回（与无映射行同形态）。"""
     from . import truth_select
@@ -481,7 +486,13 @@ def _line_chunk_for(f, project_root, file_glob, binary_kind, names, mutants,
         # 脚本集（组内签名），不用文件级并集冒充组面。
         "selection_meta": {**selection_meta, "tests": scripts,
                            "source": "runtime_mapping",
-                           "reason": "line_mapping_fresh"},
+                           "reason": "line_mapping_fresh",
+                           # SEE-1610 §SPEC-IMPL：组内 test 级 allowlist
+                           # （identities=[script::name]，script_lane=[script]
+                           # 整脚本保留——runner 入口解析进宿主 allow_tests）。
+                           "tests_allow": {
+                               "identities": list(allow_identities or []),
+                               "script_lane": list(allow_lane or [])}},
         "selection_mode": "line",
         "progress": {"run_id": run_id,
                      "worker": f"line:{seq}",
@@ -499,13 +510,19 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
     分组，同签名共享一个物化选择目录 glob（组数 = 不同测试集合数）。
 
     返回 (chunks, group_meta, uncovered_records)。"""
-    by_line, by_name = _line_map_sets(f, project_root, selection_meta,
-                                      executed_list)
+    by_line, by_name, idents_by_line, lane_scripts = _line_map_sets(
+        f, project_root, selection_meta, executed_list)
     groups, no_mapped = _line_partitions(executed_list, by_line)
     chunks: list[dict] = []
     meta: list[dict] = []
     for names, mutants in sorted(groups.items(),
                                  key=lambda kv: (len(kv[0]), sorted(kv[0]))):
+        # SEE-1610 §SPEC-IMPL：组内行集 → 身份并集 + script 车道整脚本。
+        group_lines = {getattr(mm, "line", -1) for mm in mutants}
+        group_idents: set[str] = set()
+        for ln in group_lines:
+            group_idents.update(idents_by_line.get(ln, ()))
+        group_lane = sorted(set(names) & set(lane_scripts))
         chunk, m, extra = _line_chunk_for(
             f, project_root, file_glob, binary_kind, names, mutants,
             baseline=baseline, timeout_factor=timeout_factor,
@@ -513,7 +530,8 @@ def _line_group_chunks(f, project_root, file_glob, binary_kind, executed_list,
             attention=attention, run_id=run_id, identity=identity,
             worker_channel=worker_channel, total_sites=total_sites,
             selection_meta=selection_meta, by_name=by_name,
-            seq=len(meta) + 1, executed_list=executed_list)
+            seq=len(meta) + 1, executed_list=executed_list,
+            allow_identities=sorted(group_idents), allow_lane=group_lane)
         if chunk is None:
             no_mapped.extend(extra)
             continue

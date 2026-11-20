@@ -441,7 +441,7 @@ class TestWorkerParityAndColdGate:
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
                         tests_scripts=None, baseline_failures=None,
-                        skip_red_tests=None):
+                        skip_red_tests=None, allow_tests=None):
                 captured.setdefault("legs", []).append(
                     {"leg": leg, "scripts": tests_scripts,
                      "baseline": baseline_failures, "skip": skip_red_tests})

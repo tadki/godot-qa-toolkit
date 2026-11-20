@@ -18,8 +18,8 @@ import os
 import uuid
 from pathlib import Path
 
-from .killbail import (BAIL_MARKER, DIRECT_SCRIPTS_MARKER,
-                        SKIP_RED_MARKER)
+from .killbail import (BAIL_MARKER, DIRECT_SCRIPTS_MARKER, SKIP_RED_MARKER,
+                        TEST_FACE_MARKER)
 
 DIRECT_HOST_NAME = ".gqt_direct_host_{pid}.gd"
 
@@ -143,7 +143,50 @@ func _gqt_skip_red_tests(gut: Node, red_tests: Array) -> Dictionary:
 	print("@SKIPRED@ marked=" + str(out["marked"]) + " requested="
 		+ str(out["requested"]) + " names=" + ",".join(out["names"]))
 	return out
-""".replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER).replace("@SKIPRED@", SKIP_RED_MARKER)
+
+
+# SEE-1610 §SPEC-IMPL：test 级 allowlist 物理过滤（skip_red 的逆语义）。
+# allow 元素 [script_id_or_basename, test_name]；test_name=="*" = 整脚本保留
+# （script 车道语义，before_all 等脚本级触达不可 test 级收窄）。未命中脚本
+# 的测试全部物理移除；kill 判定仍由差集语义完成（marker 只作披露对账）。
+func _gqt_allow_tests(gut: Node, allow: Array) -> Dictionary:
+	var out := {"requested": allow.size(), "kept": 0, "removed": 0,
+		"whole": 0}
+	if allow.is_empty():
+		return out
+	var wanted := {}
+	for pair in allow:
+		if typeof(pair) == TYPE_ARRAY and pair.size() == 2:
+			var sid := String(pair[0])
+			var tname := String(pair[1])
+			wanted[sid] = (wanted.get(sid, []) as Array)
+			(wanted[sid] as Array).append(tname)
+	var scripts: Array = gut._test_collector.get_scripts()
+	for s in scripts:
+		var script_id := String(s.path)
+		var base := String(s.path).get_file()
+		var names: Array = (wanted.get(script_id, [])
+			+ wanted.get(base, [])) as Array
+		if names.is_empty():
+			out["removed"] = int(out["removed"]) + s.tests.size()
+			s.tests = []
+			continue
+		if names.has("*"):
+			out["kept"] = int(out["kept"]) + s.tests.size()
+			out["whole"] = int(out["whole"]) + 1
+			continue
+		var kept: Array = []
+		for t in s.tests:
+			if names.has(String(t.name)):
+				kept.append(t)
+		out["kept"] = int(out["kept"]) + kept.size()
+		out["removed"] = int(out["removed"]) + (s.tests.size() - kept.size())
+		s.tests = kept
+	print("@TESTFACE@ requested=" + str(out["requested"]) + " kept="
+		+ str(out["kept"]) + " removed=" + str(out["removed"])
+		+ " whole=" + str(out["whole"]))
+	return out
+""".replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER).replace("@SKIPRED@", SKIP_RED_MARKER).replace("@TESTFACE@", TEST_FACE_MARKER)
 
 # cold 直驱宿主：beacon L1-L3 逐字节同构（failure 码 3/4 + marker 契约不变）
 # → 顺序执行原语。cfg 增量键：tests_scripts / baseline_failures。
@@ -217,6 +260,9 @@ func _init() -> void:
 	# SEE-1606 §SPEC-P2-R1/D2：基线红测试物理跳过（脚本+名定位）。
 	var skip_red: Dictionary = await _gqt_skip_red_tests(
 		gut, cfg.get("skip_red_tests", []))
+	# SEE-1610 §SPEC-IMPL：test 级 allowlist 过滤（skip_red 之后、执行前）。
+	var allow: Dictionary = await _gqt_allow_tests(
+		gut, cfg.get("allow_tests", []))
 	# kill 即退只在开关开启时生效；bail 基线名单与跳过名单同源但语义独立。
 	var bail_on: bool = bool(cfg.get("bail_enabled", false))
 	var bail_names: Array = (cfg.get("bail_baseline_failures", [])
@@ -224,6 +270,7 @@ func _init() -> void:
 	var seq: Dictionary = await _gqt_run_scripts_sequential(
 		gut, scripts, bail_names, 600000)
 	seq["skip_red"] = skip_red
+	seq["allow"] = allow
 	get_root().remove_child(gut)
 	gut.free()
 	quit(1 if int(seq["fail"]) > 0 else 0)
@@ -250,11 +297,14 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                      autoload_name: str, scripts: list[str],
                      baseline_failures: list[str],
                      bail_enabled: bool = True,
-                     skip_red_tests: list[tuple[str, str]] | None = None) -> Path:
+                     skip_red_tests: list[tuple[str, str]] | None = None,
+                     allow_tests: list | None = None) -> Path:
     """单 mutant 直驱 cfg（beacon cfg 超集）；调用方 finally 删除。
 
     bail_baseline_failures 仅在 bail_enabled 时被宿主消费（kill 即退）；
-    skip_red_tests（脚本+名配对）独立生效（§SPEC-P2-R1 物理跳过，与 bail 无关）。"""
+    skip_red_tests（脚本+名配对）独立生效（§SPEC-P2-R1 物理跳过，与 bail 无关）；
+    allow_tests（§SPEC-IMPL，[script, name] 或 [script, "*"]）在 skip_red
+    之后物理保留命中测试。"""
     path = Path(slot_root) / f".gqt_beacon_cfg_{uuid.uuid4().hex[:12]}.json"
     payload = {"target_res": target_res, "mutant_sha256": mutant_sha256,
                "autoload": autoload_name,
@@ -262,6 +312,7 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                "baseline_failures": sorted(baseline_failures or []),
                "bail_enabled": bool(bail_enabled),
                "bail_baseline_failures": sorted(baseline_failures or []),
-               "skip_red_tests": [list(p) for p in (skip_red_tests or [])]}
+               "skip_red_tests": [list(p) for p in (skip_red_tests or [])],
+               "allow_tests": [list(p) for p in (allow_tests or [])]}
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

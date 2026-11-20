@@ -212,7 +212,7 @@ class TestWorkerSkip:
 
             def run_leg(self, leg, target_res, sha, closure, tests_glob,
                         tests_scripts=None, baseline_failures=None,
-                        skip_red_tests=None):
+                        skip_red_tests=None, allow_tests=None):
                 captured.setdefault("legs", []).append(
                     {"leg": leg, "skip": skip_red_tests})
                 return wc.WorkerLegResult(leg=leg, hash_ok=True, gut_ran=True,

@@ -438,6 +438,17 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
         mutate_all=mutate_all, identity=identity)
     if early is not None:
         return early
+    # SEE-1610 §SPEC-IMPL：test 级筛选开关（默认开启，flag/env 可关断）。
+    # 仅当 chunk 携带组内映射（tests_allow）且开关开启时下发宿主；
+    # fn/file/full 选面与无映射组天然不含 tests_allow → 行为不变。
+    global _ACTIVE_ALLOW_TESTS
+    _ACTIVE_ALLOW_TESTS = None
+    _ta = (selection_meta or {}).get("tests_allow") or {}
+    if _ta and killbail.resolve_test_filter():
+        _ACTIVE_ALLOW_TESTS = (
+            [[str(i).partition("::")[0], str(i).partition("::")[2]]
+             for i in (_ta.get("identities") or [])]
+            + [[str(s2), "*"] for s2 in (_ta.get("script_lane") or [])])
     scoped = tests_glob is not None
     plan = _core_plan(
         c, path, project_root, original_src, tests_glob=tests_glob,
@@ -516,6 +527,12 @@ _adaptive_timeout = 0
 # 由 _loop_baseline 每轮重置；供（1）宿主红测跳过配对（2）同名列 kill 判
 # 定的保守豁免。空集 = 基线流无脚本标题可解析 → 回退裸名语义。
 _BASELINE_RED_MAP: set[tuple[str, str]] = set()
+
+# SEE-1610 §SPEC-IMPL：本 run 的 test 级 allowlist（selection_meta.tests_allow
+# 解析产物：[script, name] / [script, "*"]）。None = 本腿不启用过滤（开关
+# 关断 / 非 line 选面 / 组内无映射）。per-run 进程级上下文，与
+# _BASELINE_RED_MAP 同款（chunk 进程各自在 run_mutation 入口重置）。
+_ACTIVE_ALLOW_TESTS: list | None = None
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
@@ -684,7 +701,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     prior_entries, scopes, _ownership,
                     timings_out=timings_out, kill_bail=kill_bail,
                     tests_scripts=direct_scripts, red_pairs=red_pairs,
-                    baseline_red_map=_BASELINE_RED_MAP)
+                    baseline_red_map=_BASELINE_RED_MAP,
+                    allow_tests=_ACTIVE_ALLOW_TESTS)
             clock.add("worker_boot",
                       timings_out.get("worker_boot_s", 0.0))
             if fatal_events:
@@ -771,6 +789,15 @@ def _run_mutant_loop(
         slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
         slot_info["kill_bail_scripts"] = (
             len(bail_scripts) if bail_scripts is not None else None)
+        # SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
+        # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
+        _at = _ACTIVE_ALLOW_TESTS or []
+        slot_info["test_filter"] = {
+            "enabled": killbail.resolve_test_filter(),
+            "disabled_by": killbail.test_filter_disabled_by(None),
+            "applied": bool(_at),
+            "allow_identities": sum(1 for p in _at if p[1] != "*"),
+            "script_lane_fallback": sum(1 for p in _at if p[1] == "*")}
         if dirty:
             slot_info["baseline_skip"] = {
                 "applied": bool(skip_applied), "face": bail_face,

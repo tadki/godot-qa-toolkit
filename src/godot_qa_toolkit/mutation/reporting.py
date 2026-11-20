@@ -382,7 +382,8 @@ def _apply_mechanism_disclosures(summary: dict, results: list[dict],
     for key in ("baseline_dirty", "baseline_failures",
                 "baseline_failure_names", "break_on_baseline_failure",
                 "kill_bail", "kill_bail_face", "kill_bail_disabled_by",
-                "kill_bail_scripts", "baseline_skip"):
+                "kill_bail_scripts", "baseline_skip",
+                "test_filter"):
         if key in info:
             summary[key] = info[key]
     _emit_killed_certificates(summary, results)

@@ -782,9 +782,19 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
     if ambiguous:
         raise MutationSelectionError("ambiguous_test_names",
                                      str(sorted(ambiguous)[:5]))
+    # SEE-1610 §SPEC-IMPL：组内 test 级 allowlist（--lines 串行路径与
+    # planning 并行 chunk 同源；runner 入口按开关解析后下发宿主）。
+    from .truth_lines import line_identity_sets
+    idents, lane = line_identity_sets(doc, rel, want)
+    ident_set: set[str] = set()
+    for ls in idents.values():
+        ident_set.update(ls)
+    tests_allow = {"identities": sorted(ident_set),
+                   "script_lane": sorted(lane)}
     base = {"no_mapped_tests": no_mapped, "lines": sorted(want),
             "mapping": file_sel.get("mapping"), "zero_ref": False,
-            "ambiguous_names": []}
+            "ambiguous_names": [],
+            "tests_allow": tests_allow}
     if not scripts:
         return {**base, "source": "no_mapped_tests",
                 "reason": "line_has_no_mapped_tests", "tests": [],

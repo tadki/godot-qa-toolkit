@@ -59,7 +59,12 @@ from .orchestrator import (
     run_measurement,
 )
 
-DEFAULT_RERUN_FULL_FACE_RATIO = 0.5
+# SEE-1610 §SPEC-TH1 实测校准（KOL 824 文件/285 脚本 warm 副本）：增量墙钟
+# ≈ 16s + 8.9s×重跑脚本数（S1 1.75%/5 脚本 → 60.5s，S2 37.5%/107 → 966s，
+# S3 44.9%/128 → 1162s），暖全脸 223-227s——交叉点 ≈ 23.6 脚本（~8.3% 占比）。
+# 0.5 在中位面上让增量比全脸慢 4.3-5.2 倍，故收紧到 0.05（≈14 脚本，帽内
+# 增量仍 ≤ ~140s，保住 ≥38% 节省且留出噪声带余量）。
+DEFAULT_RERUN_FULL_FACE_RATIO = 0.05
 _FWD_KEYS = ("test_to_files", "test_to_functions",
              "script_to_files", "script_to_functions")
 _LINE_KEYS = ("test_to_lines", "script_to_lines")

@@ -117,6 +117,10 @@ func _run_leg(req: Dictionary) -> void:
 			var skip_out: Dictionary = await _gqt_skip_red_tests(
 				gut, skip_tests)
 			resp["skip_red"] = skip_out
+			# SEE-1610 §SPEC-IMPL：test 级 allowlist（skip_red 后、执行前）。
+			var allow_out: Dictionary = await _gqt_allow_tests(
+				gut, req.get("allow_tests", []))
+			resp["allow"] = allow_out
 			var seq: Dictionary = await _gqt_run_scripts_sequential(
 				gut, scripts, baseline_names, 600000)
 			resp["gut_ran"] = not bool(seq["hung"])
@@ -131,6 +135,9 @@ func _run_leg(req: Dictionary) -> void:
 			var skip_out: Dictionary = await _gqt_skip_red_tests(
 				gut, skip_tests)
 			resp["skip_red"] = skip_out
+			var allow_out2: Dictionary = await _gqt_allow_tests(
+				gut, req.get("allow_tests", []))
+			resp["allow"] = allow_out2
 			var done := [false]
 			gut.end_run.connect(func() -> void: done[0] = true)
 			gut.test_scripts()
@@ -303,6 +310,7 @@ class WorkerLegResult:
     timings: dict = field(default_factory=dict)
     bail_info: dict | None = None
     skip_red_info: dict | None = None
+    allow_info: dict | None = None
 
 
 @dataclass
@@ -449,6 +457,7 @@ class WorkerSession:
                 tests_scripts: list[str] | None = None,
                 baseline_failures: list[str] | None = None,
                 skip_red_tests: list[tuple[str, str]] | None = None,
+                allow_tests: list | None = None,
                 ) -> WorkerLegResult:
         """执行一条 R-C 腿；任何致命形态标记 self.dead 并如实返回。
 
@@ -474,6 +483,8 @@ class WorkerSession:
             req["baseline_failures"] = sorted(baseline_failures or [])
         # §SPEC-P2-R1/D2：红测试物理跳过（脚本+名定位）与 bail/清单无关。
         req["skip_red_tests"] = [list(p) for p in (skip_red_tests or [])]
+        # SEE-1610 §SPEC-IMPL：test 级 allowlist（[script, name]/[script, "*"]）。
+        req["allow_tests"] = [list(p) for p in (allow_tests or [])]
         req_name = f"req-{leg}-{uuid.uuid4().hex[:8]}.json"
         (work / req_name).write_text(json.dumps(req), encoding="utf-8")
         resp_path = work / "resp.json"
@@ -534,6 +545,7 @@ class WorkerSession:
             timings=dict(resp.get("timings") or {}),
             bail_info=_bail_info_of(resp),
             skip_red_info=_dict_or_none(resp, "skip_red"),
+            allow_info=_dict_or_none(resp, "allow"),
         )
         r.target_compile_invalid = self._target_compile_invalid(leg, r.reload)
         r.failing_tests = self._leg_failing_names(leg)

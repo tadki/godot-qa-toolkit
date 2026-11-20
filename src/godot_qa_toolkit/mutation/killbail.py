@@ -27,6 +27,9 @@ DIRECT_SCRIPTS_MARKER = "GQT_DIRECT_SCRIPTS"
 # SEE-1606 §SPEC-P2-R1：基线红测试物理跳过 marker（宿主从 collector 移除
 # 红测试后打点；Python 分类侧据此区分「干净批次」与「跑过但不算」）。
 SKIP_RED_MARKER = "GQT_SKIP_RED"
+# SEE-1610 §SPEC-IMPL：test 级 allowlist 过滤 marker（宿主物理保留
+# allowlist 命中测试后打点；kept/removed/whole 供 §SPEC-JSON 披露对账）。
+TEST_FACE_MARKER = "GQT_TEST_FACE"
 
 # 顺序执行 chunk 大小：性能门实测（SEE-1606 DoD）——per-script 逐脚本调
 # 用 `_test_the_scripts([i])` 的固定开销 ~0.46s/次，286 脚本宽面幸存腿
@@ -96,6 +99,10 @@ def face_scripts(project_root: str,
 _SKIP_RED_RE = re.compile(
     rf"{SKIP_RED_MARKER} marked=(\d+) requested=(\d+) names=(\S*)")
 
+_TEST_FACE_RE = re.compile(
+    rf"{TEST_FACE_MARKER} requested=(\d+) kept=(\d+) removed=(\d+) "
+    rf"whole=(\d+)")
+
 
 def parse_skip_red_marker(tail: str) -> dict | None:
     """红测试物理跳过 marker → 披露 dict；缺席 = 本腿未发生跳过（None）。"""
@@ -105,6 +112,38 @@ def parse_skip_red_marker(tail: str) -> dict | None:
     names = [n for n in m.group(3).split(",") if n]
     return {"marked": int(m.group(1)), "requested": int(m.group(2)),
             "names": names}
+
+
+def parse_test_face_marker(tail: str) -> dict | None:
+    """test 级 allowlist 过滤 marker → 披露 dict（§SPEC-JSON test_face）；
+    缺席 = 本腿未启用过滤（None）。"""
+    m = _TEST_FACE_RE.search(tail or "")
+    if m is None:
+        return None
+    return {"requested": int(m.group(1)), "kept": int(m.group(2)),
+            "removed": int(m.group(3)), "whole_script_fallback":
+                int(m.group(4))}
+
+
+# SEE-1610 §SPEC-IMPL：test 筛选开关（照 kill 即退先例：默认开启，显式
+# flag 最高优先，env 关断逃生门）。仅对 line 选面且有组内映射的腿生效。
+ENV_TEST_FILTER = "GQT_MUTATION_TEST_FILTER"
+
+
+def resolve_test_filter(flag: bool | None = None) -> bool:
+    if flag is not None:
+        return bool(flag)
+    return os.environ.get(ENV_TEST_FILTER, "").strip().lower() \
+        not in _OFF_VALUES
+
+
+def test_filter_disabled_by(flag: bool | None = None) -> str | None:
+    if flag is False:
+        return "flag"
+    if flag is None and os.environ.get(ENV_TEST_FILTER, "").strip().lower() \
+            in _OFF_VALUES:
+        return "env"
+    return None
 
 
 def parse_bail_marker(tail: str) -> dict | None:

@@ -236,11 +236,15 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
             f"disk injection failed for {target_res}: {e}",
             src=original_src), None, None
     if direct_scripts is not None:
+        from godot_qa_toolkit.mutation import runner as _runner_mod
         from . import directdrive
+        # SEE-1610 §SPEC-IMPL：test 级 allowlist 从 runner per-run 上下文
+        # 取（_ACTIVE_ALLOW_TESTS；beacon 兜底腿不下发——宿主无该原语）。
+        allow = getattr(_runner_mod, "_ACTIVE_ALLOW_TESTS", None)
         cfg_path = directdrive.write_direct_cfg(
             slot.root, target_res, mutant_sha, auto_name, direct_scripts,
             sorted(baseline_failures or ()), bail_enabled=bail_enabled,
-            skip_red_tests=list(red_pairs or ()))
+            skip_red_tests=list(red_pairs or ()), allow_tests=allow)
     else:
         cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
                                            auto_name)
@@ -303,6 +307,13 @@ def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
                 "skipped (clean batch)")
         print(f"mutation: baseline skip-red marked="
               f"{skip_red['marked']}/{skip_red['requested']}", file=sys.stderr)
+    # SEE-1610 §SPEC-JSON：test_face 披露（kept/removed/whole_script_fallback）。
+    test_face = killbail.parse_test_face_marker(tail)
+    if test_face is not None:
+        verdict = {**verdict, "test_face": test_face}
+        print(f"mutation: test-face kept={test_face['kept']} "
+              f"removed={test_face['removed']} "
+              f"whole={test_face['whole_script_fallback']}", file=sys.stderr)
     return verdict
 
 

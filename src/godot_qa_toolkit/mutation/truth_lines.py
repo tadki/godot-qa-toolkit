@@ -69,6 +69,31 @@ def _line_script_sets(doc: dict, rel: str,
                 out.setdefault(int(ln), set()).add(Path(script).name)
     return out
 
+def line_identity_sets(doc: dict, rel: str,
+                       lines: set[int]) -> "tuple[dict[int, list[str]], set[str]]":
+    """行 → test 身份列表（test 车道，身份级）∪ 组内 script 车道脚本集。
+
+    SEE-1610 §SPEC-IMPL：test 级 allowlist 数据源——identities 供
+    [script, name] 保留对；script 车道脚本（before_all 等脚本级触达）以
+    整脚本保留（"*"），不可 test 级收窄。"""
+    arm = (doc.get("arms") or {}).get("gut_full") or {}
+    out: dict[int, list[str]] = {}
+    lane: set[str] = set()
+    for ln_s, idents in (arm.get("line_to_tests") or {}).get(rel, {}).items():
+        ln = int(ln_s)
+        if ln not in lines:
+            continue
+        slot = out.setdefault(ln, [])
+        for i in idents:
+            if i not in slot:
+                slot.append(i)
+    for script, rel_map in (arm.get("script_to_lines") or {}).items():
+        for ln in (rel_map or {}).get(rel, []) or []:
+            if int(ln) in lines:
+                lane.add(script)
+    return out, lane
+
+
 def _resolve_script_paths(by_name: dict,
                           names) -> "tuple[list[str], list[str]]":
     """basename → tests 树路径解析（缺失名跳过、多路径记歧义）。

@@ -534,7 +534,7 @@ class _FakeSession:
 
     def run_leg(self, seq, target_res, mutant_sha, closure, tests_glob,
                 tests_scripts=None, baseline_failures=None,
-                skip_red_tests=None):
+                skip_red_tests=None, allow_tests=None):
         return self._leg
 
 
@@ -599,7 +599,7 @@ def test_runner_worker_boot_harvest_counted(tmp_path, monkeypatch):
              target_rel, target_res, kind, reporter, store2,
              prior_entries, scopes, ownership_fn, timings_out=None,
              kill_bail=False, tests_scripts=None,
-             red_pairs=None, baseline_red_map=None):
+             red_pairs=None, baseline_red_map=None, allow_tests=None):
         if timings_out is not None:
             timings_out["worker_boot_s"] = 2.5
         return _fake_cold_legs(
@@ -772,7 +772,7 @@ def test_d1_parent_identity_honors_worker_flag(tmp_path, monkeypatch):
              target_rel, target_res, kind, reporter, store2,
              prior_entries, scopes, ownership_fn, timings_out=None,
              kill_bail=False, tests_scripts=None,
-             red_pairs=None, baseline_red_map=None):
+             red_pairs=None, baseline_red_map=None, allow_tests=None):
         raw = runner_mod._run_cold_legs(
             path, project_root, original_src, "", mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,

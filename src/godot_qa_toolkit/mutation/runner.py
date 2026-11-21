@@ -57,7 +57,7 @@ from .identity import (COLD_SCHEME, INJECT_SCHEME,
                        suspected_orphan)
 from .channel_router import CHANNEL_WORKER, route_target
 from .stagetiming import StageClock, reconcile, self_rss_peak_mb
-from .worker_channel import (build_worker_disclosure,
+from .worker_channel import (RouteDriftError, build_worker_disclosure,
                              degraded_worker_disclosure, identity_for_target,
                              resolve_exec_scheme,
                              run_worker_legs, worker_enabled)
@@ -67,7 +67,7 @@ from .worker_channel import (build_worker_disclosure,
 from .reporting import (
     _attention_note, _classify_mutant_run, _mutant_record,
     _no_sites_result, _record_invalid_mutants, _require_baseline_snapshot,
-    _run_error_result,
+    _route_drift_result, _run_error_result,
     _setup_error_result,
     _mutation_report,
     _valid_mutants,
@@ -252,11 +252,18 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
     kind = binary_kind or detect_binary_kind()
     target_res_early = _res_path_of(str(path), str(project_root))
     # SEE-1550 §SPEC-020：exec_scheme 按目标路由入身份包（worker 显式启用且
-    # 路由判 worker 才 worker-reset/1；A9 默认冷）。parent 传入的 identity
-    # 用同源解析覆盖 scheme——父子两侧 file_key 一致。
+    # 路由判 worker 才 worker-reset/1；A9 默认冷）。
+    # SEE-1606 §SPEC-P1：父层 identity 已带权威 exec_scheme 时（planning
+    # 注入），本地重解析只做比对——不一致具名 route_drift（baseline 前
+    # fail-loud，禁止静默覆盖 file_key 面）；父层无 scheme（串行首解析）
+    # 本次解析即权威，行为不变。
     with clock.stage("route_scan"):
-        identity, _route, exec_scheme = identity_for_target(
-            identity, project_root, target_res_early, worker_channel)
+        try:
+            identity, _route, exec_scheme = identity_for_target(
+                identity, project_root, target_res_early, worker_channel,
+                check=True)
+        except RouteDriftError as e:
+            return _route_drift_result(str(path), e), {}
     if identity is None:
         identity = identity_pack(project_root, kind, exec_scheme=exec_scheme)
     try:
@@ -721,7 +728,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     timings_out=timings_out, kill_bail=kill_bail,
                     tests_scripts=direct_scripts, red_pairs=red_pairs,
                     baseline_red_map=_BASELINE_RED_MAP,
-                    allow_tests=_ACTIVE_ALLOW_TESTS)
+                    allow_tests=_ACTIVE_ALLOW_TESTS,
+                    expected_scheme=exec_scheme_resolved)
             clock.add("worker_boot",
                       timings_out.get("worker_boot_s", 0.0))
             if fatal_events:
@@ -773,6 +781,9 @@ def _run_mutant_loop(
     baseline_elapsed, slot_info)。verdict 记录不在此处进 results——D5 streak
     是窗口级判定，由调用方 apply_timeout_streaks 落定后统一扩展。"""
     with tempfile.TemporaryDirectory() as workdir:
+        # SEE-1606 §SPEC-P1：baseline 前权威比对门——setup 权威 scheme 与
+        # 实跑重解析漂移即具名失败（零 baseline 支付、零槽写入）。
+        _preflight_route_check(identity, project_root, path, worker_channel)
         (baseline_failures, baseline_dirty, baseline_reused,
          baseline_elapsed) = _loop_baseline(workdir, path, project_root,
                                             tests_glob, timeout_s,
@@ -788,8 +799,10 @@ def _run_mutant_loop(
             bail_effective, str(project_root), tests_glob, dirty=dirty)
         # §SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
         # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
-        worker_host = (dirty and _scheme_is_worker(
-            str(project_root), str(path), worker_channel))
+        # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
+        # 保证 setup 权威与实跑一致）。
+        worker_host = (dirty and (identity or {}).get("exec_scheme")
+                       == WORKER_SCHEME)
         if dirty and bail_scripts is None and not worker_host:
             raise _BaselineSkipUnsupportedFace(
                 sorted(baseline_failures), bail_face)
@@ -833,14 +846,23 @@ def _run_mutant_loop(
                 project_root, target_res)
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
 
-def _scheme_is_worker(project_root: str, target_path: str,
-                     worker_channel) -> bool:
-    """§SPEC-P2-R1：目标是否走可控宿主（worker 通道可按单测物理跳过）。"""
-    from .worker_channel import WORKER_SCHEME, resolve_exec_scheme
+def _preflight_route_check(identity, project_root, path, worker_channel):
+    """SEE-1606 §SPEC-P1：baseline 前权威比对门。
 
+    setup/父层身份携带权威 exec_scheme 时，本地重解析只做漂移校验——
+    不一致抛 RouteDriftError（where=pre_baseline），由 with_aborts 转具名
+    JSON；此门保证漂移永不先付 baseline。identity 无权威 scheme（串行
+    首解析前的 None 形态）时跳过——下游 _loop_slot 比对仍覆盖。"""
+    expected = (identity or {}).get("exec_scheme") \
+        if isinstance(identity, dict) else None
+    if expected is None:
+        return
     scheme, _route = resolve_exec_scheme(
-        project_root, _res_path_of(target_path, project_root), worker_channel)
-    return scheme == WORKER_SCHEME
+        str(project_root), _res_path_of(str(path), str(project_root)),
+        worker_channel)
+    if scheme != expected:
+        raise RouteDriftError(_res_path_of(str(path), str(project_root)),
+                              str(expected), str(scheme), "pre_baseline")
 
 
 class _BaselineSkipUnsupportedFace(Exception):
@@ -934,3 +956,7 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             "shadow slot provisioning failed — mutation data untrustworthy",
             f"shadow slot provisioning failed: {e}",
         )
+    except RouteDriftError as e:
+        # SEE-1606 §SPEC-P1：route 漂移（pre_baseline 门 / _loop_slot /
+        # worker 注入）→ 具名中止契约（零 baseline / 零错误 key 写入）。
+        return _route_drift_result(str(path), e)

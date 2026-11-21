@@ -157,7 +157,7 @@ func _run_leg(req: Dictionary) -> void:
 				req.get("skip_red_tests", []))
 			resp["allow"] = allow_out2
 			# SEE-1615 §SPEC-EVWAIT：事件等待 + 一次性超时事件（无轮询）
-			var done := {"end": false, "cap": false}
+			var done := {"end": false}
 			# on_end 由 end_run 发射栈内调用——经 Object.call_deferred 推迟
 			# 出派发栈（同 directdrive；Signal 无 call_deferred 成员）
 			var on_end := func() -> void:
@@ -166,7 +166,6 @@ func _run_leg(req: Dictionary) -> void:
 			gut.end_run.connect(on_end)
 			var cap := create_timer(60.0)
 			var on_cap := func() -> void:
-				done["cap"] = true
 				call_deferred("_finish_leg", false)
 			cap.timeout.connect(on_cap)
 			gut.test_scripts()

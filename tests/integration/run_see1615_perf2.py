@@ -251,7 +251,6 @@ def main(argv: list[str] | None = None) -> int:
 
     root, target = build_fixture(Path(tempfile.mkdtemp(prefix="see1615-p2-")))
     report: dict = {"tool": "see1615-perf2", "rules": [], "tracks": {}}
-    rules_src = Path(__file__).resolve().parents[1] / "unit"
     for rule in (RULE_EQ_ZERO_ADD, RULE_EQ_ZERO_SUB,
                  RULE_EQ_ARMSWAP_SYMMETRIC):
         report["rules"].append({"rule": rule, "proof": _RULE_PROOFS[rule]})

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 
-from godot_qa_toolkit.mutation import reporting
 from godot_qa_toolkit.mutation.reporting import (
     _dry_run_result,
     _execution_plan,
@@ -125,7 +124,6 @@ def test_core_dry_run_rebuilds_plan_after_selection_disclosure(
     rel = "src_game/cell.gd"
     mutants = _collect_mutations(src, rel)
     assert mutants
-    resume_dir = tmp_path / "store"
 
     class _FakeStore:
         def __init__(self, *a, **k):

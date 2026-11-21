@@ -73,7 +73,6 @@ def test_plan_id_stable_under_derived_and_blind_to_observed():
 
 
 def _fixture_project(tmp_path, with_map=None):
-    from pathlib import Path
     root = tmp_path / "proj"
     (root / "src_game").mkdir(parents=True)
     (root / "src_game" / "cell.gd").write_text(_SRC, encoding="utf-8")

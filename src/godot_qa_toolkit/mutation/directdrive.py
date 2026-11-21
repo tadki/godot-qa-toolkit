@@ -96,10 +96,10 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 		var idxs: Array = []
 		for i in range(start, stop):
 			idxs.append(i)
-		var done := [false]
-		var cb := func() -> void: done[0] = true
 		# SEE-1615 §SPEC-EVWAIT：事件等待 + 一次性超时事件（无轮询）——
 		# end_run 信号与超时事件同汇 _chunk_settled，语义与 HANG 判定不变。
+		# hung ⟺ not end（MEDIUM-1 同帧边界：end 与 cap 同帧先后触发时
+		# 二者均已置位，按 end_fired 优先，不误报 hung）。
 		var settled := {"end": false, "cap": false}
 		# on_end 由 end_run 发射栈内调用——经 Object.call_deferred 推迟出
 		# 派发栈（Signal 无 call_deferred 成员；KOL 实测同步恢复会在信号
@@ -117,8 +117,7 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 		await _chunk_settled
 		gut.end_run.disconnect(on_end)
 		cap.timeout.disconnect(on_cap)
-		_chunk_settled.disconnect(on_cap)
-		if settled["cap"]:
+		if not settled["end"]:
 			out["hung"] = true
 			print("@HUNG@ waited_ms=" + str(per_script_timeout_ms)
 				+ " scripts_run=" + str(out["scripts_run"])
@@ -276,8 +275,6 @@ func _init() -> void:
 	if(Engine.get_main_loop() == null):
 		printerr('GQT_BEACON_FAIL: main loop did not start in time')
 		quit(4)
-		return
-		quit(0)
 		return
 	var bytes := FileAccess.get_file_as_bytes(target_res)
 	if bytes.is_empty():

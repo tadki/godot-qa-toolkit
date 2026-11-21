@@ -173,7 +173,6 @@ func _run_leg(req: Dictionary) -> void:
 			await _leg_settled
 			gut.end_run.disconnect(on_end)
 			cap.timeout.disconnect(on_cap)
-			_leg_settled.disconnect(on_cap)
 			resp["gut_ran"] = done["end"]
 			resp["pass"] = gut.get_pass_count()
 			resp["fail"] = gut.get_fail_count()

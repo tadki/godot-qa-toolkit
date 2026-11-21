@@ -39,8 +39,6 @@ SRC = REPO / "src"
 if str(SRC) not in sys.path:  # `-I` 隔离模式下 PYTHONPATH 被忽略，须自举
     sys.path.insert(0, str(SRC))
 DEFAULT_GODOT = "/home/jerry/gqt-probe-bin/godot"
-KOL_ADDONS = Path("/home/jerry/multica_workspaces/seed-478690824e46/"
-                  "see-1615-f9a8c1cf79db/workdir/KingOfLikes-Godot/addons/gut")
 
 HOT_FUNCS = [("v01", "a + b"), ("v02", "a - b"), ("v03", "a * b"),
              ("v04", "a + b"), ("v05", "a - b"), ("v06", "a * b"),
@@ -89,15 +87,20 @@ def _test_script(name: str, funcs: list[tuple[str, str]],
             + body + "\n")
 
 
-def build_fixture(root: Path, n_scripts: int = 24) -> tuple[Path, str]:
+def build_fixture(root: Path, n_scripts: int = 24,
+                  kol_addons: Path | None = None) -> tuple[Path, str]:
     """受控工程：hot 脚本断言全部 8 函数（击杀数最高），其余单函数。"""
+    if kol_addons is None:
+        raise SystemExit("missing --kol-addons (real GUT addon source, "
+                         "e.g. <KingOfLikes-Godot>/addons/gut)")
     if root.exists():
         shutil.rmtree(root)
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "addons").mkdir()
-    if not KOL_ADDONS.is_dir():
-        raise SystemExit(f"missing real GUT addon: {KOL_ADDONS}")
-    shutil.copytree(KOL_ADDONS, root / "addons" / "gut")
+    if not kol_addons.is_dir():
+        raise SystemExit(f"GUT addon source missing (--kol-addons): "
+                         f"{kol_addons}")
+    shutil.copytree(kol_addons, root / "addons" / "gut")
     (root / "project.godot").write_text(
         'config_version=5\n\n[application]\nconfig/name="perf1"\n',
         encoding="utf-8")
@@ -358,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--budget", type=int, default=24)
     ap.add_argument("--report", default="perf1-report.json")
     ap.add_argument("--godot-bin", default=DEFAULT_GODOT)
+    ap.add_argument("--kol-addons", default=None,
+                    help="真实 GUT addon 源（addons/gut；合成 fixture 用）")
     ap.add_argument("--fixture-root", default=None)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--track", choices=["synthetic", "kol"],
@@ -425,7 +430,8 @@ def main(argv: list[str] | None = None) -> int:
                           "cells": results}, ensure_ascii=False, indent=2))
         return 0
     root = Path(args.fixture_root or tempfile.mkdtemp(prefix="see1615-perf1-"))
-    target, _rel = build_fixture(root)
+    kol_addons = Path(args.kol_addons).resolve() if args.kol_addons else None
+    target, _rel = build_fixture(root, kol_addons=kol_addons)
     err = _run(root, target, False, 32, args.budget, args.godot_bin)
     if not err.get("completed"):
         print(json.dumps({"stage": "warmup_failed", "run": err},

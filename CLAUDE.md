@@ -10,6 +10,10 @@
 - 本主检出上 **禁止运行 `gqt mutation` / `gqt measure coverage`** 之外的长驻流程；repo-sync daemon（`.dev/repo-sync/`）是本目录唯一的常驻写手，其余常驻进程不得指向本目录
 - push 纪律：只推 `shared/SEE-XXX` 共享分支（显式 refspec），严禁直推 master
 
+## 测试脚本规范
+
+- 测试脚本必须自包含：每个脚本自带 before_each/after_each 还原其触达的全部全局状态（autoload 单例、user:// 存档、场景树），不得依赖其他脚本的执行顺序或残留状态
+
 ## 背景
 
 2026-10-15/16 SEE-1416 事故：agent 在本主检出上 checkout 共享分支，与 repo-sync 的分支守卫（stash+强切 master）互相拉锯，导致 4 个 commit 直接落在本地 master 并被同步器如实推上 origin/master，绕过 PR。本规则防止复发；架构级修复（受管 worktree 化、repo-sync 守卫改跳过）另行 issue 跟进。

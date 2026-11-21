@@ -173,7 +173,9 @@ def assign_scope_ids(spans: list, file_label: str, mutants: list) -> list:
     return out
 
 
-def build_manifest(src: str, file_label: str, mutants: list) -> tuple[
+def build_manifest(src: str, file_label: str, mutants: list,
+                   equivalent_prune: bool | None = None,
+                   prune_out: "dict | None" = None) -> tuple[
         str, list, list, dict[str, str]]:
     """P1 manifest 编排入口：extract → no-mutate 过滤 → id 标定 → scope 表。
 
@@ -181,16 +183,44 @@ def build_manifest(src: str, file_label: str, mutants: list) -> tuple[
     **无位点 scope 不进 manifest**（D2）：site_scopes 只收含 ≥1 位点的
     scope；module 位点的 hash 锚定 header hash（D2 同域——顶层 var/const
     变更必然同触 header 重跑，module 差分不 self-invalidate）。
+
+    SEE-1615 §SPEC-PERF2：``equivalent_prune``（默认经 env 单点解析，OFF）
+    开启时在 id 标定**后**做等价/无意义预剪枝——pruned 保留 stable id 并经
+    ``prune_out`` 逐点披露（规则/分母/清单），kept id 零位移（diff/resume
+    机制不变；开关联动的一次性 store 失效随披露）。``prune_out`` 缺省时
+    开关状态照常解析（调用方只要行为不要披露）。
     """
+    from .equivalent import prune_equivalent, resolve_equiv_prune
+
     header_hash, spans = extract_scopes(src)
     filtered = filter_no_mutate(src, mutants, spans)
     tagged = assign_scope_ids(spans, file_label, filtered)
+    prune_on = resolve_equiv_prune(equivalent_prune)
+    pruned_items: list[dict] = []
+    if prune_on and tagged:
+        tagged, pruned_items = prune_equivalent(src, tagged)
     site_scopes: dict[str, str] = {}
     for s in spans:
         if any(m.scope_id == s.scope_id for m in tagged):
             site_scopes[s.scope_id] = s.hash
     if any(m.scope_id == "module" for m in tagged):
         site_scopes["module"] = header_hash
+    if prune_out is not None:
+        rules: dict[str, int] = {}
+        for item in pruned_items:
+            rules[item["rule"]] = rules.get(item["rule"], 0) + 1
+        prune_out["equivalent_pruned"] = {
+            "enabled": prune_on,
+            "rules": rules,
+            "sites_before": len(filtered),
+            "sites_after": len(tagged),
+            "items": pruned_items,
+            "execution_cost_saved": {
+                "mutants_pruned": len(pruned_items),
+                "note": ("每剪枝位点省一轮 GUT 腿；绝对秒数见 PERF2 双轨"
+                         "实测对比，估算不作结论"),
+            },
+        }
     return header_hash, spans, tagged, site_scopes
 
 

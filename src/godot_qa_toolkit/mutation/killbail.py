@@ -36,6 +36,128 @@ TEST_FACE_MARKER = "GQT_TEST_FACE"
 # 210.9s vs 现状 78.5s（2.69×）不达标；C=32 时幸存腿开销 ≈ (N/C)×0.46
 # （286→9 次 ≈ +5%，落 A/A 噪声带内），被杀腿至多多跑 C-1 个脚本。
 KILL_BAIL_CHUNK = 32
+DEFAULT_BAIL_CHUNK = KILL_BAIL_CHUNK
+ENV_BAIL_CHUNK = "GQT_MUTATION_BAIL_CHUNK"
+
+# SEE-1615 §SPEC-HANG：直驱宿主挂起守卫（脚本清单不可加载 fail-fast +
+# chunk 等待上限有界）。等待上限 env 可配，默认 120s——600s 级等待等于
+# 实际挂起（KOL 实测腿内 GUT 正常 2s；不可加载脚本时 end_run 永不发射）。
+ENV_HOST_WAIT = "GQT_MUTATION_HOST_WAIT_MS"
+DEFAULT_HOST_WAIT_MS = 120000
+SCRIPTS_FAIL_MARKER = "GQT_DIRECT_SCRIPTS_FAIL"
+HOST_HUNG_MARKER = "GQT_HOST_HUNG"
+
+_SCRIPTS_FAIL_RE = re.compile(rf"{SCRIPTS_FAIL_MARKER} path=(\S+)")
+_HOST_HUNG_RE = re.compile(
+    rf"{HOST_HUNG_MARKER} waited_ms=(\d+) scripts_run=(\d+)/(\d+)")
+
+
+def resolve_host_wait_ms(flag: int | None = None) -> int:
+    """直驱宿主 chunk 等待上限：显式 > env 正整数 > 默认 120s。"""
+    if flag is not None and int(flag) > 0:
+        return int(flag)
+    raw = os.environ.get(ENV_HOST_WAIT, "").strip()
+    try:
+        v = int(raw)
+        return v if v > 0 else DEFAULT_HOST_WAIT_MS
+    except (TypeError, ValueError):
+        return DEFAULT_HOST_WAIT_MS
+
+
+def parse_scripts_fail_marker(tail: str) -> "dict | None":
+    """宿主脚本清单不可加载 marker → {path}；缺席 = 未触发（None）。"""
+    m = _SCRIPTS_FAIL_RE.search(tail or "")
+    return {"path": m.group(1)} if m else None
+
+
+def parse_host_hung_marker(tail: str) -> "dict | None":
+    """宿主持久等待 marker → {waited_ms, scripts_run, scripts_total}。"""
+    m = _HOST_HUNG_RE.search(tail or "")
+    if m is None:
+        return None
+    return {"waited_ms": int(m.group(1)), "scripts_run": int(m.group(2)),
+            "scripts_total": int(m.group(3))}
+
+
+# SEE-1606 §SPEC-PERF1：历史杀手排序开关。默认值由 A/A≥3 + 交错 A/B≥3
+# 实测落定（perf1-report.json：C∈{8,16,32,64} 收益 3.8%/-0.6%/3.6%/-0.85%
+# 均不超各自噪声带 5.4%/5.9%/40%/9.1%，verdict 零翻转）→ 无收益超噪声
+# 保留现默认（原序），机制经 env opt-in（GQT_MUTATION_TEST_ORDER=history）。
+ENV_TEST_ORDER = "GQT_MUTATION_TEST_ORDER"
+_TEST_ORDER_DEFAULT = False
+
+
+def resolve_test_order(flag: bool | None = None) -> bool:
+    """排序开关：显式 flag 最高优先；env 在场即权威（off 值 False、其余
+    True）；未设置取默认（实测落定为 False——保留现状原序）。"""
+    if flag is not None:
+        return bool(flag)
+    raw = os.environ.get(ENV_TEST_ORDER, "").strip().lower()
+    if raw:
+        return raw not in (*_OFF_VALUES, "off")
+    return _TEST_ORDER_DEFAULT
+
+
+def resolve_bail_chunk(flag: int | None = None) -> int:
+    """顺序执行 chunk 大小：显式 > env 正整数 > 默认 32（非法值诚实回落）。"""
+    if flag is not None and int(flag) > 0:
+        return int(flag)
+    raw = os.environ.get(ENV_BAIL_CHUNK, "").strip()
+    try:
+        v = int(raw)
+        return v if v > 0 else DEFAULT_BAIL_CHUNK
+    except (TypeError, ValueError):
+        return DEFAULT_BAIL_CHUNK
+
+
+def order_scripts_by_history(scripts: list[str],
+                             history: "dict[str, int]") -> list[str]:
+    """SEE-1606 §SPEC-PERF1：历史击杀数降序，同分/无历史保持**原序**。
+
+    排序仅置换清单——集合成员零变化（verdict 语义不受影响；首个杀手
+    可变、证书仍真实）。原序由调用方（face_scripts 的排序枚举）保证
+    确定性，故缺失历史的项目行为与现状逐位一致。"""
+    return [s for _, s in sorted(
+        enumerate(scripts),
+        key=lambda t: (-int(history.get(t[1]) or 0), t[0]))]
+
+
+def kill_history(project_root: str, target_file: str) -> "dict[str, int]":
+    """resume v2 store → 每脚本历史击杀数（killed_by 证书聚合，只读）。
+
+    扫描 `gqt-mutation-resume-v2/*/manifest.json`，rel 命中的 store 逐条目
+    聚合 `killed_by[].script_path` 计数。任何读失败/损坏/无条目 = 该数据
+    缺席（诚实降级 → 确定性原序），绝不抛出。"""
+    import json
+    from ..timing import project_relative
+    from .resume2 import RESUME_V2_DIRNAME
+    try:
+        rel = project_relative(project_root, target_file)
+        base = Path(project_root) / ".qa-cache" / RESUME_V2_DIRNAME
+        counts: dict[str, int] = {}
+        for manifest in base.glob("*/manifest.json"):
+            try:
+                doc = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if doc.get("rel") != rel:
+                continue
+            for entry in manifest.parent.glob("*.json"):
+                if entry.name == "manifest.json":
+                    continue
+                try:
+                    rec = json.loads(entry.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                for cert in (rec.get("killed_by") or []) \
+                        if isinstance(rec, dict) else []:
+                    script = cert.get("script_path") \
+                        if isinstance(cert, dict) else None
+                    if script:
+                        counts[script] = counts.get(script, 0) + 1
+        return counts
+    except OSError:
+        return {}
 
 FACE_SELECTION_DIR = "selection_dir"
 FACE_SINGLE_SCRIPT = "single_script"

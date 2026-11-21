@@ -41,12 +41,14 @@ from .shadow import SlotProvisionError
 from .reporting import _mutant_record
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
+from . import killbail
 from .stagetiming import StageClock
 from ..timing import explicit_timing_meta, resolve_budget
 
 _TIMEOUT_SCALE = 2.0
 from .identity import killer_certificate, suspected_orphan
-from .worker_channel import (WORKER_SCHEME, build_worker_disclosure,
+from .worker_channel import (WORKER_SCHEME, RouteDriftError,
+                             build_worker_disclosure,
                              degraded_worker_disclosure, resolve_exec_scheme)
 
 class _BaselineLaunchFailure(Exception):
@@ -259,6 +261,21 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
 def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
                  ownership_fn, project_root) -> dict:
     """beacon 四级失败分类 + kill 判定 + L4 GUT 运行证据门 + killed 证书。"""
+    # SEE-1615 §SPEC-HANG：宿主具名 marker 优先于一切判定——脚本清单不可
+    # 加载 / 宿主等待超界 → 具名 run_error（不得被误判 killed/survived）。
+    bad = killbail.parse_scripts_fail_marker(tail or "")
+    if bad is not None:
+        return _mutant_record(
+            m, "run_error",
+            f"direct_scripts_unloadable: {bad['path']} — host fail-fast "
+            f"before execution", src=original_src)
+    hung = killbail.parse_host_hung_marker(tail or "")
+    if hung is not None:
+        return _mutant_record(
+            m, "run_error",
+            f"host_hung: direct-drive wait exceeded {hung['waited_ms']}ms "
+            f"at scripts {hung['scripts_run']}/{hung['scripts_total']}",
+            src=original_src)
     # 四级 beacon 失败分类：load-null/parse → invalid_mutant；
     # 哈希不符/实例不同源/基础设施 → run_error（§SPEC-003）。
     beacon_verdict = beacon.classify_beacon_failure(rc, tail)
@@ -287,8 +304,6 @@ def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
                                ownership_fn, project_root)
     # SEE-1606 §SPEC-P3：早停 marker → 机器可读披露（宿主在首个新增失败
     # 处中断后续脚本；verdict 判定仍由差集语义完成，marker 只作披露）。
-    from . import killbail
-
     bail_info = killbail.parse_bail_marker(tail)
     if bail_info is not None:
         verdict = {**verdict, "kill_bail_info": bail_info}
@@ -454,23 +469,32 @@ def _loop_slot(project_root, path, kind, identity, tests_glob,
     # 空间解析，补丁点调用链不变。
     from godot_qa_toolkit.mutation import runner as _r
 
+    # SEE-1606 §SPEC-P1：权威 scheme 比对前置于取槽——漂移具名失败时零槽
+    # 写入；identity 缺权威 scheme（None 首解析形态）跳过比对（本次解析
+    # 即权威），稳定路径行为不变。
+    authoritative = identity.get("exec_scheme") \
+        if isinstance(identity, dict) else None
     idpack = identity if identity is not None else \
         identity_pack(project_root, kind)
     target_rel = project_relative(project_root, str(path))
     target_res = _res_path_of(str(path), str(Path(project_root)))
     auto_name = beacon.autoload_name_for(project_root, target_res)
     t_slot = _r.time.monotonic()
+    # R-DW6 默认启用实测轮：身份与执行同源解析——store file_key 与实际
+    # 执行通道一致，杜绝 scheme 漂移性 store-miss。
+    with clock.stage("route_scan"):
+        exec_scheme_resolved, route_resolved = _r.resolve_exec_scheme(
+            project_root, target_res, worker_channel)
+        if authoritative is not None \
+                and authoritative != exec_scheme_resolved:
+            raise RouteDriftError(target_res, str(authoritative),
+                                  str(exec_scheme_resolved), "loop_slot")
     with clock.stage("farm_provision"):
         slot = shadowpool.acquire_slot(
             project_root, kind, [target_rel],
             idpack.get("boot_wiring_hash", ""),
             targeted_only=targeted_only,
             required_globs=[tests_glob] if tests_glob else None)
-    # R-DW6 默认启用实测轮：身份与执行同源解析——store file_key 与实际
-    # 执行通道一致，杜绝 scheme 漂移性 store-miss。
-    with clock.stage("route_scan"):
-        exec_scheme_resolved, route_resolved = _r.resolve_exec_scheme(
-            project_root, target_res, worker_channel)
     slot_info: dict = {}
     slot_info["exec_scheme"] = exec_scheme_resolved
     slot_info["worker_channel"] = build_worker_disclosure(

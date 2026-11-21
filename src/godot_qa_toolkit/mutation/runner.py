@@ -57,7 +57,7 @@ from .identity import (COLD_SCHEME, INJECT_SCHEME,
                        suspected_orphan)
 from .channel_router import CHANNEL_WORKER, route_target
 from .stagetiming import StageClock, reconcile, self_rss_peak_mb
-from .worker_channel import (build_worker_disclosure,
+from .worker_channel import (RouteDriftError, build_worker_disclosure,
                              degraded_worker_disclosure, identity_for_target,
                              resolve_exec_scheme,
                              run_worker_legs, worker_enabled)
@@ -67,7 +67,7 @@ from .worker_channel import (build_worker_disclosure,
 from .reporting import (
     _attention_note, _classify_mutant_run, _mutant_record,
     _no_sites_result, _record_invalid_mutants, _require_baseline_snapshot,
-    _run_error_result,
+    _route_drift_result, _run_error_result,
     _setup_error_result,
     _mutation_report,
     _valid_mutants,
@@ -252,11 +252,18 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
     kind = binary_kind or detect_binary_kind()
     target_res_early = _res_path_of(str(path), str(project_root))
     # SEE-1550 §SPEC-020：exec_scheme 按目标路由入身份包（worker 显式启用且
-    # 路由判 worker 才 worker-reset/1；A9 默认冷）。parent 传入的 identity
-    # 用同源解析覆盖 scheme——父子两侧 file_key 一致。
+    # 路由判 worker 才 worker-reset/1；A9 默认冷）。
+    # SEE-1606 §SPEC-P1：父层 identity 已带权威 exec_scheme 时（planning
+    # 注入），本地重解析只做比对——不一致具名 route_drift（baseline 前
+    # fail-loud，禁止静默覆盖 file_key 面）；父层无 scheme（串行首解析）
+    # 本次解析即权威，行为不变。
     with clock.stage("route_scan"):
-        identity, _route, exec_scheme = identity_for_target(
-            identity, project_root, target_res_early, worker_channel)
+        try:
+            identity, _route, exec_scheme = identity_for_target(
+                identity, project_root, target_res_early, worker_channel,
+                check=True)
+        except RouteDriftError as e:
+            return _route_drift_result(str(path), e), {}
     if identity is None:
         identity = identity_pack(project_root, kind, exec_scheme=exec_scheme)
     try:
@@ -265,8 +272,11 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
         return _setup_error_result(str(path), e), {}
     # P1 manifest 标定（定案 D1/D2/D3 + L6）：scope 提取 → no-mutate 过滤
     # → stable id。total_sites 按过滤后位点数计（无位点 scope 不进 manifest）。
+    # SEE-1615 §SPEC-PERF2：等价预剪枝（env 默认 OFF；prune_out 逐点披露
+    # 经 ctx → _core_plan disclosures → summary equivalent_pruned）
+    eq_prune_out: dict = {}
     header_hash, spans, mutants, scope_hashes = build_manifest(
-        original_src, str(path), raw_mutants)
+        original_src, str(path), raw_mutants, prune_out=eq_prune_out)
     ctx = {
         "path": path, "tests_glob": tests_glob, "selection_meta": selection_meta,
         "original_src": original_src, "kind": kind, "identity": identity,
@@ -274,6 +284,7 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
         "scope_hashes": scope_hashes, "total_sites": len(mutants),
         "attention": _attention_note(mutation_warning, len(mutants),
                                      str(path)),
+        "equivalent_pruned": eq_prune_out.get("equivalent_pruned"),
     }
     return None, ctx
 
@@ -342,6 +353,22 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
             "hit_count": len(dry_hit),
             "skipped_no_site": sorted(lines - set(dry_hit)),
         }
+    # SEE-1610 §SPEC-PLAN Phase 0：选面披露落定后重建同构 plan（V7 同构）。
+    from .reporting import _execution_plan, _plan_meta
+    estimate["summary"]["execution_plan"] = _execution_plan(
+        estimate["summary"], extra={"budget": budget})
+    # SEE-1606 §SPEC-P2：dry-run 计划预览元数据——映射状态/证明存在性
+    # 只读探测（零续新、零 import、零 census；不计算 import_proof）；
+    # validate_plan lint 仅供消费侧，不作运行门（此处不调用）。
+    from .truth_select import map_preview_state
+    from .prewarm_proof import _proof_paths
+    _meta = _plan_meta(
+        estimate["summary"]["execution_plan"], estimate["summary"],
+        extra={"budget": budget},
+        map_state=map_preview_state(str(project_root), str(path)),
+        import_proof_present=(
+            _proof_paths(str(project_root))[1].is_file()))
+    estimate["summary"]["execution_plan_meta"] = _meta
     return estimate
 
 def _core_caliper_and_early(c: dict, project_root: str, path: Path, *,
@@ -399,6 +426,11 @@ def _core_plan(c: dict, path: Path, project_root: str, original_src: str, *,
     from .testscan import selection_disclosure
     # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
     disclosures.update(selection_disclosure(selection_meta))
+    # SEE-1615 §SPEC-PERF2：等价剪枝披露（enabled=false 时不落键——既有
+    # 消费方零扰动）
+    eq_disc = c.get("equivalent_pruned")
+    if eq_disc and eq_disc.get("enabled"):
+        disclosures["equivalent_pruned"] = eq_disc
     if c["total_sites"] > budget:
         disclosures["total_sites"] = c["total_sites"]
         # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid
@@ -526,6 +558,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
 # per-mutant 自适应上限（baseline 耗时决定，_run_mutant_loop 内写入；统一
 # 报告构建已迁 reporting.py，经参数传入读取时刻同值）。
 _adaptive_timeout = 0
+# SEE-1615 §SPEC-HANG：腿 spawn 超时下限（秒）——缺失/0 兜底，防立即超时。
+_LEG_TIMEOUT_FLOOR = 120
 
 # §SPEC-P2-R1-D2：本轮 baseline 红测试的脚本限定身份集 {(script, name)}，
 # 由 _loop_baseline 每轮重置；供（1）宿主红测跳过配对（2）同名列 kill 判
@@ -576,8 +610,14 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
         _ACTIVE_SCRIPT = beacon.beacon_script_res(slot.root)
     try:
         try:
+            # SEE-1615 §SPEC-HANG：仅当 _adaptive_timeout 缺失/≤0（未跑
+            # baseline 的调用面）时用有界兜底 120s——正常自适应值（含显式
+            # 60s）保持既有语义不抬高。
+            _leg_timeout = int(_adaptive_timeout or 0)
             rc, tail = _run_gut_on_project(
-                str(slot.root), timeout_s=_adaptive_timeout,
+                str(slot.root),
+                timeout_s=(_leg_timeout if _leg_timeout > 0
+                           else _LEG_TIMEOUT_FLOOR),
                 tests_glob=tests_glob)
             verdict = _sm_classify(m, rc, tail, baseline_failures,
                                    baseline_dirty, original_src, ownership_fn,
@@ -717,7 +757,8 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                     timings_out=timings_out, kill_bail=kill_bail,
                     tests_scripts=direct_scripts, red_pairs=red_pairs,
                     baseline_red_map=_BASELINE_RED_MAP,
-                    allow_tests=_ACTIVE_ALLOW_TESTS)
+                    allow_tests=_ACTIVE_ALLOW_TESTS,
+                    expected_scheme=exec_scheme_resolved)
             clock.add("worker_boot",
                       timings_out.get("worker_boot_s", 0.0))
             if fatal_events:
@@ -769,6 +810,9 @@ def _run_mutant_loop(
     baseline_elapsed, slot_info)。verdict 记录不在此处进 results——D5 streak
     是窗口级判定，由调用方 apply_timeout_streaks 落定后统一扩展。"""
     with tempfile.TemporaryDirectory() as workdir:
+        # SEE-1606 §SPEC-P1：baseline 前权威比对门——setup 权威 scheme 与
+        # 实跑重解析漂移即具名失败（零 baseline 支付、零槽写入）。
+        _preflight_route_check(identity, project_root, path, worker_channel)
         (baseline_failures, baseline_dirty, baseline_reused,
          baseline_elapsed) = _loop_baseline(workdir, path, project_root,
                                             tests_glob, timeout_s,
@@ -782,10 +826,16 @@ def _run_mutant_loop(
         dirty = bool(baseline_failures)
         bail_scripts, bail_face, bail_gut_ok = _cold_direct_decision(
             bail_effective, str(project_root), tests_glob, dirty=dirty)
+        # SEE-1606 §SPEC-PERF1：历史杀手优先排序（仅置换清单，verdict 语义
+        # 不变；缺失历史确定性原序；env 可关断）。
+        bail_scripts = _ordered_bail_scripts(
+            project_root, path, bail_scripts)
         # §SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
         # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
-        worker_host = (dirty and _scheme_is_worker(
-            str(project_root), str(path), worker_channel))
+        # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
+        # 保证 setup 权威与实跑一致）。
+        worker_host = (dirty and (identity or {}).get("exec_scheme")
+                       == WORKER_SCHEME)
         if dirty and bail_scripts is None and not worker_host:
             raise _BaselineSkipUnsupportedFace(
                 sorted(baseline_failures), bail_face)
@@ -829,14 +879,31 @@ def _run_mutant_loop(
                 project_root, target_res)
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
 
-def _scheme_is_worker(project_root: str, target_path: str,
-                     worker_channel) -> bool:
-    """§SPEC-P2-R1：目标是否走可控宿主（worker 通道可按单测物理跳过）。"""
-    from .worker_channel import WORKER_SCHEME, resolve_exec_scheme
+def _ordered_bail_scripts(project_root, path, bail_scripts):
+    """SEE-1606 §SPEC-PERF1：历史杀手优先（None / env 关断 → 原样返回）。"""
+    if bail_scripts is None or not killbail.resolve_test_order():
+        return bail_scripts
+    return killbail.order_scripts_by_history(
+        bail_scripts, killbail.kill_history(str(project_root), str(path)))
 
+
+def _preflight_route_check(identity, project_root, path, worker_channel):
+    """SEE-1606 §SPEC-P1：baseline 前权威比对门。
+
+    setup/父层身份携带权威 exec_scheme 时，本地重解析只做漂移校验——
+    不一致抛 RouteDriftError（where=pre_baseline），由 with_aborts 转具名
+    JSON；此门保证漂移永不先付 baseline。identity 无权威 scheme（串行
+    首解析前的 None 形态）时跳过——下游 _loop_slot 比对仍覆盖。"""
+    expected = (identity or {}).get("exec_scheme") \
+        if isinstance(identity, dict) else None
+    if expected is None:
+        return
     scheme, _route = resolve_exec_scheme(
-        project_root, _res_path_of(target_path, project_root), worker_channel)
-    return scheme == WORKER_SCHEME
+        str(project_root), _res_path_of(str(path), str(project_root)),
+        worker_channel)
+    if scheme != expected:
+        raise RouteDriftError(_res_path_of(str(path), str(project_root)),
+                              str(expected), str(scheme), "pre_baseline")
 
 
 class _BaselineSkipUnsupportedFace(Exception):
@@ -930,3 +997,7 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
             "shadow slot provisioning failed — mutation data untrustworthy",
             f"shadow slot provisioning failed: {e}",
         )
+    except RouteDriftError as e:
+        # SEE-1606 §SPEC-P1：route 漂移（pre_baseline 门 / _loop_slot /
+        # worker 注入）→ 具名中止契约（零 baseline / 零错误 key 写入）。
+        return _route_drift_result(str(path), e)

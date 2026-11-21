@@ -83,6 +83,24 @@ def gut_direct_drive_available(project_root: str) -> bool:
                                        "gut.gd"))
 
 
+class RouteDriftError(Exception):
+    """SEE-1606 §SPEC-P1：下游重解析与父层/权威 route 漂移（fail-loud）。
+
+    权威 scheme 来自父层身份/file_key（planning 注入）或单元 setup 首次
+    解析；任何下游比对点不一致即本异常——由调用方转具名 route_drift
+    统一 JSON（零 baseline、零错误 file_key 缓存/证书写入）。"""
+
+    def __init__(self, target_res: str, expected: str, actual: str,
+                 where: str):
+        self.target_res = target_res
+        self.expected = expected
+        self.actual = actual
+        self.where = where
+        super().__init__(
+            f"route_drift at {where}: {target_res} "
+            f"authoritative={expected} resolved={actual}")
+
+
 def resolve_exec_scheme(project_root: str, target_res: str,
                         worker_flag: bool | None = None
                         ) -> tuple[str, object]:
@@ -175,10 +193,20 @@ def degraded_worker_disclosure(base: dict, fatal_events: list[str]) -> dict:
 
 
 def identity_for_target(identity: dict | None, project_root: str,
-                        target_res: str, worker_flag: bool | None = None
-                        ) -> tuple[dict | None, object, str]:
-    """按目标解析 scheme 并把 exec_scheme 写入身份包（file_key 隔离面）。"""
+                        target_res: str, worker_flag: bool | None = None,
+                        check: bool = False) -> tuple[dict | None, object, str]:
+    """按目标解析 scheme 并把 exec_scheme 写入身份包（file_key 隔离面）。
+
+    SEE-1606 §SPEC-P1：`check=True` 时（下游消费点）本地重解析只做漂移
+    比对——入包已携带权威 exec_scheme 且与实跑不一致 → 具名 route_drift
+    fail-loud（禁止静默覆盖 file_key 面）；`check=False`（规划层首次解析）
+    保持既有覆写语义，本次解析即权威。"""
     scheme, route = resolve_exec_scheme(project_root, target_res, worker_flag)
+    expected = identity.get("exec_scheme") if isinstance(identity, dict) \
+        else None
+    if check and expected is not None and expected != scheme:
+        raise RouteDriftError(target_res, str(expected), str(scheme),
+                              "core_setup")
     if identity is None:
         return None, route, scheme
     return {**identity, "exec_scheme": scheme}, route, scheme
@@ -530,15 +558,22 @@ def execute_worker_branch(path, project_root, original_src, mutants,
                           tests_scripts: list[str] | None = None,
                           red_pairs: list[tuple[str, str]] | None = None,
                           baseline_red_map=None,
-                          allow_tests: list | None = None):
+                          allow_tests: list | None = None,
+                          expected_scheme: str | None = None):
     """§SPEC-020 W 通道接线（薄层）：注入/冷跑/记录/分类回调注入编排层。
 
+    SEE-1606 §SPEC-P1：worker 注入路径的 route_target 重解析只做比对——
+    权威 scheme=worker 而实跑 route 判 cold（树/状态在 setup 后漂移）→
+    具名 route_drift，不得以漂移后的 closure 继续逐腿。
     runner 域符号在函数体内延迟 import（baseline.py 先例）——避免
     runner ↔ worker_channel 的模块级循环依赖。
     """
     from .reporting import classify_worker_leg
 
     route = route_target(project_root, target_res)
+    if expected_scheme == WORKER_SCHEME and route.channel != CHANNEL_WORKER:
+        raise RouteDriftError(target_res, WORKER_SCHEME, str(route.channel),
+                              "worker_injection")
     return run_worker_legs(
         mutants, slot, target_rel, target_res, route.closure, kind,
         tests_glob,

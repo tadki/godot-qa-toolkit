@@ -384,10 +384,14 @@ class TestKillBailChunkContract:
     def test_chunk_constant_is_32(self):
         assert killbail.KILL_BAIL_CHUNK == 32
 
-    def test_host_literal_matches_python_constant(self):
-        needle = f"var chunk := {killbail.KILL_BAIL_CHUNK}"
-        assert needle in directdrive.SEQUENTIAL_RUNNER_GD, \
-            "GDScript chunk literal diverged from KILL_BAIL_CHUNK"
+    def test_host_chunk_default_matches_python_constant(self):
+        # SEE-1615 §SPEC-PERF1：chunk 由字面量改为调用方注入（cfg/req），
+        # 契约变为「宿主缺省回退 == Python 默认常量」+ 原语接形参。
+        assert killbail.DEFAULT_BAIL_CHUNK == killbail.KILL_BAIL_CHUNK
+        assert f'int(cfg.get("bail_chunk", {killbail.DEFAULT_BAIL_CHUNK}))' \
+            in directdrive.COLD_DIRECT_GD_TEMPLATE, \
+            "GDScript chunk default diverged from DEFAULT_BAIL_CHUNK"
+        assert "chunk: int) -> Dictionary:" in directdrive.SEQUENTIAL_RUNNER_GD
 
 
 class TestParserScriptQualified:
@@ -603,7 +607,8 @@ class TestPlanChunksFlagChain:
         monkeypatch.setattr(pl, "_plan_resolve_gate",
                             lambda *a, **k: ("res://tests/", {}, [], None))
         monkeypatch.setattr(pl, "_plan_diff_phase",
-                            lambda *a, **k: ("h", [], {}, None, None, None))
+                            lambda *a, **k: ("h", [], {}, None, None, None,
+                                             None))
         monkeypatch.setattr(pl, "_plan_budget_phase",
                             lambda *a, **k: ([], [], [], {"elapsed": 1.0}, []))
 

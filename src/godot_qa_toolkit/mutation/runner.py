@@ -350,9 +350,21 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
             "skipped_no_site": sorted(lines - set(dry_hit)),
         }
     # SEE-1610 §SPEC-PLAN Phase 0：选面披露落定后重建同构 plan（V7 同构）。
-    from .reporting import _execution_plan
+    from .reporting import _execution_plan, _plan_meta
     estimate["summary"]["execution_plan"] = _execution_plan(
         estimate["summary"], extra={"budget": budget})
+    # SEE-1606 §SPEC-P2：dry-run 计划预览元数据——映射状态/证明存在性
+    # 只读探测（零续新、零 import、零 census；不计算 import_proof）；
+    # validate_plan lint 仅供消费侧，不作运行门（此处不调用）。
+    from .truth_select import map_preview_state
+    from .prewarm_proof import _proof_paths
+    _meta = _plan_meta(
+        estimate["summary"]["execution_plan"], estimate["summary"],
+        extra={"budget": budget},
+        map_state=map_preview_state(str(project_root), str(path)),
+        import_proof_present=(
+            _proof_paths(str(project_root))[1].is_file()))
+    estimate["summary"]["execution_plan_meta"] = _meta
     return estimate
 
 def _core_caliper_and_early(c: dict, project_root: str, path: Path, *,

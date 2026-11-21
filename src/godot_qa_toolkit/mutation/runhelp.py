@@ -46,7 +46,8 @@ from ..timing import explicit_timing_meta, resolve_budget
 
 _TIMEOUT_SCALE = 2.0
 from .identity import killer_certificate, suspected_orphan
-from .worker_channel import (WORKER_SCHEME, build_worker_disclosure,
+from .worker_channel import (WORKER_SCHEME, RouteDriftError,
+                             build_worker_disclosure,
                              degraded_worker_disclosure, resolve_exec_scheme)
 
 class _BaselineLaunchFailure(Exception):
@@ -454,23 +455,32 @@ def _loop_slot(project_root, path, kind, identity, tests_glob,
     # 空间解析，补丁点调用链不变。
     from godot_qa_toolkit.mutation import runner as _r
 
+    # SEE-1606 §SPEC-P1：权威 scheme 比对前置于取槽——漂移具名失败时零槽
+    # 写入；identity 缺权威 scheme（None 首解析形态）跳过比对（本次解析
+    # 即权威），稳定路径行为不变。
+    authoritative = identity.get("exec_scheme") \
+        if isinstance(identity, dict) else None
     idpack = identity if identity is not None else \
         identity_pack(project_root, kind)
     target_rel = project_relative(project_root, str(path))
     target_res = _res_path_of(str(path), str(Path(project_root)))
     auto_name = beacon.autoload_name_for(project_root, target_res)
     t_slot = _r.time.monotonic()
+    # R-DW6 默认启用实测轮：身份与执行同源解析——store file_key 与实际
+    # 执行通道一致，杜绝 scheme 漂移性 store-miss。
+    with clock.stage("route_scan"):
+        exec_scheme_resolved, route_resolved = _r.resolve_exec_scheme(
+            project_root, target_res, worker_channel)
+        if authoritative is not None \
+                and authoritative != exec_scheme_resolved:
+            raise RouteDriftError(target_res, str(authoritative),
+                                  str(exec_scheme_resolved), "loop_slot")
     with clock.stage("farm_provision"):
         slot = shadowpool.acquire_slot(
             project_root, kind, [target_rel],
             idpack.get("boot_wiring_hash", ""),
             targeted_only=targeted_only,
             required_globs=[tests_glob] if tests_glob else None)
-    # R-DW6 默认启用实测轮：身份与执行同源解析——store file_key 与实际
-    # 执行通道一致，杜绝 scheme 漂移性 store-miss。
-    with clock.stage("route_scan"):
-        exec_scheme_resolved, route_resolved = _r.resolve_exec_scheme(
-            project_root, target_res, worker_channel)
     slot_info: dict = {}
     slot_info["exec_scheme"] = exec_scheme_resolved
     slot_info["worker_channel"] = build_worker_disclosure(

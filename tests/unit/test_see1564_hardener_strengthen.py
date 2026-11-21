@@ -471,7 +471,9 @@ def _install_slot_fakes(monkeypatch, proj):
     monkeypatch.setattr(shadowpool, "acquire_slot", fake_acquire)
     monkeypatch.setattr(shadowpool, "release_slot", lambda slot: [])
     monkeypatch.setattr(runner_mod, "resolve_exec_scheme",
-                        lambda *a, **k: ("cold", None))
+                        lambda *a, **k: (COLD_SCHEME, None))
+    monkeypatch.setattr(wc_mod, "resolve_exec_scheme",
+                        lambda *a, **k: (COLD_SCHEME, None))
     monkeypatch.setattr(runner_mod.beacon, "seed_beacon_script",
                         lambda root: None)
     monkeypatch.setattr(runner_mod, "_run_cold_legs", _fake_cold_legs)
@@ -593,13 +595,16 @@ def test_runner_worker_boot_harvest_counted(tmp_path, monkeypatch):
     monkeypatch.setattr(runner_mod.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(runner_mod, "resolve_exec_scheme",
                         lambda *a, **k: (WORKER_SCHEME, None))
+    monkeypatch.setattr(wc_mod, "resolve_exec_scheme",
+                        lambda *a, **k: (WORKER_SCHEME, None))
 
     def shim(path, project_root, original_src, mutants, tests_glob,
              baseline_failures, baseline_dirty, slot, auto_name,
              target_rel, target_res, kind, reporter, store2,
              prior_entries, scopes, ownership_fn, timings_out=None,
              kill_bail=False, tests_scripts=None,
-             red_pairs=None, baseline_red_map=None, allow_tests=None):
+             red_pairs=None, baseline_red_map=None, allow_tests=None,
+             expected_scheme=None):
         if timings_out is not None:
             timings_out["worker_boot_s"] = 2.5
         return _fake_cold_legs(
@@ -772,7 +777,8 @@ def test_d1_parent_identity_honors_worker_flag(tmp_path, monkeypatch):
              target_rel, target_res, kind, reporter, store2,
              prior_entries, scopes, ownership_fn, timings_out=None,
              kill_bail=False, tests_scripts=None,
-             red_pairs=None, baseline_red_map=None, allow_tests=None):
+             red_pairs=None, baseline_red_map=None, allow_tests=None,
+             expected_scheme=None):
         raw = runner_mod._run_cold_legs(
             path, project_root, original_src, "", mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,

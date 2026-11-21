@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import shadow
+from .killbail import SCRIPTS_FAIL_MARKER
 from . import worker_channel as _wc
 from .directdrive import SEQUENTIAL_RUNNER_GD
 
@@ -105,6 +106,13 @@ func _run_leg(req: Dictionary) -> void:
 		GutErrorTracker.register_logger(GutUtils.get_error_tracker())
 		gut._ignore_pause_before_teardown = true
 		var scripts: Array = req.get("tests_scripts", [])
+		# SEE-1615 §SPEC-HANG：清单不可加载 → 具名 fail-fast（会话致命，
+		# 后续冷腿同源 fail-fast → 统一具名 run_error）
+		var bad_script: String = _gqt_verify_scripts(scripts)
+		if bad_script != "":
+			print("@SCRIPTSFAIL@ path=" + bad_script)
+			quit(5)
+			return
 		var baseline_names: Array = req.get("baseline_failures", [])
 		var skip_tests: Array = req.get("skip_red_tests", [])
 		for s2 in scripts:
@@ -123,7 +131,8 @@ func _run_leg(req: Dictionary) -> void:
 				req.get("skip_red_tests", []))
 			resp["allow"] = allow_out
 			var seq: Dictionary = await _gqt_run_scripts_sequential(
-				gut, scripts, baseline_names, 600000,
+				gut, scripts, baseline_names,
+				int(req.get("host_wait_ms", 120000)),
 				int(req.get("bail_chunk", 32)))
 			resp["gut_ran"] = not bool(seq["hung"])
 			resp["pass"] = int(seq["pass"])
@@ -275,7 +284,7 @@ func _walk_connections(node: Node, out: Array, depth: int) -> void:
 			out.append([owner_id, sig_name, String(cb.get_method())])
 	for child in node.get_children():
 		_walk_connections(child, out, depth + 1)
-""" + SEQUENTIAL_RUNNER_GD
+""".replace("@SCRIPTSFAIL@", SCRIPTS_FAIL_MARKER) + SEQUENTIAL_RUNNER_GD
 
 
 def _dict_or_none(resp: dict, key: str) -> dict | None:
@@ -485,8 +494,10 @@ class WorkerSession:
             req["tests_scripts"] = [str(s) for s in tests_scripts]
             req["baseline_failures"] = sorted(baseline_failures or [])
             # SEE-1606 §SPEC-PERF1：顺序执行 chunk 大小（env/默认单点解析）。
-            from .killbail import resolve_bail_chunk
+            from .killbail import resolve_bail_chunk, resolve_host_wait_ms
             req["bail_chunk"] = resolve_bail_chunk()
+            # SEE-1615 §SPEC-HANG：宿主 chunk 等待上限（有界，默认 120s）
+            req["host_wait_ms"] = resolve_host_wait_ms()
         # §SPEC-P2-R1/D2：红测试物理跳过（脚本+名定位）与 bail/清单无关。
         req["skip_red_tests"] = [list(p) for p in (skip_red_tests or [])]
         # SEE-1610 §SPEC-IMPL：test 级 allowlist（[script, name]/[script, "*"]）。

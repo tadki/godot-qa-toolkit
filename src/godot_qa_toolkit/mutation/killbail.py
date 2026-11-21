@@ -39,6 +39,46 @@ KILL_BAIL_CHUNK = 32
 DEFAULT_BAIL_CHUNK = KILL_BAIL_CHUNK
 ENV_BAIL_CHUNK = "GQT_MUTATION_BAIL_CHUNK"
 
+# SEE-1615 §SPEC-HANG：直驱宿主挂起守卫（脚本清单不可加载 fail-fast +
+# chunk 等待上限有界）。等待上限 env 可配，默认 120s——600s 级等待等于
+# 实际挂起（KOL 实测腿内 GUT 正常 2s；不可加载脚本时 end_run 永不发射）。
+ENV_HOST_WAIT = "GQT_MUTATION_HOST_WAIT_MS"
+DEFAULT_HOST_WAIT_MS = 120000
+SCRIPTS_FAIL_MARKER = "GQT_DIRECT_SCRIPTS_FAIL"
+HOST_HUNG_MARKER = "GQT_HOST_HUNG"
+
+_SCRIPTS_FAIL_RE = re.compile(rf"{SCRIPTS_FAIL_MARKER} path=(\S+)")
+_HOST_HUNG_RE = re.compile(
+    rf"{HOST_HUNG_MARKER} waited_ms=(\d+) scripts_run=(\d+)/(\d+)")
+
+
+def resolve_host_wait_ms(flag: int | None = None) -> int:
+    """直驱宿主 chunk 等待上限：显式 > env 正整数 > 默认 120s。"""
+    if flag is not None and int(flag) > 0:
+        return int(flag)
+    raw = os.environ.get(ENV_HOST_WAIT, "").strip()
+    try:
+        v = int(raw)
+        return v if v > 0 else DEFAULT_HOST_WAIT_MS
+    except (TypeError, ValueError):
+        return DEFAULT_HOST_WAIT_MS
+
+
+def parse_scripts_fail_marker(tail: str) -> "dict | None":
+    """宿主脚本清单不可加载 marker → {path}；缺席 = 未触发（None）。"""
+    m = _SCRIPTS_FAIL_RE.search(tail or "")
+    return {"path": m.group(1)} if m else None
+
+
+def parse_host_hung_marker(tail: str) -> "dict | None":
+    """宿主持久等待 marker → {waited_ms, scripts_run, scripts_total}。"""
+    m = _HOST_HUNG_RE.search(tail or "")
+    if m is None:
+        return None
+    return {"waited_ms": int(m.group(1)), "scripts_run": int(m.group(2)),
+            "scripts_total": int(m.group(3))}
+
+
 # SEE-1606 §SPEC-PERF1：历史杀手排序开关。默认值由 A/A≥3 + 交错 A/B≥3
 # 实测落定（perf1-report.json：C∈{8,16,32,64} 收益 3.8%/-0.6%/3.6%/-0.85%
 # 均不超各自噪声带 5.4%/5.9%/40%/9.1%，verdict 零翻转）→ 无收益超噪声

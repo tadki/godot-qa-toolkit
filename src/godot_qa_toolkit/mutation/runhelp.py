@@ -41,6 +41,7 @@ from .shadow import SlotProvisionError
 from .reporting import _mutant_record
 from .resume2 import ResumeStoreV2
 from .scopemanifest import build_manifest
+from . import killbail
 from .stagetiming import StageClock
 from ..timing import explicit_timing_meta, resolve_budget
 
@@ -260,6 +261,21 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
 def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
                  ownership_fn, project_root) -> dict:
     """beacon 四级失败分类 + kill 判定 + L4 GUT 运行证据门 + killed 证书。"""
+    # SEE-1615 §SPEC-HANG：宿主具名 marker 优先于一切判定——脚本清单不可
+    # 加载 / 宿主等待超界 → 具名 run_error（不得被误判 killed/survived）。
+    bad = killbail.parse_scripts_fail_marker(tail or "")
+    if bad is not None:
+        return _mutant_record(
+            m, "run_error",
+            f"direct_scripts_unloadable: {bad['path']} — host fail-fast "
+            f"before execution", src=original_src)
+    hung = killbail.parse_host_hung_marker(tail or "")
+    if hung is not None:
+        return _mutant_record(
+            m, "run_error",
+            f"host_hung: direct-drive wait exceeded {hung['waited_ms']}ms "
+            f"at scripts {hung['scripts_run']}/{hung['scripts_total']}",
+            src=original_src)
     # 四级 beacon 失败分类：load-null/parse → invalid_mutant；
     # 哈希不符/实例不同源/基础设施 → run_error（§SPEC-003）。
     beacon_verdict = beacon.classify_beacon_failure(rc, tail)
@@ -288,8 +304,6 @@ def _sm_classify(m, rc, tail, baseline_failures, baseline_dirty, original_src,
                                ownership_fn, project_root)
     # SEE-1606 §SPEC-P3：早停 marker → 机器可读披露（宿主在首个新增失败
     # 处中断后续脚本；verdict 判定仍由差集语义完成，marker 只作披露）。
-    from . import killbail
-
     bail_info = killbail.parse_bail_marker(tail)
     if bail_info is not None:
         verdict = {**verdict, "kill_bail_info": bail_info}

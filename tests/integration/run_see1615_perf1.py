@@ -190,10 +190,13 @@ def _env(order_on: bool, chunk: int, godot: str) -> dict:
 
 
 def _run(root: Path, target: Path, order_on: bool, chunk: int, budget: int,
-         godot: str, timeout_s: int = 600) -> dict:
+         godot: str, timeout_s: int = 600, tests_glob: str | None = None,
+         verdict_rel: str = "calc.gd") -> dict:
     cmd = [sys.executable, "-m", "godot_qa_toolkit.cli", "mutation",
            str(target), "--project-root", str(root), "--budget", str(budget),
            "--mutate-all", "--timeout", str(timeout_s // 4)]
+    if tests_glob:
+        cmd += ["--tests", tests_glob]
     t0 = time.monotonic()
     try:
         proc = subprocess.run(cmd, cwd=str(root), env=_env(order_on, chunk,
@@ -201,24 +204,30 @@ def _run(root: Path, target: Path, order_on: bool, chunk: int, budget: int,
                               capture_output=True, text=True,
                               timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "run_timeout", "wall_s": timeout_s}
+        return {"ok": False, "completed": False, "error": "run_timeout",
+                "wall_s": timeout_s}
     wall = round(time.monotonic() - t0, 3)
     try:
         out = json.loads(proc.stdout)
     except ValueError:
-        return {"ok": False, "error": "non_json_stdout", "wall_s": wall,
+        return {"ok": False, "completed": False,
+                "error": "non_json_stdout", "wall_s": wall,
                 "rc": proc.returncode,
                 "stderr_tail": proc.stderr[-300:]}
     s = out.get("summary") or {}
-    return {"ok": bool(out.get("ok")), "wall_s": wall, "rc": proc.returncode,
+    # completed：完成判据 ≠ ok（有幸存者时 mutation 契约 rc=1/ok=false，
+    # 但运行已完成——A/B 数据有效）
+    completed = proc.returncode in (0, 1) and not _had_error(out)
+    return {"ok": bool(out.get("ok")), "completed": completed,
+            "wall_s": wall, "rc": proc.returncode,
             "killed": int(s.get("killed") or 0),
             "survived": int(s.get("survived") or 0),
-            "verdict_map": _verdict_map(root),
+            "verdict_map": _verdict_map(root, verdict_rel),
             "summary_keys": sorted(s.keys())}
 
 
-def _verdict_map(root: Path) -> dict[str, str]:
-    """resume v2 store 全条目 stable-id → verdict（rel=calc.gd）。"""
+def _verdict_map(root: Path, rel: str) -> dict[str, str]:
+    """resume v2 store 全条目 stable-id → verdict（manifest rel 过滤）。"""
     from godot_qa_toolkit.mutation.resume2 import RESUME_V2_DIRNAME
 
     out: dict[str, str] = {}
@@ -228,7 +237,7 @@ def _verdict_map(root: Path) -> dict[str, str]:
             doc = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if doc.get("rel") != "calc.gd":
+        if doc.get("rel") != rel:
             continue
         for entry in manifest.parent.glob("*.json"):
             if entry.name == "manifest.json":
@@ -262,6 +271,12 @@ def _save(cells: Path, name: str, data: dict) -> None:
     os.replace(tmp, cells / f"{name}.json")
 
 
+def _had_error(out: dict) -> bool:
+    """run_error / 非 JSON 崩溃 = 未完成；有幸存者的正常完成不算 error。"""
+    s = out.get("summary") or {}
+    return bool(s.get("run_error")) or bool(s.get("error"))
+
+
 def _spread(samples: list[float]) -> float:
     if len(samples) < 2 or statistics.median(samples) == 0:
         return 0.0
@@ -275,25 +290,27 @@ def _flips(a: dict[str, str], b: dict[str, str]) -> list[str]:
 
 
 def run_cell(root: Path, target: Path, chunk: int, *, aa: int, rounds: int,
-             budget: int, godot: str) -> dict:
-    aa_runs = [_run(root, target, False, chunk, budget, godot)
+             budget: int, godot: str, tests_glob: str | None = None,
+             verdict_rel: str = "calc.gd") -> dict:
+    kw = {"tests_glob": tests_glob, "verdict_rel": verdict_rel}
+    aa_runs = [_run(root, target, False, chunk, budget, godot, **kw)
                for _ in range(aa)]
     pairs = []
     for i in range(rounds):
         if i % 2 == 0:      # 交错：奇偶轮换臂序控漂移
-            a = _run(root, target, True, chunk, budget, godot)
-            b = _run(root, target, False, chunk, budget, godot)
+            a = _run(root, target, True, chunk, budget, godot, **kw)
+            b = _run(root, target, False, chunk, budget, godot, **kw)
         else:
-            b = _run(root, target, False, chunk, budget, godot)
-            a = _run(root, target, True, chunk, budget, godot)
+            b = _run(root, target, False, chunk, budget, godot, **kw)
+            a = _run(root, target, True, chunk, budget, godot, **kw)
         pairs.append({"A": a, "B": b})
     return {"chunk": chunk, "aa": aa_runs, "pairs": pairs}
 
 
 def summarize_cell(cell: dict) -> dict:
-    aa_s = [r["wall_s"] for r in cell["aa"] if r.get("ok")]
-    a_s = [p["A"]["wall_s"] for p in cell["pairs"] if p["A"].get("ok")]
-    b_s = [p["B"]["wall_s"] for p in cell["pairs"] if p["B"].get("ok")]
+    aa_s = [r["wall_s"] for r in cell["aa"] if r.get("completed")]
+    a_s = [p["A"]["wall_s"] for p in cell["pairs"] if p["A"].get("completed")]
+    b_s = [p["B"]["wall_s"] for p in cell["pairs"] if p["B"].get("completed")]
     noise = _spread(aa_s)
     cell_out = {
         "chunk": cell["chunk"],
@@ -316,7 +333,7 @@ def summarize_cell(cell: dict) -> dict:
                             p["B"].get("verdict_map") or {}))
     killed = max((r.get("killed") or 0)
                  for r in [p["A"] for p in cell["pairs"]
-                           if p["A"].get("ok")] or [{}])
+                           if p["A"].get("completed")] or [{}])
     cell_out["verdict_flips"] = sorted(set(flips))
     cell_out["killed_sample"] = killed
     if killed <= 0:
@@ -343,15 +360,74 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--godot-bin", default=DEFAULT_GODOT)
     ap.add_argument("--fixture-root", default=None)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--track", choices=["synthetic", "kol"],
+                    default="synthetic")
+    ap.add_argument("--kol-root", default=None,
+                    help="KOL /tmp 忠实副本（须已 --import 预导入）")
+    ap.add_argument("--kol-target", default="utils/container_utils.gd")
+    ap.add_argument("--kol-tests", default="",
+                    help="comma 分隔的 res:// 既有测试脚本（物化选择面）")
+    ap.add_argument("--kol-map-mode-off", action="store_true", default=True)
     args = ap.parse_args(argv)
     if not Path(args.godot_bin).is_file():
         raise SystemExit(f"godot binary missing: {args.godot_bin}")
-    root = Path(args.fixture_root or tempfile.mkdtemp(prefix="see1615-perf1-"))
-    target, _rel = build_fixture(root)
     report_path = Path(args.report).resolve()
     cells_dir = report_path.with_suffix(report_path.suffix + ".cells")
+    if args.track == "kol":
+        if not args.kol_root:
+            raise SystemExit("--track kol requires --kol-root")
+        # KOL 副本无归属映射：off 关断 auto 生成（否则 ownership_for 触发
+        # 全量 measurement 并 invalid arms 失败）
+        os.environ["GQT_ATTRIBUTION_MAP_MODE"] = "off"
+        root = Path(args.kol_root).resolve()
+        target = root / args.kol_target
+        tests = [t.strip() for t in args.kol_tests.split(",") if t.strip()]
+        from godot_qa_toolkit.mutation.truth_select import materialize_selection
+        sel = materialize_selection(str(root), tests)
+        rel = args.kol_target
+        warm = _run(root, target, False, 32, args.budget, args.godot_bin,
+                    tests_glob=sel, verdict_rel=rel)
+        if not warm.get("completed"):
+            print(json.dumps({"stage": "kol_warmup_failed", "run": warm},
+                             ensure_ascii=False, indent=2))
+            return 2
+        results = []
+        for chunk in [int(c) for c in args.chunks.split(",") if c.strip()]:
+            name = f"kol-c{chunk:03d}"
+            cell = _cell(cells_dir, name)
+            if cell is None:
+                cell = run_cell(root, target, chunk, aa=args.aa,
+                                rounds=args.rounds, budget=args.budget,
+                                godot=args.godot_bin, tests_glob=sel,
+                                verdict_rel=rel)
+                _save(cells_dir, name, cell)
+            results.append(summarize_cell(cell))
+        doc = {
+            "tool": "see1615-perf1-kol",
+            "kol_root": str(root), "kol_target": args.kol_target,
+            "kol_selection": sel, "kol_tests": tests,
+            "kol_note": ("KOL /tmp 忠实副本（--import 预导入后测量；显式"
+                         "选择面物化，无归属映射 → GQT_ATTRIBUTION_MAP_MODE"
+                         "=off；只读主检出未触碰）"),
+            "aa": args.aa, "rounds": args.rounds, "budget": args.budget,
+            "godot_bin": args.godot_bin,
+            "cells": results,
+            "reproduce": " ".join([sys.executable,
+                                   str(Path(__file__).resolve())]
+                                  + list(argv if argv is not None else
+                                         sys.argv[1:])),
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                          time.gmtime()),
+        }
+        report_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2)
+                               + "\n", encoding="utf-8")
+        print(json.dumps({"report": str(report_path),
+                          "cells": results}, ensure_ascii=False, indent=2))
+        return 0
+    root = Path(args.fixture_root or tempfile.mkdtemp(prefix="see1615-perf1-"))
+    target, _rel = build_fixture(root)
     err = _run(root, target, False, 32, args.budget, args.godot_bin)
-    if not err.get("ok"):
+    if not err.get("completed"):
         print(json.dumps({"stage": "warmup_failed", "run": err},
                          ensure_ascii=False, indent=2))
         return 2
@@ -368,9 +444,7 @@ def main(argv: list[str] | None = None) -> int:
     doc = {
         "tool": "see1615-perf1",
         "fixture": str(root), "fixture_scripts": 24,
-        "fixture_note": ("合成真实 GUT 工程（KOL addons/gut 副本）；KOL 样本"
-                         "轨道见 perf1-kol-track.json（直驱宿主腿挂起，具名"
-                         "阻塞；非 map 预算省略）"),
+        "fixture_note": "合成真实 GUT 工程（KOL addons/gut 副本）",
         "aa": args.aa, "rounds": args.rounds, "budget": args.budget,
         "godot_bin": args.godot_bin,
         "cells": results,

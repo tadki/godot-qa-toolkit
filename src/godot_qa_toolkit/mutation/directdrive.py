@@ -57,14 +57,14 @@ func _gqt_chunk_fail_names(gut: Node, from_i: int, to_i: int) -> Array:
 # SEE-1606 §SPEC-P3：脚本顺序分 chunk 执行 + 新增失败早停。同一 Gut 实例
 # 逐 chunk `_test_the_scripts(indices)`（多索引一次调用 = 与一次跑全部的
 # legacy 语义同构，仅 chunk 间插新增失败检查）；collector 跨调用累积
-# （GUT _init_run 不清 collector）。32 由 Python 常量注入（32：性能
-# 门实测口径见 killbail.KILL_BAIL_CHUNK）。
+# （GUT _init_run 不清 collector）。chunk 由调用方 cfg/req 注入（Python
+# 侧 killbail.resolve_bail_chunk 单点解析；默认 32 = SEE-1606 性能门口径）。
 func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
-		baseline_failures: Array, per_script_timeout_ms: int) -> Dictionary:
+		baseline_failures: Array, per_script_timeout_ms: int,
+		chunk: int) -> Dictionary:
 	var out := {"scripts_run": 0, "scripts_total": scripts.size(),
 		"bail": false, "bail_at": -1, "bail_new_failure": "",
 		"pass": 0, "fail": 0, "hung": false}
-	var chunk := 32
 	var total := scripts.size()
 	var start := 0
 	while start < total and not bool(out["hung"]):
@@ -290,7 +290,8 @@ func _init() -> void:
 	var bail_names: Array = (cfg.get("bail_baseline_failures", [])
 		if bail_on else [])
 	var seq: Dictionary = await _gqt_run_scripts_sequential(
-		gut, scripts, bail_names, 600000)
+		gut, scripts, bail_names, 600000,
+		int(cfg.get("bail_chunk", 32)))
 	seq["skip_red"] = skip_red
 	seq["allow"] = allow
 	get_root().remove_child(gut)
@@ -320,13 +321,16 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                      baseline_failures: list[str],
                      bail_enabled: bool = True,
                      skip_red_tests: list[tuple[str, str]] | None = None,
-                     allow_tests: list | None = None) -> Path:
+                     allow_tests: list | None = None,
+                     bail_chunk: int | None = None) -> Path:
     """单 mutant 直驱 cfg（beacon cfg 超集）；调用方 finally 删除。
 
     bail_baseline_failures 仅在 bail_enabled 时被宿主消费（kill 即退）；
     skip_red_tests（脚本+名配对）独立生效（§SPEC-P2-R1 物理跳过，与 bail 无关）；
     allow_tests（§SPEC-IMPL，[script, name] 或 [script, "*"]）在 skip_red
-    之后物理保留命中测试。"""
+    之后物理保留命中测试；bail_chunk（§SPEC-PERF1）缺省经单点解析取
+    env/默认（顺序执行 chunk 大小）。"""
+    from .killbail import resolve_bail_chunk
     path = Path(slot_root) / f".gqt_beacon_cfg_{uuid.uuid4().hex[:12]}.json"
     payload = {"target_res": target_res, "mutant_sha256": mutant_sha256,
                "autoload": autoload_name,
@@ -335,6 +339,7 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                "bail_enabled": bool(bail_enabled),
                "bail_baseline_failures": sorted(baseline_failures or []),
                "skip_red_tests": [list(p) for p in (skip_red_tests or [])],
-               "allow_tests": [list(p) for p in (allow_tests or [])]}
+               "allow_tests": [list(p) for p in (allow_tests or [])],
+               "bail_chunk": resolve_bail_chunk(bail_chunk)}
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

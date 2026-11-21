@@ -115,6 +115,33 @@ def test_resolve_bail_chunk_env(monkeypatch):
         assert killbail.resolve_bail_chunk() == killbail.DEFAULT_BAIL_CHUNK
 
 
+def test_ordered_bail_scripts_env_off_is_passthrough(monkeypatch):
+    """env 关断（默认，实测落定）：_ordered_bail_scripts 原样透传，
+    不触发排序与历史读——排序机制只在 opt-in 时生效。"""
+    from godot_qa_toolkit.mutation import runner as runner_mod
+
+    monkeypatch.delenv(killbail.ENV_TEST_ORDER, raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("ordering must not run when env off")
+
+    monkeypatch.setattr(killbail, "order_scripts_by_history", _boom)
+    monkeypatch.setattr(killbail, "kill_history", _boom)
+    scripts = ["b.gd", "a.gd"]
+    assert runner_mod._ordered_bail_scripts("/p", "t.gd", scripts) == scripts
+
+
+def test_ordered_bail_scripts_env_on_orders_by_history(monkeypatch):
+    """env opt-in：按历史击杀数降序（杀手优先，仅置换清单）。"""
+    from godot_qa_toolkit.mutation import runner as runner_mod
+
+    monkeypatch.setenv(killbail.ENV_TEST_ORDER, "history")
+    monkeypatch.setattr(killbail, "kill_history",
+                        lambda root, path: {"a.gd": 3})
+    assert runner_mod._ordered_bail_scripts(
+        "/p", "t.gd", ["b.gd", "a.gd"]) == ["a.gd", "b.gd"]
+
+
 def test_write_direct_cfg_carries_bail_chunk(tmp_path, monkeypatch):
     import godot_qa_toolkit.mutation.directdrive as dd
 

@@ -65,10 +65,12 @@ def test_zero_sub_identity_pruned():
 
 def test_negatives_conservative_keep():
     """负例（保守保留）：左操作数非整数字面量（float −0.0 符号位/动态类型
-    不可证）、右操作数非 0、float 字面量、非目标算子方向。"""
+    不可证）、右操作数非 0（``3 + a`` 的 +→−）、float 字面量（``1.5 + 0``）、
+    非目标算子方向。"""
     src = ("extends RefCounted\n\nfunc f(x: float, a: int, b: int) -> float:\n"
            "\tvar t1 = x + 0\n\tvar t2 = a + b\n\tvar t3 = a - b\n"
-           "\treturn t1 + t2 + t3\n")
+           "\tvar t4 = 3 + a\n\tvar t5 = 1.5 + 0\n"
+           "\treturn t1 + t2 + t3 + t4 + t5\n")
     rules, kept = _pruned_rules(src)
     assert rules == {}
 

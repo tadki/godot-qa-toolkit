@@ -148,12 +148,44 @@ def _dry_run_result(file: str, mutants: list["Mutant"], budget: int,
         summary["total_sites"] = total_sites
     if estimate:
         summary.update(estimate)
+    # SEE-1610 §SPEC-PLAN Phase 0：dry-run 同构计划（零 GUT/零续新已由
+    # 本路径构造保证；budget 参数不在 summary，经 extra 进组）。
+    summary["execution_plan"] = _execution_plan(summary, extra={"budget":
+                                                                budget})
     return {
         "tool": "mutation",
         "ok": True,
         "summary": summary,
         "failures": [],
     }
+
+
+def _execution_plan(summary: dict, extra: "dict | None" = None) -> dict:
+    """SEE-1610 §SPEC-PLAN Phase 0：只读执行计划聚合。
+
+    把报告内**已算出**的值按 selection/route/budget/diff/preconditions
+    五组重排为 Agent 可读计划——纯读 dict 键过滤（键按固定序收集，缺席
+    不造），零副作用、零 GUT/import/map 触达（V1）；同输入同 JSON（V3）。
+    extra：调用面想在 plan 里可见但未进 summary 的参数（如 dry-run 的
+    budget）。"""
+    src = dict(summary)
+    if extra:
+        src.update(extra)
+    groups = {
+        "selection": ("selection_mode", "scoped", "test_selection",
+                      "lines_selection", "selection_disclosure"),
+        "route": ("exec_scheme", "inject_scheme", "slot_mode", "freshness",
+                  "worker_channel"),
+        "budget": ("budget", "adaptive_timeout_s", "timing_source"),
+        "diff": ("baseline_reused", "resumed", "diff_available",
+                 "retry_estimate", "executed_estimate"),
+        "preconditions": ("baseline_dirty", "baseline_failures",
+                          "baseline_failure_names", "baseline_skip",
+                          "kill_bail", "kill_bail_face", "kill_bail_scripts",
+                          "test_filter", "timeout_streak_suspended"),
+    }
+    return {group: {k: src[k] for k in keys if k in src}
+            for group, keys in groups.items()}
 
 
 def line_text_of(src: str, line: int) -> str:
@@ -347,6 +379,9 @@ def _mutation_report(file: str, killed: int, survived: int, timeout_count: int,
     summary["survivors"], truncated = survivors_projection(failures)
     if truncated:
         summary["survivors_truncated"] = True
+    # SEE-1610 §SPEC-PLAN Phase 0：只读执行计划聚合（本 dict 全键纯读重排，
+    # 零副作用零触达；既有键零变化，只新增 execution_plan）。
+    summary["execution_plan"] = _execution_plan(summary)
     return {
         "tool": "mutation",
         # suspect = 「无法证明被杀死」——语义上与 survived 同挡 gate ok

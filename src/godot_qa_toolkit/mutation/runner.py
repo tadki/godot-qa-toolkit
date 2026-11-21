@@ -342,6 +342,10 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
             "hit_count": len(dry_hit),
             "skipped_no_site": sorted(lines - set(dry_hit)),
         }
+    # SEE-1610 §SPEC-PLAN Phase 0：选面披露落定后重建同构 plan（V7 同构）。
+    from .reporting import _execution_plan
+    estimate["summary"]["execution_plan"] = _execution_plan(
+        estimate["summary"], extra={"budget": budget})
     return estimate
 
 def _core_caliper_and_early(c: dict, project_root: str, path: Path, *,

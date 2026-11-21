@@ -57,6 +57,12 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   materialized test glob and one baseline; grouping is by distinct test set, not
   mechanically by line. Sites with no mapped tests are disclosed as `uncovered`
   and do not execute on this default path.
+- Test-level filtering is ON by default for controlled line faces: `tests_allow`
+  contains only exact `line_to_tests` identities plus whole-script entries for
+  `script_to_lines` lanes. Sparse lines do **not** widen to function/file test
+  sets, and `unattributed_files` never changes selection. When an allowlist is
+  applied, `summary.test_filter.scope` is always `line`; disable the filter for
+  troubleshooting with `GQT_MUTATION_TEST_FILTER=0`.
 - `fn` / `file`: explicit calibration and fallback views, not parallel primary
   semantics. `fn` groups by enclosing function and discloses a bounded file
   fallback when the function is absent; `file` uses the file's derived test set.
@@ -118,6 +124,17 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   `validation` / `generated_dirs`), `prewarm` (`decision` / `reason` /
   `import_calls` / `probe_s` / `import_wall_s`), `stage_reconciliation`
   (`wall_s` / `attributed_s` / `unexplained_s` / `over_attributed_s`).
+- `execution_plan` is a read-only five-group view (`selection`, `route`,
+  `budget`, `diff`, `preconditions`) on normal and dry-run reports. Dry-run also
+  emits `execution_plan_meta`: derived/observed/runtime partitions, a `plan_id`
+  hashed only from derived inputs, channel/reason/failure/reuse answers, and a
+  read-only `map_state`. Missing or stale maps are disclosed there as
+  `would_renew` plus `missing` and `cost`; no renewal/import/census is run, and
+  this disclosure does not replace selection fail-loud behavior.
+- `equivalent_pruned` appears only when `GQT_MUTATION_EQUIV_PRUNE` opts in. It
+  discloses rule counts, before/after denominators and every pruned stable id;
+  kept ids and their order are unchanged. KOL samples with no provable matches
+  report zero pruned items rather than a fabricated speedup.
 - Single-file runs always use the flat `{tool, ok, summary, failures}`
   envelope, including `--jobs 1`; `{tool, ok, jobs, results[]}` exists only for
   multi-file runs.
@@ -149,6 +166,11 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   signal: not executed, no budget consumed).
 - Selection fail-loud (`MutationSelectionError`) → exit 1, stating why the
   mapping is unusable.
+- The first parent identity/file-key route is authoritative. Core setup,
+  pre-baseline, slot acquisition and worker injection only verify it. Any
+  mismatch aborts before baseline/cache/engine work with
+  `summary.{run_error:true,route_drift:true,authoritative_scheme,resolved_scheme,drift_site}`;
+  never continue on the drifted channel.
 
 ## Boundaries
 
@@ -179,6 +201,25 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   — the fair spot-check channel against false negatives. They still use the
   selected lines' runtime test sets unless `--tests` explicitly takes over.
 
+## Opt-in acceleration and host waits
+
+- History-killer ordering is **OFF by default**. Set
+  `GQT_MUTATION_TEST_ORDER=history` to order scripts by historical kill counts;
+  ties and missing history retain deterministic original order. The kill-bail
+  chunk remains **C=32** by default (`GQT_MUTATION_BAIL_CHUNK` overrides).
+  Interleaved measurements found no stable over-noise ordering gain; enabling it
+  may change the first killer, not the stable-id verdict.
+- Equivalent-mutant pruning is also **OFF by default**. Set
+  `GQT_MUTATION_EQUIV_PRUNE=1` to prune only the three constructively proven
+  forms: integer-literal `n+0` (`+→−`), `n−0` (`−→+`), and identical ternary
+  arms. Dynamic/non-literal/asymmetric forms are retained. Pruning happens
+  after stable-id assignment, so retained ids do not shift.
+- Direct-drive and worker `end_run` waits use signals plus a one-shot timeout,
+  with deferred coroutine resumption; direct-drive defaults to 120s and the
+  worker fallback wait to 60s. Main-loop guards use one 100ms timeout. The only
+  remaining host poll is the worker's 10ms req/STOP filesystem rendezvous,
+  which has no one-shot filesystem event API.
+
 ## Command reference (aligned with v0.3.0 `--help`)
 
 `gqt mutation [<files...>] [--project-root <root>] [all options]`
@@ -189,7 +230,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins and invalid values fail loud |
 | `--budget <n>` | 50 | Max mutants; with diff reuse present, counted on the post-diff retry set (order-preserving truncation) |
 | `--timeout <s>` | 600 | Single GUT wall-clock limit; default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade |
-| `--dry-run` | off | List mutation sites without running GUT; emits a diff estimate when a manifest exists |
+| `--dry-run` | off | List sites without GUT, map renewal, import or census; emits diff estimates plus `execution_plan` / `execution_plan_meta`. Missing/stale maps are disclosed as `would_renew` with missing inputs and cost, never renewed; existing selection fail-loud semantics still apply |
 | `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping and discloses `explicit_tests` |
 | `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value |
 | `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |

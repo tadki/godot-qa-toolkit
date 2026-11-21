@@ -549,6 +549,8 @@ def _execute_planned(path, project_root, original_src, backup, mutants,
 # per-mutant 自适应上限（baseline 耗时决定，_run_mutant_loop 内写入；统一
 # 报告构建已迁 reporting.py，经参数传入读取时刻同值）。
 _adaptive_timeout = 0
+# SEE-1615 §SPEC-HANG：腿 spawn 超时下限（秒）——缺失/0 兜底，防立即超时。
+_LEG_TIMEOUT_FLOOR = 120
 
 # §SPEC-P2-R1-D2：本轮 baseline 红测试的脚本限定身份集 {(script, name)}，
 # 由 _loop_baseline 每轮重置；供（1）宿主红测跳过配对（2）同名列 kill 判
@@ -599,8 +601,14 @@ def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
         _ACTIVE_SCRIPT = beacon.beacon_script_res(slot.root)
     try:
         try:
+            # SEE-1615 §SPEC-HANG：仅当 _adaptive_timeout 缺失/≤0（未跑
+            # baseline 的调用面）时用有界兜底 120s——正常自适应值（含显式
+            # 60s）保持既有语义不抬高。
+            _leg_timeout = int(_adaptive_timeout or 0)
             rc, tail = _run_gut_on_project(
-                str(slot.root), timeout_s=_adaptive_timeout,
+                str(slot.root),
+                timeout_s=(_leg_timeout if _leg_timeout > 0
+                           else _LEG_TIMEOUT_FLOOR),
                 tests_glob=tests_glob)
             verdict = _sm_classify(m, rc, tail, baseline_failures,
                                    baseline_dirty, original_src, ownership_fn,

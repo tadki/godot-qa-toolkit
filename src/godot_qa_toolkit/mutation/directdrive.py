@@ -18,7 +18,8 @@ import os
 import uuid
 from pathlib import Path
 
-from .killbail import (BAIL_MARKER, DIRECT_SCRIPTS_MARKER, SKIP_RED_MARKER,
+from .killbail import (BAIL_MARKER, DIRECT_SCRIPTS_MARKER, HOST_HUNG_MARKER,
+                        SCRIPTS_FAIL_MARKER, SKIP_RED_MARKER,
                         TEST_FACE_MARKER)
 
 DIRECT_HOST_NAME = ".gqt_direct_host_{pid}.gd"
@@ -29,6 +30,19 @@ DIRECT_HOST_NAME = ".gqt_direct_host_{pid}.gd"
 # 与一次跑全部脚本的终态计数一致；每脚本结果经
 # `_test_collector.get_scripts()[i].tests` 的 was_run/is_failing 取名。
 SEQUENTIAL_RUNNER_GD = r"""
+# SEE-1615 §SPEC-HANG：执行前脚本清单可加载校验——wrapper/其 extends 目标
+# 缺失时 GUT end_run 永不发射，等待将烧满上限（KOL 实测挂起）；不可加载即
+# 具名 fail-fast（统一 marker → Python 侧具名 run_error）。
+func _gqt_verify_scripts(scripts: Array) -> String:
+	# KOL 实测：parse-error wrapper（extends 目标缺失）load() 返回非 null
+	# 但 can_instantiate()==false——两者都必须检出，否则 GUT 收集期挂起。
+	for s in scripts:
+		var res = load(String(s))
+		if res == null or not res.can_instantiate():
+			return String(s)
+	return ""
+
+
 func _gqt_first_new_failure(names: Array, baseline: Array) -> String:
 	for n in names:
 		if not baseline.has(String(n)):
@@ -83,6 +97,9 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 		gut.end_run.disconnect(cb)
 		if not done[0]:
 			out["hung"] = true
+			print("@HUNG@ waited_ms=" + str(per_script_timeout_ms)
+				+ " scripts_run=" + str(out["scripts_run"])
+				+ "/" + str(out["scripts_total"]))
 			break
 		out["scripts_run"] = stop
 		out["pass"] = int(out["pass"]) + gut.get_pass_count()
@@ -207,7 +224,7 @@ func _gqt_allow_tests(gut: Node, allow: Array,
 		+ str(out["matched_pairs"]) + " overlap_red="
 		+ str(out["overlap_red"]))
 	return out
-""".replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER).replace("@SKIPRED@", SKIP_RED_MARKER).replace("@TESTFACE@", TEST_FACE_MARKER)
+""".replace("@BAIL@", BAIL_MARKER).replace("@SCRIPTS@", DIRECT_SCRIPTS_MARKER).replace("@SKIPRED@", SKIP_RED_MARKER).replace("@TESTFACE@", TEST_FACE_MARKER).replace("@SCRIPTSFAIL@", SCRIPTS_FAIL_MARKER).replace("@HUNG@", HOST_HUNG_MARKER)
 
 # cold 直驱宿主：beacon L1-L3 逐字节同构（failure 码 3/4 + marker 契约不变）
 # → 顺序执行原语。cfg 增量键：tests_scripts / baseline_failures。
@@ -270,6 +287,12 @@ func _init() -> void:
 		printerr("GQT_BEACON_FAIL: direct host requires tests_scripts list")
 		quit(4)
 		return
+	# SEE-1615 §SPEC-HANG：清单不可加载 → 具名 fail-fast（不等 end_run）
+	var bad_script: String = _gqt_verify_scripts(scripts)
+	if bad_script != "":
+		print("@SCRIPTSFAIL@ path=" + bad_script)
+		quit(5)
+		return
 	var gut: Node = load("res://addons/gut/gut.gd").new()
 	get_root().add_child(gut)
 	var GutUtils = load("res://addons/gut/utils.gd")
@@ -290,14 +313,14 @@ func _init() -> void:
 	var bail_names: Array = (cfg.get("bail_baseline_failures", [])
 		if bail_on else [])
 	var seq: Dictionary = await _gqt_run_scripts_sequential(
-		gut, scripts, bail_names, 600000,
+		gut, scripts, bail_names, int(cfg.get("host_wait_ms", 120000)),
 		int(cfg.get("bail_chunk", 32)))
 	seq["skip_red"] = skip_red
 	seq["allow"] = allow
 	get_root().remove_child(gut)
 	gut.free()
 	quit(1 if int(seq["fail"]) > 0 else 0)
-""" + SEQUENTIAL_RUNNER_GD
+""".replace("@SCRIPTSFAIL@", SCRIPTS_FAIL_MARKER) + SEQUENTIAL_RUNNER_GD
 
 
 def direct_host_name() -> str:
@@ -330,7 +353,7 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
     allow_tests（§SPEC-IMPL，[script, name] 或 [script, "*"]）在 skip_red
     之后物理保留命中测试；bail_chunk（§SPEC-PERF1）缺省经单点解析取
     env/默认（顺序执行 chunk 大小）。"""
-    from .killbail import resolve_bail_chunk
+    from .killbail import resolve_bail_chunk, resolve_host_wait_ms
     path = Path(slot_root) / f".gqt_beacon_cfg_{uuid.uuid4().hex[:12]}.json"
     payload = {"target_res": target_res, "mutant_sha256": mutant_sha256,
                "autoload": autoload_name,
@@ -340,6 +363,7 @@ def write_direct_cfg(slot_root: str, target_res: str, mutant_sha256: str,
                "bail_baseline_failures": sorted(baseline_failures or []),
                "skip_red_tests": [list(p) for p in (skip_red_tests or [])],
                "allow_tests": [list(p) for p in (allow_tests or [])],
-               "bail_chunk": resolve_bail_chunk(bail_chunk)}
+               "bail_chunk": resolve_bail_chunk(bail_chunk),
+               "host_wait_ms": resolve_host_wait_ms()}
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

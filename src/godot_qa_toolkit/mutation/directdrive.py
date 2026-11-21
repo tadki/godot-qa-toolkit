@@ -33,6 +33,16 @@ SEQUENTIAL_RUNNER_GD = r"""
 # SEE-1615 §SPEC-HANG：执行前脚本清单可加载校验——wrapper/其 extends 目标
 # 缺失时 GUT end_run 永不发射，等待将烧满上限（KOL 实测挂起）；不可加载即
 # 具名 fail-fast（统一 marker → Python 侧具名 run_error）。
+signal _chunk_settled
+
+
+# SEE-1615 §SPEC-EVWAIT：end_run 回调栈内禁止 disconnect/free(gut)——
+# 经 Object.call_deferred 推迟到 idle 帧再 emit 恢复协程（Signal 类型无
+# call_deferred 成员，KOL 实测宿主解析失败）。
+func _finish_chunk(end_fired: bool) -> void:
+	_chunk_settled.emit()
+
+
 func _gqt_verify_scripts(scripts: Array) -> String:
 	# KOL 实测：parse-error wrapper（extends 目标缺失）load() 返回非 null
 	# 但 can_instantiate()==false——两者都必须检出，否则 GUT 收集期挂起。
@@ -88,14 +98,27 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 			idxs.append(i)
 		var done := [false]
 		var cb := func() -> void: done[0] = true
-		gut.end_run.connect(cb)
+		# SEE-1615 §SPEC-EVWAIT：事件等待 + 一次性超时事件（无轮询）——
+		# end_run 信号与超时事件同汇 _chunk_settled，语义与 HANG 判定不变。
+		var settled := {"end": false, "cap": false}
+		# on_end 由 end_run 发射栈内调用——经 Object.call_deferred 推迟出
+		# 派发栈（Signal 无 call_deferred 成员；KOL 实测同步恢复会在信号
+		# 派发中 disconnect/free(gut) → 锁定崩溃 → resp 永不写）
+		var on_end := func() -> void:
+			settled["end"] = true
+			call_deferred("_finish_chunk", true)
+		gut.end_run.connect(on_end)
+		var cap := create_timer(per_script_timeout_ms / 1000.0)
+		var on_cap := func() -> void:
+			settled["cap"] = true
+			call_deferred("_finish_chunk", false)
+		cap.timeout.connect(on_cap)
 		gut._test_the_scripts(idxs)
-		var waited := 0
-		while not done[0] and waited * 10 < per_script_timeout_ms:
-			await create_timer(0.01).timeout
-			waited += 1
-		gut.end_run.disconnect(cb)
-		if not done[0]:
+		await _chunk_settled
+		gut.end_run.disconnect(on_end)
+		cap.timeout.disconnect(on_cap)
+		_chunk_settled.disconnect(on_cap)
+		if settled["cap"]:
 			out["hung"] = true
 			print("@HUNG@ waited_ms=" + str(per_script_timeout_ms)
 				+ " scripts_run=" + str(out["scripts_run"])
@@ -248,13 +271,12 @@ func _init() -> void:
 		return
 	var target_res := String(cfg["target_res"])
 	var expect_hex := String(cfg["mutant_sha256"])
-	var max_iter := 20
-	var iter := 0
-	while(Engine.get_main_loop() == null and iter < max_iter):
-		await create_timer(.01).timeout
-		iter += 1
+	# SEE-1615 §SPEC-EVWAIT：一次性 100ms 超时事件（非轮询）；未就绪即具名失败
+	await create_timer(0.1).timeout
 	if(Engine.get_main_loop() == null):
-		push_error('Main loop did not start in time.')
+		printerr('GQT_BEACON_FAIL: main loop did not start in time')
+		quit(4)
+		return
 		quit(0)
 		return
 	var bytes := FileAccess.get_file_as_bytes(target_res)

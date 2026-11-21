@@ -26,8 +26,6 @@ SRC = REPO / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 DEFAULT_GODOT = "/home/jerry/gqt-probe-bin/godot"
-KOL_ADDONS = Path("/home/jerry/multica_workspaces/seed-478690824e46/"
-                  "see-1615-f9a8c1cf79db/workdir/KingOfLikes-Godot/addons/gut")
 
 HOT_FUNCS = [("v01", "a + b"), ("v02", "a - b"), ("v03", "a * b"),
              ("v04", "a + b"), ("v05", "a - b"), ("v06", "a * b"),
@@ -70,14 +68,17 @@ def _test_script(funcs: list[tuple[str, str]], suffix: str = "") -> str:
             + body + "\n")
 
 
-def build_fixture(root: Path) -> tuple[Path, Path]:
+def build_fixture(root: Path, kol_addons: Path) -> tuple[Path, Path]:
     if root.exists():
         import shutil
         shutil.rmtree(root)
+    if not kol_addons.is_dir():
+        raise SystemExit(f"GUT addon source missing (--kol-addons): "
+                         f"{kol_addons}")
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "addons").mkdir()
     import shutil
-    shutil.copytree(KOL_ADDONS, root / "addons" / "gut")
+    shutil.copytree(kol_addons, root / "addons" / "gut")
     (root / "project.godot").write_text(
         'config_version=5\n\n[application]\nconfig/name="perf2"\n',
         encoding="utf-8")
@@ -230,10 +231,23 @@ def _verdict_map(root: Path, rel: str) -> dict[str, str]:
     return out
 
 
+def _clear_store(root: Path) -> None:
+    """两臂间 store 隔离：清空 resume v2 store，使 on 臂 verdict_map 只含
+    本臂 verdict——共享 store 会继承 off 臂条目，剪枝位点 id 在 on 臂
+    verdict 中必然在场，`pruned_ids_absent_from_on_verdicts` 恒 False
+    （SEE-1615 QA LOW F1）。off 臂 verdict_map 已在清空前快照。"""
+    import shutil
+    from godot_qa_toolkit.mutation.resume2 import RESUME_V2_DIRNAME
+    shutil.rmtree(root / ".qa-cache" / RESUME_V2_DIRNAME,
+                  ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--budget", type=int, default=48)
     ap.add_argument("--godot-bin", default=DEFAULT_GODOT)
+    ap.add_argument("--kol-addons", default=None,
+                    help="真实 GUT addon 源（addons/gut；合成 fixture 用）")
     ap.add_argument("--kol-root", default=None,
                     help="KOL /tmp 忠实副本（已 --import）")
     ap.add_argument("--kol-target", default="utils/container_utils.gd")
@@ -245,17 +259,23 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if not Path(args.godot_bin).is_file():
         raise SystemExit(f"godot binary missing: {args.godot_bin}")
+    if not args.kol_addons:
+        raise SystemExit("missing --kol-addons (real GUT addon source, "
+                         "e.g. <KingOfLikes-Godot>/addons/gut)")
     from godot_qa_toolkit.mutation.equivalent import (
         _RULE_PROOFS, RULE_EQ_ARMSWAP_SYMMETRIC, RULE_EQ_ZERO_ADD,
         RULE_EQ_ZERO_SUB)
 
-    root, target = build_fixture(Path(tempfile.mkdtemp(prefix="see1615-p2-")))
+    kol_addons = Path(args.kol_addons).resolve()
+    root, target = build_fixture(Path(tempfile.mkdtemp(prefix="see1615-p2-")),
+                                 kol_addons)
     report: dict = {"tool": "see1615-perf2", "rules": [], "tracks": {}}
     for rule in (RULE_EQ_ZERO_ADD, RULE_EQ_ZERO_SUB,
                  RULE_EQ_ARMSWAP_SYMMETRIC):
         report["rules"].append({"rule": rule, "proof": _RULE_PROOFS[rule]})
 
     off = _run(root, target, False, args.budget, args.godot_bin)
+    _clear_store(root)
     on = _run(root, target, True, args.budget, args.godot_bin)
     pruned_on = (on.get("equivalent_pruned") or {})
     common = {i for i in off.get("verdict_map", {}) if i in on.get("verdict_map", {})}
@@ -266,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         "on": {k: on.get(k) for k in ("completed", "rc", "wall_s",
                                       "killed", "survived",
                                       "equivalent_pruned")},
+        "on_store_isolated": True,
         "verdict_common_ids_consistent": all(
             off["verdict_map"][i] == on["verdict_map"][i] for i in common),
         "common_ids": len(common),
@@ -282,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         koff = _run(kol, kol / args.kol_target, False, args.kol_budget,
                     args.godot_bin, tests_glob=sel,
                     rel=args.kol_target, timeout_s=600)
+        _clear_store(kol)
         kon = _run(kol, kol / args.kol_target, True, args.kol_budget,
                    args.godot_bin, tests_glob=sel,
                    rel=args.kol_target, timeout_s=600)
@@ -296,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
             "on": {k: kon.get(k) for k in ("completed", "rc", "wall_s",
                                            "killed", "survived",
                                            "equivalent_pruned")},
+            "on_store_isolated": True,
             "verdict_common_ids_consistent": all(
                 koff["verdict_map"][i] == kon["verdict_map"][i]
                 for i in kcommon),

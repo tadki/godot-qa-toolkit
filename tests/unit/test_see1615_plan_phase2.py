@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
+
 from godot_qa_toolkit.mutation import reporting
 from godot_qa_toolkit.mutation.reporting import _execution_plan, _plan_meta
 
@@ -48,6 +50,14 @@ def test_partitions_cover_all_plan_fields():
     assert "selection_mode" in parts["derived"]["selection"]
     assert "baseline_reused" in parts["observed"]["diff"]
     assert "slot_mode" in parts["runtime"]["route"]
+
+
+def test_answers_channel_is_exec_scheme_not_inject_scheme():
+    """channel 回答唯一来源 = route.exec_scheme（fixture 两 scheme 可分辨）。"""
+    plan, meta = _plan_with()
+    assert meta["answers"]["channel"] == "cold-shadow/1"
+    assert plan["route"].get("inject_scheme") == "disk-shadow/1"
+    assert meta["answers"]["channel"] != plan["route"].get("inject_scheme")
 
 
 def test_plan_id_stable_under_derived_and_blind_to_observed():
@@ -163,6 +173,7 @@ def test_missing_map_would_renew_named_missing_and_cost(tmp_path,
     assert block["would_renew"] is True
     assert "attribution_map" in block["missing"]
     assert block["cost"]
+    assert "auto map-update (full-chain GUT renewal)" in block["cost"]
     assert calls["renew"] == [] and calls["spawn"] == []
 
 
@@ -215,8 +226,31 @@ def test_would_renew_makes_lint_fail_but_not_a_run_gate(tmp_path,
     结果仍 ok=True——lint 不作运行门。"""
     root, target = _fixture_project(tmp_path)  # 缺 map
     _spy_all(monkeypatch)
-    s = _run_core_dry_run(root, target, monkeypatch)["summary"]
+    r = _run_core_dry_run(root, target, monkeypatch)
+    s = r["summary"]
     meta = s["execution_plan_meta"]
     assert meta["map_state"]["would_renew"] is True
     problems = reporting.validate_plan(meta)
     assert any("selection_usable" in p for p in problems)
+    assert r["ok"] is True
+
+
+def test_dry_run_core_setup_passes_renew_false(tmp_path, monkeypatch):
+    """零副作用守门单点：dry-run 经 _core_setup 进 _resolve_auto_glob 时
+    必须 allow_renew=False（renew 抑制在 runner 侧单点钉住；line/fn 面
+    才可达该点，full 面直接短路不经 resolve_selection）。"""
+    from godot_qa_toolkit.mutation import runner as runner_mod
+    from godot_qa_toolkit.mutation import truth_select
+
+    root, target = _fixture_project(tmp_path)
+    seen: dict = {}
+
+    def fake_resolve(project_root, target_file, *a, **k):
+        seen["renew"] = k.get("renew")
+        raise truth_select.MutationSelectionError("stub_no_map", "stub")
+
+    monkeypatch.setattr(truth_select, "resolve_selection", fake_resolve)
+    with pytest.raises(truth_select.MutationSelectionError):
+        runner_mod._run_mutation_core(str(target), str(root), dry_run=True,
+                                      select_mode="fn")
+    assert seen["renew"] is False

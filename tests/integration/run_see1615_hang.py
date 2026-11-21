@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -141,6 +142,33 @@ def _flips(a: dict[str, str], b: dict[str, str]) -> list[str]:
     return sorted(i for i in ids if a.get(i) != b.get(i))
 
 
+def _isolate_store_for_legacy(root: Path) -> tuple[Path | None, bool]:
+    """legacy 腿 store 隔离：四形态共享 store 会累积前序 verdict，legacy
+    直读得到的是累积 superset 而非自身判定，逐 id 翻转被掩盖（QA LOW F2）。
+    先把 resume store 快照移走（同 fs rename），legacy 落全新 store——
+    其 verdict_map 只含本腿判定；跑后丢弃 legacy store、还原快照。
+    返回 (快照路径, 是否发生隔离)。"""
+    from godot_qa_toolkit.mutation.resume2 import RESUME_V2_DIRNAME
+    store = root / ".qa-cache" / RESUME_V2_DIRNAME
+    if not store.is_dir():
+        return None, False
+    snapshot = root / ".qa-cache" / f"{RESUME_V2_DIRNAME}.legacy-snapshot"
+    if snapshot.exists():
+        shutil.rmtree(snapshot)
+    store.rename(snapshot)
+    return snapshot, True
+
+
+def _restore_store(root: Path, snapshot: Path | None) -> None:
+    from godot_qa_toolkit.mutation.resume2 import RESUME_V2_DIRNAME
+    if snapshot is None:
+        return
+    store = root / ".qa-cache" / RESUME_V2_DIRNAME
+    if store.exists():
+        shutil.rmtree(store)
+    snapshot.rename(store)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kol-root", required=True)
@@ -176,8 +204,13 @@ def main(argv: list[str] | None = None) -> int:
         r["form"] = name
         r["completed"] = _completed(r)
         results.append(r)
-    legacy = _run(root, args.target, valid_sel, False, 1, False,
-                  args.budget, args.godot_bin, args.timeout_s)
+    legacy = None
+    store_snapshot, store_isolated = _isolate_store_for_legacy(root)
+    try:
+        legacy = _run(root, args.target, valid_sel, False, 1, False,
+                      args.budget, args.godot_bin, args.timeout_s)
+    finally:
+        _restore_store(root, store_snapshot)
     legacy["form"] = "legacy_cold_jobs1"
     legacy["completed"] = _completed(legacy)
     cold_map = next((r.get("verdict_map") or {} for r in results
@@ -197,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         "budget": args.budget,
         "forms": results,
         "legacy": legacy,
+        "legacy_store_isolated": store_isolated,
         "legacy_verdict_flips": legacy_flips,
         "invalid_face": invalid,
         "criteria": {

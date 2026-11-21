@@ -69,41 +69,39 @@ def _doc(**kw):
 
 
 def test_line_identity_sets_split_lanes():
-    idents, lane, scope = line_identity_sets(_doc(), "src/x.gd", {10, 12})
+    idents, lane = line_identity_sets(_doc(), "src/x.gd", {10, 12})
     assert idents[10] == ["test_a.gd::t1", "test_b.gd::t2"]
     assert idents[12] == ["test_a.gd::t1"]
     assert lane == {"test_c.gd"}
-    assert scope == "line"
 
 
-def test_closure_whole_file_when_unattributed_listed():
-    """D1：窗口归因有损文件 → 整文件面（allow 含文件级全部测试）。"""
+def test_unattributed_listing_does_not_change_selection():
+    """D1 回退：unattributed_files 命中目标不再改变选面——稀疏行无整文件
+    面，有行事实的行照常严格行级（正例 + 反例）。"""
     doc = _doc(unattributed_files=["src/x.gd"])
-    idents, lane, scope = line_identity_sets(doc, "src/x.gd", {99})
-    assert scope == "file"
-    assert "test_a.gd::t1" in idents[99] and "test_b.gd::t2" in idents[99]
+    idents, lane = line_identity_sets(doc, "src/x.gd", {99})
+    assert 99 not in idents
+    assert lane == set()
+    idents_dense, lane_dense = line_identity_sets(doc, "src/x.gd", {10})
+    assert idents_dense == {10: ["test_a.gd::t1", "test_b.gd::t2"]}
+    assert lane_dense == {"test_c.gd"}
+
+
+def test_legacy_map_without_list_keeps_strict_lines():
+    """名单键缺失（legacy/增量产物）同语义：行级身份照常，无整文件面。"""
+    doc = _doc()
+    doc["arms"]["gut_full"].pop("unattributed_files")
+    idents, lane = line_identity_sets(doc, "src/x.gd", {10})
+    assert idents == {10: ["test_a.gd::t1", "test_b.gd::t2"]}
     assert lane == {"test_c.gd"}
 
 
-def test_closure_whole_file_when_list_absent_legacy_map():
-    """名单键缺失（legacy/增量产物）→ 无法证伪归因完整 → 整文件面。"""
-    doc = _doc()
-    doc["arms"]["gut_full"].pop("unattributed_files")
-    _idents, _lane, scope = line_identity_sets(doc, "src/x.gd", {10})
-    assert scope == "file"
-
-
-def test_closure_sparse_line_fn_then_file_ladder():
-    """稀疏行（无行事实）：fn 级 ∪；fn 边也空 → 文件级。"""
+def test_sparse_lines_get_no_fn_or_file_widening():
+    """D1 回退：稀疏行不再 fn→file 扩面——test_to_functions 在册也不回退。"""
     doc = _doc(test_to_functions={"test_fn.gd::t9": ["src/x.gd::work"]})
-    idents, _lane, scope = line_identity_sets(
-        doc, "src/x.gd", {77}, registry={77: "src/x.gd::work"})
-    assert scope == "line"
-    assert "test_fn.gd::t9" in idents[77]
-    # fn 边空 → 文件级回退
-    idents2, _l2, _s2 = line_identity_sets(
-        doc, "src/x.gd", {78}, registry={78: "src/x.gd::other"})
-    assert "test_a.gd::t1" in idents2[78]
+    idents, lane = line_identity_sets(doc, "src/x.gd", {77, 78})
+    assert 77 not in idents and 78 not in idents
+    assert lane == set()
 
 
 # ---------------------------------------------------------- verdict 披露
@@ -268,32 +266,33 @@ def test_killed_certificate_and_store_carry_test_face():
 
 
 def test_test_filter_disclosure_counts_and_scope(monkeypatch):
-    """summary.test_filter 披露：identities/script_lane 计数与闭包形态同源。"""
+    """summary.test_filter 披露：identities/script_lane 计数与 scope 同源
+    （D1 回退后 scope 恒 "line"）。"""
     import godot_qa_toolkit.mutation.runner as runner
 
     monkeypatch.delenv(killbail.ENV_TEST_FILTER, raising=False)
     allow = [["test_a.gd", "t1"], ["test_b.gd", "t2"], ["test_c.gd", "*"]]
-    monkeypatch.setattr(runner, "_ACTIVE_ALLOW_SCOPE", "file")
+    monkeypatch.setattr(runner, "_ACTIVE_ALLOW_SCOPE", "line")
     d = runner._test_filter_disclosure(allow)
     assert d["enabled"] is True and d["disabled_by"] is None
     assert d["applied"] is True
     assert d["allow_identities"] == 2
     assert d["script_lane_fallback"] == 1
-    assert d["scope"] == "file"
+    assert d["scope"] == "line"
     # 未下发（None）→ applied False、scope 归空、计数为 0
-    monkeypatch.setattr(runner, "_ACTIVE_ALLOW_SCOPE", "line")
     e = runner._test_filter_disclosure(None)
     assert e["applied"] is False and e["scope"] is None
     assert e["allow_identities"] == 0 and e["script_lane_fallback"] == 0
 
 
 def test_run_mutation_core_assembles_allow_from_selection_meta(monkeypatch):
-    """selection_meta.tests_allow → _ACTIVE_ALLOW_TESTS/[script,name] 组装。"""
+    """selection_meta.tests_allow → _ACTIVE_ALLOW_TESTS/[script,name] 组装；
+    chunk 无 scope 键（D1 回退）→ runner 默认 scope="line"。"""
     import godot_qa_toolkit.mutation.runner as runner
 
     monkeypatch.delenv(killbail.ENV_TEST_FILTER, raising=False)
     meta = {"tests_allow": {"identities": ["a.gd::t1", "b.gd::t2"],
-                            "script_lane": ["c.gd"], "scope": "file"}}
+                            "script_lane": ["c.gd"]}}
     ctx = {"path": "x.gd", "original_src": "", "identity": {},
            "mutants": [], "scope_hashes": {}, "total_sites": 0,
            "header_hash": "h"}
@@ -308,7 +307,7 @@ def test_run_mutation_core_assembles_allow_from_selection_meta(monkeypatch):
         "ok": True}
     assert runner._ACTIVE_ALLOW_TESTS == [
         ["a.gd", "t1"], ["b.gd", "t2"], ["c.gd", "*"]]
-    assert runner._ACTIVE_ALLOW_SCOPE == "file"
+    assert runner._ACTIVE_ALLOW_SCOPE == "line"
 
 
 def test_write_direct_cfg_carries_allow_tests(tmp_path):
@@ -378,7 +377,8 @@ def _fixture_project(tmp_path):
 
 def _write_line_map_1610(proj, target):
     """行事实 /6 映射：4/7→test_a、7 兼 test_b、10→test_b；script 车道
-    test_b 触达行 10；unattributed_files 含目标 → 闭包整文件面（scope=file）。"""
+    test_b 触达行 10；unattributed_files 含目标仅作选面不变性对照
+    （D1 回退：名单不再触发整文件面，无 scope 键）。"""
     import hashlib
     import json
     from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
@@ -426,7 +426,8 @@ def _write_line_map_1610(proj, target):
 
 def test_line_selection_and_chunk_carry_tests_allow(tmp_path):
     """resolve（--lines 串行）与 planning chunk 同源组装 tests_allow：
-    identities 并集、script 车道整脚本保留、闭包形态透传。"""
+    identities 并集、script 车道整脚本保留；严格行级——unattributed
+    名单在场不改变选面、稀疏行只具名披露（D1 回退后无 scope 键）。"""
     from godot_qa_toolkit.mutation import truth_select
     from godot_qa_toolkit.mutation.executor import _line_group_chunks
     from godot_qa_toolkit.mutation.ops import _collect_mutations
@@ -434,12 +435,14 @@ def test_line_selection_and_chunk_carry_tests_allow(tmp_path):
 
     proj, target = _fixture_project(tmp_path)
     map_path = _write_line_map_1610(proj, target)
-    # 1) resolve 侧
-    sel = truth_select.resolve_line_group_selection(proj, str(target), [4, 7, 10])
+    # 1) resolve 侧：请求含稀疏行 5（无行事实）
+    sel = truth_select.resolve_line_group_selection(
+        proj, str(target), [4, 7, 10, 5])
     ta = sel["tests_allow"]
-    assert ta["scope"] == "file"
+    assert set(ta) == {"identities", "script_lane"}
     assert set(ta["identities"]) == {"test_a.gd::t1", "test_b.gd::t2"}
     assert ta["script_lane"] == ["test_b.gd"]
+    assert sel["no_mapped_tests"] == [5]
     # 2) planning chunk 侧
     src = target.read_text(encoding="utf-8")
     _, _, mutants, _ = build_manifest(src, str(target),
@@ -455,10 +458,13 @@ def test_line_selection_and_chunk_carry_tests_allow(tmp_path):
               for ch, g in zip(chunks, groups)}
     a = by_sig[frozenset({"test_a.gd"})]
     b = by_sig[frozenset({"test_b.gd"})]
-    assert a["scope"] == "file" and b["scope"] == "file"
-    assert set(a["identities"]) == {"test_a.gd::t1", "test_b.gd::t2"}
-    assert a["script_lane"] == []             # test_a 组不触达 script 车道
-    assert b["script_lane"] == ["test_b.gd"]  # test_b 组命中 script 车道
+    ab = by_sig[frozenset({"test_a.gd", "test_b.gd"})]
+    assert set(a) == {"identities", "script_lane"} == set(b) == set(ab)
+    assert a["identities"] == ["test_a.gd::t1"]   # 组内行身份（行 4 仅 test_a）
+    assert a["script_lane"] == []                 # test_a 组不触达 script 车道
+    assert b["identities"] == ["test_b.gd::t2"]   # 行 10 仅 test_b
+    assert b["script_lane"] == ["test_b.gd"]      # test_b 组命中 script 车道
+    assert ab["identities"] == ["test_a.gd::t1", "test_b.gd::t2"]  # 行 7 混合组
 
 
 def test_run_mutation_core_respects_off_switch(monkeypatch):

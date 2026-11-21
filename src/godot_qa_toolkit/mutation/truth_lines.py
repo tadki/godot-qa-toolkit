@@ -69,93 +69,29 @@ def _line_script_sets(doc: dict, rel: str,
                 out.setdefault(int(ln), set()).add(Path(script).name)
     return out
 
-def _file_level_sets(arm: dict, rel: str) -> "tuple[set[str], set[str]]":
-    """整文件面：触达 rel 的 test 身份全集 ∪ script 车道脚本全集。"""
-    idents: set[str] = set()
-    for identity, by_rel in (arm.get("test_to_lines") or {}).items():
-        if rel in by_rel:
-            idents.add(identity)
-    scripts = {s for s, by_rel in (arm.get("script_to_lines") or {}).items()
-               if rel in by_rel}
-    return idents, scripts
+def line_identity_sets(doc: dict, rel: str,
+                       lines: set[int]) -> "tuple[dict[int, list[str]], set[str]]":
+    """行 → test 身份列表（test 车道，身份级）∪ 组内 script 车道脚本集。
 
-
-def _fn_level_sets(arm: dict, fid: str) -> set[str]:
-    """函数面：fn 边触达该 fid 的 test 身份全集（行稀疏时的第一级回退）。"""
-    out: set[str] = set()
-    for identity, fids in (arm.get("test_to_functions") or {}).items():
-        if fid in fids:
-            out.add(identity)
-    return out
-
-
-def line_identity_sets(doc: dict, rel: str, lines: set[int],
-                       registry: "dict | None" = None
-                       ) -> "tuple[dict[int, list[str]], set[str], str]":
-    """行 → test 身份列表（test 车道）∪ script 车道脚本集 ∪ 闭包形态。
-
-    SEE-1610 §SPEC-IMPL/D1（覆盖式 allow 集欠近似修复）：闭包阶梯
-    - 行级：命中行的 line_to_tests 身份（绿路径归因完整时唯一所需）；
-    - 稀疏/条件覆盖行（行不在任何行事实）→ 包围函数级（fn 边）测试集，
-      仍空 → 整文件面；
-    - 窗口归因有损文件（map `unattributed_files` 含 rel，或该键缺失——
-      legacy/增量产物无法证伪）→ **整文件面**（行/fn 精度不可信）。
-    返回 (idents_by_line, script_lane, scope)，scope ∈ {"line", "file"}；
-    script_lane 元素统一进 "*" 整脚本保留；file 形态另由调用方把文件面
-    并入 identities。registry（line→fid）缺省时稀疏行直接走文件面。"""
+    SEE-1610 §SPEC-IMPL：test 级 allowlist 数据源——identities 供
+    [script, name] 保留对；script 车道脚本（before_all 等脚本级触达）以
+    整脚本保留（"*"），不可 test 级收窄。"""
     arm = (doc.get("arms") or {}).get("gut_full") or {}
-    idents_by_line, lane = _line_lane_facts(arm, rel, lines)
-    unattr = arm.get("unattributed_files")
-    if unattr is None or rel in unattr:
-        f_idents, f_scripts = _file_level_sets(arm, rel)
-        _merge_idents(idents_by_line, lines, f_idents)
-        return idents_by_line, lane | f_scripts, "file"
-    _widen_sparse_lines(arm, rel, idents_by_line, lane, lines, registry)
-    return idents_by_line, lane, "line"
-
-
-def _merge_idents(idents_by_line: dict[int, list[str]], lines,
-                  add: "set[str] | list[str]" = ()) -> None:
-    for ln in lines:
-        slot = idents_by_line.setdefault(ln, [])
-        for i in sorted(add):
-            if i not in slot:
-                slot.append(i)
-
-
-def _line_lane_facts(arm: dict, rel: str, lines: set[int]
-                     ) -> "tuple[dict[int, list[str]], set[str]]":
-    """基础车道事实：行 → test 身份列表 + script 车道脚本集。"""
-    idents_by_line: dict[int, list[str]] = {}
+    out: dict[int, list[str]] = {}
     lane: set[str] = set()
     for ln_s, idents in (arm.get("line_to_tests") or {}).get(rel, {}).items():
         ln = int(ln_s)
         if ln not in lines:
             continue
-        _merge_idents(idents_by_line, {ln}, idents)
+        slot = out.setdefault(ln, [])
+        for i in idents:
+            if i not in slot:
+                slot.append(i)
     for script, rel_map in (arm.get("script_to_lines") or {}).items():
         for ln in (rel_map or {}).get(rel, []) or []:
             if int(ln) in lines:
                 lane.add(script)
-    return idents_by_line, lane
-
-
-def _widen_sparse_lines(arm: dict, rel: str,
-                        idents_by_line: dict[int, list[str]],
-                        lane: set[str], lines: set[int],
-                        registry: "dict | None") -> None:
-    """归因完整文件的稀疏行闭包：fn 级 ∪（fn 边也空）文件级。"""
-    fid_of = registry or {}
-    f_idents, f_scripts = _file_level_sets(arm, rel)
-    for ln in lines:
-        if idents_by_line.get(ln):
-            continue
-        fid = fid_of.get(ln)
-        widened = _fn_level_sets(arm, fid) if fid else set()
-        if not widened:
-            widened = f_idents
-            lane |= f_scripts
-        _merge_idents(idents_by_line, {ln}, widened)
+    return out, lane
 
 
 def _resolve_script_paths(by_name: dict,

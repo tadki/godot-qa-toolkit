@@ -34,7 +34,11 @@ def test_host_wait_is_bounded_and_named():
 
     seq = _norm(directdrive.SEQUENTIAL_RUNNER_GD)
     assert killbail.HOST_HUNG_MARKER in seq
-    assert "waited * 10 < per_script_timeout_ms" in seq  # 有界等待语义保留
+    # SEE-1615 §SPEC-EVWAIT：end_run 等待 = 事件 race + 一次性超时事件
+    # （无 10ms 轮询循环）
+    assert "await _chunk_settled" in seq
+    assert "create_timer(per_script_timeout_ms / 1000.0)" in seq
+    assert "while not done" not in seq
     # cold 宿主把有界上限注入原语（不再硬编码 600000）
     cold = _norm(directdrive.COLD_DIRECT_GD_TEMPLATE)
     assert 'int(cfg.get("host_wait_ms", 120000))' in cold
@@ -47,6 +51,10 @@ def test_both_hosts_share_sequential_guard():
     assert directdrive.SEQUENTIAL_RUNNER_GD in worker_session.WORKER_HOST_GD
     assert killbail.SCRIPTS_FAIL_MARKER in _norm(worker_session.WORKER_HOST_GD)
     assert killbail.HOST_HUNG_MARKER in _norm(worker_session.WORKER_HOST_GD)
+    # worker end_run 等待同样事件化（§SPEC-EVWAIT）
+    whost = _norm(worker_session.WORKER_HOST_GD)
+    assert "await _leg_settled" in whost
+    assert "while not done" not in whost
 
 
 # ------------------------------------------------------------- marker 解析

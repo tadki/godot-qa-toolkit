@@ -720,6 +720,10 @@ def _inject_diff_results(results: list[dict], v2ctx: dict) -> None:
         if ctx is None:
             continue
         _inject_one(r, ctx)
+        # SEE-1615 §SPEC-PERF2：等价剪枝披露（父层单点注入 per-file summary）
+        eq_disc = ctx.get("equivalent_pruned")
+        if eq_disc and eq_disc.get("enabled"):
+            r.setdefault("summary", {})["equivalent_pruned"] = eq_disc
         # manifest 索引层单点写（收尾方唯一写者——并发竞态规避）
         ctx["store2"].write_manifest(
             ctx["header_hash"], ctx["scope_hashes"],

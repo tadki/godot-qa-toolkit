@@ -25,6 +25,14 @@ HOST_SCRIPT_NAME = ".gqt_worker_host.gd"
 # 常量本体随会话实现迁移；worker_channel 再导入保持引用面不变）。
 WORKER_HOST_GD = r"""extends SceneTree
 
+signal _leg_settled
+
+
+# SEE-1615 §SPEC-EVWAIT：end_run 回调栈内禁止 disconnect/free(gut)——经
+# Object.call_deferred 推迟到 idle 帧再 emit（Signal 无 call_deferred）。
+func _finish_leg(end_fired: bool) -> void:
+	_leg_settled.emit()
+
 const WORK := "res://.gqt-worker/"
 const REQ := WORK + "req.json"
 const RESP_TMP := WORK + "resp.tmp"
@@ -33,10 +41,8 @@ const STOP := WORK + "stop"
 
 
 func _init() -> void:
-	var max_iter := 20
-	while Engine.get_main_loop() == null and max_iter > 0:
-		await create_timer(.01).timeout
-		max_iter -= 1
+	# SEE-1615 §SPEC-EVWAIT：一次性 100ms 超时事件（非轮询）
+	await create_timer(0.1).timeout
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(WORK))
 	_touch_boot()
 	while not FileAccess.file_exists(STOP):
@@ -150,14 +156,25 @@ func _run_leg(req: Dictionary) -> void:
 				gut, req.get("allow_tests", []),
 				req.get("skip_red_tests", []))
 			resp["allow"] = allow_out2
-			var done := [false]
-			gut.end_run.connect(func() -> void: done[0] = true)
+			# SEE-1615 §SPEC-EVWAIT：事件等待 + 一次性超时事件（无轮询）
+			var done := {"end": false, "cap": false}
+			# on_end 由 end_run 发射栈内调用——经 Object.call_deferred 推迟
+			# 出派发栈（同 directdrive；Signal 无 call_deferred 成员）
+			var on_end := func() -> void:
+				done["end"] = true
+				call_deferred("_finish_leg", true)
+			gut.end_run.connect(on_end)
+			var cap := create_timer(60.0)
+			var on_cap := func() -> void:
+				done["cap"] = true
+				call_deferred("_finish_leg", false)
+			cap.timeout.connect(on_cap)
 			gut.test_scripts()
-			var waited := 0
-			while not done[0] and waited < 60000:
-				await create_timer(0.01).timeout
-				waited += 1
-			resp["gut_ran"] = done[0]
+			await _leg_settled
+			gut.end_run.disconnect(on_end)
+			cap.timeout.disconnect(on_cap)
+			_leg_settled.disconnect(on_cap)
+			resp["gut_ran"] = done["end"]
 			resp["pass"] = gut.get_pass_count()
 			resp["fail"] = gut.get_fail_count()
 		get_root().remove_child(gut)

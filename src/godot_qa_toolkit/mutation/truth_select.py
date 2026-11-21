@@ -406,6 +406,32 @@ def _fresh_recipe_hash(project_root: str) -> str | None:
     return _raw({k: v for k, v in recipe.items() if k != "recipe_hash"})
 
 
+def map_preview_state(project_root: str, target_file: str) -> dict:
+    """SEE-1606 §SPEC-P2：dry-run 预览的映射状态只读探测（零续新零 GUT）。
+
+    absent → 不做新鲜度计算（具名缺失直接给 map）；在场才走 `_evaluate`
+    同源判定（文件绑定 + recipe + 测试面漂移，全只读）；不可用/解析失败
+    按保守未知披露。返回 {"present", "fresh", "reason"}，reason ∈
+    {map_missing, map_unusable, map_fresh, map_stale:<eval reason>}。"""
+    path = map_path(project_root)
+    if not path:
+        return {"present": False, "fresh": None, "reason": "map_missing"}
+    try:
+        doc = load_map(path)
+    except Exception:  # noqa: BLE001 — 探测不得失败上抛（预览零副作用）
+        return {"present": True, "fresh": None, "reason": "map_unusable"}
+    try:
+        from ..timing import project_relative
+        rel = project_relative(project_root, target_file)
+        verdict = _evaluate(str(project_root), rel, doc)
+    except Exception:  # noqa: BLE001 — 同上，探测失败按未知保守披露
+        return {"present": True, "fresh": None, "reason": "map_unusable"}
+    fresh = bool(verdict.get("ok"))
+    detail = "" if fresh else f":{verdict.get('reason', 'unknown')}"
+    return {"present": True, "fresh": fresh,
+            "reason": f"map_fresh{'' if fresh else detail}"}
+
+
 def load_map(path: str | Path) -> dict:
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))

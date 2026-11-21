@@ -206,6 +206,151 @@ def _execution_plan(summary: dict, extra: "dict | None" = None) -> dict:
             for group, keys in groups.items()}
 
 
+# SEE-1606 §SPEC-P2：字段分区——derived 仅由静态输入决定（plan_id 唯一
+# 来源）；observed = 映射/环境实测事实；runtime = 执行期状态。五组内每个
+# 已知字段都必须在此分类（validate_plan 对未分类字段 lint）。
+_PLAN_FIELD_PARTITION = {
+    # derived
+    "selection_mode": "derived", "scoped": "derived",
+    "lines_selection": "derived", "exec_scheme": "derived",
+    "inject_scheme": "derived", "budget": "derived",
+    "kill_bail": "derived", "kill_bail_face": "derived",
+    "test_filter": "derived",
+    # observed
+    "test_selection": "observed", "selection_disclosure": "observed",
+    "baseline_reused": "observed", "resumed": "observed",
+    "diff_available": "observed", "retry_estimate": "observed",
+    "executed_estimate": "observed", "baseline_dirty": "observed",
+    "baseline_failures": "observed", "baseline_failure_names": "observed",
+    "baseline_skip": "observed",
+    # runtime
+    "slot_mode": "runtime", "freshness": "runtime",
+    "worker_channel": "runtime", "adaptive_timeout_s": "runtime",
+    "timing_source": "runtime", "kill_bail_scripts": "runtime",
+    "timeout_streak_suspended": "runtime",
+}
+_PLAN_FAILURE_PATHS = (
+    "route_drift", "selection_map_unusable", "no_mapped_tests",
+    "zero_ref_short_circuit", "baseline_timeout", "baseline_launch_failed",
+    "baseline_skip_unsupported_face", "slot_provision_failed",
+    "no_mutation_sites")
+_MAP_RENEW_COST = "auto map-update (full-chain GUT renewal)"
+_PROOF_COST = "godot --headless --import (single warm-up)"
+
+
+def _plan_partitions(plan: dict) -> "tuple[dict, list[str]]":
+    """五组计划 → (三分区视图, 未分类字段名单)（纯读重排）。"""
+    out: dict[str, dict] = {"derived": {}, "observed": {}, "runtime": {}}
+    unclassified: list[str] = []
+    for group, fields in plan.items():
+        for k, v in fields.items():
+            part = _PLAN_FIELD_PARTITION.get(k)
+            if part is not None:
+                out[part].setdefault(group, {})[k] = v
+            else:
+                unclassified.append(f"{group}.{k}")
+    return out, unclassified
+
+
+def _plan_id(derived_view: dict) -> str:
+    """plan_id：仅 hash derived 分区（observed/runtime 不参与）。"""
+    import hashlib
+    import json as _json
+    payload = _json.dumps(derived_view, sort_keys=True,
+                          ensure_ascii=False, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _map_state_block(map_state: "dict | None",
+                     import_proof_present: "bool | None") -> dict:
+    """缺/旧 map 与证明缺失 → would_renew + 具名缺失 + 成本（只读披露）。"""
+    missing: list[str] = []
+    costs: list[str] = []
+    would_renew = None
+    if map_state is not None:
+        would_renew = (not map_state.get("present")) \
+            or (map_state.get("fresh") is False)
+        if not map_state.get("present"):
+            missing.append("attribution_map")
+        elif map_state.get("fresh") is False:
+            missing.append("attribution_map_freshness")
+        if would_renew:
+            costs.append(_MAP_RENEW_COST)
+    if import_proof_present is False:
+        missing.append("prewarm_proof")
+        costs.append(_PROOF_COST)
+    return {"would_renew": would_renew, "missing": missing, "cost": costs,
+            "reason": (map_state or {}).get("reason")}
+
+
+def _plan_reasons(plan: dict, src: dict) -> list:
+    """理由回答：route 披露优先，选面披露补充（都缺席则空列表）。"""
+    route = plan.get("route") or {}
+    reasons: list = list((route.get("worker_channel") or {})
+                         .get("route_reasons") or [])
+    sel = src.get("test_selection") or src.get("selection_disclosure") or {}
+    if sel.get("reason"):
+        reasons.append(sel["reason"])
+    return reasons
+
+
+def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
+               map_state: "dict | None" = None,
+               import_proof_present: "bool | None" = None) -> dict:
+    """SEE-1606 §SPEC-P2：dry-run 计划预览元数据（只增键不改既有键）。
+
+    - partitions：字段按 derived/observed/runtime 分区；
+    - plan_id：仅 hash derived（同 derived 输入逐字节稳定，observed 变化
+      不动 id）；
+    - map_state：缺/旧 map 仅 would_renew+具名缺失+成本披露（探测只读，
+      零续新）；
+    - answers：通道/理由/失败路径/复用面四类机器问题；
+    - assumptions：计划假设与 handler（handler=None 供 validate_plan
+      lint——不作运行门）。"""
+    partitions, unclassified = _plan_partitions(plan)
+    if extra:
+        for k, v in extra.items():
+            part = _PLAN_FIELD_PARTITION.get(k)
+            if part is not None:
+                partitions[part].setdefault("budget", {})[k] = v
+            else:
+                unclassified.append(f"budget.{k}")
+    block = _map_state_block(map_state, import_proof_present)
+    route = plan.get("route") or {}
+    return {
+        "plan_id": _plan_id(partitions["derived"]),
+        "partitions": partitions,
+        "unclassified_fields": sorted(set(unclassified)),
+        "map_state": block,
+        "answers": {
+            "channel": route.get("exec_scheme"),
+            "reasons": _plan_reasons(plan, src),
+            "failure_paths": list(_PLAN_FAILURE_PATHS),
+            "reuse_surface": dict(plan.get("diff") or {}),
+        },
+        "assumptions": [
+            {"name": "route_stable", "handler": "route_drift_gate"},
+            {"name": "selection_usable",
+             "handler": None if block["would_renew"]
+             else "selection_disclosure"},
+        ],
+    }
+
+
+def validate_plan(meta: dict) -> list[str]:
+    """SEE-1606 §SPEC-P2：计划静态完整性 lint（仅供 Agent/测试消费）。
+
+    无 handler assumption / 未分类字段 → 具名问题；**不作运行门**——
+    运行路径不调用本函数，lint 失败不改变任何结果契约。"""
+    problems: list[str] = []
+    for a in meta.get("assumptions") or []:
+        if not a.get("handler"):
+            problems.append(f"assumption_without_handler:{a.get('name')}")
+    for f in meta.get("unclassified_fields") or []:
+        problems.append(f"unclassified_field:{f}")
+    return problems
+
+
 def line_text_of(src: str, line: int) -> str:
     """变异行原文；行号越界返回空串（不吞错误——记录仍可判读）。"""
     lines = src.splitlines()

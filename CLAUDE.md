@@ -1,6 +1,7 @@
 # godot-qa-toolkit 本地主仓库规则（SEE-1416 事件后比照 KOL 设立）
 
 **主仓库本地路径**：`/home/jerry/tools/godot-qa-toolkit/`（WSL 规范检出，gqt 全局 CLI 的 editable 安装源）
+- 非万不得已禁止防御性编程，尽可能使用事件驱动。
 
 ## 主仓库保护（比照 KingOfLikes CLAUDE.md §1 同款约束）
 

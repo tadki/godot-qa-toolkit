@@ -139,8 +139,8 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - Each arm carries `unattributed_files`: production files with unattributed
   hits, for which test-window attribution is lossy. Incremental artifacts carry
   the union of the baseline list and this round's changed/new production files.
-  Mutation's test-level filter treats a listed file (or a missing key) as a
-  conservative whole-file allow scope instead of trusting line/fn precision.
+  This is measurement-completeness disclosure only: mutation's strict per-test
+  filter does not consume the list or widen selection to function/file faces.
 
 ## Command reference (aligned with v0.3.0 `--help`)
 

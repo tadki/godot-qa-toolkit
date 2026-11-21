@@ -123,3 +123,11 @@ B 轮的目标不是「再优化一次」，而是解释并消除**机制在真�
 - **披露先于信任**：三项机制的每次决策都有机器可读 reason（`worker_channel` / `farm` / `prewarm` 块），会话致命后的实际降级态（多数腿已冷跑）不得继续报 worker。原则与 §3.4 相同：机制失效不可怕，静默失效才不可接受。
 - **阶段全归因**：旧 `stage_timings` 只覆盖约 56% 墙钟，farm 制备、prewarm/import、路由扫描与规划不在账上。定案新增 `farm_provision` / `planning` / `route_scan` 阶段与 `stage_reconciliation`（墙钟 − 已归因 = 未解释；并发重叠以 `over_attributed_s` 显式披露），使「提速不见了」可以被定位而不是被估算。
 - **A 面契约收敛**：有效选面统一由单一判别点给出（`line`/`fn`/`file`/`full`/`lines`/`mutation`/`explicit_tests`）；单文件对外恒为 flat 信封；`measure run` 区分「union 已认证」与「映射本轮可用」；全脸超时建议在到达预算上限后改指可执行的窄面路径，而不是回显同一个超时值。共同原则：**契约描述实际生效面，不描述调用者以为生效的面**。
+
+## 9. SEE-1615 增量：严格选面、计划预览与受证加速
+
+- **严格 per-test 选面**：D1 闭包降级被撤回。test 级 allowlist 只取命中行的 `line_to_tests` 身份与 `script_to_lines` 整脚本车道；稀疏行不向函数/文件扩面，`unattributed_files` 仅保留测量完整性披露，不参与选面。设计理由是避免用更宽测试面掩盖归因缺口；实际下发的 `test_filter.scope` 因而恒为 `line`。
+- **route 单一权威**：父层首次解析并写入 identity/file_key 的 `exec_scheme` 是唯一权威，core setup、pre-baseline、slot 与 worker 注入只做比对。漂移必须在 baseline、缓存写入和引擎执行前以 `route_drift` 中止，防止同一 run 在两条通道身份间漂移。
+- **同构只读计划**：普通 run 与 dry-run 都以 `execution_plan` 五组聚合既有决策；dry-run 再以 derived/observed/runtime 分区生成 `execution_plan_meta`，`plan_id` 只由 derived 决定。缺/旧 map 仅披露 `would_renew`、缺失项与成本，零 GUT/续新/import/census；计划 lint 不作运行门，选面 fail-loud 不被预览取代。
+- **性能机制默认保守**：历史杀手排序默认 OFF、kill-bail chunk 默认 C=32，因为 A/A 与交错 A/B 未显示稳定超噪声收益；排序只影响首个杀手，不得改变 stable-id 最终 verdict。等价预剪枝同样默认 OFF，只接受三条有构造性证明的规则，在 stable-id 标定后剪枝并逐点披露，KOL 零命中必须如实报告。
+- **事件化宿主等待**：direct-drive 与 worker 的 `end_run` 等待改为信号 + 一次性超时事件，回调 deferred 离开发射栈，main-loop 守卫改为单次超时。仅保留 worker req/STOP 文件会合的 10ms 服务轮询，因为跨进程文件系统会合没有一次性事件 API；超时、不可加载与 hung 仍走具名有界失败。

@@ -123,7 +123,8 @@ func _run_leg(req: Dictionary) -> void:
 				req.get("skip_red_tests", []))
 			resp["allow"] = allow_out
 			var seq: Dictionary = await _gqt_run_scripts_sequential(
-				gut, scripts, baseline_names, 600000)
+				gut, scripts, baseline_names, 600000,
+				int(req.get("bail_chunk", 32)))
 			resp["gut_ran"] = not bool(seq["hung"])
 			resp["pass"] = int(seq["pass"])
 			resp["fail"] = int(seq["fail"])
@@ -483,6 +484,9 @@ class WorkerSession:
         if tests_scripts:
             req["tests_scripts"] = [str(s) for s in tests_scripts]
             req["baseline_failures"] = sorted(baseline_failures or [])
+            # SEE-1606 §SPEC-PERF1：顺序执行 chunk 大小（env/默认单点解析）。
+            from .killbail import resolve_bail_chunk
+            req["bail_chunk"] = resolve_bail_chunk()
         # §SPEC-P2-R1/D2：红测试物理跳过（脚本+名定位）与 bail/清单无关。
         req["skip_red_tests"] = [list(p) for p in (skip_red_tests or [])]
         # SEE-1610 §SPEC-IMPL：test 级 allowlist（[script, name]/[script, "*"]）。

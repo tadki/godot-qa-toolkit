@@ -809,6 +809,10 @@ def _run_mutant_loop(
         dirty = bool(baseline_failures)
         bail_scripts, bail_face, bail_gut_ok = _cold_direct_decision(
             bail_effective, str(project_root), tests_glob, dirty=dirty)
+        # SEE-1606 §SPEC-PERF1：历史杀手优先排序（仅置换清单，verdict 语义
+        # 不变；缺失历史确定性原序；env 可关断）。
+        bail_scripts = _ordered_bail_scripts(
+            project_root, path, bail_scripts)
         # §SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
         # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
         # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
@@ -857,6 +861,14 @@ def _run_mutant_loop(
             slot_info["suspected_orphan"] = _orphan_disclosure(
                 project_root, target_res)
     return raw_pairs, baseline_reused, baseline_elapsed, slot_info
+
+def _ordered_bail_scripts(project_root, path, bail_scripts):
+    """SEE-1606 §SPEC-PERF1：历史杀手优先（None / env 关断 → 原样返回）。"""
+    if bail_scripts is None or not killbail.resolve_test_order():
+        return bail_scripts
+    return killbail.order_scripts_by_history(
+        bail_scripts, killbail.kill_history(str(project_root), str(path)))
+
 
 def _preflight_route_check(identity, project_root, path, worker_channel):
     """SEE-1606 §SPEC-P1：baseline 前权威比对门。

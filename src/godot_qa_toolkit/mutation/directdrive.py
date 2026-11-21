@@ -98,9 +98,9 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 			idxs.append(i)
 		# SEE-1615 §SPEC-EVWAIT：事件等待 + 一次性超时事件（无轮询）——
 		# end_run 信号与超时事件同汇 _chunk_settled，语义与 HANG 判定不变。
-		# hung ⟺ not end（MEDIUM-1 同帧边界：end 与 cap 同帧先后触发时
-		# 二者均已置位，按 end_fired 优先，不误报 hung）。
-		var settled := {"end": false, "cap": false}
+		# hung ⟺ not end（MEDIUM-1 同帧边界：end_run 与 cap 超时同帧先后
+		# 触发时按 end 优先判定，不误报 hung）。
+		var settled := {"end": false}
 		# on_end 由 end_run 发射栈内调用——经 Object.call_deferred 推迟出
 		# 派发栈（Signal 无 call_deferred 成员；KOL 实测同步恢复会在信号
 		# 派发中 disconnect/free(gut) → 锁定崩溃 → resp 永不写）
@@ -110,7 +110,6 @@ func _gqt_run_scripts_sequential(gut: Node, scripts: Array,
 		gut.end_run.connect(on_end)
 		var cap := create_timer(per_script_timeout_ms / 1000.0)
 		var on_cap := func() -> void:
-			settled["cap"] = true
 			call_deferred("_finish_chunk", false)
 		cap.timeout.connect(on_cap)
 		gut._test_the_scripts(idxs)

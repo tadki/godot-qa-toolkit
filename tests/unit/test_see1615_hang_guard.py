@@ -183,7 +183,7 @@ def test_leg_spawn_timeout_floor(tmp_path, monkeypatch):
 # ------------------------------------------ MEDIUM-1 同帧边界回归（返修）
 
 
-def test_host_hung_boundry_is_not_end():
+def test_host_hung_boundary_is_not_end():
     """MEDIUM-1 同帧边界回归：hung 判定必须为 `not settled["end"]`
     （end 与 cap 同帧先后触发时二者均已置位——end 优先，不得误报 hung），
     且不得残留 `settled["cap"]` 判定形态。"""

@@ -31,7 +31,6 @@ import re
 from .ops import _line_offsets, _token_pos
 
 ENV_EQUIV_PRUNE = "GQT_MUTATION_EQUIV_PRUNE"
-OFF_VALUES = ("0", "false", "no", "off")
 
 RULE_EQ_ZERO_ADD = "EQ_ARITH_ZERO_ADD"
 RULE_EQ_ZERO_SUB = "EQ_ARITH_ZERO_SUB"

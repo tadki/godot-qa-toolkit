@@ -51,6 +51,24 @@ def _no_sites_result(file: str, scoped: bool | None = None,
             "failures": []}
 
 
+def _route_drift_result(file: str, err) -> dict:
+    """SEE-1606 §SPEC-P1：route 漂移具名中止契约（fail-loud，零 baseline）。
+
+    summary.route_drift=True + 权威/实跑 scheme 双披露——下游重解析不得
+    静默覆盖 file_key 面，也不得以漂移后的通道继续执行。"""
+    return {
+        "tool": "mutation",
+        "ok": False,
+        "summary": {
+            "file": file, "run_error": True, "route_drift": True,
+            "error": str(err),
+            "authoritative_scheme": getattr(err, "expected", None),
+            "resolved_scheme": getattr(err, "actual", None),
+            "drift_site": getattr(err, "where", None)},
+        "failures": [{"reason": str(err)}],
+    }
+
+
 def _run_error_result(file: str, error: str, failure_reason: str,
                       hint: str | None = None,
                       action_kind: str | None = None) -> dict:

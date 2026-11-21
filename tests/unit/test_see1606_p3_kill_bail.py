@@ -179,6 +179,8 @@ class TestPlumbing:
         # 钉冷通道：focus 是路线 B 的面判定/披露，不拉真 worker 会话。
         monkeypatch.setattr(mrunner, "resolve_exec_scheme",
                             lambda *a, **k: (COLD_SCHEME, None))
+        monkeypatch.setattr(wc, "resolve_exec_scheme",
+                            lambda *a, **k: (COLD_SCHEME, None))
         monkeypatch.setattr(mrunner, "_run_baseline",
                             lambda root, tests_glob, timeout_s:
                             (0, "* test_a\n[passed]\n", 1.0))

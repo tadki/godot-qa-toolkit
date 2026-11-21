@@ -607,7 +607,8 @@ class TestPlanChunksFlagChain:
         monkeypatch.setattr(pl, "_plan_resolve_gate",
                             lambda *a, **k: ("res://tests/", {}, [], None))
         monkeypatch.setattr(pl, "_plan_diff_phase",
-                            lambda *a, **k: ("h", [], {}, None, None, None))
+                            lambda *a, **k: ("h", [], {}, None, None, None,
+                                             None))
         monkeypatch.setattr(pl, "_plan_budget_phase",
                             lambda *a, **k: ([], [], [], {"elapsed": 1.0}, []))
 

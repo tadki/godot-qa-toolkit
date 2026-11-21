@@ -272,8 +272,11 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
         return _setup_error_result(str(path), e), {}
     # P1 manifest 标定（定案 D1/D2/D3 + L6）：scope 提取 → no-mutate 过滤
     # → stable id。total_sites 按过滤后位点数计（无位点 scope 不进 manifest）。
+    # SEE-1615 §SPEC-PERF2：等价预剪枝（env 默认 OFF；prune_out 逐点披露
+    # 经 ctx → _core_plan disclosures → summary equivalent_pruned）
+    eq_prune_out: dict = {}
     header_hash, spans, mutants, scope_hashes = build_manifest(
-        original_src, str(path), raw_mutants)
+        original_src, str(path), raw_mutants, prune_out=eq_prune_out)
     ctx = {
         "path": path, "tests_glob": tests_glob, "selection_meta": selection_meta,
         "original_src": original_src, "kind": kind, "identity": identity,
@@ -281,6 +284,7 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
         "scope_hashes": scope_hashes, "total_sites": len(mutants),
         "attention": _attention_note(mutation_warning, len(mutants),
                                      str(path)),
+        "equivalent_pruned": eq_prune_out.get("equivalent_pruned"),
     }
     return None, ctx
 
@@ -422,6 +426,11 @@ def _core_plan(c: dict, path: Path, project_root: str, original_src: str, *,
     from .testscan import selection_disclosure
     # §SPEC-613：自动选测披露（弱选测时 weak=true 随 summary 透出）。
     disclosures.update(selection_disclosure(selection_meta))
+    # SEE-1615 §SPEC-PERF2：等价剪枝披露（enabled=false 时不落键——既有
+    # 消费方零扰动）
+    eq_disc = c.get("equivalent_pruned")
+    if eq_disc and eq_disc.get("enabled"):
+        disclosures["equivalent_pruned"] = eq_disc
     if c["total_sites"] > budget:
         disclosures["total_sites"] = c["total_sites"]
         # O2：此处 executed 仍为计划面预估——_execute_planned 在 invalid

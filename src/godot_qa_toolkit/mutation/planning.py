@@ -109,8 +109,9 @@ def _plan_diff_phase(src, collected, f, project_root, identity,
     """manifest 构建 + 身份注入（D-1 同通道同键）+ resume store 载入 +
     killed 证书差分门。返回 (header_hash, mutants, scope_hashes, identity,
     store2, plan)。"""
+    eq_prune_out: dict = {}
     header_hash, spans, mutants, scope_hashes = build_manifest(
-        src, f, collected)
+        src, f, collected, prune_out=eq_prune_out)
     from .worker_channel import identity_for_target
     identity, _route, _scheme = identity_for_target(
         identity, project_root, _res_path_of(f, project_root), worker_channel)
@@ -123,7 +124,8 @@ def _plan_diff_phase(src, collected, f, project_root, identity,
                      entries, mutate_all=mutate_all,
                      cert_validator=lambda kb: certificate_valid(kb,
                                                                  project_root))
-    return header_hash, mutants, scope_hashes, identity, store2, plan
+    return header_hash, mutants, scope_hashes, identity, store2, plan, \
+        eq_prune_out.get("equivalent_pruned")
 
 
 def _plan_budget_phase(plan, f, project_root, glob, binary_kind,
@@ -244,7 +246,8 @@ def _plan_grouped_chunks(f, project_root, select_mode, glob, binary_kind,
 
 def _plan_make_ctx(plan, executed_list, untouched, header_hash, scope_hashes,
                    store2, src, mutants, uncovered_mutants, selection_meta,
-                   select_mode, jobs, prefilter_disclosures) -> dict:
+                   select_mode, jobs, prefilter_disclosures,
+                   equivalent_pruned=None) -> dict:
     """v2ctx 组装（差分收尾注入与合并层的共享上下文）。"""
     return {
         "plan": plan, "executed": executed_list, "untouched": untouched,
@@ -254,6 +257,8 @@ def _plan_make_ctx(plan, executed_list, untouched, header_hash, scope_hashes,
         "selection_mode": select_mode, "requested_jobs": jobs,
         "coverage_prefilter_source": prefilter_disclosures.get(
             "coverage_prefilter"),
+        # SEE-1615 §SPEC-PERF2：等价剪枝披露（父层合并层注入 summary）
+        "equivalent_pruned": equivalent_pruned,
     }
 
 
@@ -315,8 +320,9 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     if gate_settled is not None:
         return [], None, gate_settled
     (header_hash, mutants, scope_hashes, identity, store2,
-     plan) = _plan_diff_phase(src, collected, f, project_root, identity,
-                              worker_channel, mutate_all, glob, binary_kind)
+     plan, equivalent_pruned) = _plan_diff_phase(
+        src, collected, f, project_root, identity, worker_channel,
+        mutate_all, glob, binary_kind)
     (uncovered_mutants, executed_list, untouched, baseline,
      prefilter_disclosures) = _plan_budget_phase(
         plan, f, project_root, glob, binary_kind, reuse_coverage, identity,
@@ -336,7 +342,8 @@ def _plan_file_chunks(f, project_root, budget, timeout_s, tests_glob, jobs,
     ctx = _plan_make_ctx(plan, executed_list, untouched, header_hash,
                          scope_hashes, store2, src, mutants,
                          uncovered_mutants, selection_meta, select_mode,
-                         jobs, prefilter_disclosures)
+                         jobs, prefilter_disclosures,
+                         equivalent_pruned=equivalent_pruned)
     return _plan_dispatch(f, project_root, select_mode, glob, binary_kind,
                           executed_list, src, baseline, timeout_factor,
                           timeout_s, budget, mutate_all, attention, jobs,

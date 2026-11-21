@@ -178,3 +178,31 @@ def test_leg_spawn_timeout_floor(tmp_path, monkeypatch):
         "", None, 1, set(), False,
         slot=types.SimpleNamespace(root=str(tmp_path)), direct_scripts=None)
     assert captured["timeout_s"] == 60
+
+
+# ------------------------------------------ MEDIUM-1 同帧边界回归（返修）
+
+
+def test_host_hung_boundry_is_not_end():
+    """MEDIUM-1 同帧边界回归：hung 判定必须为 `not settled["end"]`
+    （end 与 cap 同帧先后触发时二者均已置位——end 优先，不得误报 hung），
+    且不得残留 `settled["cap"]` 判定形态。"""
+    from godot_qa_toolkit.mutation import directdrive, worker_session
+
+    seq = _norm(directdrive.SEQUENTIAL_RUNNER_GD)
+    assert 'if not settled["end"]:' in seq
+    assert 'if settled["cap"]:' not in seq
+    # worker 腿语义本就正确（gut_ran ⟺ end），回归钉住
+    whost = _norm(worker_session.WORKER_HOST_GD)
+    assert 'resp["gut_ran"] = done["end"]' in whost
+
+
+def test_host_no_never_connected_disconnects():
+    """MEDIUM-2 回归：_chunk_settled/_leg_settled 不得 disconnect on_cap
+    （on_cap 只连接 cap.timeout——disconnect 不存在的连接产生引擎错误日志）。"""
+    from godot_qa_toolkit.mutation import directdrive, worker_session
+
+    seq = _norm(directdrive.SEQUENTIAL_RUNNER_GD)
+    assert "_chunk_settled.disconnect(on_cap)" not in seq
+    whost = _norm(worker_session.WORKER_HOST_GD)
+    assert "_leg_settled.disconnect(on_cap)" not in whost

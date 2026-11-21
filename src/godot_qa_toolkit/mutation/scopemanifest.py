@@ -191,7 +191,6 @@ def build_manifest(src: str, file_label: str, mutants: list,
     开关状态照常解析（调用方只要行为不要披露）。
     """
     from .equivalent import prune_equivalent, resolve_equiv_prune
-    from .killbail import resolve_host_wait_ms  # noqa: F401 — 单点解析先例对齐
 
     header_hash, spans = extract_scopes(src)
     filtered = filter_no_mutate(src, mutants, spans)

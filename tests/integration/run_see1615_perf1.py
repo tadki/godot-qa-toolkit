@@ -368,14 +368,16 @@ def main(argv: list[str] | None = None) -> int:
     doc = {
         "tool": "see1615-perf1",
         "fixture": str(root), "fixture_scripts": 24,
-        "fixture_note": ("合成真实 GUT 工程（KOL addons/gut 副本）；KOL 规模"
-                         "未测（副本无归属映射，全量 map-update 超预算）"),
+        "fixture_note": ("合成真实 GUT 工程（KOL addons/gut 副本）；KOL 样本"
+                         "轨道见 perf1-kol-track.json（直驱宿主腿挂起，具名"
+                         "阻塞；非 map 预算省略）"),
         "aa": args.aa, "rounds": args.rounds, "budget": args.budget,
         "godot_bin": args.godot_bin,
         "cells": results,
-        "reproduce": ("PYTHONPATH=src python3 -I tests/integration/"
-                      "run_see1615_perf1.py --aa 3 --rounds 3 "
-                      "--chunks 8,16,32,64 --report perf1-report.json"),
+        # 可复跑口径 = 本次实际 argv（不硬编码矩阵——证据须自证执行面）
+        "reproduce": " ".join([sys.executable, str(Path(__file__).resolve())]
+                              + list(argv if argv is not None else
+                                     sys.argv[1:])),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     report_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2)

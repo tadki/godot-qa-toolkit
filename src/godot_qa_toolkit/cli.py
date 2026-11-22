@@ -416,6 +416,62 @@ def cmd_measure_complexity(args: argparse.Namespace) -> int:
     return _emit(run_gate(args.paths, config))
 
 
+def _mutation_target_hint(args: argparse.Namespace) -> "str | None":
+    raw_files = list(getattr(args, "files", []) or [])
+    if not raw_files:
+        return None
+    m = _FILE_LINES_RE.match(raw_files[0])
+    return m.group("file") if m else raw_files[0]
+
+
+def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
+    """映射相关 env 单点注入（--attribution-map / --no-attribution-auto）。"""
+    import os as _os
+    if getattr(args, "attribution_map", None):
+        _os.environ[truth_mod.ENV_MAP] = str(args.attribution_map)
+    if getattr(args, "attribution_auto", True) is False:
+        _os.environ[truth_mod.ENV_MODE] = "off"
+
+
+def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
+    """§SPEC-PLANFIRST：默认 run 的 plan 段（静态穷查 ≤10s）。
+
+    返回早退 payload（plan_blocked / dry-run plan-only）；None = 继续。
+    """
+    from .mutation.plancheck import static_plan
+
+    plan = static_plan(args.project_root,
+                       args.files[0] if args.files else None, args.tests)
+    errors = [p for p in plan["problems"] if p["severity"] == "error"]
+    print(f"mutation: plan {len(plan['problems'])} problem(s) "
+          f"({len(errors)} error) in {plan['elapsed_s']}s",
+          file=sys.stderr)
+    if errors:
+        return _emit({"tool": "mutation", "ok": False,
+                      "error": "plan_blocked", "plan": plan,
+                      "summary": {"error": "plan_blocked", "plan": plan},
+                      "failures": [{"reason": f"{p['code']}: "
+                                    f"{json.dumps(p['evidence'],
+                                                 ensure_ascii=False)}"}
+                                   for p in errors]})
+    if getattr(args, "dry_run", False) \
+            and not getattr(args, "attribution_map", None) \
+            and getattr(args, "select_mode", "line") != "full" and any(
+                p["code"] == "attribution_map_missing_or_stale"
+                for p in plan["problems"]):
+        return _emit({"tool": "mutation", "ok": True,
+                      "plan": plan,
+                      "summary": {"plan": plan,
+                                  "selection_mode": "plan_only",
+                                  "notice": "no usable attribution map — "
+                                            "dry-run returned the static "
+                                            "plan only; run without "
+                                            "--dry-run to prepare the map, "
+                                            "or pass --select full to "
+                                            "preview sites now"}})
+    return None
+
+
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import detect_binary_kind
 
@@ -429,12 +485,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
 
     # §SPEC-019：再把显式/自动发现的项目根落定；目标锚定与 git diff 发现
     # 都以它为准（target 供发现时向上找 project.godot）。
-    target_hint = None
-    raw_files = list(getattr(args, "files", []) or [])
-    if raw_files:
-        m = _FILE_LINES_RE.match(raw_files[0])
-        target_hint = m.group("file") if m else raw_files[0]
-    rc = _resolve_project_root_or_contract("mutation", args, target=target_hint)
+    rc = _resolve_project_root_or_contract(
+        "mutation", args, target=_mutation_target_hint(args))
     if rc is not None:
         return rc
     rc = _normalize_mutation_targets(args)
@@ -447,12 +499,14 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.truth_select import MutationSelectionError
     from .mutation import truth_select as _truth
     _truth.reset_ledger()
-    if getattr(args, "attribution_map", None):
-        import os as _os
-        _os.environ[_truth.ENV_MAP] = str(args.attribution_map)
-    if getattr(args, "attribution_auto", True) is False:
-        import os as _os
-        _os.environ[_truth.ENV_MODE] = "off"
+    _apply_mutation_map_flags(args, _truth)
+    # §SPEC-PLANFIRST：默认 run 的第一步 = plan（静态穷查 ≤10s，先于
+    # import/映射构建等任何贵操作）——error 级问题即停并列问题；dry-run
+    # 永不要求 map：无/旧映射时成功返回 plan 全量（problems[] 含 warning）
+    # 与成本预估，不进入需要映射的选面解析。
+    _plan_early = _plan_gate_mutation(args)
+    if _plan_early is not None:
+        return _plan_early
     if not getattr(args, "dry_run", False):
         # A20（SEE-1594 S5）：显式 --select full 是全脸审计——不需要映射，
         # 不得被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file

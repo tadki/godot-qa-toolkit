@@ -531,15 +531,23 @@ def map_preview_state(project_root: str, target_file: str) -> dict:
     except Exception:  # noqa: BLE001 — 探测不得失败上抛（预览零副作用）
         return {"present": True, "fresh": None, "reason": "map_unusable"}
     try:
+        from ..source_io import anchor_to_project_root
         from ..timing import project_relative
-        rel = project_relative(project_root, target_file)
+        # §SPEC-ANCHOR-PREVIEW：相对目标先按 project_root 锚定（与
+        # runner 同源口径）——CWD≠root 时 fresh 判定不得因 CWD 相对解析
+        # 误报 file_binding_missing_or_stale
+        anchored = anchor_to_project_root(target_file, str(project_root))
+        rel = project_relative(project_root, anchored)
         verdict = _evaluate(str(project_root), rel, doc)
     except Exception:  # noqa: BLE001 — 同上，探测失败按未知保守披露
         return {"present": True, "fresh": None, "reason": "map_unusable"}
     fresh = bool(verdict.get("ok"))
-    detail = "" if fresh else f":{verdict.get('reason', 'unknown')}"
-    return {"present": True, "fresh": fresh,
-            "reason": f"map_fresh{'' if fresh else detail}"}
+    if fresh:
+        return {"present": True, "fresh": True, "reason": "map_fresh"}
+    # §SPEC-ANCHOR-PREVIEW LOW-L2：stale 前缀命名修正（原误为 map_fresh:）
+    detail = f":{verdict.get('reason', 'unknown')}"
+    return {"present": True, "fresh": False,
+            "reason": f"map_stale{detail}"}
 
 
 def load_map(path: str | Path) -> dict:

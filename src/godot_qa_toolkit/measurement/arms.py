@@ -699,20 +699,33 @@ def _ensure_acceptance_harness(root: Path) -> Path | None:
     src = root / "acceptance" / "harness" / "harness.gd"
     if not src.is_file():
         return None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dest)
+    # D21：接线失败不得裸抛/留半成品——本次新建的部分产物就地回收后
+    # fail-loud，由调用方把该臂降级为 invalid
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+    except OSError as e:
+        err = _cleanup_acceptance_harness(dest)
+        raise MeasurementError(
+            f"acceptance harness wiring failed: {e}"
+            + (f" | {err}" if err else "")) from e
     return dest
 
 
-def _cleanup_acceptance_harness(dest: Path | None) -> None:
+def _cleanup_acceptance_harness(dest: Path | None) -> str | None:
+    """移除本次新建的契约位；返回错误描述（None = 干净）。
+
+    D21：清理失败不得静默——调用方必须把该臂降级为 invalid 并披露
+    残留路径，禁止带残留报 valid（违背生产树零残留契约）。"""
     if dest is None:
-        return
+        return None
     try:
         dest.unlink(missing_ok=True)
         if dest.parent.is_dir() and not any(dest.parent.iterdir()):
             dest.parent.rmdir()
-    except OSError:
-        pass
+    except OSError as e:
+        return f"harness cleanup failed: {e} (residue: {dest})"
+    return None
 
 
 def run_acceptance_flow(*, root: Path, recipe: dict,
@@ -725,8 +738,9 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         f["key"] for f in recipe["acceptance_face"]["features"]]
     snapshot = _snapshot_main(root)
     groups: list[dict] = []
-    harness_dest = _ensure_acceptance_harness(root)
+    harness_dest: Path | None = None
     try:
+        harness_dest = _ensure_acceptance_harness(root)
         # §SPEC-011/D20：**每 feature 独立 suite/进程**——与官方 CI
         # per-key compile+run 语义对齐。同进程连续跑多 feature 会让
         # 前序 feature 的全局状态残留进入后续 feature（实测 v5 golden
@@ -738,27 +752,34 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
             groups.append({"suite_dir": sd, "keys": [k]})
             compile_keys_to_suite(root, [k], sd)
             replay_check(root, k, suite_dir=sd)
-        return run_arm("acceptance", root=root, recipe=recipe,
-                       acceptance={
-                           "groups": groups, "snapshot": snapshot},
-                       shadow_instrument=arms_parallel,
-                       adaptive_reps=acceptance_adaptive,
-                       concurrency=max(1, int(acceptance_shards or 1)),
-                       **arm_kwargs)
-    except (SuiteError, AcceptRunError) as e:
+
+    except (SuiteError, AcceptRunError, MeasurementError) as e:
         for g in groups:
             _cleanup_suite_dir(Path(g["suite_dir"]))
+        cleanup_err = _cleanup_acceptance_harness(harness_dest)
+        reason = f"suite_error:{e}"
+        if cleanup_err:
+            reason += f" | {cleanup_err}"
         return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
                 "gut_ok": False, "timed_out": False, "state": "invalid",
-                "invalid_reason": f"suite_error:{e}", "bundles": 0,
+                "invalid_reason": reason, "bundles": 0,
                 "bundles_data": {}, "reconciliation": None,
                 "test_failures": {"observed": [], "observed_pairs": [],
                                   "new": [], "new_pairs": [],
                                   "instrumentation_intolerant": []},
                 "repeats": 0, "convergence": None}
-    finally:
-        # 临时接线必须回收（失败/成功两条路径一致；生产树零残留）
-        _cleanup_acceptance_harness(harness_dest)
+    result = run_arm("acceptance", root=root, recipe=recipe,
+                     acceptance={"groups": groups, "snapshot": snapshot},
+                     shadow_instrument=arms_parallel,
+                     adaptive_reps=acceptance_adaptive,
+                     concurrency=max(1, int(acceptance_shards or 1)),
+                     **arm_kwargs)
+    # D21：成功路径同样必须显式回收并核对——清理失败 = 残留 = 不得报 valid
+    cleanup_err = _cleanup_acceptance_harness(harness_dest)
+    if cleanup_err:
+        return {**result, "state": "invalid", "gut_ok": False,
+                "invalid_reason": f"harness_residue: {cleanup_err}"}
+    return result
 
 def execute_arms(*, root: Path, recipe: dict, arms_parallel: bool,
                  acceptance_keys: list[str] | None,

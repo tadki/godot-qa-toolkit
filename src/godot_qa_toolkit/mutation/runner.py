@@ -325,6 +325,23 @@ def _core_caliper(project_root, path, mutants, select_ids, select_lines,
         tests_glob = sel["tests_glob"]
     return selection_meta, tests_glob
 
+def _godot_binary_precondition(project_root: str, godot_ok: bool,
+                               godot_evidence: str) -> dict:
+    """§SPEC-DERIVED-A F1：godot_binary 前置块（只读探测）。
+
+    ok 仅表解析/存在性——WSL 下 bash wrapper 是合法启动方式，**不得**
+    因「非原生 ELF」判不可用；binary kind（detect_binary_kind 同源）与
+    godot_launch_issue 静态诊断只如实落 evidence，供 dry-run 读者区分
+    原生二进制与 wrapper。"""
+    from .inject import detect_binary_kind, godot_launch_issue
+
+    _, issue = godot_launch_issue(str(project_root))
+    kind = detect_binary_kind()
+    evidence = (f"{godot_evidence} | kind={kind} | launch_issue="
+                + (issue if issue else "none"))
+    return {"ok": godot_ok, "evidence": evidence}
+
+
 def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
                   tests_glob, binary_kind, resume2_store, mutate_all,
                   header_hash, scope_hashes, attention, identity,
@@ -378,7 +395,8 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
             "evidence": (f"{godot_dir} missing={import_missing}"
                          if import_missing else str(godot_dir))},
         "gut_cmdln": {"ok": gut_cmdln.is_file(), "evidence": str(gut_cmdln)},
-        "godot_binary": {"ok": godot_ok, "evidence": godot_evidence},
+        "godot_binary": _godot_binary_precondition(project_root, godot_ok,
+                                                   godot_evidence),
     }
     derived_extra = {"budget": budget, "explicit_timeout_s": timeout_s,
                      "boot_wiring_hash": boot_wiring_hash(str(project_root)),

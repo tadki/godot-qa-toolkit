@@ -409,7 +409,8 @@ class TestCliContractHardening:
         target.write_text("func a():\n\tpass\n", encoding="utf-8")
         for binary in (linux, win64):
             rc = main(["mutation", str(target), "--project-root",
-                       str(tmp_path), "--godot-bin", str(binary)])
+                       str(tmp_path), "--godot-bin", str(binary),
+                       "--auto-prepare"])
             capsys.readouterr()
             assert rc == 0
         assert seen == ["linux", "win64"]

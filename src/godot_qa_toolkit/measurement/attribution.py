@@ -499,8 +499,8 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
                           arms: tuple[dict, ...], arms_attr: dict,
                           notes: list[str],
                           instrumentable_lines: "dict[str, list[int]] | None" = None,
-                          baseline_meta: "dict | None" = None
-                          ) -> dict:
+                          baseline_meta: "dict | None" = None,
+                          preflight_meta: "dict | None" = None) -> dict:
     """归属产物正文：行级主真值 + 派生视图 + 臂有效性 + 新鲜绑定
     （recipe/文件/测试面）+ 探针面（可插桩行全集）。
 
@@ -531,6 +531,10 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
     }
     if baseline_meta is not None:
         doc["baseline_failures_meta"] = baseline_meta
+    # §SPEC-PREFLIGHT×PLANFIRST：基线预检产物（status=partial 时
+    # excluded_tests 具名在 meta 内）——映射消费者直读「按名排除」事实
+    if preflight_meta is not None:
+        doc["baseline_preflight"] = preflight_meta
     return doc
 
 # §SPEC-083：报告节固定 notes（causal 追加项运行时按开关拼接）
@@ -596,7 +600,8 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          recipe_pristine_hash: str | None = None,
                          tests_face: "dict[str, str] | None" = None,
                          prepared: "dict[str, dict] | None" = None,
-                         baseline_meta: "dict | None" = None) -> dict:
+                         baseline_meta: "dict | None" = None,
+                       preflight_meta: "dict | None" = None) -> dict:
     """§SPEC-083：measurement 报告的 test_attribution 节（归属产物在
     attribution_out 非空时落盘，与报告共用同一 notes 列表）。
 
@@ -619,7 +624,8 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
         recipe_hash, recipe_pristine_hash, project_root, causal_meta,
         file_sha256, target_files, tests_face, arms, arms_attr, notes,
         instrumentable_lines=_instrumentable_lines_from_prepared(prepared),
-        baseline_meta=baseline_meta)
+        baseline_meta=baseline_meta,
+        preflight_meta=preflight_meta)
     artifact_path = _attribution_write_artifact(artifact, attribution_out)
     return {"test_attribution": {
         "schema_version": ATTRIBUTION_SCHEMA,

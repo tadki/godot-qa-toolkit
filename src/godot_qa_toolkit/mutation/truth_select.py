@@ -154,6 +154,36 @@ def _script_names(doc: dict) -> set[str]:
             for i in (arm.get("test_to_files") or {})}
 
 
+def _intolerance_annex(gate: str, report_data: dict) -> str:
+    """§SPEC-PREFLIGHT×PLANFIRST steer：new-failure 中断报告——从
+    measurement report 原始 gut_full 臂提取新增失败，归类
+    suspected_instrumentation_intolerance，附证据与 --intolerant-tests
+    声明草稿（可直接保存使用）与三处置选项。"""
+    if "new failures" not in gate:
+        return gate
+    arms = report_data.get("arms") or []
+    newp = ((arms[0].get("test_failures") or {}).get("new_pairs")
+            if arms and isinstance(arms[0], dict) else None) or []
+    if not newp:
+        return gate
+    draft = [{"script": p.split("::", 1)[0],
+              "test": p.split("::", 1)[1],
+              "reason": "suspected_instrumentation_intolerance: passes "
+                        "uninstrumented baseline, fails instrumented run "
+                        "— confirm to exempt or investigate "
+                        "instrumentation"} for p in newp]
+    return (gate
+            + f" | classification=suspected_instrumentation_intolerance "
+            f"({len(newp)} pair(s)): " + "; ".join(newp)
+            + " | evidence: passes uninstrumented baseline, fails "
+            "instrumented run | declaration draft for --intolerant-tests: "
+            + json.dumps(draft, ensure_ascii=False)
+            + " | options: (a) confirm intolerance — save draft and rerun "
+            "with --intolerant-tests; (b) investigate instrumentation "
+            "defect; (c) explicit partial continue — "
+            "GQT_MEASUREMENT_EXPLICIT_PARTIAL_CONTINUE=1")
+
+
 def _build_gate_fail_reason(doc: dict) -> str | None:
     """S6.3 构建侧臂可用门（§SPEC-060a）：生成/增量的产物要求 gut_full
     臂 state==valid——方案 A 后基线吸收使 state 成为「既有失败已吸收、
@@ -166,9 +196,32 @@ def _build_gate_fail_reason(doc: dict) -> str | None:
         return "no execution evidence (arms_valid)"
     gut = states.get("gut_full") or {}
     if gut.get("state") != "valid":
-        return (f"gut_full arm invalid (state={gut.get('state')!r}, "
+        base = (f"gut_full arm invalid (state={gut.get('state')!r}, "
                 f"reason={gut.get('invalid_reason')!r}) — new failures "
                 f"gate the build (§SPEC-060a)")
+        # §SPEC-PREFLIGHT×PLANFIRST：新增失败归类疑似插桩不耐受——中断
+        # 报告附具名清单 + 可直接使用的 --intolerant-tests 声明草稿
+        arms = doc.get("arms") or {}
+        newp = ((arms.get("gut_full") or {}).get("test_failures")
+                or {}).get("new_pairs") or []
+        if newp:
+            draft = [{"script": p.split("::", 1)[0],
+                      "test": p.split("::", 1)[1],
+                      "reason": "suspected_instrumentation_intolerance: "
+                                "passes uninstrumented baseline, fails "
+                                "instrumented run — confirm to exempt or "
+                                "investigate instrumentation"} for p in newp]
+            base += (
+                " | classification=suspected_instrumentation_intolerance "
+                f"({len(newp)} pair(s)): " + "; ".join(newp)
+                + " | evidence: passes uninstrumented baseline, fails "
+                "instrumented run | declaration draft for --intolerant-tests: "
+                + json.dumps(draft, ensure_ascii=False)
+                + " | options: (a) confirm intolerance — save draft and "
+                "rerun with --intolerant-tests; (b) investigate "
+                "instrumentation defect; (c) explicit partial continue — "
+                "GQT_MEASUREMENT_EXPLICIT_PARTIAL_CONTINUE=1")
+        return base
     return None
 
 
@@ -247,13 +300,19 @@ def _ensure_generate(root: str, out: str, files: list[str],
     targets = _targets_under(_roots_of(files, root))
     tmp = _unique_tmp(out)
     try:
-        run_measurement(root, targets, recipe, test_attribution=True,
-                      attribution_out=tmp,
-                      **({"timeout_s": int(timeout_s)}
-                         if timeout_s is not None else {}))
+        measurement = run_measurement(
+            root, targets, recipe, test_attribution=True,
+            attribution_out=tmp, baseline_preflight=True,
+            **({"timeout_s": int(timeout_s)}
+               if timeout_s is not None else {}))
         doc = load_map(tmp)
         gate = _build_gate_fail_reason(doc)
         if gate is not None:
+            # §SPEC-PREFLIGHT×PLANFIRST steer：新增失败的中断报告从
+            # measurement 返回的原始臂结果提取（映射 doc 的 arms 投影
+            # 不含 test_failures）——具名清单 + 声明草稿
+            gate = _intolerance_annex(
+                gate, measurement if isinstance(measurement, dict) else {})
             raise MutationSelectionError(
                 "generated mapping has invalid arms "
                 f"({gate})")

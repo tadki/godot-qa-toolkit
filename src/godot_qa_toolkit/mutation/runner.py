@@ -328,6 +328,65 @@ def _core_caliper(project_root, path, mutants, select_ids, select_lines,
         tests_glob = sel["tests_glob"]
     return selection_meta, tests_glob
 
+_ENV_CHECK_BASELINE = "GQT_MUTATION_CHECK_BASELINE"
+
+
+def _expensive_operations() -> list:
+    """§SPEC-PLANFIRST：plan 必须列出的贵操作与成本口径（静态清单，
+    成本为经验默认而非实测——实测面见 stage_timings/预检 wall_s）。"""
+    return [
+        {"op": "baseline_gut", "when": "map build path",
+         "cost": "uninstrumented full-face GUT (minutes-scale)",
+         "skippable": False,
+         "reuse": "preflight result reused for arms (P4, no second run)"},
+        {"op": "attribution_map_build",
+         "when": "map missing/stale (auto mode)",
+         "cost": "instrumented gut_full arm + acceptance GUT (minutes)",
+         "skippable": True, "reuse": "fresh map; partial map on red/"
+         "timeout baseline (PLANFIRST)"},
+        {"op": "mutation_legs", "when": "always",
+         "cost": "per-mutant GUT legs (budget x timeout_s)",
+         "skippable": False, "reuse": "resume v2 store (diff/resume)"},
+    ]
+
+
+def _check_baseline_requested() -> bool:
+    """§SPEC-PREFLIGHT P3：--check-baseline（CLI 设 env 单点）。"""
+    return os.environ.get(_ENV_CHECK_BASELINE, "").strip() \
+        not in ("", "0", "false")
+
+
+def _baseline_health_precondition(project_root: str,
+                                  timeout_s: int) -> dict:
+    """§SPEC-PREFLIGHT P3：dry-run 计划的基线健康前置。
+
+    默认 not_checked + 原因（不假装全绿）；--check-baseline 只读跑一次
+    未插桩基线 GUT（不写 map、零副作用面=一次 GUT 进程）——红即具名
+    （count/top-N），绿 green，获取失败 unknown + 原因。"""
+    if not _check_baseline_requested():
+        return {"status": "not_checked",
+                "reason": "check_baseline_not_requested"}
+    try:
+        from ..measurement.orchestrator import (
+            _acquire_lazy_baseline, _gutconfig_face_args)
+        from ..measurement.recipe import build_recipe
+        recipe, err = build_recipe(Path(project_root))
+        if err is not None:
+            return {"status": "unknown",
+                    "reason": f"recipe unavailable: {err}"}
+        pairs, meta = _acquire_lazy_baseline(
+            Path(project_root), _gutconfig_face_args(recipe), timeout_s)
+    except Exception as e:  # noqa: BLE001 — 探测失败具名落块（不假装绿）
+        return {"status": "unknown", "reason": f"{type(e).__name__}: {e}"}
+    if pairs:
+        top = sorted(pairs)[:10]
+        return {"status": "red", "count": len(pairs),
+                "top": [f"{sr}::{t}" for sr, t in top],
+                "face": meta.get("face"), "wall_s": meta.get("wall_s")}
+    return {"status": "green", "count": 0, "face": meta.get("face"),
+            "wall_s": meta.get("wall_s")}
+
+
 def _godot_binary_precondition(project_root: str, godot_ok: bool,
                                godot_evidence: str) -> dict:
     """§SPEC-DERIVED-A F1：godot_binary 前置块（只读探测）。
@@ -414,6 +473,8 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
         "gut_cmdln": {"ok": gut_cmdln.is_file(), "evidence": str(gut_cmdln)},
         "godot_binary": _godot_binary_precondition(project_root, godot_ok,
                                                    godot_evidence),
+        "baseline_health": _baseline_health_precondition(
+            project_root, int(timeout_s or 600)),
     }
     derived_extra = {"budget": budget, "explicit_timeout_s": timeout_s,
                      "boot_wiring_hash": boot_wiring_hash(str(project_root)),
@@ -432,7 +493,8 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
         map_state=map_preview_state(str(project_root), str(path)),
         import_proof_present=(
             _proof_paths(str(project_root))[1].is_file()),
-        static_preconditions=static_pc)
+        static_preconditions=static_pc,
+        expensive_operations=_expensive_operations())
     estimate["summary"]["execution_plan_meta"] = _meta
     # §SPEC-PLANFIELD-A：dry-run 同款全键阶段分解（planning/route_scan
     # 真实测量，其余阶段未发生为 0.0；total=墙钟基准，形态与实跑一致）

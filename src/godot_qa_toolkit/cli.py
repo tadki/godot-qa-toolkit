@@ -609,6 +609,10 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
 
     # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
     timing_store = None
+    if getattr(args, "check_baseline", False):
+        os.environ["GQT_MUTATION_CHECK_BASELINE"] = "1"
+    if getattr(args, "fail_on_red_baseline", False):
+        os.environ["GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"] = "1"
     if not args.dry_run:
         timing_store = TimingStore(args.project_root, args.files[0],
                                    "mutation", args.tests,
@@ -1367,6 +1371,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="GUT timeout seconds (default 600)")
     m.add_argument("--dry-run", action="store_true",
                    help="list mutation sites without running GUT (SPEC-009)")
+    m.add_argument("--check-baseline", action="store_true",
+                   help="SEE-1615 §SPEC-PREFLIGHT: dry-run runs one "
+                        "uninstrumented baseline GUT (read-only, no map "
+                        "write) and names failing tests in "
+                        "static_preconditions.baseline_health; default "
+                        "not_checked")
+    m.add_argument("--fail-on-red-baseline", action="store_true",
+                   help="SEE-1615 §SPEC-PREFLIGHT x PLANFIRST: fail fast "
+                        "when the uninstrumented baseline is red (default "
+                        "OFF: red tests are excluded by name, mapping "
+                        "marked partial, run continues)")
     m.add_argument("--tests", default=None,
                    help="scoped GUT dir override, e.g. res://tests/save/ "
                         "(SPEC-009); omitted = SEE-1581 runtime truth-map "

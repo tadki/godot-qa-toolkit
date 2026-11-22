@@ -27,9 +27,15 @@ _PRELOAD_RE = re.compile(
 _AUTOLOAD_RE = re.compile(r'^(\w+)="\*?res://([^"]+)"', re.M)
 
 
-def _problem(severity: str, code: str, evidence: dict, fix: str) -> dict:
-    return {"severity": severity, "code": code, "evidence": evidence,
-            "fix": fix}
+def _problem(severity: str, code: str, evidence: dict, fix: str,
+             level: str = "P3", source: str = "static",
+             auto_prepare_covered: bool = False) -> dict:
+    """§SPEC-PREREQ-MATRIX：分级问题项——level P0/P1/P2/P3，
+    source=静态解析来源（约定位置/固定优先级），fix=可执行修复命令，
+    auto_prepare_covered=--auto-prepare 是否可自动补齐该问题。"""
+    return {"severity": severity, "code": code, "level": level,
+            "source": source, "evidence": evidence, "fix": fix,
+            "auto_prepare_covered": auto_prepare_covered}
 
 
 def _autoload_problems(root: Path) -> list[dict]:
@@ -38,7 +44,9 @@ def _autoload_problems(root: Path) -> list[dict]:
         # warning：既有 recipe/build 阶段会具名失败；此处只披露不漏判
         return [_problem("warning", "project_godot_missing",
                          {"path": str(pg)},
-                         "ensure project.godot exists at the project root")]
+                         "ensure project.godot exists at the project root",
+                         level="P0", source="project root convention",
+                         auto_prepare_covered=False)]
     text = pg.read_text(encoding="utf-8", errors="replace")
     missing = []
     for name, rel in _AUTOLOAD_RE.findall(text):
@@ -50,7 +58,8 @@ def _autoload_problems(root: Path) -> list[dict]:
         "error", "autoload_target_missing",
         {"count": len(missing), "items": missing},
         "fix or remove the broken autoload entries in project.godot "
-        "[autoload] (missing files make every GUT run fail late)")]
+        "[autoload] (missing files make every GUT run fail late)",
+        level="P0", source="project.godot [autoload] (conventional)")]
 
 
 def _test_interpreter_problems(root: Path, tests_glob: str | None,
@@ -89,7 +98,8 @@ def _test_interpreter_problems(root: Path, tests_glob: str | None,
              "items": [{"target": t, "referenced_by": sorted(set(v))[:5]}
                        for t, v in sorted(missing.items())]},
             "install the missing addon/files or fix the preload paths — "
-            "these tests fail late inside GUT otherwise"))
+            "these tests fail late inside GUT otherwise",
+            level="P0", source="tests/**/*.gd preload/load (conventional)"))
     if not exhaustive:
         problems.append(_problem(
             "warning", "plan_budget_exhausted",
@@ -117,17 +127,23 @@ def _env_problems(root: Path) -> list[dict]:
     if not gut.is_file():
         problems.append(_problem(
             "warning", "gut_addon_missing", {"path": str(gut)},
-            "install the GUT addon; mutation/measurement GUT legs fail "
-            "loudly without it (dry-run --select full stays usable)"))
+            "install the GUT addon (addons/gut/) — GUT legs fail loudly "
+            "without it; auto-prepare cannot install vendored addons",
+            level="P0", source="addons/gut/gut_cmdln.gd (fixed path)",
+            auto_prepare_covered=False))
     from .shadow import _IMPORT_ARTIFACTS
     godot_dir = root / ".godot"
     lacked = [n for n in _IMPORT_ARTIFACTS if not (godot_dir / n).exists()]
     if lacked:
         problems.append(_problem(
             "warning", "import_cache_missing",
-            {"dir": str(godot_dir), "missing": lacked},
-            "prepare will run `godot --headless --import` before the "
-            "first GUT (seconds-to-minutes; disclosed below)"))
+            {"dir": str(godot_dir), "missing": lacked,
+             "estimated_cost": "godot --headless --import (seconds to "
+                               "~1 minute)"},
+            "godot --headless --path . --import  (auto-prepare covers "
+            "this step)",
+            level="P1", source=".godot/import artifacts (conventional)",
+            auto_prepare_covered=True))
     return problems
 
 
@@ -147,9 +163,15 @@ def _map_problem(root: Path, target_file: str | None) -> list[dict]:
     return [_problem(
         "warning", "attribution_map_missing_or_stale",
         {"present": st.get("present"), "fresh": st.get("fresh"),
-         "reason": st.get("reason")},
-        "prepare will build/renew the attribution map (full-chain GUT, "
-        "minutes-scale; cost disclosed below) unless --select full is used")]
+         "reason": st.get("reason"),
+         "estimated_cost": "map build/renew: baseline preflight + "
+                           "instrumented GUT, ~2m15s (KOL 实测 135-137s)"},
+        "gqt measure map-update --project-root .  (~2m15s) — or rerun "
+        "with --auto-prepare to build it automatically, or --select full "
+        "to skip the map",
+        level="P1",
+        source=".qa-cache/attribution-map.json (conventional)",
+        auto_prepare_covered=True)]
 
 
 def _estimated_costs() -> list[dict]:

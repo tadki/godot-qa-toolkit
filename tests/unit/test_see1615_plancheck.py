@@ -117,3 +117,75 @@ def test_run_blocks_on_plan_error_without_spawning(tmp_path, monkeypatch):
     assert any(p["code"] == "preload_target_missing"
                for p in r["plan"]["problems"])
     assert spawned == []
+
+
+# §SPEC-PREREQ-MATRIX：分级矩阵、聚合、P1 默认停 + --auto-prepare
+
+def test_problems_carry_prereq_matrix_fields(tmp_path, monkeypatch):
+    """每问题带 level(P0-P3)/source/fix/auto_prepare_covered；
+    同一阶段全部静态问题一次列全（不得修一个再报一个）。"""
+    root = _healthy_project(tmp_path, monkeypatch)
+    (root / "addons" / "gut" / "gut_cmdln.gd").unlink()
+    (root / ".godot" / "uid_cache.bin").unlink()
+    _write(root, "tests/unit/test_broken.gd",
+           'extends GutTest\n'
+           'const A = preload("res://addons/godot_mcp/m1.gd")\n'
+           'const B = preload("res://addons/godot_mcp/m2.gd")\n')
+    _write(root, "project.godot",
+           'config_version=5\n\n[autoload]\n'
+           'Game="*res://autoload/game.gd"\n'
+           'Ghost="*res://autoload/ghost.gd"\n')
+    plan = plancheck.static_plan(str(root))
+    probs = plan["problems"]
+    assert len(probs) >= 4  # autoload + preload + gut + import 一次列全
+    for p in probs:
+        assert p["level"] in ("P0", "P1", "P2", "P3")
+        assert p["source"]
+        assert p["fix"]
+        assert isinstance(p["auto_prepare_covered"], bool)
+    levels = {p["code"]: p["level"] for p in probs}
+    assert levels["autoload_target_missing"] == "P0"
+    assert levels["preload_target_missing"] == "P0"
+    assert levels["gut_addon_missing"] == "P0"
+    assert levels["import_cache_missing"] == "P1"
+
+
+def test_map_missing_is_p1_with_cost_and_fix_command(tmp_path, monkeypatch):
+    root = _healthy_project(tmp_path, monkeypatch)
+    target = _write(root, "utils/calc.gd", "extends RefCounted\n")
+    plan = plancheck.static_plan(str(root), str(target))
+    m = [p for p in plan["problems"]
+         if p["code"] == "attribution_map_missing_or_stale"]
+    assert m and m[0]["level"] == "P1"
+    assert m[0]["auto_prepare_covered"] is True
+    assert "map-update" in m[0]["fix"]
+    assert "estimated_cost" in m[0]["evidence"]
+
+
+def test_cli_p1_stops_by_default_auto_prepare_continues(tmp_path, monkeypatch):
+    """P1 默认停（prepare_required + 修复命令/成本）；--auto-prepare 继续。"""
+    import argparse
+    from godot_qa_toolkit import cli as cli_mod
+
+    root = _healthy_project(tmp_path, monkeypatch)
+    target = _write(root, "utils/calc.gd", "extends RefCounted\n")
+    base = dict(project_root=str(root), files=[str(target)],
+                tests="res://tests/unit/", select_mode="line",
+                dry_run=False, attribution_map=None)
+
+    import io
+    import json as _json
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli_mod._plan_gate_mutation(argparse.Namespace(
+            auto_prepare=False, **base))
+    assert rc is not None and rc != 0
+    stopped = _json.loads(buf.getvalue())
+    assert stopped["error"] == "prepare_required"
+    p1 = stopped["summary"]["problems"]
+    assert p1 and p1[0]["level"] == "P1" and "map-update" in p1[0]["fix"]
+
+    cont = cli_mod._plan_gate_mutation(argparse.Namespace(
+        auto_prepare=True, **base))
+    assert cont is None  # auto-prepare → 继续（既有惰性 prepare 补齐）

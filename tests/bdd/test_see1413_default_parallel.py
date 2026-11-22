@@ -95,6 +95,7 @@ def when_default_jobs(bdd_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:
             bdd_state["root"],
             "--tests",
             "res://tests/unit/save/",
+            "--auto-prepare",
         ]
     )
     output = io.StringIO()

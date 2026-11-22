@@ -426,7 +426,8 @@ def _arm_fanout(name: str, *, root: Path, run_uuid: str, plans: list,
                 sink_by_rel: dict, manifest_by_rel: dict,
                 shadow_instrument: bool, inst_by_rel: dict,
                 shadow_hook_files: list, shard_log_dir: str | None,
-                xdg_homes: list[str]) -> list[dict]:
+                xdg_homes: list[str],
+                concurrency: int | None = None) -> list[dict]:
     """分片并行扇出（ThreadPoolExecutor：每分片独立进程 + XDG 隔离）。
 
     §SPEC-060e：worker 生命周期异常终止（如 shadow 构建失败）→ 已创建的
@@ -434,8 +435,10 @@ def _arm_fanout(name: str, *, root: Path, run_uuid: str, plans: list,
     已完整。"""
     results: list[dict] = []
     try:
-        with ThreadPoolExecutor(
-                max_workers=max(1, len(plans))) as ex:
+        # concurrency（acceptance per-feature 进程上限）；缺省全并行
+        workers = (max(1, min(int(concurrency), len(plans)))
+                   if concurrency else max(1, len(plans)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
             results = list(ex.map(
                 lambda ip: _run_shard_leg(
                     ip, name=name, plans=plans,
@@ -459,7 +462,7 @@ def _arm_fanout(name: str, *, root: Path, run_uuid: str, plans: list,
 
 def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
                  timeout_s: int, adaptive_reps: bool, shard_log_dir: str | None,
-                 stage: dict) -> tuple:
+                 stage: dict, concurrency: int | None = None) -> tuple:
     """执行段：根树注入 → 分片扇出 → XDG 异步清理 → 失败扫描。"""
     run_uuid = stage["run_uuid"]
     backup_dir = stage["backup_dir"]
@@ -485,7 +488,8 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
             sink_by_rel=sink_by_rel, manifest_by_rel=manifest_by_rel,
             shadow_instrument=shadow_instrument, inst_by_rel=inst_by_rel,
             shadow_hook_files=shadow_hook_files,
-            shard_log_dir=shard_log_dir, xdg_homes=xdg_homes)
+            shard_log_dir=shard_log_dir, xdg_homes=xdg_homes,
+            concurrency=concurrency)
         wall_s = time.monotonic() - t_arm
         gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs = \
             _arm_fail_scan(results)
@@ -530,7 +534,8 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             baseline_pairs: "set[tuple[str, str]] | None" = None,
             declared_scoped: "set[tuple[str, str]] | None" = None,
             declared_bare: "set[str] | None" = None,
-            arms_parallel: bool = False, evidence_dir=None) -> dict:
+            arms_parallel: bool = False, evidence_dir=None,
+            concurrency: int | None = None) -> dict:
     """一条批式臂（§SPEC-052 并行分片）：装载 → 分片扇出 → 门控 → 读回
     → vacuous 车道。shadow_instrument/adaptive_reps 语义见各分解函数。"""
     stage = _arm_stage(
@@ -546,7 +551,8 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
      arm_failures, arm_fail_pairs) = _arm_execute(
         name, root=root, shadow_instrument=shadow_instrument,
         timeout_s=timeout_s, adaptive_reps=adaptive_reps,
-        shard_log_dir=shard_log_dir, stage=stage)
+        shard_log_dir=shard_log_dir, stage=stage,
+        concurrency=concurrency)
     (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
      reconciliation, arm_valid, invalid_reason) = _arm_gate(
         name, root=root, recipe=recipe, timeout_s=timeout_s,
@@ -677,6 +683,38 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
         run_error, baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
         exempt_pairs, reps, convergence, adaptive_rounds_used, arms_parallel,
         attribution, bundles, reconciliation, plans, results)
+def _ensure_acceptance_harness(root: Path) -> Path | None:
+    """§SPEC-011/D20：CI 同款 harness 幂等接线。
+
+    项目侧契约位 `res://addons/gqt_accept/harness.gd` 通常被
+    .gitignore 忽略（CI acceptance 流水线每次 cp 接线）。measure 的
+    acceptance 臂此前跳过该前置 → 生成测试 `_make_harness()` 全部
+    fail_test("acceptance harness unavailable")，全量面 177 红。
+    契约位缺失且项目提供源时临时复制；返回本次新建路径供 finally 移除
+    （生产树零残留契约）。已存在则保持不动（幂等）。
+    """
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    if dest.exists():
+        return None
+    src = root / "acceptance" / "harness" / "harness.gd"
+    if not src.is_file():
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dest)
+    return dest
+
+
+def _cleanup_acceptance_harness(dest: Path | None) -> None:
+    if dest is None:
+        return
+    try:
+        dest.unlink(missing_ok=True)
+        if dest.parent.is_dir() and not any(dest.parent.iterdir()):
+            dest.parent.rmdir()
+    except OSError:
+        pass
+
+
 def run_acceptance_flow(*, root: Path, recipe: dict,
                         acceptance_keys: list[str] | None,
                         acceptance_shards: int,
@@ -687,21 +725,25 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         f["key"] for f in recipe["acceptance_face"]["features"]]
     snapshot = _snapshot_main(root)
     groups: list[dict] = []
+    harness_dest = _ensure_acceptance_harness(root)
     try:
-        n_groups = max(1, min(int(acceptance_shards or 1), len(keys) or 1))
-        chunk = max(1, -(-len(keys) // n_groups))
-        for i in range(0, len(keys), chunk):
-            sub = keys[i:i + chunk]
+        # §SPEC-011/D20：**每 feature 独立 suite/进程**——与官方 CI
+        # per-key compile+run 语义对齐。同进程连续跑多 feature 会让
+        # 前序 feature 的全局状态残留进入后续 feature（实测 v5 golden
+        # L2 payload 10470B > 4096B 预算；单 feature 进程绿）。
+        # acceptance_shards 语义降为并发上限（进程数钳制），不再合并
+        # feature 到同一 GUT 进程。
+        for k in keys:
             sd = create_suite_dir(root)
-            groups.append({"suite_dir": sd, "keys": sub})
-            compile_keys_to_suite(root, sub, sd)
-            for k in sub:
-                replay_check(root, k, suite_dir=sd)
+            groups.append({"suite_dir": sd, "keys": [k]})
+            compile_keys_to_suite(root, [k], sd)
+            replay_check(root, k, suite_dir=sd)
         return run_arm("acceptance", root=root, recipe=recipe,
                        acceptance={
                            "groups": groups, "snapshot": snapshot},
                        shadow_instrument=arms_parallel,
                        adaptive_reps=acceptance_adaptive,
+                       concurrency=max(1, int(acceptance_shards or 1)),
                        **arm_kwargs)
     except (SuiteError, AcceptRunError) as e:
         for g in groups:
@@ -714,6 +756,9 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
                                   "new": [], "new_pairs": [],
                                   "instrumentation_intolerant": []},
                 "repeats": 0, "convergence": None}
+    finally:
+        # 临时接线必须回收（失败/成功两条路径一致；生产树零残留）
+        _cleanup_acceptance_harness(harness_dest)
 
 def execute_arms(*, root: Path, recipe: dict, arms_parallel: bool,
                  acceptance_keys: list[str] | None,

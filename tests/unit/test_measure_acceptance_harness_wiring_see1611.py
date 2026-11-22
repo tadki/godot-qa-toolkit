@@ -1,0 +1,173 @@
+"""SEE-1613 §SPEC-011/D20 — measure acceptance 臂 harness 契约位接线。
+
+CI accept 流水线在跑 gherkin 前会把项目源 `acceptance/harness/harness.gd`
+幂等接线到契约位 `res://addons/gqt_accept/harness.gd`（该契约位被
+.gitignore 忽略、不入库）。measure 的 acceptance 臂此前直接编译+跑 GUT，
+跳过接线步 → 生成测试 before_all/`_make_harness` 全部 fail_test
+("acceptance harness unavailable") → 全量 acceptance 面 177 红。
+
+修复：acceptance 臂执行期临时接线，finally 移除（measure 既有
+「生产树零残留」契约；已存在契约位时保持幂等不动）。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from godot_qa_toolkit.measurement import arms
+
+
+def _proj(tmp_path: Path, *, with_source: bool = True,
+          with_contract: bool = False) -> Path:
+    root = tmp_path / "proj"
+    root.mkdir()
+    if with_source:
+        src = root / "acceptance" / "harness" / "harness.gd"
+        src.parent.mkdir(parents=True)
+        src.write_text("extends RefCounted\n", encoding="utf-8")
+    if with_contract:
+        dest = root / "addons" / "gqt_accept" / "harness.gd"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("extends RefCounted\n# pre-wired\n", encoding="utf-8")
+    return root
+
+
+def test_ensure_wires_missing_contract_then_cleanup_removes(tmp_path):
+    root = _proj(tmp_path)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    assert not dest.exists()
+
+    wired = arms._ensure_acceptance_harness(root)
+    assert wired == dest
+    assert dest.is_file()
+    assert dest.read_text(encoding="utf-8") == "extends RefCounted\n"
+
+    arms._cleanup_acceptance_harness(wired)
+    assert not dest.exists()
+    # 空目录一并清理（生产树零残留）
+    assert not (root / "addons" / "gqt_accept").exists()
+
+
+def test_ensure_is_idempotent_when_contract_already_present(tmp_path):
+    root = _proj(tmp_path, with_contract=True)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    before = dest.read_text(encoding="utf-8")
+
+    assert arms._ensure_acceptance_harness(root) is None
+    assert dest.read_text(encoding="utf-8") == before
+    arms._cleanup_acceptance_harness(None)
+    assert dest.is_file(), "pre-existing contract must never be removed"
+
+
+def test_ensure_skips_when_project_has_no_harness_source(tmp_path):
+    root = _proj(tmp_path, with_source=False)
+    assert arms._ensure_acceptance_harness(root) is None
+    assert not (root / "addons" / "gqt_accept").exists()
+
+
+def test_acceptance_flow_cleans_contract_on_success(tmp_path, monkeypatch):
+    """行为级：run_acceptance_flow 成功路径返回后契约位不得残留。"""
+    root = _proj(tmp_path)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    seen: dict = {}
+
+    def fake_compile(project_root, keys, suite_dir):
+        seen["wired_during_compile"] = dest.is_file()
+
+    def fake_replay(project_root, key, *, suite_dir=None):
+        return {}
+
+    def fake_run_arm(name, *, root, recipe, acceptance, **kw):
+        seen["wired_during_run"] = dest.is_file()
+        return {"arm": name, "state": "valid"}
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
+    monkeypatch.setattr(arms, "replay_check", fake_replay)
+    monkeypatch.setattr(arms, "run_arm", fake_run_arm)
+    monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
+    def fake_suite_dir(r):
+        d = Path(tmp_path / "suite")
+        d.mkdir(exist_ok=True)
+        return d
+
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    out = arms.run_acceptance_flow(
+        root=root, recipe={"acceptance_face": {"features": [{"key": "k1"}]}},
+        acceptance_keys=["k1"], acceptance_shards=1,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "valid"
+    assert seen["wired_during_compile"] is True
+    assert seen["wired_during_run"] is True
+    assert not dest.exists(), "contract must be removed after the arm"
+
+
+def test_acceptance_flow_cleans_contract_on_suite_error(tmp_path, monkeypatch):
+    """行为级：编译异常分支也不得残留契约位（finally 语义）。"""
+    from godot_qa_toolkit.gherkin.suite import SuiteError
+
+    root = _proj(tmp_path)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+
+    def boom(project_root, keys, suite_dir):
+        raise SuiteError("injected")
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", boom)
+    monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
+    def fake_suite_dir(r):
+        d = Path(tmp_path / "suite")
+        d.mkdir(exist_ok=True)
+        return d
+
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    out = arms.run_acceptance_flow(
+        root=root, recipe={"acceptance_face": {"features": [{"key": "k1"}]}},
+        acceptance_keys=["k1"], acceptance_shards=1,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "invalid"
+    assert not dest.exists(), "contract must be removed on suite_error"
+
+
+def test_acceptance_flow_uses_per_feature_processes(tmp_path, monkeypatch):
+    """§SPEC-011/D20：每 feature 独立 suite/进程（对齐 CI per-key 语义）——
+    同进程多 feature 会让前序残留进入后续（v5 golden L2 10KB>4KB）。"""
+    root = _proj(tmp_path)
+    compiles: list[tuple[list, Path]] = []
+    concurrency_seen: dict = {}
+
+    def fake_compile(project_root, keys, suite_dir):
+        compiles.append((list(keys), Path(suite_dir)))
+
+    def fake_replay(project_root, key, *, suite_dir=None):
+        return {}
+
+    def fake_run_arm(name, *, root, recipe, acceptance, **kw):
+        concurrency_seen["value"] = kw.get("concurrency")
+        concurrency_seen["plans"] = acceptance
+
+        class FakeArm:
+            pass
+        return {"arm": name, "state": "valid"}
+
+    def fake_suite_dir(r):
+        d = Path(tmp_path) / f"suite{len(compiles)}"
+        d.mkdir(exist_ok=True)
+        return d
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
+    monkeypatch.setattr(arms, "replay_check", fake_replay)
+    monkeypatch.setattr(arms, "run_arm", fake_run_arm)
+    monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    out = arms.run_acceptance_flow(
+        root=root,
+        recipe={"acceptance_face": {"features": [
+            {"key": "k1"}, {"key": "k2"}, {"key": "k3"}]}},
+        acceptance_keys=None, acceptance_shards=2,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "valid"
+    # 每 key 一次独立编译，且每次只含一个 key
+    assert [keys for keys, _ in compiles] == [["k1"], ["k2"], ["k3"]]
+    assert len({str(sd) for _, sd in compiles}) == 3, "suite dirs must differ"
+    assert concurrency_seen["value"] == 2, "shards become concurrency cap"

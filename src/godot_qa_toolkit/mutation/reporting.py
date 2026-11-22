@@ -178,6 +178,25 @@ def _dry_run_result(file: str, mutants: list["Mutant"], budget: int,
     }
 
 
+# SEE-1606 §SPEC-DERIVED-A：组键表提为模块常量——三静态输入（显式
+# --timeout / wiring hash / 显式 --tests glob）入 derived 域所辖组。
+_PLAN_GROUPS = {
+    "selection": ("selection_mode", "scoped", "test_selection",
+                  "lines_selection", "selection_disclosure",
+                  "explicit_tests_glob"),
+    "route": ("exec_scheme", "inject_scheme", "slot_mode", "freshness",
+              "worker_channel", "boot_wiring_hash"),
+    "budget": ("budget", "explicit_timeout_s", "adaptive_timeout_s",
+               "timing_source"),
+    "diff": ("baseline_reused", "resumed", "diff_available",
+             "retry_estimate", "executed_estimate"),
+    "preconditions": ("baseline_dirty", "baseline_failures",
+                      "baseline_failure_names", "baseline_skip",
+                      "kill_bail", "kill_bail_face", "kill_bail_scripts",
+                      "test_filter", "timeout_streak_suspended"),
+}
+
+
 def _execution_plan(summary: dict, extra: "dict | None" = None) -> dict:
     """SEE-1610 §SPEC-PLAN Phase 0：只读执行计划聚合。
 
@@ -189,21 +208,8 @@ def _execution_plan(summary: dict, extra: "dict | None" = None) -> dict:
     src = dict(summary)
     if extra:
         src.update(extra)
-    groups = {
-        "selection": ("selection_mode", "scoped", "test_selection",
-                      "lines_selection", "selection_disclosure"),
-        "route": ("exec_scheme", "inject_scheme", "slot_mode", "freshness",
-                  "worker_channel"),
-        "budget": ("budget", "adaptive_timeout_s", "timing_source"),
-        "diff": ("baseline_reused", "resumed", "diff_available",
-                 "retry_estimate", "executed_estimate"),
-        "preconditions": ("baseline_dirty", "baseline_failures",
-                          "baseline_failure_names", "baseline_skip",
-                          "kill_bail", "kill_bail_face", "kill_bail_scripts",
-                          "test_filter", "timeout_streak_suspended"),
-    }
     return {group: {k: src[k] for k in keys if k in src}
-            for group, keys in groups.items()}
+            for group, keys in _PLAN_GROUPS.items()}
 
 
 # SEE-1606 §SPEC-P2：字段分区——derived 仅由静态输入决定（plan_id 唯一
@@ -216,6 +222,9 @@ _PLAN_FIELD_PARTITION = {
     "inject_scheme": "derived", "budget": "derived",
     "kill_bail": "derived", "kill_bail_face": "derived",
     "test_filter": "derived",
+    # derived（§SPEC-DERIVED-A 三静态输入）
+    "explicit_timeout_s": "derived", "boot_wiring_hash": "derived",
+    "explicit_tests_glob": "derived",
     # observed
     "test_selection": "observed", "selection_disclosure": "observed",
     "baseline_reused": "observed", "resumed": "observed",
@@ -296,7 +305,8 @@ def _plan_reasons(plan: dict, src: dict) -> list:
 
 def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
                map_state: "dict | None" = None,
-               import_proof_present: "bool | None" = None) -> dict:
+               import_proof_present: "bool | None" = None,
+               static_preconditions: "dict | None" = None) -> dict:
     """SEE-1606 §SPEC-P2：dry-run 计划预览元数据（只增键不改既有键）。
 
     - partitions：字段按 derived/observed/runtime 分区；
@@ -304,6 +314,8 @@ def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
       不动 id）；
     - map_state：缺/旧 map 仅 would_renew+具名缺失+成本披露（探测只读，
       零续新）；
+    - static_preconditions：独立只读静态前置块（import cache / gut_cmdln /
+      godot binary，各带 ok 与证据来源；None = 未探测不造键）；
     - answers：通道/理由/失败路径/复用面四类机器问题；
     - assumptions：计划假设与 handler（handler=None 供 validate_plan
       lint——不作运行门）。"""
@@ -317,11 +329,16 @@ def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
                 unclassified.append(f"budget.{k}")
     block = _map_state_block(map_state, import_proof_present)
     route = plan.get("route") or {}
-    return {
+    out = {
         "plan_id": _plan_id(partitions["derived"]),
         "partitions": partitions,
         "unclassified_fields": sorted(set(unclassified)),
         "map_state": block,
+    }
+    # SEE-1615 §SPEC-DERIVED-A：未探测（None）→ 键缺席不造
+    if static_preconditions is not None:
+        out["static_preconditions"] = static_preconditions
+    out.update({
         "answers": {
             "channel": route.get("exec_scheme"),
             "reasons": _plan_reasons(plan, src),
@@ -334,7 +351,8 @@ def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
              "handler": None if block["would_renew"]
              else "selection_disclosure"},
         ],
-    }
+    })
+    return out
 
 
 def validate_plan(meta: dict) -> list[str]:

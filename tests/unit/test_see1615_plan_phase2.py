@@ -152,6 +152,22 @@ def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
     assert calls == {"spawn": [], "renew": [], "import": [], "census": []}
     meta = s["execution_plan_meta"]
     assert meta["plan_id"]
+    # §SPEC-DERIVED-A：derived 三键在 plan 分区 + static_preconditions 块
+    derived = meta["partitions"]["derived"]
+    assert derived["budget"]["explicit_timeout_s"] == 600
+    assert derived["route"]["boot_wiring_hash"]
+    assert derived["route"]["boot_wiring_hash"] != ""
+    # dry-run 恒传 extra → 无显式 --tests 时如实披露 None
+    assert derived["selection"]["explicit_tests_glob"] is None
+    sp = meta["static_preconditions"]
+    assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary"}
+    # 精简 fixture（无 addons/gut/.godot）→ ok=False 是诚实的探测值
+    assert sp["import_cache"]["ok"] is False
+    assert "missing=" in sp["import_cache"]["evidence"]
+    assert sp["gut_cmdln"]["ok"] is False
+    assert sp["gut_cmdln"]["evidence"].endswith("gut_cmdln.gd")
+    assert sp["godot_binary"]["ok"] is True
+    assert sp["godot_binary"]["evidence"]
     assert set(meta["answers"].keys()) == {
         "channel", "reasons", "failure_paths", "reuse_surface"}
     assert meta["answers"]["channel"] == \
@@ -254,3 +270,71 @@ def test_dry_run_core_setup_passes_renew_false(tmp_path, monkeypatch):
         runner_mod._run_mutation_core(str(target), str(root), dry_run=True,
                                       select_mode="fn")
     assert seen["renew"] is False
+
+
+# ------------------------- §SPEC-DERIVED-A：derived 三键 + static_preconditions
+
+
+def test_derived_keys_in_partitions_and_plan_id_sensitivity():
+    """三静态输入独立成 derived 键（分属 budget/route/selection 组）；
+    plan_id 对显式 timeout / wiring hash / 显式 tests glob 敏感，对
+    observed（baseline_dirty）盲，同输入逐字节稳定。"""
+    src = {"selection_mode": "line", "scoped": True,
+           "exec_scheme": "cold-shadow/1", "budget": 50}
+    extra = {"explicit_timeout_s": 120, "boot_wiring_hash": "wh-1",
+             "explicit_tests_glob": "res://tests/custom/"}
+    plan = _execution_plan(src, extra=extra)
+    meta = _plan_meta(plan, src, extra=extra,
+                      map_state={"present": True, "fresh": True,
+                                 "reason": "map_fresh"})
+    derived = meta["partitions"]["derived"]
+    assert derived["budget"]["explicit_timeout_s"] == 120
+    assert derived["route"]["boot_wiring_hash"] == "wh-1"
+    assert derived["selection"]["explicit_tests_glob"] == \
+        "res://tests/custom/"
+    pid = meta["plan_id"]
+    # 同输入重算 → 逐字节稳定
+    again = _plan_meta(_execution_plan(src, extra=extra), src, extra=extra,
+                       map_state={"present": True, "fresh": True,
+                                  "reason": "map_fresh"})
+    assert again["plan_id"] == pid
+    # 显式 timeout / wiring hash 变化 → id 变（derived 敏感）
+    for key, val in (("explicit_timeout_s", 240), ("boot_wiring_hash", "wh-2")):
+        src2 = dict(src)
+        plan2 = _execution_plan(src2, extra={**extra, key: val})
+        meta2 = _plan_meta(plan2, src2, extra={**extra, key: val},
+                           map_state={"present": True, "fresh": True,
+                                      "reason": "map_fresh"})
+        assert meta2["plan_id"] != pid, key
+        assert meta2["partitions"]["derived"][(
+            "budget" if key == "explicit_timeout_s" else "route")][key] == val
+    # observed 变化（baseline_dirty）→ id 不变
+    plan3 = _execution_plan({**src, "baseline_dirty": True}, extra=extra)
+    meta3 = _plan_meta(plan3, {**src, "baseline_dirty": True}, extra=extra,
+                       map_state={"present": True, "fresh": True,
+                                  "reason": "map_fresh"})
+    assert meta3["plan_id"] == pid
+    # 显式 tests glob 缺席 → derived 无该键（缺席不造）
+    plan4 = _execution_plan(src, extra={"budget": 50})
+    meta4 = _plan_meta(plan4, src, extra={"budget": 50})
+    assert "explicit_tests_glob" not in meta4["partitions"]["derived"] \
+        .get("selection", {})
+
+
+def test_static_preconditions_block_shapes():
+    """static_preconditions 独立块：三项各带 ok 与 evidence；未探测（None）
+    → 缺席不造（既有 meta 形态不变）。"""
+    plan = _execution_plan({"budget": 50, "scoped": True}, extra={"budget": 50})
+    pc = {
+        "import_cache": {"ok": True, "evidence": "/p/.godot"},
+        "gut_cmdln": {"ok": False, "evidence": "/p/addons/gut/gut_cmdln.gd"},
+        "godot_binary": {"ok": True, "evidence": "/usr/bin/godot"},
+    }
+    meta = _plan_meta(plan, {"budget": 50}, extra={"budget": 50},
+                      static_preconditions=pc)
+    sp = meta["static_preconditions"]
+    assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary"}
+    assert sp["import_cache"] == {"ok": True, "evidence": "/p/.godot"}
+    assert sp["gut_cmdln"]["ok"] is False
+    meta_none = _plan_meta(plan, {"budget": 50}, extra={"budget": 50})
+    assert "static_preconditions" not in meta_none

@@ -184,6 +184,23 @@ def _intolerance_annex(gate: str, report_data: dict) -> str:
             "GQT_MEASUREMENT_EXPLICIT_PARTIAL_CONTINUE=1")
 
 
+_GATE_EVIDENCE_KEYS = ("new_pairs", "baseline_absorbed", "shard_timeouts",
+                       "unattributed_shards", "launch_failures")
+
+
+def _gate_evidence_summary(gut: dict) -> str:
+    """§SPEC-PLANFIRST：细分原因的证据摘要（invalid_evidence 各键）。"""
+    ev = gut.get("invalid_evidence") or {}
+    parts = []
+    for k in _GATE_EVIDENCE_KEYS:
+        v = ev.get(k)
+        if v is not None and v != []:
+            parts.append(f"{k}={v}")
+    if not parts:
+        return ""
+    return " — evidence: " + "; ".join(parts)
+
+
 def _build_gate_fail_reason(doc: dict) -> str | None:
     """S6.3 构建侧臂可用门（§SPEC-060a）：生成/增量的产物要求 gut_full
     臂 state==valid——方案 A 后基线吸收使 state 成为「既有失败已吸收、
@@ -196,15 +213,18 @@ def _build_gate_fail_reason(doc: dict) -> str | None:
         return "no execution evidence (arms_valid)"
     gut = states.get("gut_full") or {}
     if gut.get("state") != "valid":
+        reason = gut.get("invalid_reason")
         base = (f"gut_full arm invalid (state={gut.get('state')!r}, "
-                f"reason={gut.get('invalid_reason')!r}) — new failures "
-                f"gate the build (§SPEC-060a)")
+                f"reason={reason!r})")
+        base += _gate_evidence_summary(gut)
+        if reason == "new_failures":
+            base += " — new failures gate the build (§SPEC-060a)"
         # §SPEC-PREFLIGHT×PLANFIRST：新增失败归类疑似插桩不耐受——中断
         # 报告附具名清单 + 可直接使用的 --intolerant-tests 声明草稿
         arms = doc.get("arms") or {}
         newp = ((arms.get("gut_full") or {}).get("test_failures")
                 or {}).get("new_pairs") or []
-        if newp:
+        if newp and "new_failures" in base:
             draft = [{"script": p.split("::", 1)[0],
                       "test": p.split("::", 1)[1],
                       "reason": "suspected_instrumentation_intolerance: "

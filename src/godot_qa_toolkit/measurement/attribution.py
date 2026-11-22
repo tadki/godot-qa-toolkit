@@ -472,6 +472,7 @@ def _arms_state(arms: tuple[dict, ...]) -> dict:
         out[arm["arm"]] = {
             "state": arm.get("state"),
             "invalid_reason": arm.get("invalid_reason"),
+            "invalid_evidence": arm.get("invalid_evidence"),
             "bundles": int(arm.get("bundles") or 0),
             "pairs": sum(len(v) for v in
                          (attribution.get("test_to_files") or {}).values()),

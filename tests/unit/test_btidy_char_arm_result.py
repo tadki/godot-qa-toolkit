@@ -81,7 +81,7 @@ def test_arm_result_invalid_reason_timeout(tmp_path, monkeypatch):
     _wire(monkeypatch)
     doc, _ = _call(tmp_path, gut_ok=False, timed_out=True, arm_valid=False,
                    run_error=True)
-    assert doc["invalid_reason"] == "timeout"
+    assert doc["invalid_reason"] == "shard_timeout"  # §SPEC-PLANFIRST 细分
     assert doc["state"] == "invalid"
 
 

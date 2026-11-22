@@ -310,7 +310,7 @@ def test_gut_timeout_records_wall_and_sentinel(project, tmp_path, monkeypatch):
     for arm in report["arms"]:
         assert arm["timed_out"] is True
         assert arm["wall_s"] > 0
-        assert arm["invalid_reason"] == "timeout"
+        assert arm["invalid_reason"] == "shard_timeout"  # §SPEC-PLANFIRST 细分
     assert report["ok"] is False
 
 
@@ -1248,7 +1248,8 @@ def test_unparseable_nonzero_failure_gates_arm(project, tmp_path):
     assert report["failures"]["gated"] is False  # 非新增失败路径
     gut = next(a for a in report["arms"] if a["arm"] == "gut_full")
     assert gut["state"] == "invalid"
-    assert gut["invalid_reason"] == "run_error"
+    # §SPEC-PLANFIRST：rc!=0 且无可解析失败名细分归因
+    assert gut["invalid_reason"] == "unattributed_failures"
     assert not any(r["score_status"] == "scored"
                    for r in report["crap"]["records"])
 

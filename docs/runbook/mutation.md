@@ -7,6 +7,43 @@ source-level mutants for a `.gd` file, execute each in an isolated shadow slot,
 and report every mutant the tests fail to kill as a survivor (an assertion
 gap).
 
+## Plan-first flow
+
+`gqt mutation` runs in three stages on every invocation (including the
+default non-dry-run path):
+
+1. **plan** — a static, read-only sweep bounded by `PLAN_BUDGET_S=10s`. It
+   inspects `project.godot` autoload targets, every `preload`/`load` call in
+   the test surface, the Godot binary and the GUT addon, and the state of the
+   attribution map. Each finding is recorded as a problem entry
+   `{severity, code, evidence, fix}` in `plan.problems[]`. Errors block the
+   run; warnings disclose work the next stage will pay for. A read-only
+   `estimated_costs` list previews expensive operations without executing
+   them.
+2. **prepare** — performs the work plan disclosed: import cache warm-up,
+   attribution-map build / incremental refresh, baseline preflight, warm pool
+   provisioning. Anything that fails here is named (`route_drift`,
+   `baseline_preflight_red`, `suspected_instrumentation_intolerance`,
+   `plan_blocked` if a plan error surfaced late, …) instead of collapsing
+   into a generic `run_error`.
+3. **run** — consumes the prepared assets. The static plan output is reused
+   for both `--dry-run` (plan only, never enters prepare) and the real run.
+
+`--dry-run` therefore does **not** require an attribution map. When no usable
+map exists, the response is `ok=true`, `selection_mode=plan_only`, and the
+plan's `problems[]` contains an `attribution_map_missing_or_stale` warning
+describing the work a real run will pay for; nothing is renewed, imported, or
+censused. Pass `--select full` or an explicit `--tests` to preview sites
+without a map. If the plan finds an error-class problem the run aborts as
+`plan_blocked` with `summary.error="plan_blocked"`, `summary.plan` echoing
+the static plan, and one `failures[]` entry per error problem.
+
+When the target file paths are not all under the project root (or are bare
+top-level files), target derivation falls back to the project root and
+discloses this on stderr as `measure: targets_root_fallback (<reason>) —
+target face widened to the whole project root ...`. The fallback is named,
+not silent.
+
 ## Prerequisites
 
 - `<root>/addons/gut/gut_cmdln.gd` exists; a resolvable Godot binary
@@ -130,7 +167,10 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   hashed only from derived inputs, channel/reason/failure/reuse answers, and a
   read-only `map_state`. Missing or stale maps are disclosed there as
   `would_renew` plus `missing` and `cost`; no renewal/import/census is run, and
-  this disclosure does not replace selection fail-loud behavior.
+  this disclosure does not replace selection fail-loud behavior. When the
+  dry-run returns the static plan only (no usable map), the top level carries
+  `summary.plan` (the static plan, including `problems[]`) and
+  `summary.selection_mode=plan_only`, and stops short of site enumeration.
 - `equivalent_pruned` appears only when `GQT_MUTATION_EQUIV_PRUNE` opts in. It
   discloses rule counts, before/after denominators and every pruned stable id;
   kept ids and their order are unchanged. KOL samples with no provable matches
@@ -171,6 +211,18 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   mismatch aborts before baseline/cache/engine work with
   `summary.{run_error:true,route_drift:true,authoritative_scheme,resolved_scheme,drift_site}`;
   never continue on the drifted channel.
+- **Suspected instrumentation intolerance**: when an instrumented run
+  produces failing `(script, test)` pairs that pass on the uninstrumented
+  baseline, the run interrupts with
+  `classification=suspected_instrumentation_intolerance`, the named failing
+  pairs, the wall clock and face of the uninstrumented baseline, and a
+  ready-to-save `--intolerant-tests` declaration draft
+  (`{"tests":[{"name":...,"reason":...,"script":...}], "coverage_limitations":[]}`).
+  Options printed alongside the draft: (a) save the draft and re-run with
+  `--intolerant-tests <path>` to declare those tests as blind spots, or
+  (b) investigate the instrumentation itself. Save the draft to a path and
+  point `GQT_MEASUREMENT_INTOLERANT_TESTS=<path>` at it so the
+  measurement-chain auto-build reuses the same declarations.
 
 ## Boundaries
 
@@ -230,7 +282,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins and invalid values fail loud |
 | `--budget <n>` | 50 | Max mutants; with diff reuse present, counted on the post-diff retry set (order-preserving truncation) |
 | `--timeout <s>` | 600 | Single GUT wall-clock limit; default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade |
-| `--dry-run` | off | List sites without GUT, map renewal, import or census; emits diff estimates plus `execution_plan` / `execution_plan_meta`. Missing/stale maps are disclosed as `would_renew` with missing inputs and cost, never renewed; existing selection fail-loud semantics still apply |
+| `--dry-run` | off | Run the static plan only; zero GUT, map renewal, import or census. The plan response carries `problems[]` (severity/code/evidence/fix per finding) and `estimated_costs`, plus the diff-estimate, `execution_plan` / `execution_plan_meta` views. A missing or stale attribution map does not block the dry-run: the response is `ok=true` with `selection_mode=plan_only` and the plan's `problems[]` records `attribution_map_missing_or_stale` as a warning. Error-class problems abort as `plan_blocked`. Existing selection fail-loud semantics still apply when a usable map is present and `--dry-run` is asked to enumerate sites |
 | `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping and discloses `explicit_tests` |
 | `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value |
 | `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |

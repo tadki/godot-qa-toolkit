@@ -189,3 +189,37 @@ def test_cli_p1_stops_by_default_auto_prepare_continues(tmp_path, monkeypatch):
     cont = cli_mod._plan_gate_mutation(argparse.Namespace(
         auto_prepare=True, **base))
     assert cont is None  # auto-prepare → 继续（既有惰性 prepare 补齐）
+
+
+# §SPEC-ANCHOR-PREVIEW：map_preview_state 锚定 + stale 前缀
+
+
+def test_map_preview_fresh_with_cwd_relative_target(tmp_path, monkeypatch):
+    """CWD≠root 时相对目标锚定后 fresh 判定不误报 stale。"""
+    from godot_qa_toolkit.mutation.truth_select import map_preview_state
+
+    root = _healthy_project(tmp_path, monkeypatch)
+    target = _write(root, "utils/calc.gd", "extends RefCounted\n")
+    from attribution_fixtures import write_map
+    write_map(root, {"utils/calc.gd": []})
+    monkeypatch.chdir(tmp_path)  # CWD≠root
+    st = map_preview_state(str(root), "utils/calc.gd")
+    assert st["present"] is True and st["fresh"] is True
+    assert st["reason"] == "map_fresh"
+    # 绝对路径同判
+    st_abs = map_preview_state(str(root), str(target))
+    assert st_abs["fresh"] is True
+
+
+def test_map_preview_stale_reason_prefix_named(tmp_path, monkeypatch):
+    """LOW-L2：stale 前缀 map_stale:<detail>（原误为 map_fresh:detail）。"""
+    from godot_qa_toolkit.mutation.truth_select import map_preview_state
+
+    root = _healthy_project(tmp_path, monkeypatch)
+    from attribution_fixtures import write_map
+    write_map(root, {"utils/calc.gd": []})
+    _write(root, "utils/calc.gd", "extends RefCounted\n# drift\n")
+    monkeypatch.chdir(tmp_path)
+    st = map_preview_state(str(root), "utils/calc.gd")
+    assert st["fresh"] is False
+    assert st["reason"].startswith("map_stale:")

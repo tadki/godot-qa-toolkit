@@ -684,9 +684,13 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                   baseline_preflight: bool = False) -> dict:
     """measurement 双源批式编排，产出 measurement-report/2（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
-    inp = _measure_inputs(project_root, target_files, recipe,
-                          baseline_failures, intolerant_config,
-                          inject_toolchain)
+    from ..mutation.stagetiming import StageClock
+    clock = StageClock()
+    t_total = time.monotonic()
+    with clock.stage("planning"):
+        inp = _measure_inputs(project_root, target_files, recipe,
+                              baseline_failures, intolerant_config,
+                              inject_toolchain)
     root = inp["root"]
     # §SPEC-PREFLIGHT P1/P4：映射构建路径（baseline_preflight=True）且未
     # 显式提供基线时——基线臂前置，红即具名短停；绿/放行则复用结果
@@ -694,15 +698,18 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     # （默认 False）语义零变化。
     _pf_meta = None
     if baseline_preflight and baseline_failures is None:
-        baseline_failures, _pf_meta = run_baseline_preflight(
-            root, inp["recipe"], timeout_s)
+        with clock.stage("baseline_preflight"):
+            baseline_failures, _pf_meta = run_baseline_preflight(
+                root, inp["recipe"], timeout_s)
         # 生效基线通道是 baseline_pairs（_gate_ctx 的 effective 来源）——
         # 预检结果必须双写（failures 供 meta 判定，pairs 供吸收判定）
         inp["baseline_pairs"] = {tuple(p) for p in baseline_failures}
-    st = _measure_stage(
-        root, target_files, inp["recipe_hash"], block_compress,
-        test_attribution, attribution_causal, evidence_out, scope_roots)
-    arm_a, arm_b = _measure_arms(
+    with clock.stage("instrument_prepare"):
+        st = _measure_stage(
+            root, target_files, inp["recipe_hash"], block_compress,
+            test_attribution, attribution_causal, evidence_out, scope_roots)
+    with clock.stage("gut_full_arm"):
+        arm_a, arm_b = _measure_arms(
         root, inp["recipe"], st["prepared"], timeout_s=timeout_s,
         test_attribution=test_attribution,
         attribution_causal=attribution_causal, shard_width=shard_width,
@@ -714,6 +721,9 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         evidence_dir=st["evidence_dir"], acceptance_keys=acceptance_keys,
         acceptance_shards=acceptance_shards,
         acceptance_adaptive=acceptance_adaptive)
+    # acceptance 臂耗时单独披露（gut_full_arm 段含双臂——差值即 acceptance）
+    clock.add("acceptance_arm", max(
+        0.0, (arm_b.get("wall_s") or 0.0)))
     unions = _build_unions(arm_a, arm_b, inp["recipe_hash"])
     gated_arms, comparable_reason = _gate_comparable(
         unions, arm_a, arm_b, st["complete"])
@@ -727,9 +737,13 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         preflight_meta=_pf_meta,
         causal_sites=st["causal_sites"],
         pristine_recipe_hash=inp["pristine_recipe_hash"])
-    return _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
+    report = _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
                          comparable_reason, crap, stability_baseline, perf,
                          attr_section)
+    # §SPEC-PLANFIRST B：映射构建全链分段落盘（消灭 prepare 盲区）
+    clock.add("total", time.monotonic() - t_total)
+    report["stage_timings"] = clock.disclosure()
+    return report
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")
 

@@ -195,6 +195,17 @@ def _parse_intolerant_config(cfg: dict) -> tuple:
         coverage_limitations.append(
             {"file": _req_str(l, "file", "coverage limitation"),
              "reason": _req_str(l, "reason", "coverage limitation")})
+    # §SPEC-ACC-GOVERN：acceptance 不耐受身份（feature/scenario +
+    # scenario_line/example_row_line）——同构校验后挂 acceptance 子集
+    from .acc_govern import parse_acceptance_scenarios
+    try:
+        acc_scenarios = parse_acceptance_scenarios(cfg)
+    except ValueError as e:
+        raise MeasurementError(str(e)) from e
+    if acc_scenarios:
+        intolerant_tests = list(intolerant_tests) + [
+            {"name": f"{a['feature']}::{a['scenario']}",
+             "reason": a["reason"], "acceptance": a} for a in acc_scenarios]
     return intolerant_tests, declared_scoped, declared_bare, \
         coverage_limitations
 

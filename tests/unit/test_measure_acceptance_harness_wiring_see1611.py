@@ -171,3 +171,71 @@ def test_acceptance_flow_uses_per_feature_processes(tmp_path, monkeypatch):
     assert [keys for keys, _ in compiles] == [["k1"], ["k2"], ["k3"]]
     assert len({str(sd) for _, sd in compiles}) == 3, "suite dirs must differ"
     assert concurrency_seen["value"] == 2, "shards become concurrency cap"
+
+
+def _wire_flow_fakes(monkeypatch, tmp_path, root, dest, state="valid"):
+    """成功路径共用的 fake 装配。"""
+    counter = {"n": 0}
+
+    def fake_compile(project_root, keys, suite_dir):
+        counter["n"] += 1
+
+    def fake_replay(project_root, key, *, suite_dir=None):
+        return {}
+
+    def fake_suite_dir(r):
+        d = Path(tmp_path) / f"s{counter['n']}"
+        d.mkdir(exist_ok=True)
+        counter["n"] += 1
+        return d
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
+    monkeypatch.setattr(arms, "replay_check", fake_replay)
+    monkeypatch.setattr(arms, "run_arm",
+                        lambda name, **kw: {"arm": name, "state": state})
+    monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    return dest
+
+
+def test_cleanup_failure_downgrades_result_to_invalid(tmp_path, monkeypatch):
+    """D21：unlink 失败不得静默——本次 acceptance 结果必须 invalid 并
+    披露残留（不得带残留报 valid）。"""
+    root = _proj(tmp_path)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    _wire_flow_fakes(monkeypatch, tmp_path, root, dest)
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self == dest:
+            raise OSError("injected unlink failure")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    out = arms.run_acceptance_flow(
+        root=root, recipe={"acceptance_face": {"features": [{"key": "k1"}]}},
+        acceptance_keys=["k1"], acceptance_shards=1,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "invalid", "residue must not report valid"
+    assert "residue" in (out.get("invalid_reason") or "")
+
+
+def test_copy_failure_yields_invalid_and_no_partial_residue(tmp_path,
+                                                           monkeypatch):
+    """D21：mkdir/copyfile 中途失败不得裸抛——结果 invalid 且本次部分
+    产物被回收（树内无残留）。"""
+    root = _proj(tmp_path)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    _wire_flow_fakes(monkeypatch, tmp_path, root, dest)
+
+    def boom_copy(src, dst, *a, **k):
+        raise OSError("injected copy failure")
+
+    monkeypatch.setattr(arms.shutil, "copyfile", boom_copy)
+    out = arms.run_acceptance_flow(
+        root=root, recipe={"acceptance_face": {"features": [{"key": "k1"}]}},
+        acceptance_keys=["k1"], acceptance_shards=1,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "invalid"
+    assert not dest.exists(), "partial copy must be reclaimed"
+    assert not (root / "addons" / "gqt_accept").exists()

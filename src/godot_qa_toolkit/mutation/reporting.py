@@ -272,7 +272,11 @@ def _plan_id(derived_view: dict) -> str:
 
 def _map_state_block(map_state: "dict | None",
                      import_proof_present: "bool | None") -> dict:
-    """缺/旧 map 与证明缺失 → would_renew + 具名缺失 + 成本（只读披露）。"""
+    """缺/旧 map 与证明缺失 → would_renew + 具名缺失 + 成本（只读披露）。
+
+    SEE-1615 §SPEC-MAPSTATE-A：present/fresh 原始探测值直出（来自
+    map_preview_state 同源只读结果；None = 未探测/不可判定）——消费方
+    无需解码 missing/reason；既有四键语义零变化。"""
     missing: list[str] = []
     costs: list[str] = []
     would_renew = None
@@ -288,7 +292,9 @@ def _map_state_block(map_state: "dict | None",
     if import_proof_present is False:
         missing.append("prewarm_proof")
         costs.append(_PROOF_COST)
-    return {"would_renew": would_renew, "missing": missing, "cost": costs,
+    return {"present": (map_state or {}).get("present"),
+            "fresh": (map_state or {}).get("fresh"),
+            "would_renew": would_renew, "missing": missing, "cost": costs,
             "reason": (map_state or {}).get("reason")}
 
 

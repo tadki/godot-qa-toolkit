@@ -328,7 +328,8 @@ def _core_caliper(project_root, path, mutants, select_ids, select_lines,
 def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
                   tests_glob, binary_kind, resume2_store, mutate_all,
                   header_hash, scope_hashes, attention, identity,
-                  selection_meta, select_ids, select_lines, select_mode) -> dict:
+                  selection_meta, select_ids, select_lines, select_mode,
+                  timeout_s: int = 600) -> dict:
     """dry_run（SPEC-009）估算与选面/求交披露（与完整执行路径同一判别点）。"""
     estimate = dry_run_estimate(
         str(path), mutants, budget, scoped, total_sites,
@@ -354,9 +355,36 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
             "skipped_no_site": sorted(lines - set(dry_hit)),
         }
     # SEE-1610 §SPEC-PLAN Phase 0：选面披露落定后重建同构 plan（V7 同构）。
+    # SEE-1606 §SPEC-DERIVED-A：三静态输入独立成 derived 键（显式 timeout/
+    # wiring hash/显式 tests glob；缺席不造）+ 只读静态前置块。
+    from .identity import boot_wiring_hash
     from .reporting import _execution_plan, _plan_meta
+    from .shadow import _IMPORT_ARTIFACTS
+    explicit_glob = tests_glob if (selection_meta or {}).get(
+        "source") == "explicit_tests" else None
+    godot_dir = Path(project_root) / ".godot"
+    import_missing = [n for n in _IMPORT_ARTIFACTS
+                      if not (godot_dir / n).exists()]
+    gut_cmdln = Path(project_root) / "addons" / "gut" / "gut_cmdln.gd"
+    try:
+        from .inject import godot_command
+        godot_bin = godot_command()
+        godot_ok, godot_evidence = Path(godot_bin).is_file(), str(godot_bin)
+    except Exception as e:  # noqa: BLE001 — 解析失败具名落块（只读探测）
+        godot_ok, godot_evidence = False, f"{type(e).__name__}: {e}"
+    static_pc = {
+        "import_cache": {
+            "ok": not import_missing,
+            "evidence": (f"{godot_dir} missing={import_missing}"
+                         if import_missing else str(godot_dir))},
+        "gut_cmdln": {"ok": gut_cmdln.is_file(), "evidence": str(gut_cmdln)},
+        "godot_binary": {"ok": godot_ok, "evidence": godot_evidence},
+    }
+    derived_extra = {"budget": budget, "explicit_timeout_s": timeout_s,
+                     "boot_wiring_hash": boot_wiring_hash(str(project_root)),
+                     "explicit_tests_glob": explicit_glob}
     estimate["summary"]["execution_plan"] = _execution_plan(
-        estimate["summary"], extra={"budget": budget})
+        estimate["summary"], extra=derived_extra)
     # SEE-1606 §SPEC-P2：dry-run 计划预览元数据——映射状态/证明存在性
     # 只读探测（零续新、零 import、零 census；不计算 import_proof）；
     # validate_plan lint 仅供消费侧，不作运行门（此处不调用）。
@@ -364,17 +392,18 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
     from .prewarm_proof import _proof_paths
     _meta = _plan_meta(
         estimate["summary"]["execution_plan"], estimate["summary"],
-        extra={"budget": budget},
+        extra=derived_extra,
         map_state=map_preview_state(str(project_root), str(path)),
         import_proof_present=(
-            _proof_paths(str(project_root))[1].is_file()))
+            _proof_paths(str(project_root))[1].is_file()),
+        static_preconditions=static_pc)
     estimate["summary"]["execution_plan_meta"] = _meta
     return estimate
 
 def _core_caliper_and_early(c: dict, project_root: str, path: Path, *,
                             select_ids, select_lines, select_mode, dry_run,
-                            budget, binary_kind, resume2_store, mutate_all,
-                            identity) -> tuple:
+                            budget, timeout_s: int, binary_kind,
+                            resume2_store, mutate_all, identity) -> tuple:
     """卡尺选面 + dry-run / 零位点两个早退出口。返回 (early_or_None,
     tests_glob, selection_meta)。"""
     tests_glob = c["tests_glob"]
@@ -390,8 +419,8 @@ def _core_caliper_and_early(c: dict, project_root: str, path: Path, *,
             path, c["mutants"], budget, scoped, c["total_sites"],
             project_root, tests_glob, binary_kind, resume2_store, mutate_all,
             c["header_hash"], c["scope_hashes"], c["attention"], identity,
-            selection_meta, select_ids, select_lines, select_mode),
-            tests_glob, selection_meta)
+            selection_meta, select_ids, select_lines, select_mode,
+            timeout_s=timeout_s), tests_glob, selection_meta)
     if not c["mutants"]:
         return (_no_sites_result(str(path), scoped,
                                  zero_ref=bool(selection_meta.get("zero_ref"))),
@@ -468,8 +497,9 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
     early, tests_glob, selection_meta = _core_caliper_and_early(
         c, project_root, path, select_ids=select_ids,
         select_lines=select_lines, select_mode=select_mode, dry_run=dry_run,
-        budget=budget, binary_kind=binary_kind, resume2_store=resume2_store,
-        mutate_all=mutate_all, identity=identity)
+        budget=budget, timeout_s=timeout_s, binary_kind=binary_kind,
+        resume2_store=resume2_store, mutate_all=mutate_all,
+        identity=identity)
     if early is not None:
         return early
     # SEE-1610 §SPEC-IMPL：test 级筛选开关（默认开启，flag/env 可关断）。

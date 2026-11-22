@@ -237,6 +237,22 @@ def run_mutation_files(
     时挂 knobs——单文件 flat CLI 契约的信封键随 unwrap 丢失，单文件时
     投影进 summary（多文件语义归 run，逐文件不投影）。
     """
+    # §SPEC-PLANFIRST：默认 run 的第一步 = plan（静态穷查 ≤10s）——
+    # error 级问题即停并列问题（不跑任何重活）；无问题自动进入 prepare。
+    from .plancheck import static_plan
+    plan = static_plan(project_root, files[0] if files else None, tests_glob)
+    plan_errors = [p for p in plan["problems"] if p["severity"] == "error"]
+    print(f"mutation: plan {len(plan['problems'])} problem(s) "
+          f"({len(plan_errors)} error) in {plan['elapsed_s']}s"
+          + (" — BLOCKED" if (plan_errors and not dry_run) else ""),
+          file=sys.stderr)
+    if plan_errors and not dry_run:
+        return {"tool": "mutation", "ok": False, "error": "plan_blocked",
+                "plan": plan,
+                "results": [{"file": f, "ok": False,
+                             "summary": {"error": "plan_blocked",
+                                         "plan": plan}}
+                            for f in files]}
     if dry_run:
         return _run_mutation_files_impl(
             files, project_root, budget=budget, timeout_s=timeout_s,
@@ -248,6 +264,11 @@ def run_mutation_files(
             select_mode=select_mode,
             break_on_baseline_failure=break_on_baseline_failure,
             kill_bail=kill_bail)
+    # §SPEC-PLANFIRST：prepare 启动披露（缺失前置将由既有惰性路径补齐，
+    # 每步具名失败/独立超时保留）
+    print("mutation: prepare filling missing preconditions "
+          "(import -> map -> baseline) — see [[plan]] warnings above",
+          file=sys.stderr)
     clock = StageClock()
     knob_state: dict = {}
     disk_before = qa_disk_bytes(project_root)

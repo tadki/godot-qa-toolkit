@@ -1316,7 +1316,10 @@ def test_mutation_missing_godot_clean_env(project, tmp_path):
     # godot 时 summary.error 为类目行，精确根因在 failures[0].reason
     # （import cache 缺失、须先 godot --import）。根因可见即契约。
     reason = payload["failures"][0]["reason"]
-    assert "import cache" in reason and "godot" in reason, reason
+    # §SPEC-PLANFIRST：plan 先报 binary 缺失（比 import cache 更早更准确，
+    # 两者均为具名错误）
+    assert "godot" in reason and ("binary" in reason
+                                  or "import cache" in reason), reason
 
 
 def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
@@ -1325,7 +1328,10 @@ def test_mutation_serial_missing_godot_clean_env(project, tmp_path):
         project, tmp_path)
     assert payload["tool"] == "mutation"
     reason = payload["failures"][0]["reason"]
-    assert "import cache" in reason and "godot" in reason, reason
+    # §SPEC-PLANFIRST：plan 先报 binary 缺失（比 import cache 更早更准确，
+    # 两者均为具名错误）
+    assert "godot" in reason and ("binary" in reason
+                                  or "import cache" in reason), reason
 
 
 def test_coverage_measure_missing_godot_clean_env(project, tmp_path):

@@ -129,9 +129,11 @@ def test_acceptance_flow_cleans_contract_on_suite_error(tmp_path, monkeypatch):
     assert not dest.exists(), "contract must be removed on suite_error"
 
 
-def test_acceptance_flow_uses_per_feature_processes(tmp_path, monkeypatch):
-    """§SPEC-011/D20：每 feature 独立 suite/进程（对齐 CI per-key 语义）——
-    同进程多 feature 会让前序残留进入后续（v5 golden L2 10KB>4KB）。"""
+def test_acceptance_flow_uses_shared_suite_groups(tmp_path, monkeypatch):
+    """§SPEC-005（SEE-1619 C2）：恢复 acceptance_shards 共享分片——44
+    feature 已过 acceptance-feature-state-isolation 原子化门（SEE-1619
+    C1/C1-R2），同进程共享 suite 不再有跨 feature 残留。shards=共享组数
+    （并发上限同步收敛到组数），扇出=len(groups)×reps。"""
     root = _proj(tmp_path)
     compiles: list[tuple[list, Path]] = []
     concurrency_seen: dict = {}
@@ -144,11 +146,18 @@ def test_acceptance_flow_uses_per_feature_processes(tmp_path, monkeypatch):
 
     def fake_run_arm(name, *, root, recipe, acceptance, **kw):
         concurrency_seen["value"] = kw.get("concurrency")
-        concurrency_seen["plans"] = acceptance
+        concurrency_seen["groups"] = acceptance["groups"]
 
         class FakeArm:
             pass
-        return {"arm": name, "state": "valid"}
+        return {"arm": name, "state": "valid", "gut_ok": True,
+                "arm_fail_pairs": set(), "arm_failures": set(),
+                "new_pairs": set(),
+                "test_failures": {"observed": [], "observed_pairs": [],
+                                  "new": [], "new_pairs": [],
+                                  "instrumentation_intolerant": []},
+                "reconciliation": {"ok": True, "shards": []},
+                "wall_s": 0.0}
 
     def fake_suite_dir(r):
         d = Path(tmp_path) / f"suite{len(compiles)}"
@@ -167,10 +176,15 @@ def test_acceptance_flow_uses_per_feature_processes(tmp_path, monkeypatch):
         acceptance_keys=None, acceptance_shards=2,
         arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
     assert out["state"] == "valid"
-    # 每 key 一次独立编译，且每次只含一个 key
-    assert [keys for keys, _ in compiles] == [["k1"], ["k2"], ["k3"]]
-    assert len({str(sd) for _, sd in compiles}) == 3, "suite dirs must differ"
-    assert concurrency_seen["value"] == 2, "shards become concurrency cap"
+    # 共享分片：2 组（k1,k3 / k2），共享组 keys>1，suite 目录数=组数
+    assert [keys for keys, _ in compiles] == [["k1", "k3"], ["k2"]]
+    assert len({str(sd) for _, sd in compiles}) == 2
+    assert all(len(keys) > 1 for keys, _ in compiles
+               if len(keys) == max(len(k) for k, _ in compiles))
+    assert concurrency_seen["value"] == 2
+    assert len(concurrency_seen["groups"]) == 2
+    # 全原子：process_fallbacks 为空数组
+    assert out.get("process_fallbacks") == []
 
 
 def _wire_flow_fakes(monkeypatch, tmp_path, root, dest, state="valid"):

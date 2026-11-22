@@ -12,6 +12,56 @@
 - Incrementally rebuild the line-primary attribution map (`test-attribution/6`)
   that mutation selection and Coverage Store projection depend on.
 
+## Plan-first flow
+
+`gqt measure run` follows the same `plan → prepare → run` shape as
+`gqt mutation`:
+
+1. **plan** — recipe build, target universe enumeration, exclusion
+   validation. Output is the in-memory suite, no execution.
+2. **prepare** — attribution instrumentation of the target tree, attribution
+   map build/refresh, **baseline preflight**, warm pool provisioning. Stage
+   timings are disclosed on the report as
+   `stage_timings.{instrument_prepare, baseline_preflight, gut_full_arm,
+   acceptance_arm, planning, total}` (seconds, summed across the matching
+   stage if it fires more than once). Each stage carries its own wall clock;
+   a missing stage means it did not run.
+3. **run** — the two instrumented arms consume the prepared map. The report
+   is written only after every named failure has been classified.
+
+**Baseline preflight** runs the uninstrumented baseline GUT once before any
+instrumented arm. When it observes failing `(script, test)` pairs:
+
+- default: the red tests are **excluded by name** from the instrumented
+  arms and disclosed on the map as `status=partial` plus
+  `excluded_tests=[(script, test), ...]`; the run continues. Print line:
+  `measure: baseline_preflight RED — N failing pair(s) ... EXCLUDED by name
+  ... mapping marked partial, run continues`.
+- explicit short-stop: set `GQT_MEASUREMENT_FAIL_ON_RED_BASELINE=1` (or any
+  non-empty / non-`0` / non-`false` value) to fail loud with
+  `MeasurementError("baseline_preflight_red: ... top-N of M failing tests")`
+  instead. With this switch the instrumented arms do not run.
+
+The preflight result is reused for the instrumented arms (the lazy-baseline
+path is skipped when preflight has already produced the failing-pair set).
+
+**Acceptance arm is paused by default** (Owner decision in SEE-1615
+§SPEC-PLANFIRST). `gqt measure run` no longer executes the acceptance suite
+on the default path. The report field
+`report.acceptance_arm = "disabled_pending_atomization — acceptance arm
+paused by default; restore via GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0 once
+SEE-1619 atomization lands"` discloses the pause. The corresponding
+`stage_timings.acceptance_arm` is `0.0`. To restore acceptance measurement,
+set `GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0` after SEE-1619 has landed; the
+default (unset or `1`) keeps the arm paused.
+
+**Target universe anchoring**: positional roots are anchored to the
+project root via `anchor_to_project_root`. When the requested paths fall
+outside the project root or sit at the project top level, the target
+universe falls back to the project root and discloses this on stderr as
+`measure: targets_root_fallback (<reason>) — target face widened to the
+whole project root (<root>)`. The fallback is named, not silent.
+
 ## Prerequisites
 
 - `.gutconfig.json` and `acceptance/features/**/*.feature` exist (suite); GUT
@@ -107,6 +157,36 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   usable when probes fired or the measured surface is genuinely vacuous. An
   invalid map fails loud; auto mode rebuilds instead of consuming a false empty
   truth.
+- **Arm `invalid_reason` classification** (five classes, priority order
+  `launch_failure > shard_timeout > unattributed_failures > new_failures >
+  reconciliation_failed`; an invalid arm carries the first matching class
+  and the corresponding `invalid_evidence` block):
+  - `launch_failure` — the Godot subprocess never reached GUT (looked like a
+    binary / project-load failure). Evidence: `launch_failures=[shard ids]`.
+  - `shard_timeout` — a shard exceeded its wall-clock budget. Evidence:
+    `shard_timeouts=[shard ids]`.
+  - `unattributed_failures` — failing tests whose `(script, test)` identity
+    could not be attributed to a recorded baseline pair. Evidence:
+    `unattributed=[(script, test), ...]` (top-N of total).
+  - `new_failures` — failing tests not present in the baseline; these are
+    the load-bearing arm-gate class. Evidence: `new_failures=[(script,
+    test), ...]`.
+  - `reconciliation_failed` — the run produced verdicts but the reconciliation
+    pass disagreed (e.g. reported ok vs. observed line coverage diverged).
+    Evidence: `reconciliation_failed=true`.
+  The evidence block is disclosure-only and never overrides the priority
+  ordering. An invalid arm never contributes to the union and is not scored.
+- **Suspected instrumentation intolerance**: when an instrumented arm fails
+  on `(script, test)` pairs that pass on the uninstrumented baseline, the
+  attribution map records them as `instrumentation_intolerant=[(script,
+  test), ...]` (or via the run-record `instrumentation_intolerant` block),
+  the attribution build interrupts with a
+  `suspected_instrumentation_intolerance` classification, and the failure
+  message includes a ready-to-save `--intolerant-tests` declaration draft.
+  Saving the draft and passing it via `--intolerant-tests <path>` (or the
+  env `GQT_MEASUREMENT_INTOLERANT_TESTS=<path>` for the auto-build path)
+  declares the tests as blind spots and re-runs with the declarations
+  applied.
 
 ## Boundaries
 

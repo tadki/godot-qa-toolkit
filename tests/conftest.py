@@ -5,12 +5,38 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import os
+
 import pytest
 
 from tests.bdd.plugin import *
 
 # 测试辅助模块（attribution_fixtures 等）与被测用例同目录
 sys.path.insert(0, str(Path(__file__).parent / "unit"))
+
+
+@pytest.fixture(autouse=True)
+def _stub_godot_binary_for_vacuum(monkeypatch, tmp_path_factory):
+    """§SPEC-VACUUM-ADAPT：CI/真空环境 stub godot binary。
+
+    plan-first 将 godot binary 缺失列 error 阻断（产品行为正确）——
+    历史测试夹具未提供 binary，真空形态（无 GQT_GODOT_BIN、PATH 无
+    godot）大量路由契约测试被 plan_blocked。本 fixture 仅在检测到
+    真空形态时注入 stub binary（非真空不动作，零行为影响）。"""
+    if os.environ.get("GQT_GODOT_BIN"):
+        return
+    path_env = os.environ.get("PATH", "")
+    if any(Path(d).joinpath("godot").is_file()
+           for d in path_env.split(os.pathsep) if d):
+        return
+    stub = tmp_path_factory.mktemp("stub-bin") / "godot"
+    # --version 输出合法版本串：identity 解析成功，避免 planner/executor
+    # disclosure parity 在 stub 下不对称
+    stub.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then '
+                    'echo "4.6.2-stable.official.stub"; exit 0; fi\n'
+                    'exit 0\n', encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("GQT_GODOT_BIN", str(stub))
 
 
 @pytest.fixture

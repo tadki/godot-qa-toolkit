@@ -425,11 +425,28 @@ def _mutation_target_hint(args: argparse.Namespace) -> "str | None":
 
 
 def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
-    """映射相关 env 单点注入（--attribution-map / --no-attribution-auto）。"""
+    """映射相关 env 单点注入（§SPEC-ARGMERGE 三态 + 兼容别名）。
+
+    `--attribution-map auto|off|<path>` 三态：auto（默认，env 语义不变）、
+    off（关闭自动生成/续新，无可用映射 fail-loud）、<path>（显式产物只读
+    透传）。`--no-attribution-auto` 保留为 off 的兼容别名；env
+    GQT_ATTRIBUTION_MAP_MODE 语义不变，CLI 显式值覆盖 env。"""
     import os as _os
-    if getattr(args, "attribution_map", None):
-        _os.environ[truth_mod.ENV_MAP] = str(args.attribution_map)
-    if getattr(args, "attribution_auto", True) is False:
+    map_arg = getattr(args, "attribution_map", None)
+    if map_arg is not None:
+        if map_arg == "auto":
+            _os.environ.pop(truth_mod.ENV_MAP, None)
+            _os.environ.pop(truth_mod.ENV_MODE, None)
+        elif map_arg == "off":
+            _os.environ.pop(truth_mod.ENV_MAP, None)
+            _os.environ[truth_mod.ENV_MODE] = "off"
+        else:
+            _os.environ[truth_mod.ENV_MAP] = str(map_arg)
+            _os.environ.pop(truth_mod.ENV_MODE, None)
+    # 兼容别名仅在主旋钮未显式给定时生效（--attribution-map 为新主旋钮）
+    if getattr(args, "attribution_auto", True) is False \
+            and map_arg is None:
+        _os.environ.pop(truth_mod.ENV_MAP, None)
         _os.environ[truth_mod.ENV_MODE] = "off"
 
 
@@ -1466,13 +1483,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "view, per-file set), full (the only explicit "
                         "full-face audit; bypasses attribution)")
     m.add_argument("--attribution-map", default=None,
-                   help="SEE-1581: measurement attribution artifact "
-                        "(test-attribution/6, line-primary) used as the "
-                        "runtime truth for test selection; default: "
-                        "auto-managed .qa-cache/attribution-map.json")
+                   help="SEE-1581 + §SPEC-ARGMERGE three-state: "
+                        "'auto' (default) = auto-managed "
+                        ".qa-cache/attribution-map.json with generation/"
+                        "incremental refresh; 'off' = disable auto map "
+                        "(fail loud with no usable map); <path> = explicit "
+                        "attribution artifact (test-attribution/6, "
+                        "line-primary) used read-only as the runtime truth "
+                        "for test selection (never renewed)")
     m.add_argument("--no-attribution-auto", dest="attribution_auto",
                    action="store_false",
-                   help="disable automatic generation/incremental refresh of "
+                   help="[deprecated alias of --attribution-map off] "
+                        "disable automatic generation/incremental refresh of "
                         "the attribution map; with no usable map present the "
                         "run fails loud instead of falling back (build one "
                         "first via `gqt measure map-update` or an explicit "

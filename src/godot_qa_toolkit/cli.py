@@ -450,6 +450,33 @@ def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
         _os.environ[truth_mod.ENV_MODE] = "off"
 
 
+def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
+    """§SPEC-PREREQ-MATRIX：P1 prepare-blockers 默认停（一次列全 +
+    修复命令/成本）；--auto-prepare 续跑；--select full 不需要 map；
+    目标不存在时交由下游原错误契约。"""
+    from .source_io import anchor_to_project_root as _anchor
+    p1 = [p for p in plan["problems"]
+          if p.get("level") == "P1" and p.get("severity") == "warning"]
+    if not p1:
+        return None
+    if getattr(args, "dry_run", False) or getattr(args, "auto_prepare",
+                                                  False):
+        return None
+    if getattr(args, "select_mode", "line") == "full":
+        return None
+    files = list(getattr(args, "files", []) or [])
+    if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
+        return None
+    return _emit({"tool": "mutation", "ok": False,
+                  "error": "prepare_required", "plan": plan,
+                  "summary": {"error": "prepare_required", "plan": plan,
+                              "problems": p1,
+                              "notice": "preconditions missing — fix the "
+                                        "listed items or rerun with "
+                                        "--auto-prepare to build them "
+                                        "automatically"}})
+
+
 def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
     """§SPEC-PLANFIRST：默认 run 的 plan 段（静态穷查 ≤10s）。
 
@@ -471,6 +498,12 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
                                     f"{json.dumps(p['evidence'],
                                                  ensure_ascii=False)}"}
                                    for p in errors]})
+    # §SPEC-PREREQ-MATRIX：P1 prepare-blockers（map 缺失/stale、import
+    # 缓存缺失）默认停并一次列全问题 + 修复命令与成本；--auto-prepare
+    # 时自动补齐续跑；--select full 不需要 map 直接继续
+    p1_early = _p1_prepare_gate(args, plan)
+    if p1_early is not None:
+        return p1_early
     if getattr(args, "dry_run", False) \
             and not getattr(args, "attribution_map", None) \
             and getattr(args, "select_mode", "line") != "full" and any(
@@ -687,6 +720,8 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
     if getattr(args, "intolerant_tests", None):
         os.environ["GQT_MEASUREMENT_INTOLERANT_TESTS"] = \
             str(args.intolerant_tests)
+    if getattr(args, "auto_prepare", False):
+        os.environ["GQT_MUTATION_AUTO_PREPARE"] = "1"
     if not args.dry_run:
         timing_store = TimingStore(args.project_root, args.files[0],
                                    "mutation", args.tests,
@@ -1451,6 +1486,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "write) and names failing tests in "
                         "static_preconditions.baseline_health; default "
                         "not_checked")
+    m.add_argument("--auto-prepare", action="store_true",
+                   help="SEE-1615 §SPEC-PREREQ-MATRIX: when the plan "
+                        "reports P1 prepare-blockers (missing/stale "
+                        "attribution map, missing import cache), "
+                        "automatically build them and continue; without "
+                        "this flag the run stops with the problem list and "
+                        "estimated cost")
     m.add_argument("--intolerant-tests", default=None,
                    help="SEE-1615 §SPEC-PLANFIRST: JSON declaration path "
                         "for structurally instrumentation-intolerant "

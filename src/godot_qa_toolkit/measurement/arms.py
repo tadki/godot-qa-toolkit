@@ -493,10 +493,88 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
         _arm_restore(root, started, backup_dir)
     return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
             arm_failures, arm_fail_pairs)
+def _scan_shard_problems(results, timeout_s: int, timeout_source: str):
+    """§SPEC-PLANFIRST：分片级问题扫描——(launch, timeouts, unattributed)
+    三类明细（超时分片带超时值与来源；不可归因分片带 rc 与输出尾部）。"""
+    from .orchestrator import _parse_failing_pairs
+
+    unattributed: list[dict] = []
+    timeouts: list[dict] = []
+    launch: list[dict] = []
+    for r in results or []:
+        ident = (r.get("plan") or {}).get("keys") or \
+            (r.get("plan") or {}).get("suite_dir") or \
+            f"shard#{(results or []).index(r)}"
+        for rep in r.get("reps") or []:
+            problem = _classify_rep_problem(rep, ident, timeout_s,
+                                            timeout_source)
+            if problem is None:
+                continue
+            kind, rec = problem
+            {"timeout": timeouts, "launch": launch,
+             "unattributed": unattributed}[kind].append(rec)
+    return launch, timeouts, unattributed
+
+
+def _classify_rep_problem(rep, ident, timeout_s: int, timeout_source: str):
+    """单 rep 问题归类：None=正常；("timeout"/"launch"/"unattributed", 记录)。"""
+    from .orchestrator import _parse_failing_pairs
+
+    ident = str(ident)[:120]
+    if rep.get("timed_out"):
+        return "timeout", {"shard": ident, "timeout_s": timeout_s,
+                           "timeout_source": timeout_source}
+    if rep.get("rc") in (0, None):
+        return None
+    tail = (rep.get("out") or "").strip().splitlines()[-3:]
+    if _looks_like_godot_launch_failure(rep.get("out") or ""):
+        return "launch", {"shard": ident, "rc": rep.get("rc"),
+                          "tail": tail}
+    if not _parse_failing_pairs(rep.get("out") or ""):
+        return "unattributed", {"shard": ident, "rc": rep.get("rc"),
+                                "tail": tail}
+    return None
+
+
+def _classify_invalid(name: str, *, results, timed_out: bool,
+                      run_error: bool, new_pairs: set,
+                      effective_baseline: set, timeout_s: int,
+                      timeout_source: str,
+                      reconciliation_failed: bool) -> "tuple[str, dict | None]":
+    """§SPEC-PLANFIRST 证据补强：臂 invalid 的细分原因与证据（不再只有
+    通用文案）。优先级：launch_failure > shard_timeout >
+    unattributed_failures > new_failures > reconciliation_failed；
+    证据块带全部命中类的明细。"""
+    launch, timeouts, unattributed = _scan_shard_problems(
+        results, timeout_s, timeout_source)
+    hits: list[str] = []
+    evidence: dict = {}
+    if launch:
+        hits.append("launch_failure")
+        evidence["launch_failures"] = launch
+    if timeouts:
+        hits.append("shard_timeout")
+        evidence["shard_timeouts"] = timeouts
+    if unattributed:
+        hits.append("unattributed_failures")
+        evidence["unattributed_shards"] = unattributed
+    if new_pairs:
+        hits.append("new_failures")
+        evidence["new_pairs"] = sorted(f"{a}::{b}" for a, b in new_pairs)
+        evidence["baseline_absorbed"] = len(effective_baseline or set())
+    if reconciliation_failed:
+        hits.append("reconciliation_failed")
+    if not hits:
+        return ("run_error", {"note": "arm invalid without a classified "
+                              "cause (legacy generic reason)"})
+    evidence["all_causes"] = hits
+    return hits[0], evidence
+
+
 def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
               baseline_failures, baseline_pairs, declared_scoped,
               declared_bare, arm_fail_pairs, gut_ok, acceptance,
-              results, run_error) -> tuple:
+              results, run_error, timed_out: bool = False) -> tuple:
     """§SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）：
     新增失败门控 + 具名排除按 (script, test) 身份吸收 + reconcile。
     返回 (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
@@ -517,8 +595,19 @@ def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
     (reconciliation, arm_valid, invalid_reason, gut_ok_delta,
      run_error) = _arm_reconcile(root, acceptance, results, run_error)
     gut_ok = gut_ok and not gut_ok_delta
+    # §SPEC-PLANFIRST 证据补强：invalid 时细分原因 + 证据块（不再只有
+    # 通用「new failures gate the build」文案）
+    invalid_evidence = None
+    if not arm_valid:
+        invalid_reason, invalid_evidence = _classify_invalid(
+            name, results=results, timed_out=timed_out, run_error=run_error,
+            new_pairs=new_pairs, effective_baseline=effective_baseline,
+            timeout_s=timeout_s,
+            timeout_source=f"parameter timeout_s={timeout_s}s",
+            reconciliation_failed=(invalid_reason
+                                   == "reconciliation_failed"))
     return (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
-            reconciliation, arm_valid, invalid_reason)
+            reconciliation, arm_valid, invalid_reason, invalid_evidence)
 
 def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             acceptance: dict | None = None, shadow_instrument: bool = False,
@@ -548,12 +637,14 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         timeout_s=timeout_s, adaptive_reps=adaptive_reps,
         shard_log_dir=shard_log_dir, stage=stage)
     (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
-     reconciliation, arm_valid, invalid_reason) = _arm_gate(
+     reconciliation, arm_valid, invalid_reason,
+     invalid_evidence) = _arm_gate(
         name, root=root, recipe=recipe, timeout_s=timeout_s,
         baseline_failures=baseline_failures, baseline_pairs=baseline_pairs,
         declared_scoped=declared_scoped, declared_bare=declared_bare,
         arm_fail_pairs=arm_fail_pairs, gut_ok=gut_ok,
-        acceptance=acceptance, results=results, run_error=run_error)
+        acceptance=acceptance, results=results, run_error=run_error,
+        timed_out=timed_out)
     return _arm_result(
         name, root=root, prepared=prepared, acceptance=acceptance,
         arms_parallel=arms_parallel, evidence_dir=evidence_dir,
@@ -562,6 +653,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         test_attribution=test_attribution, results=results,
         run_uuid=run_uuid, wall_s=wall_s, gut_ok=gut_ok,
         run_error=run_error, timed_out=timed_out,
+        invalid_evidence=invalid_evidence,
         arm_failures=arm_failures, arm_fail_pairs=arm_fail_pairs,
         new_pairs=new_pairs, exempt_pairs=exempt_pairs,
         baseline_meta=baseline_meta, reconciliation=reconciliation,
@@ -609,7 +701,8 @@ def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
              baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
              exempt_pairs, reps: int, convergence, adaptive_rounds_used,
              arms_parallel: bool, attribution, bundles: dict,
-             reconciliation, plans: list, results) -> dict:
+             reconciliation, plans: list, results,
+             invalid_evidence: "dict | None" = None) -> dict:
     """结果文档组装（键序 = 结果 JSON 契约）。"""
     return {
         "arm": name, "run_uuid": run_uuid, "wall_s": round(wall_s, 3),
@@ -617,8 +710,9 @@ def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
         "state": ("valid" if arm_valid else "invalid"),
         "invalid_reason": (invalid_reason
                            if invalid_reason is not None
-                           else ("timeout" if timed_out
+                           else ("shard_timeout" if timed_out
                                  else ("run_error" if run_error else None))),
+        "invalid_evidence": invalid_evidence,
         "baseline_failures_meta": baseline_meta,
         "test_failures": {"observed": sorted(arm_failures),
                           "observed_pairs": sorted(
@@ -657,7 +751,8 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
                 arm_fail_pairs, new_pairs, exempt_pairs, baseline_meta,
                 reconciliation, arm_valid: bool, invalid_reason, reps: int,
                 plans: list, sink_by_rel: dict, manifest_by_rel: dict,
-                xdg_homes: list[str], vacuous_rels: list) -> dict:
+                xdg_homes: list[str], vacuous_rels: list,
+                invalid_evidence: "dict | None" = None) -> dict:
     """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
     vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
     convergence, attribution, bundles = _arm_readback(
@@ -676,7 +771,8 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
         name, run_uuid, wall_s, gut_ok, timed_out, arm_valid, invalid_reason,
         run_error, baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
         exempt_pairs, reps, convergence, adaptive_rounds_used, arms_parallel,
-        attribution, bundles, reconciliation, plans, results)
+        attribution, bundles, reconciliation, plans, results,
+        invalid_evidence=invalid_evidence)
 def run_acceptance_flow(*, root: Path, recipe: dict,
                         acceptance_keys: list[str] | None,
                         acceptance_shards: int,

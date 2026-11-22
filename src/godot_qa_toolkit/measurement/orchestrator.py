@@ -530,6 +530,33 @@ ENV_FAIL_ON_RED_BASELINE = "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"
 ENV_ACCEPTANCE_DISABLED = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
 
 
+_ENV_ARM_TIMEOUT_S = "GQT_MEASUREMENT_ARM_TIMEOUT_S"
+
+
+def resolve_arm_timeout(requested_timeout_s: int,
+                        preflight_wall_s: "float | None" = None
+                        ) -> "tuple[int, str]":
+    """§SPEC-TIMEOUT-ADAPT：分片 GUT 超时自适应。
+
+    优先级：显式 env GQT_MEASUREMENT_ARM_TIMEOUT_S > 预检 wall_s 校准
+    （wall × 安全系数 4，向上取整；无预检=无校准源）> 传入默认。
+    返回 (effective_timeout_s, source)。"""
+    import os as _os
+    raw = _os.environ.get(_ENV_ARM_TIMEOUT_S, "").strip()
+    if raw:
+        try:
+            return max(1, int(raw)), (f"explicit env "
+                                      f"{_ENV_ARM_TIMEOUT_S}={raw}")
+        except ValueError:
+            pass
+    if preflight_wall_s:
+        calibrated = max(requested_timeout_s,
+                         int(-(-preflight_wall_s * 4.0 // 1)))
+        return calibrated, (f"preflight_calibrated x4 "
+                            f"(baseline wall_s={preflight_wall_s})")
+    return requested_timeout_s, f"parameter timeout_s={requested_timeout_s}s"
+
+
 def acceptance_disabled() -> bool:
     """§SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——映射
     构建与默认测量路径不执行、不产出 acceptance；统一披露
@@ -708,10 +735,19 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     # （arms 收到 baseline_failures，懒获取不再发生）。既有 measure 调用
     # （默认 False）语义零变化。
     _pf_meta = None
+    timeout_source = f"parameter timeout_s={timeout_s}s"
     if baseline_preflight and baseline_failures is None:
         with clock.stage("baseline_preflight"):
             baseline_failures, _pf_meta = run_baseline_preflight(
                 root, inp["recipe"], timeout_s)
+        # §SPEC-TIMEOUT-ADAPT：自适应分片超时——预检 wall_s 为校准源
+        # （显式 env > 校准 x4 > 传入值），来源随 pf_meta 披露
+        timeout_s, timeout_source = resolve_arm_timeout(
+            timeout_s, (_pf_meta or {}).get("wall_s"))
+        _pf_meta = {**(_pf_meta or {}), "arm_timeout_s": timeout_s,
+                    "arm_timeout_source": timeout_source}
+        print(f"measure: arm timeout {timeout_s}s "
+              f"(source: {timeout_source})", file=sys.stderr)
         # 生效基线通道是 baseline_pairs（_gate_ctx 的 effective 来源）——
         # 预检结果必须双写（failures 供 meta 判定，pairs 供吸收判定）
         inp["baseline_pairs"] = {tuple(p) for p in baseline_failures}
@@ -727,6 +763,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             from .arms import run_arm
             arm_a = run_arm(
                 "gut_full", root=Path(root), recipe=inp["recipe"],
+                timeout_s_source=timeout_source,
                 prepared=st["prepared"], timeout_s=timeout_s,
                 test_attribution=test_attribution,
                 attribution_causal=attribution_causal,

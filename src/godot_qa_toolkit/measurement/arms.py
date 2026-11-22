@@ -903,12 +903,14 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
                 fb_groups.append({"suite_dir": sd, "keys": [k]})
                 compile_keys_to_suite(root, [k], sd)
                 replay_check(root, k, suite_dir=sd)
+            # §SPEC-005/006（C2-R1）：降级轮与共享轮共用同一并发上限——
+            # 多 key 失败时不得按失败数重新放开扇出（OOM 风险回潮）。
             fb_result = run_arm(
                 "acceptance", root=root, recipe=recipe,
                 acceptance={"groups": fb_groups, "snapshot": snapshot},
                 shadow_instrument=arms_parallel,
                 adaptive_reps=acceptance_adaptive,
-                concurrency=max(1, len(fb_groups)), **arm_kwargs)
+                concurrency=max(1, int(acceptance_shards or 1)), **arm_kwargs)
             result = _merge_fallback_round(result, fb_result, fb_groups)
 
         # D21：成功路径显式回收并核对——清理失败 = 残留 = 不得报 valid
@@ -930,7 +932,8 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
             reason += f" | {cleanup_err}"
         return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
                 "gut_ok": False, "timed_out": False, "state": "invalid",
-                "invalid_reason": reason, "bundles": 0,
+                "invalid_reason": reason, "process_fallbacks": [],
+                "bundles": 0,
                 "bundles_data": {}, "reconciliation": None,
                 "test_failures": {"observed": [], "observed_pairs": [],
                                   "new": [], "new_pairs": [],

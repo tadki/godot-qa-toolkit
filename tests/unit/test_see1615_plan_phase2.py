@@ -169,7 +169,8 @@ def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
     assert st["total"] >= 0
     assert st["planning"] >= 0 and st["route_scan"] >= 0
     sp = meta["static_preconditions"]
-    assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary"}
+    assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary",
+                              "baseline_health"}
     # 精简 fixture（无 addons/gut/.godot）→ ok=False 是诚实的探测值
     assert sp["import_cache"]["ok"] is False
     assert "missing=" in sp["import_cache"]["evidence"]
@@ -179,6 +180,17 @@ def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
     # F1：evidence 增强含 binary kind 与启动诊断（ok 语义不变严）
     assert "| kind=" in sp["godot_binary"]["evidence"]
     assert "launch_issue=" in sp["godot_binary"]["evidence"]
+    # §SPEC-PREFLIGHT P3：默认 not_checked（不假装全绿）
+    bh = sp["baseline_health"]
+    assert bh["status"] == "not_checked"
+    assert bh["reason"] == "check_baseline_not_requested"
+    # §SPEC-PLANFIRST：贵操作清单（三 op，各带 cost/reuse 口径）
+    ops = meta["expensive_operations"]
+    assert {o["op"] for o in ops} == {"baseline_gut",
+                                      "attribution_map_build",
+                                      "mutation_legs"}
+    assert all("cost" in o and "reuse" in o and "skippable" in o
+               for o in ops)
     assert set(meta["answers"].keys()) == {
         "channel", "reasons", "failure_paths", "reuse_surface"}
     assert meta["answers"]["channel"] == \
@@ -357,6 +369,33 @@ def test_dry_run_jobs_passthrough_effective(tmp_path, monkeypatch):
     assert isinstance(d2["budget"]["jobs"], int) and d2["budget"]["jobs"] >= 2
 
 
+def test_check_baseline_red_named_in_preconditions(tmp_path, monkeypatch):
+    """§SPEC-PREFLIGHT P3：--check-baseline（env 单点）只读跑基线——红即
+    具名（count/top）落 static_preconditions.baseline_health。"""
+    from godot_qa_toolkit.measurement import orchestrator as mo
+    from godot_qa_toolkit.mutation import runner as runner_mod
+
+    root, target = _fixture_project(tmp_path)
+    # 基线面所需：.gutconfig 默认面 + 可扫描 tests 目录 + acceptance 面
+    (root / ".gutconfig.json").write_text('{"dirs": ["res://tests/unit"]}',
+                                          encoding="utf-8")
+    (root / "tests" / "unit").mkdir(parents=True)
+    (root / "acceptance" / "features").mkdir(parents=True)
+    (root / "acceptance" / "features" / "pf.feature").write_text(
+        "Feature: pf\n\n  Scenario: s\n    Given x\n",
+        encoding="utf-8")
+    monkeypatch.setenv(runner_mod._ENV_CHECK_BASELINE, "1")
+    monkeypatch.setattr(mo, "_acquire_lazy_baseline", lambda root, a, t: (
+        {("res://tests/a.gd", "test_red1"), ("res://tests/b.gd", "test_red2"),
+         ("res://tests/c.gd", "test_red3")}, {"face": "gutconfig_default",
+                                              "wall_s": 0.2, "count": 3}))
+    s = _run_core_dry_run(root, target, monkeypatch)["summary"]
+    bh = s["execution_plan_meta"]["static_preconditions"]["baseline_health"]
+    assert bh["status"] == "red"
+    assert bh["count"] == 3
+    assert len(bh["top"]) == 3 and all("::" in x for x in bh["top"])
+
+
 def test_map_state_block_direct_read_three_states():
     """§SPEC-MAPSTATE-A：map_state 块直读 present/fresh（缺失/不可用/
     陈旧/新鲜四形态），既有 would_renew/missing/cost/reason 零变化；
@@ -390,11 +429,14 @@ def test_static_preconditions_block_shapes():
         "import_cache": {"ok": True, "evidence": "/p/.godot"},
         "gut_cmdln": {"ok": False, "evidence": "/p/addons/gut/gut_cmdln.gd"},
         "godot_binary": {"ok": True, "evidence": "/usr/bin/godot"},
+        "baseline_health": {"status": "not_checked",
+                            "reason": "check_baseline_not_requested"},
     }
     meta = _plan_meta(plan, {"budget": 50}, extra={"budget": 50},
                       static_preconditions=pc)
     sp = meta["static_preconditions"]
-    assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary"}
+    assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary",
+                              "baseline_health"}
     assert sp["import_cache"] == {"ok": True, "evidence": "/p/.godot"}
     assert sp["gut_cmdln"]["ok"] is False
     meta_none = _plan_meta(plan, {"budget": 50}, extra={"budget": 50})

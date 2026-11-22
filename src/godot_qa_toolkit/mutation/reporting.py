@@ -313,7 +313,8 @@ def _plan_reasons(plan: dict, src: dict) -> list:
 def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
                map_state: "dict | None" = None,
                import_proof_present: "bool | None" = None,
-               static_preconditions: "dict | None" = None) -> dict:
+               static_preconditions: "dict | None" = None,
+               expensive_operations: "list | None" = None) -> dict:
     """SEE-1606 §SPEC-P2：dry-run 计划预览元数据（只增键不改既有键）。
 
     - partitions：字段按 derived/observed/runtime 分区；
@@ -345,6 +346,8 @@ def _plan_meta(plan: dict, src: dict, extra: "dict | None" = None,
     # SEE-1615 §SPEC-DERIVED-A：未探测（None）→ 键缺席不造
     if static_preconditions is not None:
         out["static_preconditions"] = static_preconditions
+    if expensive_operations is not None:
+        out["expensive_operations"] = expensive_operations
     out.update({
         "answers": {
             "channel": route.get("exec_scheme"),

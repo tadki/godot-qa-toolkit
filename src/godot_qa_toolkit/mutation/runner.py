@@ -498,6 +498,11 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
     estimate["summary"]["execution_plan_meta"] = _meta
     # §SPEC-PLANFIELD-A：dry-run 同款全键阶段分解（planning/route_scan
     # 真实测量，其余阶段未发生为 0.0；total=墙钟基准，形态与实跑一致）
+    # §SPEC-PLANFIRST：dry-run = plan 全部内容——静态问题清单（永不阻断，
+    # severity 分级由消费方判；error 级在默认 run 入口阻断）
+    from .plancheck import static_plan
+    estimate["summary"]["plan"] = static_plan(
+        str(project_root), str(path), tests_glob)
     estimate["summary"]["stage_timings"] = clock.disclosure()
     estimate["summary"]["stage_timings"]["total"] = round(
         time.monotonic() - t0, 3)

@@ -56,6 +56,8 @@ def _write_zero_ref_project(tmp_path: Path, source: str = GD_TARGET) -> tuple[st
     (proj / "tests" / "unit").mkdir(parents=True)
     (proj / "tests" / "unit" / "test_other.gd").write_text(
         'preload("res://unrelated.gd")\n')
+    # §SPEC-PLANFIRST：plan 静态穷查将断裂 preload 判 error——夹具补目标
+    (proj / "unrelated.gd").write_text("extends RefCounted\n")
     target = proj / "calc.gd"
     target.write_text(source)
     write_map(proj, {"calc.gd": []})

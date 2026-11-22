@@ -107,10 +107,11 @@ class TestHigh1SerialCaliperSelectDispatch:
                        "--jobs", "1", "--dry-run"])
         out = capsys.readouterr().out
         payload = json.loads(out[out.index("{"):])
-        assert rc == 1
-        assert payload["summary"]["selection_error"] is True
-        assert payload["summary"].get("test_selection", {}) \
-            .get("reason") != "explicit_full_face"
+        # §SPEC-PLANFIRST：dry-run 无可用映射 → plan-only 成功（列出静态
+        # 问题），不再是 fail-loud；有 map 的 case 仍走原选面解析
+        assert rc == 0
+        assert payload["summary"].get("selection_mode") == "plan_only"
+        assert payload["summary"].get("plan", {}).get("problems")
 
 
 class TestHigh2DefaultMapRecovery:

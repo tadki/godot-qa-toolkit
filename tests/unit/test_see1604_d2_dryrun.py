@@ -75,4 +75,6 @@ def test_cli_dry_run_on_stale_map_triggers_no_renew(tmp_path, monkeypatch):
     rc = cli.main(["mutation", str(proj / "calc.gd"),
                    "--project-root", str(proj), "--dry-run"])
     assert calls == []          # 零续新 = 零 GUT（旧行为会跑全链）
-    assert rc == 1              # 不可用映射仍 fail-loud（不静默全脸）
+    # §SPEC-PLANFIRST：--dry-run 永不要求 map——无可用映射时成功返回
+    # plan 全量（problems[] 含 map warning），不静默全脸、不 fail-loud
+    assert rc == 0

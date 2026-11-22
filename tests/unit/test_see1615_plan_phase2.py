@@ -184,7 +184,12 @@ def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
     bh = sp["baseline_health"]
     assert bh["status"] == "not_checked"
     assert bh["reason"] == "check_baseline_not_requested"
-    # §SPEC-PLANFIRST：贵操作清单（三 op，各带 cost/reuse 口径）
+    # §SPEC-PLANFIRST：dry-run = plan 全量——problems[] 在场（不阻断）
+    plan_block = s["plan"]
+    assert isinstance(plan_block["problems"], list)
+    assert plan_block["budget_s"] <= 10
+    assert plan_block["elapsed_s"] <= 10.5
+    # 贵操作清单（三 op，各带 cost/reuse 口径）
     ops = meta["expensive_operations"]
     assert {o["op"] for o in ops} == {"baseline_gut",
                                       "attribution_map_build",

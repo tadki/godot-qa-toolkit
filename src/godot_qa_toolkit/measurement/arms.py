@@ -1126,20 +1126,20 @@ def _script_key(script: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _reconciliation_failed_keys(result: dict) -> set[str]:
+    """对账失败分组的全组 key（对账 ok 或缺失时为空集）。"""
+    rec = result.get("reconciliation") or {}
+    if not rec or rec.get("ok"):
+        return set()
+    return {k for sh in rec.get("shards") or [] if not sh.get("ok")
+            for k in sh.get("keys") or []}
+
+
 def _failed_keys(result: dict, groups: list[dict]) -> list[str]:
     """共享轮失败 key 集：观测失败对的脚本归属 + 对账失败分组的全组 key。"""
-    keys: set[str] = set()
-    for pair in (result.get("test_failures") or {}).get(
-            "observed_pairs", []):
-        k = _script_key(pair.split("::", 1)[0])
-        if k:
-            keys.add(k)
-    rec = result.get("reconciliation") or {}
-    if rec and not rec.get("ok"):
-        for sh in rec.get("shards") or []:
-            if not sh.get("ok"):
-                for k in sh.get("keys") or []:
-                    keys.add(k)
+    keys = {k for pair in (result.get("test_failures") or {}).get(
+        "observed_pairs", []) if (k := _script_key(pair.split("::", 1)[0]))}
+    keys |= _reconciliation_failed_keys(result)
     return sorted(k for k in keys
                   if any(k in g["keys"] for g in groups))
 
@@ -1149,16 +1149,10 @@ def _green_script(pair_script: str, ok_keys: set[str]) -> bool:
         f"test_{k}.gd" for k in ok_keys}
 
 
-def _merge_fallback_round(result: dict, fb_result: dict,
-                          fb_groups: list[dict]) -> dict:
-    """§SPEC-006 共享轮 → 单例隔离轮合并。
-
-    隔离绿 key：共享轮红对移除（进程残留伪红由隔离证据推翻）、process_
-    fallbacks 具名；隔离红 key：共享红保持、不列入降级（不得包装为有效
-    降级）。bundle/收敛/reps 保留共享轮证据（覆盖测量以共享轮为准）；
-    reconciliation 两轮分项并列披露；gut_ok/state 按合并后残集重算。"""
+def _isolated_green_keys(fb_result: dict, fb_groups: list[dict]
+                         ) -> tuple[set[str], bool]:
+    """单例隔离轮：返回 (隔离绿 key 集, 对账 ok)。隔离红 key 不列入。"""
     fb_rec_ok = bool((fb_result.get("reconciliation") or {}).get("ok", True))
-    fallbacks: list[dict] = []
     ok_keys: set[str] = set()
     for g in fb_groups:
         k = g["keys"][0]
@@ -1168,30 +1162,51 @@ def _merge_fallback_round(result: dict, fb_result: dict,
             if pr.split("::", 1)[0].endswith(script)]
         if not red and fb_rec_ok:
             ok_keys.add(k)
-            fallbacks.append({"key": k, "reason": _FALLBACK_REASON})
-    fallbacks.sort(key=lambda f: f["key"])
+    return ok_keys, fb_rec_ok
 
+
+def _keep_pairs(pairs, keep) -> set:
+    """按 (script, test) 二元组保留谓词为真的失败对。"""
+    return {pr for pr in pairs if keep(f"{pr[0]}::{pr[1]}")}
+
+
+def _keep_pair_strings(pairs, keep) -> list[str]:
+    """按 "script::test" 字符串保留谓词为真的失败对（排序）。"""
+    return sorted(pr for pr in pairs if keep(pr))
+
+
+def _drop_green_failures(result: dict, ok_keys: set[str]) -> None:
+    """共享轮红对移除隔离绿 key（进程残留伪红由隔离证据推翻）。"""
     def keep(pair: str) -> bool:
         return not _green_script(pair.split("::", 1)[0], ok_keys)
 
-    fpairs = {tuple(pr) for pr in (fb_result.get("arm_fail_pairs") or [])}
-    result["arm_fail_pairs"] = {
-        pr for pr in (result.get("arm_fail_pairs") or set())
-        if keep(f"{pr[0]}::{pr[1]}")}
+    result["arm_fail_pairs"] = _keep_pairs(
+        result.get("arm_fail_pairs") or set(), keep)
     result["arm_failures"] = {t for (_s, t) in result["arm_fail_pairs"]}
-    result["new_pairs"] = {
-        pr for pr in (result.get("new_pairs") or set())
-        if keep(f"{pr[0]}::{pr[1]}")}
+    result["new_pairs"] = _keep_pairs(result.get("new_pairs") or set(), keep)
     tf = result.get("test_failures") or {}
-    tf["observed_pairs"] = sorted(
-        pr for pr in tf.get("observed_pairs", []) if keep(pr))
+    tf["observed_pairs"] = _keep_pair_strings(
+        tf.get("observed_pairs", []), keep)
     tf["observed"] = sorted(
         pr.split("::", 1)[1] for pr in tf["observed_pairs"])
-    tf["new_pairs"] = sorted(
-        pr for pr in tf.get("new_pairs", []) if keep(pr))
+    tf["new_pairs"] = _keep_pair_strings(tf.get("new_pairs", []), keep)
     tf["new"] = sorted(pr.split("::", 1)[1] for pr in tf["new_pairs"])
     result["test_failures"] = tf
 
+
+def _merged_state(rec_ok: bool, remaining_fail: bool
+                  ) -> tuple[str, str | None]:
+    """合并后状态与 invalid_reason（valid 时 reason 为 None）。"""
+    if rec_ok and not remaining_fail:
+        return "valid", None
+    if not rec_ok:
+        return "invalid", "reconciliation_failed"
+    return "invalid", "isolated_red_not_fallback"
+
+
+def _merge_reconciliation(result: dict, fb_result: dict, fb_rec_ok: bool,
+                          ok_keys: set[str]) -> None:
+    """两轮 reconciliation 分项并列；gut_ok/state 按合并后残集重算。"""
     shared_rec = result.get("reconciliation") or {}
     fb_rec = fb_result.get("reconciliation") or {}
     rec_ok = bool(shared_rec.get("ok", True)) and fb_rec_ok
@@ -1207,15 +1222,24 @@ def _merge_fallback_round(result: dict, fb_result: dict,
     remaining_fail = bool(result["arm_fail_pairs"]) or bool(
         result["new_pairs"])
     result["gut_ok"] = not remaining_fail
-    result["state"] = ("valid" if rec_ok and (
-        not remaining_fail) else "invalid")
-    result["invalid_reason"] = (
-        None if result["state"] == "valid"
-        else ("reconciliation_failed" if not rec_ok
-              else "isolated_red_not_fallback"))
+    result["state"], result["invalid_reason"] = _merged_state(
+        rec_ok, remaining_fail)
     result["wall_s"] = round(
         float(result.get("wall_s") or 0.0)
         + float(fb_result.get("wall_s") or 0.0), 3)
+
+
+def _merge_fallback_round(result: dict, fb_result: dict,
+                          fb_groups: list[dict]) -> dict:
+    """§SPEC-006 共享轮 → 单例隔离轮合并。
+
+    隔离绿 key：共享轮红对移除（进程残留伪红由隔离证据推翻）、process_
+    fallbacks 具名；隔离红 key：共享红保持、不列入降级（不得包装为有效
+    降级）。bundle/收敛/reps 保留共享轮证据（覆盖测量以共享轮为准）；
+    reconciliation 两轮分项并列披露；gut_ok/state 按合并后残集重算。"""
+    ok_keys, fb_rec_ok = _isolated_green_keys(fb_result, fb_groups)
+    _drop_green_failures(result, ok_keys)
+    _merge_reconciliation(result, fb_result, fb_rec_ok, ok_keys)
     return result
 
 
@@ -1234,6 +1258,45 @@ def _fallback_disclosure(result: dict, fb_groups: list[dict]) -> list[dict]:
         ({"key": k, "reason": _FALLBACK_REASON}
          for k in set(fb_round.get("keys") or []) & fb_keys),
         key=lambda f: f["key"])
+
+
+def _compile_into(sd: Path, root: Path, chunk: list[str]) -> None:
+    """私有 suite 组编译 + 逐 key 重放校验（目录即选择集）。"""
+    compile_keys_to_suite(root, chunk, sd)
+    for k in chunk:
+        replay_check(root, k, suite_dir=sd)
+
+
+def _finish_acceptance_result(result: dict, harness_dest: Path | None,
+                              fb_groups: list[dict]) -> dict:
+    """D21 成功路径显式回收：清理失败 = 残留 = 不得报 valid。"""
+    cleanup_err = _cleanup_acceptance_harness(harness_dest)
+    if cleanup_err:
+        return {**result, "process_fallbacks": [],
+                "state": "invalid", "gut_ok": False,
+                "invalid_reason": f"harness_residue: {cleanup_err}"}
+    result["process_fallbacks"] = _fallback_disclosure(result, fb_groups)
+    return result
+
+
+def _acceptance_error_result(e: Exception, groups: list[dict],
+                             harness_dest: Path | None) -> dict:
+    """异常路径：回收已建 suite 与 harness 契约位并组装 invalid 结果。"""
+    for g in groups:
+        _cleanup_suite_dir(Path(g["suite_dir"]))
+    reason = f"suite_error:{e}"
+    cleanup_err = _cleanup_acceptance_harness(harness_dest)
+    if cleanup_err:
+        reason += f" | {cleanup_err}"
+    return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
+            "gut_ok": False, "timed_out": False, "state": "invalid",
+            "invalid_reason": reason, "process_fallbacks": [],
+            "bundles": 0,
+            "bundles_data": {}, "reconciliation": None,
+            "test_failures": {"observed": [], "observed_pairs": [],
+                              "new": [], "new_pairs": [],
+                              "instrumentation_intolerant": []},
+            "repeats": 0, "convergence": None}
 
 
 def run_acceptance_flow(*, root: Path, recipe: dict,
@@ -1258,9 +1321,7 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         for chunk in _acceptance_groups(keys, acceptance_shards):
             sd = create_suite_dir(root)
             groups.append({"suite_dir": sd, "keys": list(chunk)})
-            compile_keys_to_suite(root, chunk, sd)
-            for k in chunk:
-                replay_check(root, k, suite_dir=sd)
+            _compile_into(sd, root, chunk)
 
         result = run_arm("acceptance", root=root, recipe=recipe,
                          acceptance={"groups": groups, "snapshot": snapshot},
@@ -1278,8 +1339,7 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
             for k in failed:
                 sd = create_suite_dir(root)
                 fb_groups.append({"suite_dir": sd, "keys": [k]})
-                compile_keys_to_suite(root, [k], sd)
-                replay_check(root, k, suite_dir=sd)
+                _compile_into(sd, root, [k])
             # §SPEC-005/006（C2-R1）：降级轮与共享轮共用同一并发上限——
             # 多 key 失败时不得按失败数重新放开扇出（OOM 风险回潮）。
             fb_result = run_arm(
@@ -1292,30 +1352,11 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
 
         # D21：成功路径显式回收并核对——清理失败 = 残留 = 不得报 valid
         cleanup_done = True
-        cleanup_err = _cleanup_acceptance_harness(harness_dest)
-        if cleanup_err:
-            return {**result, "process_fallbacks": [],
-                    "state": "invalid", "gut_ok": False,
-                    "invalid_reason": f"harness_residue: {cleanup_err}"}
-        result["process_fallbacks"] = _fallback_disclosure(result, fb_groups)
-        return result
+        return _finish_acceptance_result(result, harness_dest, fb_groups)
     except (SuiteError, AcceptRunError, MeasurementError) as e:
-        for g in groups:
-            _cleanup_suite_dir(Path(g["suite_dir"]))
-        reason = f"suite_error:{e}"
+        result = _acceptance_error_result(e, groups, harness_dest)
         cleanup_done = True
-        cleanup_err = _cleanup_acceptance_harness(harness_dest)
-        if cleanup_err:
-            reason += f" | {cleanup_err}"
-        return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
-                "gut_ok": False, "timed_out": False, "state": "invalid",
-                "invalid_reason": reason, "process_fallbacks": [],
-                "bundles": 0,
-                "bundles_data": {}, "reconciliation": None,
-                "test_failures": {"observed": [], "observed_pairs": [],
-                                  "new": [], "new_pairs": [],
-                                  "instrumentation_intolerant": []},
-                "repeats": 0, "convergence": None}
+        return result
     finally:
         # D22/D23：兜底清理覆盖**所有退出路径**——run_arm 等未列名异常
         # 冒泡时，本次新建的 **suite 目录与 harness 契约位**一并回收

@@ -120,7 +120,7 @@ def test_new_failure_gate_reports_intolerance_draft(tmp_path):
 
     doc = {
         "arms_state": {"gut_full": {"state": "invalid",
-                                    "invalid_reason": "run_error",
+                                    "invalid_reason": "new_failures",
                                     "bundles": 2, "pairs": 6,
                                     "probes_fired": 9}},
         "arms": {"gut_full": {"test_failures": {"new_pairs": [

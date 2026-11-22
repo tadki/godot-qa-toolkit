@@ -28,7 +28,11 @@ def _run_measure(monkeypatch, *, pairs, allow_red=False,
     calls: list = []
 
     def spy_arms(**k):
-        calls.append(k)
+        calls.append({"arm_kwargs": k})
+        raise _ArmsCalled()
+
+    def spy_run_arm(*a, **k):
+        calls.append({"arm_kwargs": k})
         raise _ArmsCalled()
 
     monkeypatch.setattr(mo, "_measure_inputs", lambda *a, **k: {
@@ -37,9 +41,16 @@ def _run_measure(monkeypatch, *, pairs, allow_red=False,
         "declared_bare": set()})
     monkeypatch.setattr(mo, "_measure_stage", lambda *a, **k: {
         "prepared": {}, "evidence_dir": None})
+    # §SPEC-PLANFIRST 任务 2：映射构建路径默认 acceptance 暂停 → 单臂
+    # run_arm；两条调用点都 spy（分支无关，语义 = arms 被触达即停）
+    from godot_qa_toolkit.measurement import arms as arms_mod
+    monkeypatch.setattr(arms_mod, "run_arm", spy_run_arm)
     monkeypatch.setattr(mo, "execute_arms", spy_arms)
     monkeypatch.setattr(mo, "_measure_crap", lambda *a, **k: {})
     monkeypatch.setattr(mo, "_measure_perf", lambda *a, **k: {})
+    monkeypatch.setattr(mo, "_gate_comparable",
+                        lambda *a, **k: ({}, False))
+    monkeypatch.setattr(mo, "_build_unions", lambda *a, **k: [])
     if acquire_impl is not None:
         monkeypatch.setattr(mo, "_acquire_lazy_baseline", acquire_impl)
     else:

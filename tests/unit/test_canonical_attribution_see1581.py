@@ -491,7 +491,9 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     assert gut["lanes"]["unattributed"]["rate"] == round(4 / 24, 6)
     assert gut["unattributed_phases"]["bootstrap"]["hit_events"] == 4
     # acceptance 臂不做归属（方向②③：plain 模板 + 默认钩子）
-    assert "acceptance" not in gut and summary["arms"].keys() == {"gut_full"}
+    # §SPEC-PLANFIRST 任务 2：acceptance 占位臂（disabled）在场
+    assert "acceptance" not in gut
+    assert set(summary["arms"].keys()) == {"gut_full", "acceptance"}
     # 默认关闭的键不得出现
     assert all("attribution" not in arm for arm in report["arms"])
 

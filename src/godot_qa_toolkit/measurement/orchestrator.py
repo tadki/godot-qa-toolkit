@@ -527,6 +527,17 @@ def _measure_stage(root, target_files, recipe_hash, block_compress,
 
 
 ENV_FAIL_ON_RED_BASELINE = "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"
+ENV_ACCEPTANCE_DISABLED = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
+
+
+def acceptance_disabled() -> bool:
+    """§SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——映射
+    构建与默认测量路径不执行、不产出 acceptance；统一披露
+    disabled_pending_atomization。恢复条件：SEE-1619 原子化改造完成后按
+    共享进程分片恢复（设本 env=0）。默认暂停（缺省=1）。"""
+    import os as _os
+    return _os.environ.get(ENV_ACCEPTANCE_DISABLED, "1").strip() \
+        not in ("", "0", "false")
 _BASELINE_TOP_N = 10
 
 
@@ -709,21 +720,51 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             root, target_files, inp["recipe_hash"], block_compress,
             test_attribution, attribution_causal, evidence_out, scope_roots)
     with clock.stage("gut_full_arm"):
-        arm_a, arm_b = _measure_arms(
-        root, inp["recipe"], st["prepared"], timeout_s=timeout_s,
-        test_attribution=test_attribution,
-        attribution_causal=attribution_causal, shard_width=shard_width,
-        shard_log_dir=shard_log_dir, acceptance_repeats=acceptance_repeats,
-        baseline_failures=baseline_failures,
-        baseline_pairs=inp["baseline_pairs"],
-        declared_scoped=inp["declared_scoped"],
-        declared_bare=inp["declared_bare"], arms_parallel=arms_parallel,
-        evidence_dir=st["evidence_dir"], acceptance_keys=acceptance_keys,
-        acceptance_shards=acceptance_shards,
-        acceptance_adaptive=acceptance_adaptive)
-    # acceptance 臂耗时单独披露（gut_full_arm 段含双臂——差值即 acceptance）
-    clock.add("acceptance_arm", max(
-        0.0, (arm_b.get("wall_s") or 0.0)))
+        if acceptance_disabled() and test_attribution:
+            # §SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——
+            # 占位臂 state=disabled；恢复条件 SEE-1619 原子化改造后共享
+            # 进程分片（env GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0）。
+            from .arms import run_arm
+            arm_a = run_arm(
+                "gut_full", root=Path(root), recipe=inp["recipe"],
+                prepared=st["prepared"], timeout_s=timeout_s,
+                test_attribution=test_attribution,
+                attribution_causal=attribution_causal,
+                shard_width=shard_width, shard_log_dir=shard_log_dir,
+                baseline_failures=baseline_failures,
+                baseline_pairs=inp["baseline_pairs"],
+                declared_scoped=inp["declared_scoped"],
+                declared_bare=inp["declared_bare"],
+                arms_parallel=arms_parallel,
+                evidence_dir=st["evidence_dir"])
+            arm_b = {"arm": "acceptance", "state": "disabled",
+                     "invalid_reason": None, "invalid_evidence": None,
+                     "wall_s": 0.0, "bundles": 0, "bundles_data": {},
+                     "results": [], "repeats": 0, "convergence": None,
+                     "shards": 0, "test_failures": {},
+                     "baseline_failures_meta": None,
+                     "attribution": {}, "reconciliation": None,
+                     "shadowed": False, "adaptive_rounds_used": 0,
+                     "arms_parallel": False}
+        else:
+            arm_a, arm_b = _measure_arms(
+                root, inp["recipe"], st["prepared"], timeout_s=timeout_s,
+                test_attribution=test_attribution,
+                attribution_causal=attribution_causal,
+                shard_width=shard_width, shard_log_dir=shard_log_dir,
+                acceptance_repeats=acceptance_repeats,
+                baseline_failures=baseline_failures,
+                baseline_pairs=inp["baseline_pairs"],
+                declared_scoped=inp["declared_scoped"],
+                declared_bare=inp["declared_bare"],
+                arms_parallel=arms_parallel,
+                evidence_dir=st["evidence_dir"],
+                acceptance_keys=acceptance_keys,
+                acceptance_shards=acceptance_shards,
+                acceptance_adaptive=acceptance_adaptive)
+    # acceptance 臂耗时单独披露（暂停时 0.0；双臂时 gut_full_arm 段含
+    # 双臂——acceptance 取其 wall_s）
+    clock.add("acceptance_arm", max(0.0, (arm_b.get("wall_s") or 0.0)))
     unions = _build_unions(arm_a, arm_b, inp["recipe_hash"])
     gated_arms, comparable_reason = _gate_comparable(
         unions, arm_a, arm_b, st["complete"])
@@ -743,6 +784,11 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     # §SPEC-PLANFIRST B：映射构建全链分段落盘（消灭 prepare 盲区）
     clock.add("total", time.monotonic() - t_total)
     report["stage_timings"] = clock.disclosure()
+    if acceptance_disabled() and test_attribution:
+        report["acceptance_arm"] = ("disabled_pending_atomization — "
+                                    "restored after SEE-1619 (shared-"
+                                    "process shards); env override "
+                                    "GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0")
     return report
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")

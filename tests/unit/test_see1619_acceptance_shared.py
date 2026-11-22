@@ -237,6 +237,70 @@ def test_cleanup_failure_still_invalid_under_shared_round(
     assert out.get("process_fallbacks") == []
 
 
+def test_fallback_concurrency_capped_by_shards(tmp_path, monkeypatch):
+    """§SPEC-005/006（C2-R1）：降级轮与共享轮共用同一并发上限——多 key
+    失败时并发不按失败数放开（不得重新引入扇出/OOM 风险）。"""
+    root = _proj(tmp_path)
+    # 共享轮 4 key 全红，隔离轮全绿：降级轮 4 个单例组、并发仍 ≤ shards=2
+    fake, calls = _make_fake_run_arm({"k1", "k2", "k3", "k4"}, set())
+    _wire(monkeypatch, tmp_path, fake)
+    out = _flow(root, shards=2)
+    assert len(calls) == 2
+    assert len(calls[1]["groups"]) == 4, "4 key 全部进降级轮"
+    assert calls[1]["concurrency"] == 2, "降级轮并发 ≤ acceptance_shards"
+    assert calls[0]["concurrency"] == 2
+    assert sorted(f["key"] for f in out["process_fallbacks"]) == [
+        "k1", "k2", "k3", "k4"]
+    assert out["state"] == "valid" and out["gut_ok"] is True
+
+
+def test_fallback_concurrency_capped_when_shards_exceed_groups(
+        tmp_path, monkeypatch):
+    """shards > 组数时上限=组数（不空转），仍不超过 shards。"""
+    root = _proj(tmp_path)
+    fake, calls = _make_fake_run_arm({"k1", "k2"}, set())
+    _wire(monkeypatch, tmp_path, fake)
+    _flow(root, shards=4)  # 4 key / shards=4 → 4 单 key 组
+    assert calls[0]["concurrency"] == 4
+    assert calls[1]["concurrency"] == 4, "降级组数=2 ≤ shards，上限=组数"
+
+
+def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
+    """§SPEC-006（C2-R1）：早失败路径（suite_error）返回字典同样带
+    process_fallbacks 键（空数组）——成功与 invalid 形状一致，消费方
+    不可能在错误路径 KeyError。"""
+    root = _proj(tmp_path)
+
+    def boom(project_root, keys, suite_dir):
+        from godot_qa_toolkit.gherkin.suite import SuiteError
+        raise SuiteError("injected compile failure")
+
+    counter = {"n": 0}
+
+    def fake_replay(project_root, key, *, suite_dir=None):
+        return {}
+
+    def fake_suite_dir(r):
+        counter["n"] += 1
+        d = Path(tmp_path) / f"suite-{counter['n']}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", boom)
+    monkeypatch.setattr(arms, "replay_check", fake_replay)
+    monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    out = arms.run_acceptance_flow(
+        root=root,
+        recipe={"acceptance_face": {"features": [
+            {"key": k} for k in KEYS]}},
+        acceptance_keys=None, acceptance_shards=2,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "invalid"
+    assert "process_fallbacks" in out, "早失败路径必须带该键"
+    assert out["process_fallbacks"] == []
+
+
 def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
     """共享轮 replay 失败：全部组 suite 目录（含降级轮已建组）回收。"""
     root = _proj(tmp_path)

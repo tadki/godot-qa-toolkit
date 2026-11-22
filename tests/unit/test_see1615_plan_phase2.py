@@ -167,7 +167,9 @@ def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
     assert sp["gut_cmdln"]["ok"] is False
     assert sp["gut_cmdln"]["evidence"].endswith("gut_cmdln.gd")
     assert sp["godot_binary"]["ok"] is True
-    assert sp["godot_binary"]["evidence"]
+    # F1：evidence 增强含 binary kind 与启动诊断（ok 语义不变严）
+    assert "| kind=" in sp["godot_binary"]["evidence"]
+    assert "launch_issue=" in sp["godot_binary"]["evidence"]
     assert set(meta["answers"].keys()) == {
         "channel", "reasons", "failure_paths", "reuse_surface"}
     assert meta["answers"]["channel"] == \
@@ -299,15 +301,17 @@ def test_derived_keys_in_partitions_and_plan_id_sensitivity():
                                   "reason": "map_fresh"})
     assert again["plan_id"] == pid
     # 显式 timeout / wiring hash 变化 → id 变（derived 敏感）
-    for key, val in (("explicit_timeout_s", 240), ("boot_wiring_hash", "wh-2")):
+    for key, val, group in (("explicit_timeout_s", 240, "budget"),
+                            ("boot_wiring_hash", "wh-2", "route"),
+                            ("explicit_tests_glob", "res://other/",
+                             "selection")):
         src2 = dict(src)
         plan2 = _execution_plan(src2, extra={**extra, key: val})
         meta2 = _plan_meta(plan2, src2, extra={**extra, key: val},
                            map_state={"present": True, "fresh": True,
                                       "reason": "map_fresh"})
         assert meta2["plan_id"] != pid, key
-        assert meta2["partitions"]["derived"][(
-            "budget" if key == "explicit_timeout_s" else "route")][key] == val
+        assert meta2["partitions"]["derived"][group][key] == val
     # observed 变化（baseline_dirty）→ id 不变
     plan3 = _execution_plan({**src, "baseline_dirty": True}, extra=extra)
     meta3 = _plan_meta(plan3, {**src, "baseline_dirty": True}, extra=extra,

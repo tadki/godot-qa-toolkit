@@ -269,7 +269,9 @@ def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
     run_measurement(project, _targets(project), recipe)
     gut_calls = [c for c in fake.calls if any(
         x == "-s" for x in c) and "gut_cmdln.gd" in " ".join(c)]
-    assert len(gut_calls) == 4  # face 1 轮 + acceptance 3 重复（§SPEC-062C）
+    assert len(gut_calls) == 4  # face 1 轮 + acceptance 1 共享组×3 重复
+    # （§SPEC-062C + SEE-1619 §SPEC-005：acceptance 按 acceptance_shards
+    # 共享分片，扇出=len(groups)×reps；单 key fixture 退化为 1 组）
     gdirs = [" ".join(x for x in c if str(x).startswith("-gdir="))
              for c in gut_calls]
     # 两臂均按分片扇出（-gdir 均在）：face 分片引用 gutconfig 目录，
@@ -278,6 +280,9 @@ def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
     suite = [g for g in gdirs if ".gqt-run-" in g]
     assert len(face) == 1 and len(suite) == 3
     assert "res://tests/" in face[0]
+    # 共享组语义：同组 reps 复用同一 suite（-gdir 恒同），rep 间隔离靠
+    # 独立进程 + 独立 XDG，非独立套件目录
+    assert len(set(suite)) == 1 and len(suite) == 3
 
 
 def test_unparseable_target_isolated_not_fatal(project: Path, tmp_path: Path):

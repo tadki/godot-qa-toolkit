@@ -350,9 +350,13 @@ class TestS63EnsureMapEntry:
         ts._fresh_recipe_hash.cache_clear()
         ts._test_scripts_by_name.cache_clear()
 
-    def test_ensure_map_lazy_build_usable(self, project, tmp_path):
-        """mutation 默认路径（ensure_map）：懒吸收后 map 建成可用、
-        臂 valid、meta 在场。"""
+    def test_ensure_map_lazy_build_usable(self, project, tmp_path,
+                                           monkeypatch):
+        """mutation 默认路径（ensure_map）：基线红经 §SPEC-PREFLIGHT
+        预检具名暴露 + 显式放行——基线结果复用给 arms（P4 零懒获取），
+        插桩臂失败被显式基线吸收，map 建成可用、臂 valid、meta 在场。"""
+        monkeypatch.delenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE",
+                       raising=False)
         fake = LazyScenarioGodot(project, scenario="absorb")
         sp.run = fake
         from godot_qa_toolkit.mutation.truth_select import ensure_map
@@ -361,9 +365,16 @@ class TestS63EnsureMapEntry:
         doc = json.loads(Path(out).read_text(encoding="utf-8"))
         assert (doc["arms_state"]["gut_full"]["state"]) == "valid"
         meta = doc.get("baseline_failures_meta")
-        assert meta and meta["method"] == "uninstrumented_run" and meta["lazy"]
+        # §SPEC-PREFLIGHT：基线臂前置后，基线经预检结果显式传 arms（P4
+        # 零懒获取）——meta 为 explicit_param（含 pairs+sha，信息不倒退；
+        # 未插桩获取事实由 stderr 预检摘要承载）
+        assert meta and meta["method"] == "explicit_param"
+        assert meta["count"] >= 0 and "pairs" in meta
 
-    def test_ensure_map_new_failure_fail_loud(self, project, tmp_path):
+    def test_ensure_map_new_failure_fail_loud(self, project, tmp_path,
+                                               monkeypatch):
+        monkeypatch.delenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE",
+                       raising=False)
         fake = LazyScenarioGodot(project, scenario="new_failure")
         sp.run = fake
         from godot_qa_toolkit.mutation.truth_select import ensure_map

@@ -526,6 +526,54 @@ def _measure_stage(root, target_files, recipe_hash, block_compress,
     }
 
 
+ENV_FAIL_ON_RED_BASELINE = "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"
+_BASELINE_TOP_N = 10
+
+
+def fail_on_red_baseline() -> bool:
+    """§SPEC-PREFLIGHT×PLANFIRST：基线红即停为**显式开关且默认关**——
+    默认行为是红测试按名排除（基线吸收）继续构建/执行，映射标 partial
+    并披露 excluded_tests；只有显式开启才短停（Stryker 式）。"""
+    import os as _os
+    return _os.environ.get(ENV_FAIL_ON_RED_BASELINE, "").strip() \
+        not in ("", "0", "false")
+
+
+def run_baseline_preflight(root, recipe, timeout_s):
+    """§SPEC-PREFLIGHT P1/P2/P4：映射构建路径的基线臂前置预检。
+
+    未插桩基线 GUT 先跑（同面、零探针）：红即 MeasurementError 具名短停
+    （阶段 baseline_preflight + 总数 + top-N 测试名）——不进插桩臂、不写
+    map、不跑 acceptance；放行（--allow-red-baseline）或绿时把基线结果
+    复用给 arms（P4——baseline_failures 非 None，懒获取不再发生）。"""
+    pairs, meta = _acquire_lazy_baseline(
+        root, _gutconfig_face_args(recipe), timeout_s)
+    if pairs:
+        top = sorted(pairs)[:_BASELINE_TOP_N]
+        named = ", ".join(f"{s}::{t}" for s, t in top)
+        if fail_on_red_baseline():
+            raise MeasurementError(
+                f"baseline_preflight_red: uninstrumented baseline GUT has "
+                f"{len(pairs)} failing test pair(s) (stage="
+                f"baseline_preflight, face={meta.get('face')}, "
+                f"wall_s={meta.get('wall_s')}) — named failures (top-"
+                f"{len(top)} of {len(pairs)}): {named}")
+        # 默认（PLANFIRST 口径）：红测试按名排除、继续构建——映射标
+        # partial、excluded_tests 具名披露（arms 按基线吸收，非静默）
+        meta = {**meta, "status": "partial", "excluded_tests": sorted(
+            [list(p) for p in pairs])}
+        print(f"measure: baseline_preflight RED — {len(pairs)} failing "
+              f"pair(s) (wall_s={meta.get('wall_s')}) EXCLUDED by name "
+              f"(top-{len(top)}: {named}); mapping marked partial, run "
+              f"continues (fail-on-red available via "
+              f"{ENV_FAIL_ON_RED_BASELINE})", file=sys.stderr)
+    else:
+        meta = {**meta, "status": "green"}
+        print(f"measure: baseline_preflight green (wall_s="
+              f"{meta.get('wall_s')}) — reused for arms", file=sys.stderr)
+    return sorted(pairs), meta
+
+
 def _measure_arms(root, recipe, prepared, *, timeout_s, test_attribution,
                   attribution_causal, shard_width, shard_log_dir,
                   acceptance_repeats, baseline_failures, baseline_pairs,
@@ -584,7 +632,8 @@ def _measure_perf(root, probe_keys, timeout_s, t_gated, t_command) -> dict:
 def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
                          recipe_hash, root, attribution_out,
                          attribution_causal, causal_sites,
-                         pristine_recipe_hash) -> dict:
+                         pristine_recipe_hash,
+                         preflight_meta: "dict | None" = None) -> dict:
     """归属节（file_sha256 派生 + _attribution_section）。"""
     _file_sha = {rel: sha256_text(item["src"])
                  for rel, item in prepared.items()}
@@ -597,7 +646,8 @@ def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
         tests_face=_tests_face_map(root),
         prepared=prepared,
         baseline_meta=(arm_a.get("baseline_failures_meta")
-                       or arm_b.get("baseline_failures_meta")))
+                       or arm_b.get("baseline_failures_meta")),
+        preflight_meta=preflight_meta)
 
 
 def _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
@@ -630,13 +680,25 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                   acceptance_repeats: int = 3, test_attribution: bool = False,
                   attribution_out: str | None = None,
                   attribution_causal: bool = False, arms_parallel: bool = False,
-                  acceptance_adaptive: bool = False) -> dict:
+                  acceptance_adaptive: bool = False,
+                  baseline_preflight: bool = False) -> dict:
     """measurement 双源批式编排，产出 measurement-report/2（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
     inp = _measure_inputs(project_root, target_files, recipe,
                           baseline_failures, intolerant_config,
                           inject_toolchain)
     root = inp["root"]
+    # §SPEC-PREFLIGHT P1/P4：映射构建路径（baseline_preflight=True）且未
+    # 显式提供基线时——基线臂前置，红即具名短停；绿/放行则复用结果
+    # （arms 收到 baseline_failures，懒获取不再发生）。既有 measure 调用
+    # （默认 False）语义零变化。
+    _pf_meta = None
+    if baseline_preflight and baseline_failures is None:
+        baseline_failures, _pf_meta = run_baseline_preflight(
+            root, inp["recipe"], timeout_s)
+        # 生效基线通道是 baseline_pairs（_gate_ctx 的 effective 来源）——
+        # 预检结果必须双写（failures 供 meta 判定，pairs 供吸收判定）
+        inp["baseline_pairs"] = {tuple(p) for p in baseline_failures}
     st = _measure_stage(
         root, target_files, inp["recipe_hash"], block_compress,
         test_attribution, attribution_causal, evidence_out, scope_roots)
@@ -662,6 +724,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         arm_a, arm_b, st["prepared"], test_attribution=test_attribution,
         recipe_hash=inp["recipe_hash"], root=root,
         attribution_out=attribution_out, attribution_causal=attribution_causal,
+        preflight_meta=_pf_meta,
         causal_sites=st["causal_sites"],
         pristine_recipe_hash=inp["pristine_recipe_hash"])
     return _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,

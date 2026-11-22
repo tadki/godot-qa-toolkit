@@ -269,16 +269,38 @@ def validate_refresh(before: dict, after: dict) -> None:
 
 
 def _roots_of(files: list[str], project_root: str) -> list[str]:
-    """变更文件 → 目标面 roots（相对 project_root 的首层目录并集）。"""
+    """变更文件 → 目标面 roots（相对 project_root 的首层目录并集）。
+
+    §SPEC-PLANFIRST 根修：相对路径**先按 project_root 锚定**（与 runner
+    `anchor_to_project_root` 同源口径）再求首层目录——此前按进程 CWD
+    resolve，CWD≠项目根时 relative_to 抛 ValueError → 目标被跳过 →
+    静默回退全工程（KOL 实测放大到 824 文件含 tests/，源码契约断言
+    必坏）。fallback 到工程根仍会发生（首层文件/工程外路径），但必须
+    具名披露，不再静默。"""
+    import sys as _sys
+    from ..source_io import anchor_to_project_root
+
     root = Path(project_root).resolve()
     tops: set[str] = set()
+    skipped = 0
     for f in files:
+        anchored = Path(anchor_to_project_root(f, project_root)).resolve()
         try:
-            rel = Path(f).resolve().relative_to(root)
+            rel = anchored.relative_to(root)
         except ValueError:
+            # 工程外路径（如其它检出/临时目录）：无法映射首层目录
+            skipped += 1
             continue
         if len(rel.parts) > 1:
             tops.add(str(root / rel.parts[0]))
+    if not tops:
+        # fallback 到工程根（首层文件/工程外路径）→ 面=全工程，必须具名
+        # 披露（§SPEC-PLANFIRST：禁止静默放大）
+        reason = (f"{skipped} file(s) outside project root" if skipped
+                  else "top-level file(s) (no parent directory to scope)")
+        print(f"measure: targets_root_fallback ({reason}) — target face "
+              f"widened to the whole project root ({root}); pass paths in "
+              f"project subdirectories to narrow it", file=_sys.stderr)
     return sorted(tops) or [str(root)]
 
 

@@ -105,6 +105,12 @@ def _generated_gd_source(ir: dict, ir_path_res: str) -> str:
     透传（同步 harness 零破坏），场景生命周期步骤（settle_until 等）
     可为协程。整条调用链（GUT 测试方法 → _run_case_by_name → _run_case）
     相应协程化，GUT 9.x 原生支持 await 测试方法。
+
+    SEE-1619 §SPEC-002 对称生命周期：harness.reset() 唯一位点在
+    after_each（空值护栏），不再依赖普通测试体末尾语句——init 失败、
+    断言红、测试体提前 return 与 GDScript 运行时中止后，后续场景均经
+    after_each 可靠还原；before_each 以 smoke_check 供复位证据。崩溃/
+    超时仍由外层 arm 清理，不伪称 reset 成功。
     """
     test_names = [c["test_name"] for c in ir["cases"]]
     methods = "\n\n".join(
@@ -133,6 +139,20 @@ func before_all() -> void:
 \tfor case_v in ir.get("cases", []):
 \t\t_cases_by_name[String(case_v.get("test_name", ""))] = case_v
 
+func before_each() -> void:
+\t# SEE-1619 §SPEC-002 复位证据：上一场景（pass/断言红/提前 return）的
+\t# after_each reset 必已把 harness 恢复可用态；harness 尚未创建（首个
+\t# 场景）时无前置可证，空值护栏跳过。
+\tif _harness != null and not _harness.smoke_check():
+\t\tfail_test("harness failed post-reset smoke check (previous scenario's reset did not restore a usable harness)")
+
+func after_each() -> void:
+\t# SEE-1619 §SPEC-002 唯一 reset 位点：普通失败、断言红、测试体提前
+\t# return 一律经此还原；harness 未创建（init 失败）无可还原，跳过。
+\t# 崩溃/超时不经此（进程由外层 arm 清理），不伪称 reset 成功。
+\tif _harness != null:
+\t\t_harness.reset()
+
 func _make_harness() -> Object:
 \tif not ResourceLoader.exists("res://addons/gqt_accept/harness.gd"):
 \t\treturn null
@@ -159,7 +179,6 @@ func _run_case_by_name(case_name: String) -> void:
 \t# run 的 ok:true 将失去行为证据面（hollow-green）——每 case 必须真实
 \t# 断言 errs 为空（附步骤数与 unchanged 槽数的逐 case 证据明细）。
 \tassert_true(errs.is_empty(), "case '%s' verified: %d step(s) executed, %d unchanged slot(s) checked, %d error(s)" % [case_name, case.get("steps", []).size(), case.get("then_unchanged", []).size(), errs.size()])
-\t_harness.reset()
 
 {methods}
 

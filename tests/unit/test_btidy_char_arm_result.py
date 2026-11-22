@@ -81,7 +81,9 @@ def test_arm_result_invalid_reason_timeout(tmp_path, monkeypatch):
     _wire(monkeypatch)
     doc, _ = _call(tmp_path, gut_ok=False, timed_out=True, arm_valid=False,
                    run_error=True)
-    assert doc["invalid_reason"] == "shard_timeout"  # §SPEC-PLANFIRST 细分
+    # §SPEC-TIMEOUT-ADAPT：timed_out 且无 excluded（其它失败）→ invalid
+    # reason 为 run_error；有 excluded（partial）→ state=valid 不虚构 reason
+    assert doc["invalid_reason"] == "run_error"
     assert doc["state"] == "invalid"
 
 

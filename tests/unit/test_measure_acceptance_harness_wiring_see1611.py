@@ -252,7 +252,15 @@ def test_run_arm_exception_propagates_without_residue(tmp_path, monkeypatch):
     def fake_run_arm(name, **kw):
         raise RuntimeError("injected from run_arm")
 
+    suite_root = Path(tmp_path) / "acceptance" / "generated"
+    suite_dir = suite_root / ".gqt-run-deadbeef1234"
+
+    def fake_suite_dir(r):
+        suite_dir.mkdir(parents=True, exist_ok=True)
+        return suite_dir
+
     _wire_flow_fakes(monkeypatch, tmp_path, root, dest)
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
     monkeypatch.setattr(arms, "run_arm", fake_run_arm)
     with _pytest.raises(RuntimeError):
         arms.run_acceptance_flow(
@@ -262,3 +270,5 @@ def test_run_arm_exception_propagates_without_residue(tmp_path, monkeypatch):
             arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
     assert not dest.exists(), "unexpected-exception path must reclaim wiring"
     assert not (root / "addons" / "gqt_accept").exists()
+    # D23：suite 目录与 harness 同属本次新建产物——异常路径一并回收
+    assert not suite_dir.exists(), "suite dir residue on run_arm exception"

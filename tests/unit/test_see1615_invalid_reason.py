@@ -108,3 +108,18 @@ def test_gate_message_carries_reason_and_evidence():
     assert "new_pairs=['a.gd::t1']" in msg
     assert "baseline_absorbed=3" in msg
     assert "--intolerant-tests" in msg  # 声明草稿仍在（融合不回退）
+
+
+def test_stage_keys_carry_prepare_phases():
+    """§SPEC-PLANFIRST B：prepare 盲区消灭——映射构建路径的分段键
+    （instrument_prepare/baseline_preflight/gut_full_arm/acceptance_arm）
+    在 STAGE_KEYS 契约内（run_measurement 落 report.stage_timings）。"""
+    from godot_qa_toolkit.mutation.stagetiming import STAGE_KEYS
+    for k in ("instrument_prepare", "baseline_preflight", "gut_full_arm",
+              "acceptance_arm", "total"):
+        assert k in STAGE_KEYS
+    clock = __import__("godot_qa_toolkit.mutation.stagetiming",
+                       fromlist=["StageClock"]).StageClock()
+    d = clock.disclosure()
+    assert set(d.keys()) == set(STAGE_KEYS)
+    assert all(v == 0.0 for v in d.values())

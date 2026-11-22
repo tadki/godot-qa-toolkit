@@ -667,6 +667,9 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         os.environ["GQT_MUTATION_CHECK_BASELINE"] = "1"
     if getattr(args, "fail_on_red_baseline", False):
         os.environ["GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"] = "1"
+    if getattr(args, "intolerant_tests", None):
+        os.environ["GQT_MEASUREMENT_INTOLERANT_TESTS"] = \
+            str(args.intolerant_tests)
     if not args.dry_run:
         timing_store = TimingStore(args.project_root, args.files[0],
                                    "mutation", args.tests,
@@ -1431,6 +1434,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "write) and names failing tests in "
                         "static_preconditions.baseline_health; default "
                         "not_checked")
+    m.add_argument("--intolerant-tests", default=None,
+                   help="SEE-1615 §SPEC-PLANFIRST: JSON declaration path "
+                        "for structurally instrumentation-intolerant "
+                        "tests (source-contract assertions); the "
+                        "baseline-preflight interruption report generates "
+                        "this draft. Also readable from "
+                        "GQT_MEASUREMENT_INTOLERANT_TESTS")
     m.add_argument("--fail-on-red-baseline", action="store_true",
                    help="SEE-1615 §SPEC-PREFLIGHT x PLANFIRST: fail fast "
                         "when the uninstrumented baseline is red (default "

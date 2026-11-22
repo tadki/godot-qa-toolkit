@@ -186,8 +186,8 @@ _PLAN_GROUPS = {
                   "explicit_tests_glob"),
     "route": ("exec_scheme", "inject_scheme", "slot_mode", "freshness",
               "worker_channel", "boot_wiring_hash"),
-    "budget": ("budget", "explicit_timeout_s", "adaptive_timeout_s",
-               "timing_source"),
+    "budget": ("budget", "explicit_timeout_s", "jobs",
+               "adaptive_timeout_s", "timing_source"),
     "diff": ("baseline_reused", "resumed", "diff_available",
              "retry_estimate", "executed_estimate"),
     "preconditions": ("baseline_dirty", "baseline_failures",
@@ -222,8 +222,9 @@ _PLAN_FIELD_PARTITION = {
     "inject_scheme": "derived", "budget": "derived",
     "kill_bail": "derived", "kill_bail_face": "derived",
     "test_filter": "derived",
-    # derived（§SPEC-DERIVED-A 三静态输入）
+    # derived（§SPEC-DERIVED-A 三静态输入 + §SPEC-PLANFIELD-A jobs）
     "explicit_timeout_s": "derived", "boot_wiring_hash": "derived",
+    "jobs": "derived",
     "explicit_tests_glob": "derived",
     # observed
     "test_selection": "observed", "selection_disclosure": "observed",

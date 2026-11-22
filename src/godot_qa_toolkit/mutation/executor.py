@@ -85,7 +85,8 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                       select_mode: str = "full",
                       break_on_baseline_failure: bool = False,
                       kill_bail: bool | None = None,
-                      mutate_all: bool = False) -> dict:
+                      mutate_all: bool = False,
+                      jobs: int | None = None) -> dict:
     """--jobs 1 单文件串行快路径（SEE-1413；形态与串行路径一致 jobs=1）。
     SEE-1610 D3：补传 mutate_all（此前静默丢弃 → 差分复用照旧）。"""
     r = run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
@@ -96,14 +97,15 @@ def _serial_fast_path(f, project_root, budget, timeout_s, dry_run,
                      reuse_coverage=reuse_coverage, identity=identity,
                      worker_channel=worker_channel, select_mode=select_mode,
                      break_on_baseline_failure=break_on_baseline_failure,
-                     kill_bail=kill_bail, mutate_all=mutate_all)
+                     kill_bail=kill_bail, mutate_all=mutate_all, jobs=jobs)
     r["summary"].setdefault("jobs", 1)
     return {"tool": "mutation", "ok": r["ok"], "jobs": 1, "results": [r]}
 
 def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                   binary_kind, mutation_warning, timeout_factor,
                   reuse_coverage, identity, worker_channel=None,
-                  select_mode: str = "full") -> dict:
+                  select_mode: str = "full",
+                  jobs: int | None = None) -> dict:
     """多文件 dry-run 清点（零 GUT/零预热/零 baseline）。"""
     results = [
         run_mutation(f, project_root, budget=budget, timeout_s=timeout_s,
@@ -112,7 +114,8 @@ def _dry_run_list(files, project_root, budget, timeout_s, tests_glob,
                      mutation_warning=mutation_warning,
                      timeout_factor=timeout_factor,
                      reuse_coverage=reuse_coverage, identity=identity,
-                     worker_channel=worker_channel, select_mode=select_mode)
+                     worker_channel=worker_channel, select_mode=select_mode,
+                     jobs=jobs)
         for f in files
     ]
     for result in results:
@@ -145,6 +148,12 @@ def default_jobs(jobs: int | None) -> int:
     if jobs is None:
         return cap
     return max(2, min(jobs, cap))
+
+def effective_jobs(jobs: int | None) -> int:
+    """真跑编排的 effective jobs（§SPEC-PLANFIELD-A dry-run derived 披露
+    同源）：显式 1 → 1（单文件/串行 gate 快路径语义），否则 default_jobs
+    钳制。与 _run_mutation_files_impl 编排分支逐位同判。"""
+    return 1 if jobs == 1 else default_jobs(jobs)
 
 def baseline_in_farm_requested() -> bool:
     """§SPEC-203：baseline 移入 ext4 影子槽（opt-in，缺省 OFF——D5「真实仓
@@ -453,13 +462,14 @@ def _impl_fast_path(files, project_root, budget, timeout_s, dry_run,
                                  break_on_baseline_failure=
                                  break_on_baseline_failure,
                                  kill_bail=kill_bail,
-                                 mutate_all=mutate_all)
+                                 mutate_all=mutate_all,
+                                 jobs=jobs)
     if dry_run:
         return _dry_run_list(files, project_root, budget, timeout_s,
                              tests_glob, binary_kind, mutation_warning,
                              timeout_factor, reuse_coverage, identity,
                              worker_channel=worker_channel,
-                             select_mode=select_mode)
+                             select_mode=select_mode, jobs=jobs)
     return None
 
 def _impl_serial_gate(files, project_root, *, budget, timeout_s, tests_glob,

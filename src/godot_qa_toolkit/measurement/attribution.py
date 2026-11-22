@@ -473,6 +473,10 @@ def _arms_state(arms: tuple[dict, ...]) -> dict:
             "state": arm.get("state"),
             "invalid_reason": arm.get("invalid_reason"),
             "invalid_evidence": arm.get("invalid_evidence"),
+            # §SPEC-TIMEOUT-ADAPT：partial + excluded_tests（按名排除，
+            # reason=shard_timeout/explicit_partial_continue）
+            "partial": bool(arm.get("excluded_tests")),
+            "excluded_tests": arm.get("excluded_tests") or [],
             "bundles": int(arm.get("bundles") or 0),
             "pairs": sum(len(v) for v in
                          (attribution.get("test_to_files") or {}).values()),

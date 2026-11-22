@@ -171,34 +171,88 @@ def _run_shard_leg(ip, *, name: str, plans: list[dict],
 
 
 
+def _scan_shard(r: dict, keys: list[str], shard_id: str) -> dict:
+    """§SPEC-TIMEOUT-ADAPT：单分片扫描（超时→按名排除标记；rc!=0 无可
+    解析失败名→fail-closed）。"""
+    from .orchestrator import _parse_failing_pairs
+
+    out = {"timed_out": False, "gut_ok": True, "run_error": False,
+           "fail_pairs": set(), "failures": set(),
+           "shard_id": shard_id}
+    for rep in r.get("reps") or []:
+        if rep["timed_out"]:
+            out["timed_out"] = True
+            continue
+        pairs = _parse_failing_pairs(rep["out"])
+        out["fail_pairs"] |= pairs
+        out["failures"] |= {t for (_s, t) in pairs}
+        if rep["rc"] != 0:
+            if _looks_like_godot_launch_failure(rep["out"]) or not pairs:
+                out["gut_ok"] = False
+                out["run_error"] = True
+    return out
+
+
 def _arm_fail_scan(results: list[dict]) -> tuple:
     """§SPEC-063a/c：失败身份解析为 (script, test) 对；任一 rep rc!=0
     且无可解析失败名（含启动失败）→ 不可归因失败 fail-closed 门控，
-    不得出分。返回 (gut_ok, run_error, timed_out, arm_failures,
-    arm_fail_pairs)。"""
-    from .orchestrator import _parse_failing_pairs
+    不得出分。
 
+    §SPEC-TIMEOUT-ADAPT：分片超时**不再置 run_error**——该分片计划内
+    测试按名收进 timeout_excluded（reason=shard_timeout，PLANFIRST
+    partial 语义），仅有其它失败仍照旧 fail-closed。返回 (gut_ok,
+    run_error, timed_out, arm_failures, arm_fail_pairs, timeout_excluded,
+    all_keys)。"""
     gut_ok = True
     run_error = False
     timed_out = False
     arm_failures: set[str] = set()
     arm_fail_pairs: set[tuple[str, str]] = set()
+    timeout_excluded: list[dict] = []
+    all_keys: list[str] = []
     for r in results:
-        for rep in r["reps"]:
-            if rep["timed_out"]:
-                gut_ok = False
-                run_error = True
-                timed_out = True
-                continue
-            pairs = _parse_failing_pairs(rep["out"])
-            arm_fail_pairs |= pairs
-            arm_failures |= {t for (_s, t) in pairs}
-            if rep["rc"] != 0:
-                if _looks_like_godot_launch_failure(rep["out"]) \
-                        or not pairs:
-                    gut_ok = False
-                    run_error = True
-    return gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs
+        shard = _scan_shard_row(r)
+        timed_out = timed_out or shard["timed_out"]
+        gut_ok = gut_ok and shard["gut_ok"]
+        run_error = run_error or shard["run_error"]
+        arm_fail_pairs |= shard["fail_pairs"]
+        arm_failures |= shard["failures"]
+        all_keys += shard["keys"]
+        if shard["timed_out"]:
+            timeout_excluded.append({"shard": shard["shard_id"],
+                                     "keys": shard["keys"],
+                                     "reason": "shard_timeout"})
+    return _finalize_shard_scan(gut_ok, run_error, timed_out, arm_failures,
+                                arm_fail_pairs, timeout_excluded, all_keys)
+
+
+def _scan_shard_row(r: dict) -> dict:
+    """§SPEC-TIMEOUT-ADAPT：单分片行扫描（keys 解析 + 逐 rep 归类）。"""
+    plan = r.get("plan") or {}
+    # gut_full 分片计划为 -gdir 组（keys=None）——排除粒度按 dir 组；
+    # acceptance 分片有 keys 列表按名排除
+    keys = ([str(k) for k in (plan.get("keys") or [])]
+            or [a for a in (plan.get("args") or [])
+                if str(a).startswith("-gdir=")])
+    shard_id = str(plan.get("keys") or plan.get("suite_dir")
+                   or ";".join(keys) or "")[:120]
+    shard = _scan_shard(r, keys, shard_id)
+    shard["keys"] = keys
+    return shard
+
+
+def _finalize_shard_scan(gut_ok: bool, run_error: bool, timed_out: bool,
+                         arm_failures: set, arm_fail_pairs: set,
+                         timeout_excluded: "list[dict]",
+                         all_keys: "list[str]") -> tuple:
+    """§SPEC-TIMEOUT-ADAPT：排除后无可用测试 → 整体拒绝。"""
+    excluded_keys = {k for e in timeout_excluded for k in e["keys"]}
+    usable = [k for k in all_keys if k not in excluded_keys]
+    if timed_out and not usable:
+        gut_ok = False
+        run_error = True
+    return (gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs,
+            timeout_excluded, all_keys)
 
 def _gate_ctx(baseline_failures, baseline_pairs: set,
               arm_fail_pairs: set, declared_scoped: set,
@@ -491,12 +545,12 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
             shard_log_dir=shard_log_dir, xdg_homes=xdg_homes,
             concurrency=concurrency)
         wall_s = time.monotonic() - t_arm
-        gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs = \
-            _arm_fail_scan(results)
+        (gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs,
+         timeout_excluded, all_keys) = _arm_fail_scan(results)
     finally:
         _arm_restore(root, started, backup_dir)
     return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
-            arm_failures, arm_fail_pairs)
+            arm_failures, arm_fail_pairs, timeout_excluded, all_keys)
 def _scan_shard_problems(results, timeout_s: int, timeout_source: str):
     """§SPEC-PLANFIRST：分片级问题扫描——(launch, timeouts, unattributed)
     三类明细（超时分片带超时值与来源；不可归因分片带 rc 与输出尾部）。"""
@@ -578,7 +632,10 @@ def _classify_invalid(name: str, *, results, timed_out: bool,
 def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
               baseline_failures, baseline_pairs, declared_scoped,
               declared_bare, arm_fail_pairs, gut_ok, acceptance,
-              results, run_error, timed_out: bool = False) -> tuple:
+              results, run_error, timed_out: bool = False,
+              timeout_excluded: "list[dict] | None" = None,
+              all_keys: "list[str] | None" = None,
+              timeout_s_source: str = "parameter") -> tuple:
     """§SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）：
     新增失败门控 + 具名排除按 (script, test) 身份吸收 + reconcile。
     返回 (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
@@ -593,6 +650,28 @@ def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
         name, root, recipe, timeout_s, arm_fail_pairs, declared_scoped,
         effective_baseline, new_pairs, baseline_failures,
         baseline_meta)
+    excluded: list[dict] = []
+    # §SPEC-TIMEOUT-ADAPT：超时分片按名排除（partial），非 run_error——
+    # 仅排除后无可用测试才整体拒绝（判定在 _arm_fail_scan）
+    if timeout_excluded:
+        excluded += [dict(e, timeout_s=timeout_s,
+                          timeout_s_source=timeout_s_source)
+                     for e in timeout_excluded]
+        print(f"measure: shard_timeout — "
+              f"{sum(len(e.get('keys') or []) for e in timeout_excluded)} "
+              f"test(s) EXCLUDED by name; mapping marked partial",
+              file=sys.stderr)
+    # §SPEC-TIMEOUT-ADAPT：EXPLICIT_PARTIAL_CONTINUE 接线（中断报告
+    # 选项 c）——显式 env 下新增失败按名排除继续（partial），不中断
+    if new_pairs and os.environ.get(
+            "GQT_MEASUREMENT_EXPLICIT_PARTIAL_CONTINUE", "").strip() \
+            not in ("", "0", "false"):
+        excluded.append({"reason": "explicit_partial_continue",
+                         "keys": sorted(f"{a}::{b}" for a, b in new_pairs)})
+        print(f"measure: EXPLICIT_PARTIAL_CONTINUE — {len(new_pairs)} new "
+              f"failing pair(s) EXCLUDED by name; mapping marked partial",
+              file=sys.stderr)
+        new_pairs = set()
     if new_pairs:
         gut_ok = False
         run_error = True
@@ -611,13 +690,15 @@ def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
             reconciliation_failed=(invalid_reason
                                    == "reconciliation_failed"))
     return (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
-            reconciliation, arm_valid, invalid_reason, invalid_evidence)
+            reconciliation, arm_valid, invalid_reason, invalid_evidence,
+            excluded)
 
 def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             acceptance: dict | None = None, shadow_instrument: bool = False,
             adaptive_reps: bool = False, test_attribution: bool = False,
             attribution_causal: bool = False, shard_width: int = 6,
             shard_log_dir: str | None = None, timeout_s: int = 180,
+            timeout_s_source: str = "parameter",
             acceptance_repeats: int = 3,
             baseline_failures: "set[tuple[str, str]] | None" = None,
             baseline_pairs: "set[tuple[str, str]] | None" = None,
@@ -637,14 +718,15 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
     sink_by_rel, manifest_by_rel = stage["sink_by_rel"], stage["manifest_by_rel"]
     vacuous_rels = stage["vacuous_rels"]
     (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
-     arm_failures, arm_fail_pairs) = _arm_execute(
+     arm_failures, arm_fail_pairs, timeout_excluded,
+     all_keys) = _arm_execute(
         name, root=root, shadow_instrument=shadow_instrument,
         timeout_s=timeout_s, adaptive_reps=adaptive_reps,
         shard_log_dir=shard_log_dir, stage=stage,
         concurrency=concurrency)
     (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
-     reconciliation, arm_valid, invalid_reason,
-     invalid_evidence) = _arm_gate(
+     reconciliation, arm_valid, invalid_reason, invalid_evidence,
+     timeout_excluded) = _arm_gate(
         name, root=root, recipe=recipe, timeout_s=timeout_s,
         baseline_failures=baseline_failures, baseline_pairs=baseline_pairs,
         declared_scoped=declared_scoped, declared_bare=declared_bare,
@@ -702,23 +784,43 @@ def _arm_readback(name: str, *, root: Path, prepared: dict, acceptance,
         timed_out, evidence_dir))
     return convergence, attribution, bundles
 
+def _arm_state_block(arm_valid: bool, run_error: bool, invalid_reason,
+                     timed_out: bool, timeout_excluded,
+                     invalid_evidence=None) -> dict:
+    """§SPEC-TIMEOUT-ADAPT：state/invalid_reason/evidence/excluded 块。
+
+    仅超时排除（partial，无其它 invalid 原因）→ 臂仍 valid，partial
+    语义由 excluded_tests 披露承载；invalid_reason 不再回退 shard_timeout
+    （排除已按名披露，不虚构 reason）。"""
+    only_timeout = (timed_out and not run_error
+                    and invalid_reason is None and timeout_excluded)
+    return {
+        "state": ("valid" if (arm_valid or only_timeout) else "invalid"),
+        "invalid_reason": (invalid_reason
+                           if invalid_reason is not None
+                           else (None if only_timeout
+                                 else ("run_error" if run_error else None))),
+        "invalid_evidence": invalid_evidence,
+        "excluded_tests": timeout_excluded or [],
+    }
+
+
 def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
              timed_out: bool, arm_valid: bool, invalid_reason, run_error: bool,
              baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
              exempt_pairs, reps: int, convergence, adaptive_rounds_used,
              arms_parallel: bool, attribution, bundles: dict,
              reconciliation, plans: list, results,
-             invalid_evidence: "dict | None" = None) -> dict:
+             invalid_evidence: "dict | None" = None,
+             timeout_excluded: "list[dict] | None" = None) -> dict:
     """结果文档组装（键序 = 结果 JSON 契约）。"""
     return {
         "arm": name, "run_uuid": run_uuid, "wall_s": round(wall_s, 3),
         "gut_ok": gut_ok, "timed_out": timed_out,
-        "state": ("valid" if arm_valid else "invalid"),
-        "invalid_reason": (invalid_reason
-                           if invalid_reason is not None
-                           else ("shard_timeout" if timed_out
-                                 else ("run_error" if run_error else None))),
+        **_arm_state_block(arm_valid, run_error, invalid_reason, timed_out,
+                           timeout_excluded, invalid_evidence),
         "invalid_evidence": invalid_evidence,
+        "excluded_tests": timeout_excluded or [],
         "baseline_failures_meta": baseline_meta,
         "test_failures": {"observed": sorted(arm_failures),
                           "observed_pairs": sorted(
@@ -758,7 +860,8 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
                 reconciliation, arm_valid: bool, invalid_reason, reps: int,
                 plans: list, sink_by_rel: dict, manifest_by_rel: dict,
                 xdg_homes: list[str], vacuous_rels: list,
-                invalid_evidence: "dict | None" = None) -> dict:
+                invalid_evidence: "dict | None" = None,
+                timeout_excluded: "list[dict] | None" = None) -> dict:
     """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
     vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
     convergence, attribution, bundles = _arm_readback(
@@ -778,7 +881,8 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
         run_error, baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
         exempt_pairs, reps, convergence, adaptive_rounds_used, arms_parallel,
         attribution, bundles, reconciliation, plans, results,
-        invalid_evidence=invalid_evidence)
+        invalid_evidence=invalid_evidence,
+        timeout_excluded=timeout_excluded)
 
 
 def _ensure_acceptance_harness(root: Path) -> Path | None:

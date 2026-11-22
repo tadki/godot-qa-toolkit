@@ -7,6 +7,7 @@ orchestrator.py 的 run_measurement 内嵌闭包 `_arm` / `_acceptance_flow`
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import sys
@@ -728,6 +729,136 @@ def _cleanup_acceptance_harness(dest: Path | None) -> str | None:
     return None
 
 
+def _acceptance_groups(keys: list[str], shards: int) -> list[list[str]]:
+    """§SPEC-005 共享分片：排序去重后均衡切分为 shards 组（组数=分片数，
+    组内多 key 共享 suite/进程）。keys <= shards 时退化为单 key 组。"""
+    ks = sorted(set(keys))
+    n = max(1, int(shards or 1))
+    n = min(n, len(ks)) if ks else 1
+    groups: list[list[str]] = [[] for _ in range(n)]
+    for i, k in enumerate(ks):
+        groups[i % n].append(k)
+    return [g for g in groups if g]
+
+
+_FALLBACK_REASON = "shared_red_isolated_green"
+
+
+def _script_key(script: str) -> str | None:
+    m = re.search(r"test_(.+)\.gd$", script.replace("\\", "/"))
+    return m.group(1) if m else None
+
+
+def _failed_keys(result: dict, groups: list[dict]) -> list[str]:
+    """共享轮失败 key 集：观测失败对的脚本归属 + 对账失败分组的全组 key。"""
+    keys: set[str] = set()
+    for pair in (result.get("test_failures") or {}).get(
+            "observed_pairs", []):
+        k = _script_key(pair.split("::", 1)[0])
+        if k:
+            keys.add(k)
+    rec = result.get("reconciliation") or {}
+    if rec and not rec.get("ok"):
+        for sh in rec.get("shards") or []:
+            if not sh.get("ok"):
+                for k in sh.get("keys") or []:
+                    keys.add(k)
+    return sorted(k for k in keys
+                  if any(k in g["keys"] for g in groups))
+
+
+def _green_script(pair_script: str, ok_keys: set[str]) -> bool:
+    return Path(pair_script.replace("\\", "/")).name in {
+        f"test_{k}.gd" for k in ok_keys}
+
+
+def _merge_fallback_round(result: dict, fb_result: dict,
+                          fb_groups: list[dict]) -> dict:
+    """§SPEC-006 共享轮 → 单例隔离轮合并。
+
+    隔离绿 key：共享轮红对移除（进程残留伪红由隔离证据推翻）、process_
+    fallbacks 具名；隔离红 key：共享红保持、不列入降级（不得包装为有效
+    降级）。bundle/收敛/reps 保留共享轮证据（覆盖测量以共享轮为准）；
+    reconciliation 两轮分项并列披露；gut_ok/state 按合并后残集重算。"""
+    fb_rec_ok = bool((fb_result.get("reconciliation") or {}).get("ok", True))
+    fallbacks: list[dict] = []
+    ok_keys: set[str] = set()
+    for g in fb_groups:
+        k = g["keys"][0]
+        script = f"test_{k}.gd"
+        red = [pr for pr in (fb_result.get("test_failures") or {}).get(
+            "observed_pairs", [])
+            if pr.split("::", 1)[0].endswith(script)]
+        if not red and fb_rec_ok:
+            ok_keys.add(k)
+            fallbacks.append({"key": k, "reason": _FALLBACK_REASON})
+    fallbacks.sort(key=lambda f: f["key"])
+
+    def keep(pair: str) -> bool:
+        return not _green_script(pair.split("::", 1)[0], ok_keys)
+
+    fpairs = {tuple(pr) for pr in (fb_result.get("arm_fail_pairs") or [])}
+    result["arm_fail_pairs"] = {
+        pr for pr in (result.get("arm_fail_pairs") or set())
+        if keep(f"{pr[0]}::{pr[1]}")}
+    result["arm_failures"] = {t for (_s, t) in result["arm_fail_pairs"]}
+    result["new_pairs"] = {
+        pr for pr in (result.get("new_pairs") or set())
+        if keep(f"{pr[0]}::{pr[1]}")}
+    tf = result.get("test_failures") or {}
+    tf["observed_pairs"] = sorted(
+        pr for pr in tf.get("observed_pairs", []) if keep(pr))
+    tf["observed"] = sorted(
+        pr.split("::", 1)[1] for pr in tf["observed_pairs"])
+    tf["new_pairs"] = sorted(
+        pr for pr in tf.get("new_pairs", []) if keep(pr))
+    tf["new"] = sorted(pr.split("::", 1)[1] for pr in tf["new_pairs"])
+    result["test_failures"] = tf
+
+    shared_rec = result.get("reconciliation") or {}
+    fb_rec = fb_result.get("reconciliation") or {}
+    rec_ok = bool(shared_rec.get("ok", True)) and fb_rec_ok
+    merged_shards = list(shared_rec.get("shards") or []) + [
+        {**sh, "round": "fallback_singleton"}
+        for sh in (fb_rec.get("shards") or [])]
+    result["reconciliation"] = {
+        "ok": rec_ok,
+        "shards": merged_shards,
+        "fallback_round": {"ok": fb_rec_ok,
+                           "keys": sorted(ok_keys)},
+    }
+    remaining_fail = bool(result["arm_fail_pairs"]) or bool(
+        result["new_pairs"])
+    result["gut_ok"] = not remaining_fail
+    result["state"] = ("valid" if rec_ok and (
+        not remaining_fail) else "invalid")
+    result["invalid_reason"] = (
+        None if result["state"] == "valid"
+        else ("reconciliation_failed" if not rec_ok
+              else "isolated_red_not_fallback"))
+    result["wall_s"] = round(
+        float(result.get("wall_s") or 0.0)
+        + float(fb_result.get("wall_s") or 0.0), 3)
+    return result
+
+
+def _fallback_disclosure(result: dict, fb_groups: list[dict]) -> list[dict]:
+    """§SPEC-006 process_fallbacks：按 key 排序、每项恰含 key/reason。
+    披露即合并轮的隔离绿判定（fallback_round.keys）；隔离红 key 不列入
+    （不得包装为有效降级）；无降级轮为空数组。"""
+    if not fb_groups:
+        return []
+    rec = result.get("reconciliation") or {}
+    fb_round = rec.get("fallback_round") or {}
+    if not bool(fb_round.get("ok", True)):
+        return []
+    fb_keys = {g["keys"][0] for g in fb_groups}
+    return sorted(
+        ({"key": k, "reason": _FALLBACK_REASON}
+         for k in set(fb_round.get("keys") or []) & fb_keys),
+        key=lambda f: f["key"])
+
+
 def run_acceptance_flow(*, root: Path, recipe: dict,
                         acceptance_keys: list[str] | None,
                         acceptance_shards: int,
@@ -742,17 +873,17 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
     cleanup_done = False
     try:
         harness_dest = _ensure_acceptance_harness(root)
-        # §SPEC-011/D20：**每 feature 独立 suite/进程**——与官方 CI
-        # per-key compile+run 语义对齐。同进程连续跑多 feature 会让
-        # 前序 feature 的全局状态残留进入后续 feature（实测 v5 golden
-        # L2 payload 10470B > 4096B 预算；单 feature 进程绿）。
-        # acceptance_shards 语义降为并发上限（进程数钳制），不再合并
-        # feature 到同一 GUT 进程。
-        for k in keys:
+        # §SPEC-005：恢复 acceptance_shards 共享分片——44 feature 已过
+        # acceptance-feature-state-isolation 原子化门（SEE-1619 C1），
+        # 同进程共享 suite 不再有跨 feature 残留（R1 槽位缝 + 零写入判据
+        # 闭环）。shards = 共享组数，并发上限同步收敛到组数；扇出 =
+        # len(groups) × reps（非 keys × reps）。
+        for chunk in _acceptance_groups(keys, acceptance_shards):
             sd = create_suite_dir(root)
-            groups.append({"suite_dir": sd, "keys": [k]})
-            compile_keys_to_suite(root, [k], sd)
-            replay_check(root, k, suite_dir=sd)
+            groups.append({"suite_dir": sd, "keys": list(chunk)})
+            compile_keys_to_suite(root, chunk, sd)
+            for k in chunk:
+                replay_check(root, k, suite_dir=sd)
 
         result = run_arm("acceptance", root=root, recipe=recipe,
                          acceptance={"groups": groups, "snapshot": snapshot},
@@ -760,12 +891,34 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
                          adaptive_reps=acceptance_adaptive,
                          concurrency=max(1, int(acceptance_shards or 1)),
                          **arm_kwargs)
+
+        # §SPEC-006：临时具名降级——仅当某 feature 当次未通过共享校验时
+        # singleton 隔离复跑；隔离绿 = process_fallbacks 具名披露，隔离
+        # 红 = 保持红（不得包装为有效降级）。全原子时为空数组。
+        failed = _failed_keys(result, groups)
+        fb_groups: list[dict] = []
+        if failed:
+            for k in failed:
+                sd = create_suite_dir(root)
+                fb_groups.append({"suite_dir": sd, "keys": [k]})
+                compile_keys_to_suite(root, [k], sd)
+                replay_check(root, k, suite_dir=sd)
+            fb_result = run_arm(
+                "acceptance", root=root, recipe=recipe,
+                acceptance={"groups": fb_groups, "snapshot": snapshot},
+                shadow_instrument=arms_parallel,
+                adaptive_reps=acceptance_adaptive,
+                concurrency=max(1, len(fb_groups)), **arm_kwargs)
+            result = _merge_fallback_round(result, fb_result, fb_groups)
+
         # D21：成功路径显式回收并核对——清理失败 = 残留 = 不得报 valid
         cleanup_done = True
         cleanup_err = _cleanup_acceptance_harness(harness_dest)
         if cleanup_err:
-            return {**result, "state": "invalid", "gut_ok": False,
+            return {**result, "process_fallbacks": [],
+                    "state": "invalid", "gut_ok": False,
                     "invalid_reason": f"harness_residue: {cleanup_err}"}
+        result["process_fallbacks"] = _fallback_disclosure(result, fb_groups)
         return result
     except (SuiteError, AcceptRunError, MeasurementError) as e:
         for g in groups:
@@ -790,7 +943,7 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         # 已显式清理的路径由 cleanup_done 跳过（成功路径 suites 由
         # run_arm 读回段清理）。
         if not cleanup_done:
-            for g in groups:
+            for g in groups + (fb_groups if "fb_groups" in locals() else []):
                 try:
                     _cleanup_suite_dir(Path(g["suite_dir"]))
                 except OSError as e:

@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -320,9 +321,17 @@ def _ensure_generate(root: str, out: str, files: list[str],
     targets = _targets_under(_roots_of(files, root))
     tmp = _unique_tmp(out)
     try:
+        # §SPEC-PLANFIRST 任务 1：源码契约用例的 --intolerant-tests 声明
+        # 豁免接线（env 单点；中断报告草稿可直接保存后经此生效）
+        it_cfg = None
+        it_path = os.environ.get("GQT_MEASUREMENT_INTOLERANT_TESTS", "")
+        if it_path.strip():
+            it_cfg = json.loads(Path(it_path.strip()).read_text(
+                encoding="utf-8"))
         measurement = run_measurement(
             root, targets, recipe, test_attribution=True,
             attribution_out=tmp, baseline_preflight=True,
+            intolerant_config=it_cfg,
             **({"timeout_s": int(timeout_s)}
                if timeout_s is not None else {}))
         doc = load_map(tmp)

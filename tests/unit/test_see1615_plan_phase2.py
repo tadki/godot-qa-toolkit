@@ -113,7 +113,7 @@ def _spy_all(monkeypatch):
     return calls
 
 
-def _run_core_dry_run(root, target, monkeypatch):
+def _run_core_dry_run(root, target, monkeypatch, jobs=None):
     from godot_qa_toolkit.mutation import planner as planner_mod
     from godot_qa_toolkit.mutation import runner as runner_mod
     from godot_qa_toolkit.mutation.ops import _collect_mutations
@@ -140,7 +140,7 @@ def _run_core_dry_run(root, target, monkeypatch):
         str(target), mutants, 50, False, len(mutants), str(root), None,
         "linux", None, False,
         hashlib.sha256(src.encode()).hexdigest(), {}, None, None,
-        {"file": "src_game/cell.gd"}, None, None, "full")
+        {"file": "src_game/cell.gd"}, None, None, "full", jobs=jobs)
 
 
 def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
@@ -159,6 +159,15 @@ def test_dry_run_preview_zero_side_effects_and_meta_present(tmp_path,
     assert derived["route"]["boot_wiring_hash"] != ""
     # dry-run 恒传 extra → 无显式 --tests 时如实披露 None
     assert derived["selection"]["explicit_tests_glob"] is None
+    # §SPEC-PLANFIELD-A：jobs 入 derived（budget 组）+ dry-run stage_timings
+    assert isinstance(derived["budget"]["jobs"], int)
+    assert derived["budget"]["jobs"] >= 1
+    st = s["stage_timings"]
+    assert set(st.keys()) >= {"planning", "route_scan", "total"}
+    # 精简夹具尾段可 <0.5ms（round3 后 0.0）——非负即可；真实分解由
+    # KOL dry-run 实跑承载（route_scan 引用图解析为可读大头）
+    assert st["total"] >= 0
+    assert st["planning"] >= 0 and st["route_scan"] >= 0
     sp = meta["static_preconditions"]
     assert set(sp.keys()) == {"import_cache", "gut_cmdln", "godot_binary"}
     # 精简 fixture（无 addons/gut/.godot）→ ok=False 是诚实的探测值
@@ -311,7 +320,8 @@ def test_derived_keys_in_partitions_and_plan_id_sensitivity():
     for key, val, group in (("explicit_timeout_s", 240, "budget"),
                             ("boot_wiring_hash", "wh-2", "route"),
                             ("explicit_tests_glob", "res://other/",
-                             "selection")):
+                             "selection"),
+                            ("jobs", 8, "budget")):
         src2 = dict(src)
         plan2 = _execution_plan(src2, extra={**extra, key: val})
         meta2 = _plan_meta(plan2, src2, extra={**extra, key: val},
@@ -330,6 +340,21 @@ def test_derived_keys_in_partitions_and_plan_id_sensitivity():
     meta4 = _plan_meta(plan4, src, extra={"budget": 50})
     assert "explicit_tests_glob" not in meta4["partitions"]["derived"] \
         .get("selection", {})
+
+
+def test_dry_run_jobs_passthrough_effective(tmp_path, monkeypatch):
+    """§SPEC-PLANFIELD-A：jobs 穿透 dry-run——显式 1 → 1（串行快路径
+    语义同源）；缺省 → 编排 effective（>=2 钳制）。"""
+    root, target = _fixture_project(tmp_path)
+    _spy_all(monkeypatch)
+    s1 = _run_core_dry_run(root, target, monkeypatch, jobs=1)["summary"]
+    d1 = s1["execution_plan_meta"]["partitions"]["derived"]
+    assert d1["budget"]["jobs"] == 1
+    root2, target2 = _fixture_project(tmp_path / "p2")
+    _spy_all(monkeypatch)
+    s2 = _run_core_dry_run(root2, target2, monkeypatch)["summary"]
+    d2 = s2["execution_plan_meta"]["partitions"]["derived"]
+    assert isinstance(d2["budget"]["jobs"], int) and d2["budget"]["jobs"] >= 2
 
 
 def test_map_state_block_direct_read_three_states():

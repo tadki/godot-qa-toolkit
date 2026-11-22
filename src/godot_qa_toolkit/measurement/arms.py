@@ -739,6 +739,7 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
     snapshot = _snapshot_main(root)
     groups: list[dict] = []
     harness_dest: Path | None = None
+    cleanup_done = False
     try:
         harness_dest = _ensure_acceptance_harness(root)
         # §SPEC-011/D20：**每 feature 独立 suite/进程**——与官方 CI
@@ -753,11 +754,25 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
             compile_keys_to_suite(root, [k], sd)
             replay_check(root, k, suite_dir=sd)
 
+        result = run_arm("acceptance", root=root, recipe=recipe,
+                         acceptance={"groups": groups, "snapshot": snapshot},
+                         shadow_instrument=arms_parallel,
+                         adaptive_reps=acceptance_adaptive,
+                         concurrency=max(1, int(acceptance_shards or 1)),
+                         **arm_kwargs)
+        # D21：成功路径显式回收并核对——清理失败 = 残留 = 不得报 valid
+        cleanup_done = True
+        cleanup_err = _cleanup_acceptance_harness(harness_dest)
+        if cleanup_err:
+            return {**result, "state": "invalid", "gut_ok": False,
+                    "invalid_reason": f"harness_residue: {cleanup_err}"}
+        return result
     except (SuiteError, AcceptRunError, MeasurementError) as e:
         for g in groups:
             _cleanup_suite_dir(Path(g["suite_dir"]))
-        cleanup_err = _cleanup_acceptance_harness(harness_dest)
         reason = f"suite_error:{e}"
+        cleanup_done = True
+        cleanup_err = _cleanup_acceptance_harness(harness_dest)
         if cleanup_err:
             reason += f" | {cleanup_err}"
         return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
@@ -768,18 +783,15 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
                                   "new": [], "new_pairs": [],
                                   "instrumentation_intolerant": []},
                 "repeats": 0, "convergence": None}
-    result = run_arm("acceptance", root=root, recipe=recipe,
-                     acceptance={"groups": groups, "snapshot": snapshot},
-                     shadow_instrument=arms_parallel,
-                     adaptive_reps=acceptance_adaptive,
-                     concurrency=max(1, int(acceptance_shards or 1)),
-                     **arm_kwargs)
-    # D21：成功路径同样必须显式回收并核对——清理失败 = 残留 = 不得报 valid
-    cleanup_err = _cleanup_acceptance_harness(harness_dest)
-    if cleanup_err:
-        return {**result, "state": "invalid", "gut_ok": False,
-                "invalid_reason": f"harness_residue: {cleanup_err}"}
-    return result
+    finally:
+        # D22：兜底清理覆盖**所有退出路径**——run_arm 等未列名异常冒泡时
+        # 同样回收本次新建产物（异常照常传播，不吞；清理自身失败写
+        # stderr，不静默）。已显式清理的路径由 cleanup_done 跳过。
+        if not cleanup_done:
+            residue_err = _cleanup_acceptance_harness(harness_dest)
+            if residue_err:
+                print(f"measure: acceptance {residue_err}",
+                      file=sys.stderr)
 
 def execute_arms(*, root: Path, recipe: dict, arms_parallel: bool,
                  acceptance_keys: list[str] | None,

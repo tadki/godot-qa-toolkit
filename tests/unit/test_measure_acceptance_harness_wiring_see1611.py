@@ -239,3 +239,26 @@ def test_copy_failure_yields_invalid_and_no_partial_residue(tmp_path,
     assert out["state"] == "invalid"
     assert not dest.exists(), "partial copy must be reclaimed"
     assert not (root / "addons" / "gqt_accept").exists()
+
+
+def test_run_arm_exception_propagates_without_residue(tmp_path, monkeypatch):
+    """D22：run_arm 抛未列名异常时——错误传播 + 本次临时接线零残留
+    （修复前 run_arm 在清理边界外，异常路径必留残留）。"""
+    import pytest as _pytest
+
+    root = _proj(tmp_path)
+    dest = root / "addons" / "gqt_accept" / "harness.gd"
+
+    def fake_run_arm(name, **kw):
+        raise RuntimeError("injected from run_arm")
+
+    _wire_flow_fakes(monkeypatch, tmp_path, root, dest)
+    monkeypatch.setattr(arms, "run_arm", fake_run_arm)
+    with _pytest.raises(RuntimeError):
+        arms.run_acceptance_flow(
+            root=root,
+            recipe={"acceptance_face": {"features": [{"key": "k1"}]}},
+            acceptance_keys=["k1"], acceptance_shards=1,
+            arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert not dest.exists(), "unexpected-exception path must reclaim wiring"
+    assert not (root / "addons" / "gqt_accept").exists()

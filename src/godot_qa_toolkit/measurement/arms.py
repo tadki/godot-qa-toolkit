@@ -784,10 +784,18 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
                                   "instrumentation_intolerant": []},
                 "repeats": 0, "convergence": None}
     finally:
-        # D22：兜底清理覆盖**所有退出路径**——run_arm 等未列名异常冒泡时
-        # 同样回收本次新建产物（异常照常传播，不吞；清理自身失败写
-        # stderr，不静默）。已显式清理的路径由 cleanup_done 跳过。
+        # D22/D23：兜底清理覆盖**所有退出路径**——run_arm 等未列名异常
+        # 冒泡时，本次新建的 **suite 目录与 harness 契约位**一并回收
+        # （异常照常传播，不吞；清理自身失败逐项写 stderr，不静默）。
+        # 已显式清理的路径由 cleanup_done 跳过（成功路径 suites 由
+        # run_arm 读回段清理）。
         if not cleanup_done:
+            for g in groups:
+                try:
+                    _cleanup_suite_dir(Path(g["suite_dir"]))
+                except OSError as e:
+                    print(f"measure: acceptance suite cleanup failed "
+                          f"({g['suite_dir']}): {e}", file=sys.stderr)
             residue_err = _cleanup_acceptance_harness(harness_dest)
             if residue_err:
                 print(f"measure: acceptance {residue_err}",

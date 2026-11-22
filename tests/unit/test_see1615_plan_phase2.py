@@ -189,6 +189,9 @@ def test_missing_map_would_renew_named_missing_and_cost(tmp_path,
     s = _run_core_dry_run(root, target, monkeypatch)["summary"]
     block = s["execution_plan_meta"]["map_state"]
     assert block["would_renew"] is True
+    # §SPEC-MAPSTATE-A：present/fresh 原始探测值直出（三态直读）
+    assert block["present"] is False
+    assert block["fresh"] is None
     assert "attribution_map" in block["missing"]
     assert block["cost"]
     assert "auto map-update (full-chain GUT renewal)" in block["cost"]
@@ -205,6 +208,8 @@ def test_stale_map_would_renew_named(tmp_path, monkeypatch):
     s = _run_core_dry_run(root, target, monkeypatch)["summary"]
     block = s["execution_plan_meta"]["map_state"]
     assert block["would_renew"] is True
+    assert block["present"] is True
+    assert block["fresh"] is False
     assert "attribution_map_freshness" in block["missing"]
     assert calls["renew"] == []
 
@@ -218,6 +223,8 @@ def test_fresh_map_no_would_renew(tmp_path, monkeypatch):
     s = _run_core_dry_run(root, target, monkeypatch)["summary"]
     block = s["execution_plan_meta"]["map_state"]
     assert block["would_renew"] is False
+    assert block["present"] is True
+    assert block["fresh"] is True
     assert "attribution_map" not in block["missing"]
     assert "attribution_map_freshness" not in block["missing"]
     assert calls["renew"] == []
@@ -323,6 +330,31 @@ def test_derived_keys_in_partitions_and_plan_id_sensitivity():
     meta4 = _plan_meta(plan4, src, extra={"budget": 50})
     assert "explicit_tests_glob" not in meta4["partitions"]["derived"] \
         .get("selection", {})
+
+
+def test_map_state_block_direct_read_three_states():
+    """§SPEC-MAPSTATE-A：map_state 块直读 present/fresh（缺失/不可用/
+    陈旧/新鲜四形态），既有 would_renew/missing/cost/reason 零变化；
+    未探测（None）→ present/fresh 均 None（不造事实）。"""
+    from godot_qa_toolkit.mutation.reporting import _map_state_block
+
+    missing = _map_state_block({"present": False, "fresh": None,
+                                "reason": "map_missing"}, None)
+    assert (missing["present"], missing["fresh"]) == (False, None)
+    unusable = _map_state_block({"present": True, "fresh": None,
+                                 "reason": "map_unusable"}, None)
+    assert (unusable["present"], unusable["fresh"]) == (True, None)
+    assert unusable["reason"] == "map_unusable"
+    stale = _map_state_block({"present": True, "fresh": False,
+                              "reason": "map_stale:drift"}, None)
+    assert (stale["present"], stale["fresh"]) == (True, False)
+    fresh = _map_state_block({"present": True, "fresh": True,
+                              "reason": "map_fresh"}, True)
+    assert (fresh["present"], fresh["fresh"]) == (True, True)
+    assert fresh["would_renew"] is False
+    none = _map_state_block(None, None)
+    assert none["present"] is None and none["fresh"] is None
+    assert none["would_renew"] is None
 
 
 def test_static_preconditions_block_shapes():

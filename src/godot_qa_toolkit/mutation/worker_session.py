@@ -167,7 +167,8 @@ func _run_leg(req: Dictionary) -> void:
 				"bail": bool(seq["bail"]), "bail_at": int(seq["bail_at"]),
 				"new_failure": String(seq["bail_new_failure"])}
 		else:
-			_add_tests(gut, String(req.get("tests_glob", "res://tests/")))
+			_add_tests(gut, String(req.get("tests_glob", "res://tests/")),
+				bool(req.get("tests_recurse", false)))
 			var skip_out: Dictionary = await _gqt_skip_red_tests(
 				gut, skip_tests)
 			resp["skip_red"] = skip_out
@@ -272,10 +273,15 @@ func _autoload_intersection(members: Array) -> Array:
 	return hits
 
 
-func _add_tests(gut: Node, tests_glob: String) -> void:
+func _add_tests(gut: Node, tests_glob: String, recurse := false) -> void:
 	if tests_glob.ends_with(".gd"):
 		gut.add_script(tests_glob)
 	else:
+		# SEE-1627：GUT 9.6 `add_directory`「Does not look in sub
+		# directories」；full 审计面须先置 `include_subdirectories`
+		# （= 冷通道 `-ginclude_subdirs` 的引擎侧等价物，见 gut.gd
+		# `_get_files`）。显式目录保持非递归。
+		gut.include_subdirectories = recurse
 		gut.add_directory(tests_glob)
 
 
@@ -533,6 +539,10 @@ class WorkerSession:
             "mutant_sha256": mutant_sha256,
             "closure": list(closure),
             "tests_glob": tests_glob or "res://tests/",
+            # SEE-1627 §SPEC-002：full 审计面（tests_glob=None）必须递归收集，
+            # 与冷通道 `-ginclude_subdirs` 逐字对齐；显式目录 `--tests` 与
+            # `.gd` 形态不递归（`.gd` 走 add_script，无需目录扫描）。
+            "tests_recurse": tests_glob is None,
         }
         if tests_scripts:
             req["tests_scripts"] = [str(s) for s in tests_scripts]

@@ -143,6 +143,9 @@ func _run_leg(req: Dictionary) -> void:
 			resp["gut_ran"] = not bool(seq["hung"])
 			resp["pass"] = int(seq["pass"])
 			resp["fail"] = int(seq["fail"])
+			# SEE-1623 H1：实际执行的测试数随腿回传——0 = 选面收集为空，
+			# 判定面按无运行流 fail-close（不得假 survived）。
+			resp["tests_ran"] = int(seq.get("pass", 0)) + int(seq.get("fail", 0))
 			resp["bail"] = {"scripts_run": int(seq["scripts_run"]),
 				"scripts_total": int(seq["scripts_total"]),
 				"bail": bool(seq["bail"]), "bail_at": int(seq["bail_at"]),
@@ -175,6 +178,9 @@ func _run_leg(req: Dictionary) -> void:
 			resp["gut_ran"] = done["end"]
 			resp["pass"] = gut.get_pass_count()
 			resp["fail"] = gut.get_fail_count()
+			# SEE-1623 H1：0 收集（-gdir 不递归等形态）时 end_run 照常
+			# 发射、pass/fail 恒 0——必须以 ran 数区分「全绿」与「没跑」。
+			resp["tests_ran"] = int(gut.get_test_count())
 		get_root().remove_child(gut)
 		gut.free()
 	resp["timings"]["gut_ms"] = Time.get_ticks_msec() - t_gut
@@ -330,6 +336,7 @@ class WorkerLegResult:
     gut_ran: bool = False
     pass_count: int = 0
     fail_count: int = 0
+    tests_ran: int | None = None
     failing_tests: set[str] = field(default_factory=set)
     failing_scripts: set[tuple[str, str]] = field(default_factory=set)
     user_files: list[str] = field(default_factory=list)
@@ -572,6 +579,8 @@ class WorkerSession:
             gut_ran=bool(resp.get("gut_ran")),
             pass_count=int(resp.get("pass", 0)),
             fail_count=int(resp.get("fail", 0)),
+            tests_ran=(int(resp["tests_ran"])
+                       if resp.get("tests_ran") is not None else None),
             user_files=list(resp.get("user_files") or []),
             connections=list(resp.get("connections") or []),
             timings=dict(resp.get("timings") or {}),

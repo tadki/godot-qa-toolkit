@@ -763,6 +763,14 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
         return _mutant_record(
             m, "run_error", f"worker leg: no GUT run stream for {tag}",
             src=src)
+    # SEE-1623 H1：0 测试执行（选面收集为空）= 无运行流证据——与冷通道
+    # L4 门同语义 fail-close，不得落 fail_count==0 的假 survived；
+    # canary 只是兜底，通道自身判定必须可信。
+    if getattr(leg, "tests_ran", None) == 0:
+        return _mutant_record(
+            m, "run_error",
+            f"no GUT run stream evidence for {tag} — worker leg "
+            f"ran 0 tests (face glob matched no test scripts)", src=src)
     if leg.fail_count == 0:
         return _mutant_record(
             m, "survived", f"tests passed after {tag} (worker leg)", src=src)

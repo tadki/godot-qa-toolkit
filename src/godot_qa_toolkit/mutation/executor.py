@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -247,12 +248,18 @@ def run_mutation_files(
           + (" — BLOCKED" if (plan_errors and not dry_run) else ""),
           file=sys.stderr)
     if plan_errors and not dry_run:
-        return {"tool": "mutation", "ok": False, "error": "plan_blocked",
-                "plan": plan,
+        # SEE-1623 M7：信封归一——plan 只在 summary（顶层 plan/error 键
+        # 撤销），failures 恒在场（§SPEC-1312 flat 契约）。
+        return {"tool": "mutation", "ok": False,
+                "summary": {"error": "plan_blocked", "plan": plan},
                 "results": [{"file": f, "ok": False,
                              "summary": {"error": "plan_blocked",
                                          "plan": plan}}
-                            for f in files]}
+                            for f in files],
+                "failures": [{"reason": f"{p['code']}: "
+                              f"{json.dumps(p['evidence'],
+                                            ensure_ascii=False)}"}
+                             for p in plan_errors]}
     if dry_run:
         return _run_mutation_files_impl(
             files, project_root, budget=budget, timeout_s=timeout_s,

@@ -492,11 +492,14 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
     else:
         _notice = ("preconditions missing — fix the listed items or rerun "
                    "with --auto-prepare to build them automatically")
+    # SEE-1623 M7：信封归一——plan 只在 summary（顶层 error/plan 键撤销），
+    # failures 恒在场（§SPEC-1312 flat 契约：{tool, ok, summary, failures}）。
     return _emit({"tool": "mutation", "ok": False,
-                  "error": "prepare_required", "plan": plan,
                   "summary": {"error": "prepare_required", "plan": plan,
                               "problems": p1,
-                              "notice": _notice}})
+                              "notice": _notice},
+                  "failures": [{"reason": f"{p['code']}: prepare blocker "
+                                f"({p.get('level')})"} for p in p1]})
 
 
 def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
@@ -513,8 +516,8 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
           f"({len(errors)} error) in {plan['elapsed_s']}s",
           file=sys.stderr)
     if errors:
+        # SEE-1623 M7：信封归一（plan 只在 summary，顶层键撤销）。
         return _emit({"tool": "mutation", "ok": False,
-                      "error": "plan_blocked", "plan": plan,
                       "summary": {"error": "plan_blocked", "plan": plan},
                       "failures": [{"reason": f"{p['code']}: "
                                     f"{json.dumps(p['evidence'],
@@ -531,8 +534,8 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
             and getattr(args, "select_mode", "line") != "full" and any(
                 p["code"] == "attribution_map_missing_or_stale"
                 for p in plan["problems"]):
+        # SEE-1623 M7：信封归一（plan 只在 summary，failures 恒在场）。
         return _emit({"tool": "mutation", "ok": True,
-                      "plan": plan,
                       "summary": {"plan": plan,
                                   "selection_mode": "plan_only",
                                   "static_preconditions": {
@@ -543,7 +546,8 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
                                             "plan only; run without "
                                             "--dry-run to prepare the map, "
                                             "or pass --select full to "
-                                            "preview sites now"}})
+                                            "preview sites now"},
+                      "failures": []})
     return None
 
 

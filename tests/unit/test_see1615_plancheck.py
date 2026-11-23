@@ -112,10 +112,14 @@ def test_run_blocks_on_plan_error_without_spawning(tmp_path, monkeypatch):
                             AssertionError("must not build map")))
     r = ex.run_mutation_files([str(root / "autoload" / "game.gd")],
                               str(root), dry_run=False, select_mode="full")
-    assert r["ok"] is False and r["error"] == "plan_blocked"
-    assert r["plan"]["problems"]
+    # SEE-1623 M7：信封归一——error/plan 只在 summary，failures 在场。
+    assert r["ok"] is False
+    assert "error" not in r and "plan" not in r
+    assert r["summary"]["error"] == "plan_blocked"
+    assert r["failures"]
+    assert r["summary"]["plan"]["problems"]
     assert any(p["code"] == "preload_target_missing"
-               for p in r["plan"]["problems"])
+               for p in r["summary"]["plan"]["problems"])
     assert spawned == []
 
 
@@ -184,7 +188,10 @@ def test_cli_p1_stops_by_default_auto_prepare_continues(tmp_path, monkeypatch):
             auto_prepare=False, **base))
     assert rc is not None and rc != 0
     stopped = _json.loads(buf.getvalue())
-    assert stopped["error"] == "prepare_required"
+    # SEE-1623 M7：信封归一——error/plan 只在 summary（顶层键撤销）。
+    assert stopped["summary"]["error"] == "prepare_required"
+    assert "error" not in stopped and "plan" not in stopped
+    assert set(stopped) == {"tool", "ok", "summary", "failures"}
     p1 = stopped["summary"]["problems"]
     assert p1 and all(p["level"] == "P1" for p in p1)
     assert any("map-update" in p["fix"] for p in p1)

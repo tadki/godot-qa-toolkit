@@ -120,6 +120,9 @@ def _capture_validator_env(project: Path, monkeypatch) -> dict:
     """截获 validator 启动时的 env（真实拉起参数走 fake）。"""
     import godot_qa_toolkit.gherkin.addon as addon_mod
 
+    # 平台判定固定为 Linux 原生通道（宿主是 WSL，避免用例依赖宿主形态）
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+
     captured: dict = {}
 
     class _R:
@@ -146,8 +149,10 @@ def test_validator_launch_uses_isolated_env(project: Path,
     assert env.get("XDG_DATA_HOME") and env["XDG_DATA_HOME"] != os.environ.get(
         "XDG_DATA_HOME", "")
     assert env.get("TMPDIR") and env["TMPDIR"] != os.environ.get("TMPDIR", "")
-    assert "APPDATA" in env and "LOCALAPPDATA" in env
-    assert "WSLENV" not in env
+    # Linux 原生通道（显式清除 WSL_DISTRO_NAME，本机宿主为 WSL）：
+    # APPDATA/LOCALAPPDATA 属 win64 语义不设；WSLENV 原样继承。
+    assert "APPDATA" not in env and "LOCALAPPDATA" not in env
+    assert env.get("WSLENV") == os.environ.get("WSLENV")
 
 
 def test_validator_isolated_env_destroyed_after(project: Path,
@@ -284,3 +289,94 @@ def test_new_env_controls_pause(monkeypatch) -> None:
     assert orch.gherkin_arm_disabled() is False
     monkeypatch.setenv("GQT_MEASUREMENT_GHERKIN_DISABLED", "1")
     assert orch.gherkin_arm_disabled() is True
+
+
+# ============ R5-7 addon 根/父路径 symlink 逃逸（HIGH-2 补漏） ============
+
+def test_addon_root_symlink_escape_rejected(tmp_path: Path,
+                                            project: Path) -> None:
+    """整个 addons/gqt_gherkin 指向项目外 → 必须 fail-loud，不得经
+    "已被同一逃逸解析后的允许根"相互比较而放行。"""
+    from godot_qa_toolkit.gherkin.addon import AddonError, compile_preflight
+
+    outside = tmp_path / "outside-addon"
+    outside.mkdir()
+    for name in ("schema.json", "validator.gd", "harness.gd"):
+        (outside / name).write_text(
+            (project / "addons" / "gqt_gherkin" / name).read_text(
+                encoding="utf-8"), encoding="utf-8")
+    (outside / "features").mkdir()
+    addon = project / "addons" / "gqt_gherkin"
+    import shutil
+    shutil.rmtree(addon)
+    addon.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AddonError, match="symlink|escapes"):
+        compile_preflight(project)
+
+
+def test_addons_parent_symlink_escape_rejected(tmp_path: Path,
+                                               project: Path) -> None:
+    """父目录 addons/ 指向项目外（addon 根自身不是 symlink）→ 同样拒绝。"""
+    from godot_qa_toolkit.gherkin.addon import AddonError, compile_preflight
+
+    outside = tmp_path / "outside-parent"
+    outside.mkdir()
+    import shutil
+    shutil.move(str(project / "addons" / "gqt_gherkin"),
+                str(outside / "gqt_gherkin"))
+    shutil.rmtree(project / "addons")
+    (project / "addons").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AddonError, match="symlink|escapes"):
+        compile_preflight(project)
+
+
+def test_normal_addon_root_still_accepted(project: Path) -> None:
+    """正常项目内 addon 不受影响（回归护栏）。"""
+    from godot_qa_toolkit.gherkin.addon import compile_preflight
+
+    doc = compile_preflight(project)
+    assert doc["schema"].startswith("gqt-gherkin-addon/")
+
+
+# ============ R5-8 win64 通道 WSLENV 传播（HIGH-3 补漏） ============
+
+def _iso_env_wsl(monkeypatch) -> dict:
+    import godot_qa_toolkit.gherkin.isolation as iso_mod
+
+    monkeypatch.setenv("WSL_DISTRO_NAME", "TestDistro")
+    with iso_mod.isolated_godot_env() as env:
+        return dict(env)
+
+
+def test_wsl_isolation_propagates_wslenv(monkeypatch) -> None:
+    """WSL：隔离值必须经 WSLENV 放行（/w），APPDATA/TMP 为 Windows 侧
+    UNC 形态，且不得透传宿主 Windows 用户路径。"""
+    monkeypatch.delenv("WSLENV", raising=False)
+    monkeypatch.setenv("APPDATA", "C:\\Users\\real-user\\AppData\\Roaming")
+    env = _iso_env_wsl(monkeypatch)
+    wslenv = env.get("WSLENV", "")
+    for name in ("APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "XDG_DATA_HOME"):
+        assert f"{name}/w" in wslenv, f"{name} must be shared to Windows side"
+    for name in ("APPDATA", "LOCALAPPDATA", "TMP", "TEMP"):
+        assert env[name].startswith("\\\\wsl.localhost\\TestDistro\\"), \
+            f"{name} must be a Windows-side UNC path: {env[name]}"
+        assert "real-user" not in env[name], "host Windows user path leaked"
+    assert env["HOME"].startswith("/"), "Linux HOME stays native"
+
+
+def test_wsl_wslenv_appends_existing(monkeypatch) -> None:
+    """调用方已有 WSLENV 时追加不覆写（与 inject 同款 LOW-4 纪律）。"""
+    monkeypatch.setenv("WSLENV", "FOO/p")
+    env = _iso_env_wsl(monkeypatch)
+    assert env["WSLENV"].startswith("FOO/p:")
+    assert "APPDATA/w" in env["WSLENV"]
+
+
+def test_linux_isolation_leaves_wslenv_untouched(monkeypatch) -> None:
+    """Linux 原生通道不引入 WSLENV 副作用（不清空、不追加）。"""
+    import godot_qa_toolkit.gherkin.isolation as iso_mod
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setenv("WSLENV", "FOO/p")
+    with iso_mod.isolated_godot_env() as env:
+        assert env["WSLENV"] == "FOO/p"

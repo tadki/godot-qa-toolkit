@@ -40,6 +40,25 @@ def test_merge_round_appends_and_recomputes() -> None:
     assert doc["summary"]["ab_pairs"][0]["ratio_b_over_a"] == pytest.approx(
         190.0 / 30.0, abs=1e-3), "后继 A 落盘时配对完成"
     assert [r["round"] for r in doc["rounds"]] == ["A1", "B1", "A2"]
+    # §SPEC-011 hardener：配对/样本不足时判据必须保持 None/False——
+    # median 倍率需 ≥3 对、rounds_complete 需 ≥3 A 样本且 ≥3 对。
+    assert doc["summary"]["median_ratio_b_over_a"] is None, \
+        "配对 <3 时 median 倍率不得给出"
+    assert doc["summary"]["rounds_complete"] is False, \
+        "1 A 墙钟 + 1 对不构成完备"
+
+
+def test_pair_consumes_pending_b_once() -> None:
+    """§SPEC-011 hardener：一个 B 只与其后第一个 shared A 配对一次——
+    pending B 消费后必须清空，后继 A 不得复用同一 B 重复配对。"""
+    rounds = [_round("A1", "shared", 29.0),
+              _round("B1", "per_feature", 180.0),
+              _round("A2", "shared", 30.0),
+              _round("A3", "shared", 31.0)]
+    s = compute_perf_summary(rounds, 4, 44)
+    assert [p["b_round"] for p in s["ab_pairs"]] == ["B1"]
+    assert s["ab_pairs"][0]["a_round"] == "A2"
+    assert s["verdict"] == "INCONCLUSIVE", "仅 1 对不构成完备对比"
 
 
 def test_merge_round_rejects_duplicate_round_name() -> None:

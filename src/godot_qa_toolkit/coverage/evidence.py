@@ -73,6 +73,11 @@ def update_run_record(evidence_dir: Path, run_uuid: str,
 def _resolve_arm(tests_glob: str | None, arm: str | None) -> str:
     # §SPEC-037：recipe.arm 显式参数注入（measurement 编排器传入）；
     # 不传 arm 时保留 tests_glob 推断（既有调用方 stdout 契约零漂移）。
+    # SEE-1624 D-n4：退役臂名 'acceptance' → 具名拒绝（禁止静默落旧名）。
+    if arm == "acceptance":
+        raise ValueError(
+            "arm name 'acceptance' is retired — use 'gherkin' "
+            "(fail-loud: the retired arm name is never emitted silently)")
     if arm is not None:
         return arm
     return "gut_core" if tests_glob else "gut_full"

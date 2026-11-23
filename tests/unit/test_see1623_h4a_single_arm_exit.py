@@ -17,7 +17,7 @@ import godot_qa_toolkit.cli as cli
 
 _PAUSE_DISCLOSURE = ("disabled_pending_atomization — gherkin arm paused "
                      "by default; restore via "
-                     "GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0 once SEE-1619 "
+                     "GQT_MEASUREMENT_GHERKIN_DISABLED=0 once SEE-1619 "
                      "atomization lands")
 
 

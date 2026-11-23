@@ -17,6 +17,7 @@ major bump /2 → /3，旧 recipe verify fail-loud）；wiring 改指单根
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from ..digest import canonical_sha256, sha256_file, sha256_text
@@ -332,6 +333,19 @@ def _verify_exclusions(recipe: dict) -> "tuple[bool, str | None]":
             return False, f"exclusion without reason: {row!r}"
     return True, None
 
+# recipe 是外部 JSON 输入（§SPEC-067）：键集必须**封闭**——未登记键
+# （含退役的 acceptance_face）与缺失必需键一律具名拒绝，不得"多带一个
+# 旧面"后重算 hash 即通过（Final Review #9）。
+ALLOWED_RECIPE_KEYS = frozenset({
+    "recipe_version", "project_root", "gut_face", "gherkin_face",
+    "toolchain", "exclusions", "recipe_hash",
+})
+REQUIRED_GHERKIN_FACE_KEYS = ("features", "count", "excluded", "harness",
+                              "adapter_source_sha256", "adapter_source_files")
+REQUIRED_HARNESS_KEYS = ("worker", "ops_version", "wiring_sha256")
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
     """Verify a loaded recipe: version tag, exclusion legality, consumed
     face shapes, hash match.
@@ -355,6 +369,13 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         return False, f"recipe is not JSON-serializable: {e} (§SPEC-066)"
     if recipe.get("recipe_hash") != current_hash:
         return False, "recipe_hash mismatch — recipe was modified after hashing"
+    # 键集封闭（hash 校验之后）：未登记键（含退役 acceptance_face）拒绝。
+    unexpected = sorted(set(recipe) - ALLOWED_RECIPE_KEYS)
+    if unexpected:
+        return False, (f"recipe has unregistered key(s): {unexpected} — "
+                       f"allowed keys are {sorted(ALLOWED_RECIPE_KEYS)} "
+                       f"(retired faces such as 'acceptance_face' are "
+                       f"rejected, not ignored)")
     # §SPEC-067：编排/分片/feature key 展开的下游直接消费面
     dirs, features = _verify_faces(recipe)
     if dirs is None:
@@ -371,4 +392,37 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
     if not isinstance(toolchain, dict):
         return False, (f"recipe 'toolchain' must be an object, "
                        f"got {toolchain!r} (§SPEC-067)")
+    ok, reason = _verify_gherkin_face(recipe.get("gherkin_face"))
+    if not ok:
+        return False, reason
+    return True, None
+
+
+def _verify_gherkin_face(face) -> tuple[bool, str | None]:
+    """gherkin_face 必需键 + adapter 指纹形状（Final Review #9）。"""
+    if not isinstance(face, dict):
+        return False, (f"recipe 'gherkin_face' must be an object, "
+                       f"got {face!r} (§SPEC-067)")
+    missing = [k for k in REQUIRED_GHERKIN_FACE_KEYS if k not in face]
+    if missing:
+        return False, (f"recipe 'gherkin_face' missing required key(s): "
+                       f"{missing} — the adapter source fingerprint is "
+                       f"mandatory (a recipe without it can bypass the "
+                       f"single-root contract)")
+    fingerprint = face.get("adapter_source_sha256")
+    if not isinstance(fingerprint, str) or not _FINGERPRINT_RE.match(fingerprint):
+        return False, (f"recipe 'gherkin_face.adapter_source_sha256' must be "
+                       f"a 64-hex sha256 digest, got {fingerprint!r}")
+    files = face.get("adapter_source_files")
+    if not isinstance(files, int) or isinstance(files, bool) or files < 1:
+        return False, (f"recipe 'gherkin_face.adapter_source_files' must be a "
+                       f"positive int, got {files!r}")
+    harness = face.get("harness")
+    if not isinstance(harness, dict):
+        return False, (f"recipe 'gherkin_face.harness' must be an object, "
+                       f"got {harness!r}")
+    missing_h = [k for k in REQUIRED_HARNESS_KEYS if k not in harness]
+    if missing_h:
+        return False, (f"recipe 'gherkin_face.harness' missing required "
+                       f"key(s): {missing_h}")
     return True, None

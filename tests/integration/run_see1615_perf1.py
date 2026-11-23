@@ -107,8 +107,8 @@ def build_fixture(root: Path, n_scripts: int = 24,
     # 测量 recipe 面（build_recipe 需要）：最小 gutconfig + 空 feature 面
     (root / ".gutconfig.json").write_text(
         json.dumps({"dirs": ["res://tests/unit"]}), encoding="utf-8")
-    (root / "acceptance" / "features").mkdir(parents=True)
-    (root / "acceptance" / "features" / "perf1.feature").write_text(
+    (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
+    (root / "addons" / "gqt_gherkin" / "features" / "perf1.feature").write_text(
         "Feature: perf1 fixture\n\n  Scenario: smoke\n    Given a project\n",
         encoding="utf-8")
     target = root / "calc.gd"

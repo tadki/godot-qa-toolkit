@@ -119,7 +119,8 @@ def test_create_suite_dir_fresh_empty_under_generated(project: Path):
     assert d.is_dir()
     assert d.parent == project / "gherkin" / "generated"
     assert d.name.startswith(".gqt-run-")
-    assert list(d.iterdir()) == []  # 事先为空
+    # 事先为空：只允许工具所有权标记（.gqt-owner），无任何生成产物
+    assert [p.name for p in d.iterdir()] == [".gqt-owner"]
 
 
 def test_create_suite_dir_refuses_existing_path(project: Path):

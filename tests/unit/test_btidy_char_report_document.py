@@ -34,7 +34,7 @@ def test_report_document_contract():
     # key order 是 JSON 契约
     assert list(doc.keys()) == KEYS
     assert doc["report"] == "shadow-report"
-    assert doc["version"] == "shadow/1"
+    assert doc["version"] == "shadow/2"
     assert doc["metric"] == "crap_line" and doc["metric_version"] == "crap-line/1"
     # unknown 统计：count=非scored, total=全量, share=count/total
     assert doc["unknown"]["count"] == 1

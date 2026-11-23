@@ -34,7 +34,9 @@ import time
 import uuid
 from pathlib import Path
 
-from .addon import (AddonError, compile_preflight, features_root,
+from .addon import (SUITE_OWNER_MARKER, SUITE_OWNER_TOKEN,
+                    AddonError, compile_preflight, features_root,
+                    is_owned_suite_dir, normalize_feature_key,
                     resolve_feature, run_validator_preflight)
 from .compile import compile_feature
 from .run import GherkinRunError, _strip_ansi, replay_check
@@ -60,11 +62,17 @@ def create_suite_dir(project_root: str | Path, *,
     """
     root = Path(project_root)
     token = run_uuid or uuid.uuid4().hex[:12]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(token)):
+        raise SuiteError(
+            f"private suite token must be a short path-safe name: {token!r}")
     d = root / "gherkin" / "generated" / f".gqt-run-{token}"
     if d.exists():
         raise SuiteError(
             f"private suite dir already exists (must be created empty): {d}")
     d.mkdir(parents=True)
+    # 所有权标记：清理只删带此标记的目录（调用方目录永不被删）。
+    (d / SUITE_OWNER_MARKER).write_text(SUITE_OWNER_TOKEN + "\n",
+                                         encoding="utf-8")
     return d
 
 
@@ -80,7 +88,7 @@ def compile_keys_auto_suite(project_root: str | Path,
     `.gqt-run-*` 残留（QA DEF-1/1b/1c）。显式 --out-dir 场景由调用方
     持有目录，不走本函数。"""
     root = Path(project_root)
-    selected = sorted(set(keys))
+    selected = sorted({normalize_feature_key(k) for k in keys})
     if not selected:
         raise SuiteError("no keys parsed")
     compile_preflight(root)          # AddonError：schema 缺/损/漂移等
@@ -106,7 +114,7 @@ def compile_keys_to_suite(project_root: str | Path, keys: list[str],
     """
     root = Path(project_root)
     suite_dir = Path(suite_dir)
-    selected = sorted(set(keys))
+    selected = sorted({normalize_feature_key(k) for k in keys})
     manifests: dict[str, dict] = {}
     for key in selected:
         f = resolve_feature(root, key)
@@ -232,10 +240,14 @@ def reconcile(project_root: str | Path, suite_dir: str | Path,
 
 
 def _cleanup_suite_dir(suite_dir: Path) -> str:
-    parent = suite_dir.parent
-    shutil.rmtree(suite_dir)
-    # 零残留：父目录若因本管线而创建且现已空 → 一并移除；主 generated
-    # 有既有产物（KOL 实树）则 rmdir 失败原样保留。
+    sd = Path(suite_dir)
+    if not is_owned_suite_dir(sd):
+        # 调用方持有目录：永不清空/删除（可能含调用方文件）。
+        return "kept-caller-owned"
+    parent = sd.parent
+    shutil.rmtree(sd)
+    # 零残留：父目录（受管的 gherkin/generated）若已空 → 一并移除；
+    # 主 generated 有既有产物（KOL 实树）则 rmdir 失败原样保留。
     try:
         parent.rmdir()
     except OSError:
@@ -305,7 +317,7 @@ def run_gherkin_probe(project_root: str | Path, keys: list[str],
     编译后、业务 GUT 前的失败（重放/validator 红）回收本探针创建的私有
     目录——probe 入口与 measure 核心路径同纪律（QA DEF-2）。"""
     root = Path(project_root)
-    selected = sorted(set(keys))
+    selected = sorted({normalize_feature_key(k) for k in keys})
     t0 = time.monotonic()
     try:
         compile_rec = compile_keys_auto_suite(root, selected)

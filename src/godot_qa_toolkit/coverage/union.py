@@ -39,8 +39,13 @@ def arm_record_from_bundle(bundle: dict, *, recipe_hash: str,
     if state == "valid" and not sent.get("probes_fired"):
         state, reason = "invalid", "no_probe_fired"
     manifest = bundle["probe_manifest"]["inline"]
+    arm = bundle["recipe"]["arm"]
+    if arm == "acceptance":
+        raise ValueError(
+            "arm name 'acceptance' is retired — use 'gherkin' (fail-loud: "
+            "the retired arm name is never emitted silently)")
     return {
-        "arm": bundle["recipe"]["arm"],
+        "arm": arm,
         "run_uuid": bundle["run_uuid"],
         "file": bundle["target"]["file"],
         "target_sha256": bundle["target"]["sha256"],

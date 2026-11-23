@@ -4,7 +4,7 @@
 `acceptance_disabled() and test_attribution`——普通 `measure run`
 （无 env、无 --test-attribution）落入双臂执行分支：acceptance 臂真实
 执行（额外成本 + 无关失败劫持 exit）、`gherkin_arm` 披露缺位；
-显式 `GQT_MEASUREMENT_ACCEPTANCE_DISABLED=1` 同样被无视。
+显式 `GQT_MEASUREMENT_GHERKIN_DISABLED=1` 同样被无视。
 
 行为契约（§SPEC-PLANFIRST 任务 2 / Owner 裁定：暂停是有意契约，
 恢复需显式 env=0）：
@@ -68,10 +68,10 @@ def _wire(monkeypatch, *, emit_capture: list):
 
 def _setup_env(monkeypatch, value: str | None):
     if value is None:
-        monkeypatch.delenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED",
+        monkeypatch.delenv("GQT_MEASUREMENT_GHERKIN_DISABLED",
                            raising=False)
     else:
-        monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", value)
+        monkeypatch.setenv("GQT_MEASUREMENT_GHERKIN_DISABLED", value)
 
 
 def test_plain_run_paused_no_gherkin_arm(monkeypatch):

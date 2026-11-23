@@ -34,6 +34,8 @@ from .addon import (
     AddonError,
     compile_preflight,
     features_root,
+    is_owned_suite_dir,
+    normalize_feature_key,
 )
 
 IR_DIR = "gherkin/ir"
@@ -455,7 +457,17 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     # （相对路径会随调用方 CWD 漂移，造成同源误报冲突/异源漏报）。
     p = Path(feature_path).resolve()
     root = Path(project_root)
+    root_resolved = root.resolve()
     allowed = features_root(root).resolve()
+    try:
+        allowed.relative_to(root_resolved)
+    except ValueError:
+        # 单根自身经 symlink 逃逸项目根：其下"合法"源实为项目外文件，
+        # 必须拒绝（否则 strict single root 可被链接绕过）。
+        return None, {"reason": (
+            f"gherkin features root escapes the project root: {allowed} — "
+            f"{FEATURES_DIR_RELPATH} must resolve inside {root_resolved} "
+            f"(symlinked root rejected)")}
     if p.parent != allowed:
         return None, {"reason": (
             f"feature outside the strict single root: {p} — gqt only "
@@ -473,7 +485,7 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     except GherkinSyntaxError as e:
         return None, {"reason": str(e)}
 
-    feature_key = re.sub(r"[^A-Za-z0-9_]", "_", p.stem)
+    feature_key = normalize_feature_key(p.stem)
     ir_json = json.dumps(ir, ensure_ascii=False, indent=2, sort_keys=True)
     # 私有目录（§SPEC-035）：res:// 路径仍相对 project_root——私有目录必须
     # 位于项目内，生成 .gd 嵌入的 IR 读取路径才能被 Godot 解析。
@@ -485,6 +497,16 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
         except ValueError:
             return None, {"reason": f"out_dir must live inside the project "
                                     f"for res:// resolution: {out_dir}"}
+        # CRITICAL（Final Review #1）：显式 --out-dir 是**调用方持有**的
+        # 目录——gqt 只写入、从不清理/删除；为保证产物可判且不覆盖调用方
+        # 数据，目录必须不存在或为空，否则具名拒绝（零写入）。
+        if out.exists():
+            if not out.is_dir():
+                return None, {"reason": f"out_dir is not a directory: {out}"}
+            if any(out.iterdir()) and not is_owned_suite_dir(out):
+                return None, {"reason": (
+                    f"out_dir must be empty: {out} — caller-owned dirs are "
+                    f"never cleared or deleted by gqt")}
         ir_rel = f"{base}/ir/{feature_key}.json"
         gd_rel = f"{base}/generated/test_{feature_key}.gd"
     else:

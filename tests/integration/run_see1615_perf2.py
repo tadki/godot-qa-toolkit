@@ -84,8 +84,8 @@ def build_fixture(root: Path, kol_addons: Path) -> tuple[Path, Path]:
         encoding="utf-8")
     (root / ".gutconfig.json").write_text(
         json.dumps({"dirs": ["res://tests/unit"]}), encoding="utf-8")
-    (root / "acceptance" / "features").mkdir(parents=True)
-    (root / "acceptance" / "features" / "perf2.feature").write_text(
+    (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
+    (root / "addons" / "gqt_gherkin" / "features" / "perf2.feature").write_text(
         "Feature: perf2\n\n  Scenario: smoke\n    Given a project\n",
         encoding="utf-8")
     target = root / "calc.gd"

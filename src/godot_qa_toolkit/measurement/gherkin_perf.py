@@ -8,8 +8,16 @@ import statistics
 from pathlib import Path
 
 
+PERF_DOC_VERSION = "see1619-gherkin-perf/1"
+
+
 class DuplicateRoundError(ValueError):
     """重复 batch round：具名拒绝（重跑同轮不得静默覆盖样本）。"""
+
+
+class RetiredReportError(ValueError):
+    """resume 报告的 doc/version 与当前契约不符：具名拒绝（旧 schema 不得
+    与新轮次混算——旧 acceptance_wall_s 等键会被静默忽略 = 假绿）。"""
 
 
 def _pair_rounds(rounds: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -111,9 +119,15 @@ def merge_round_into_report(doc: dict, round_record: dict, shards_a: int,
     追加后重算汇总；round 名重复即拒绝（重跑同轮不得静默覆盖样本）。
     report_path 给定时落盘。"""
     name = round_record.get("round")
+    existing_doc = doc.get("doc")
+    if existing_doc is not None and existing_doc != PERF_DOC_VERSION:
+        raise RetiredReportError(
+            f"report doc {existing_doc!r} is retired/unsupported — resume "
+            f"requires {PERF_DOC_VERSION!r} (old schema reports are "
+            f"rejected, never mixed with new rounds)")
     if any(r.get("round") == name for r in doc.get("rounds", [])):
         raise DuplicateRoundError(f"duplicate round: {name}")
-    doc.setdefault("doc", "see1619-gherkin-perf/1")
+    doc.setdefault("doc", PERF_DOC_VERSION)
     doc.setdefault("rounds", []).append(round_record)
     doc["summary"] = compute_perf_summary(doc["rounds"], shards_a, keys)
     if report_path is not None:

@@ -142,13 +142,13 @@ def acceptance_evidence_block(*, executed: bool, converged: bool | None,
 
 
 def intolerant_draft(entries: "list[dict]") -> dict:
-    """acceptance_scenarios 不耐受声明草稿（与 --intolerant-tests 的
-    acceptance_scenarios 数组同构，可直接保存使用）。"""
+    """gherkin_scenarios 不耐受声明草稿（与 --intolerant-tests 的
+    gherkin_scenarios 数组同构，可直接保存使用）。"""
     scenarios = []
     for e in entries:
         item = {"feature": e["feature"], "scenario": e["scenario"],
                 "reason": e.get("reason") or
-                "suspected_acceptance_intolerance: passes uninstrumented "
+                "suspected_gherkin_intolerance: passes uninstrumented "
                 "replay, fails instrumented run — confirm to exempt or "
                 "investigate"}
         if e.get("scenario_line") is not None:
@@ -156,23 +156,31 @@ def intolerant_draft(entries: "list[dict]") -> dict:
         if e.get("example_row_line") is not None:
             item["example_row_line"] = int(e["example_row_line"])
         scenarios.append(item)
-    return {"acceptance_scenarios": scenarios}
+    return {"gherkin_scenarios": scenarios}
 
 
-def parse_acceptance_scenarios(cfg: dict) -> list[dict]:
-    """`acceptance_scenarios` 声明解析与校验（身份键必填、行号可选）。"""
-    decl = cfg.get("acceptance_scenarios", [])
+def parse_gherkin_scenarios(cfg: dict) -> list[dict]:
+    """`gherkin_scenarios` 声明解析与校验（身份键必填、行号可选）。
+
+    旧键 `acceptance_scenarios` 已退役：仍存在 → 具名 fail-loud（禁止
+    静默忽略导致新键被丢弃为空集）。"""
+    if "acceptance_scenarios" in cfg:
+        raise ValueError(
+            "intolerant 'acceptance_scenarios' is retired — use "
+            "'gherkin_scenarios' (fail-loud: the retired key is never "
+            "ignored silently)")
+    decl = cfg.get("gherkin_scenarios", [])
     if not isinstance(decl, list):
-        raise ValueError("intolerant 'acceptance_scenarios' must be a list")
+        raise ValueError("intolerant 'gherkin_scenarios' must be a list")
     out = []
     for item in decl:
         if not isinstance(item, dict):
-            raise ValueError("acceptance_scenario declaration must be an "
+            raise ValueError("gherkin_scenario declaration must be an "
                              f"object, got {item!r}")
         for key in ("feature", "scenario", "reason"):
             if not isinstance(item.get(key), str) or not item[key]:
                 raise ValueError(
-                    f"acceptance_scenario missing non-empty {key!r} "
+                    f"gherkin_scenario missing non-empty {key!r} "
                     "(declarations without a name/reason are a silent-"
                     "exemption shortcut)")
         entry = {"feature": item["feature"], "scenario": item["scenario"],

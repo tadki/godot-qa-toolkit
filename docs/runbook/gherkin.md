@@ -13,7 +13,7 @@ contract mutation over the IR to prove the assertions actually bite.
   implement the interface in `docs/templates/testing_api.gd.md` (the four-step
   combo `smoke_check` / `init_case` / `run_step` / `query_state` plus
   `check_expectations`). gqt never discovers or infers the adapter; when it is
-  missing, generated tests fail explicitly (`acceptance harness unavailable`),
+  missing, generated tests fail explicitly (`gherkin harness unavailable`),
   never silently skip.
 - `compile` also runs without wiring (it only writes artifacts).
 
@@ -21,7 +21,7 @@ contract mutation over the IR to prove the assertions actually bite.
 
 ```bash
 # Compile: .feature → IR + generated tests + manifest (--write is opt-in)
-gqt gherkin compile acceptance/foo.feature --project-root . --write
+gqt gherkin compile addons/gqt_gherkin/features/foo.feature --project-root . --write
 
 # Run: replay-check (three-artifact hash binding + recompile of the source
 # .feature), then execute the generated suite

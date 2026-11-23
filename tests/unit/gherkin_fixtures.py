@@ -29,9 +29,12 @@ SECOND_FEATURE = """Feature: 纯场景
     Given world exists
 """
 
+# R2 批准字段（§SPEC-019 终稿）：schema（<major>[.<minor>]）/ requires_gqt /
+# testing_api；未知键忽略（minor=加法）。
 VALID_SCHEMA: dict = {
-    "schema_version": "gqt-gherkin-addon/1",
-    "requires": {"gqt": "v0.4.0", "testing_api": "see1468-gherkin/2"},
+    "schema": "gqt-gherkin-addon/1.0",
+    "requires_gqt": "v0.4.0",
+    "testing_api": "see1468-gherkin/2",
 }
 
 # 真实可被 Godot `-s` 拉起的 validator 最小实现：V 检查 = schema 可解析、

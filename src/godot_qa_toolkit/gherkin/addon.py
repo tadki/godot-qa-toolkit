@@ -41,7 +41,31 @@ VALIDATOR_RELPATH = f"{ADDON_DIR_RELPATH}/validator.gd"
 SCHEMA_RELPATH = f"{ADDON_DIR_RELPATH}/schema.json"
 SCHEMA_FILENAME = "schema.json"
 
-_SCHEMA_MAJOR_RE = re.compile(r"^gqt-gherkin-addon/(\d+)$")
+_SCHEMA_RE = re.compile(r"^gqt-gherkin-addon/(\d+)(?:\.(\d+))?$")
+_KEY_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
+
+
+SUITE_OWNER_MARKER = ".gqt-owner"
+SUITE_OWNER_TOKEN = "gqt-gherkin-private-suite/1"
+
+
+def is_owned_suite_dir(suite_dir: str | Path) -> bool:
+    """私有套件目录的工具所有权标记：目录内存在 `.gqt-owner` 标记文件。
+
+    清理**只**允许命中标记的目录——调用方持有的任意目录（`--suite-dir`/
+    `--out-dir`）一律不删，即便同名同形（Final Review #1：调用方文件与
+    目录永不被递归删除）。compile 侧据此区分"工具自有增量写入"与
+    "调用方目录必须为空"。"""
+    return (Path(suite_dir) / SUITE_OWNER_MARKER).is_file()
+
+
+def normalize_feature_key(stem: str) -> str:
+    """feature key 全链唯一规范化：非 [A-Za-z0-9_] → `_`。
+
+    编译文件名（test_<key>.gd）、manifest.feature_key、suite/replay 的
+    key 解析一律经此（§SPEC-005 修复：compile 归一而 suite 按原 key 查
+    manifest 会使带连字符 feature 的 key-mode 运行必失败）。"""
+    return _KEY_UNSAFE.sub("_", str(stem))
 
 
 class AddonError(Exception):
@@ -72,9 +96,14 @@ def resolve_feature(project_root: str | Path, key: str) -> Path:
         raise AddonError(
             f"no .feature discovered at {FEATURES_DIR_RELPATH} — empty "
             f"feature set is not a valid addon layout")
-    for p in hits:
-        if p.stem == key:
-            return p
+    target = normalize_feature_key(key)
+    matches = [p for p in hits if normalize_feature_key(p.stem) == target]
+    if len(matches) > 1:
+        raise AddonError(
+            f"duplicate feature key after normalization: {key!r} matches "
+            f"{[m.name for m in matches]} — keys must be 1:1 with sources")
+    if matches:
+        return matches[0]
     raise AddonError(
         f"unknown key: {key} — no {FEATURES_DIR_RELPATH} entry with that "
         f"stem")
@@ -112,35 +141,36 @@ def compile_preflight(project_root: str | Path) -> dict:
     """compile 侧纯解析握手（§SPEC-003）：schema 缺声明、major 不支持、
     requires 过高、testing-api token 漂移具名拒绝；零 Godot 进程。
     返回通过核验的 schema dict。"""
+    # R2 批准字段（§SPEC-019 终稿）：`schema`（`gqt-gherkin-addon/<major>
+    # [.<minor>]`：major=破坏性、minor=加法）、`requires_gqt`、`testing_api`；
+    # 未知键忽略（加性演进）。
     doc = read_schema(project_root)
-    version = doc.get("schema_version")
+    version = doc.get("schema")
     if not isinstance(version, str):
         raise AddonError(
-            f"addon schema missing schema_version: {doc!r} "
+            f"addon schema missing 'schema' declaration: {doc!r} "
             f"(expected {SCHEMA_VERSION})")
-    m = _SCHEMA_MAJOR_RE.match(version)
+    m = _SCHEMA_RE.match(version)
     if m is None or int(m.group(1)) not in SUPPORTED_ADDON_MAJORS:
         raise AddonError(
             f"unsupported addon schema major: {version!r} — this GQT "
             f"supports exactly {list(SUPPORTED_ADDON_MAJORS)} "
-            f"({SCHEMA_VERSION})")
-    requires = doc.get("requires")
-    if not isinstance(requires, dict) or "gqt" not in requires \
-            or "testing_api" not in requires:
-        raise AddonError(
-            f"addon schema requires declaration missing/incomplete: "
-            f"got {requires!r} — must declare 'gqt' and 'testing_api'")
-    req_gqt = requires["gqt"]
+            f"({SCHEMA_VERSION}; minor additive versions are accepted)")
+    req_gqt = doc.get("requires_gqt")
     if not isinstance(req_gqt, str):
         raise AddonError(
-            f"addon schema requires.gqt must be a string, got "
-            f"{req_gqt!r}")
+            f"addon schema requires_gqt declaration missing/invalid: "
+            f"got {req_gqt!r} — must declare 'requires_gqt'")
     if _version_tuple(req_gqt) > _version_tuple(GQT_VERSION):
         raise AddonError(
-            f"addon requires.gqt {req_gqt!r} is higher than this GQT "
+            f"addon requires_gqt {req_gqt!r} is higher than this GQT "
             f"({GQT_VERSION}) — upgrade the toolkit or lower the addon "
             f"requirement")
-    req_token = requires["testing_api"]
+    req_token = doc.get("testing_api")
+    if not isinstance(req_token, str) or not req_token:
+        raise AddonError(
+            f"addon schema testing_api declaration missing/invalid: "
+            f"got {req_token!r} — must declare 'testing_api'")
     expected = _testing_api_token()
     if req_token != expected:
         raise AddonError(
@@ -177,8 +207,16 @@ def run_validator_preflight(project_root: str | Path,
         raise AddonError(
             f"addon validator launch failed ({type(e).__name__}): {e}") from e
     output = (r.stdout or "") + "\n" + (r.stderr or "")
+    if r.returncode != 0:
+        raise AddonError(
+            f"addon validator process failed (exit={r.returncode}) — a "
+            f"non-zero validator exit is rejected regardless of printed "
+            f"verdicts (tail: {' / '.join(output.splitlines()[-3:])})")
+    # 协议身份 + 最后一行为准：正向扫描持续覆盖，最终只认**最后一个**
+    # 携带 supported_majors 的合法 verdict——早期噪声/日志绿 verdict 不得
+    # 覆盖其后真正的红判定（反之亦然）。
     verdict: dict | None = None
-    for line in reversed(output.splitlines()):
+    for line in output.splitlines():
         line = line.strip()
         if not line.startswith("{"):
             continue

@@ -331,13 +331,65 @@ def _gherkin_compile(args: argparse.Namespace) -> int:
     })
 
 
+def _gherkin_domain_precheck(args: argparse.Namespace) -> int | None:
+    """§SPEC-016（Final Review #6）：域检查（重放/键解析/schema）先于二进制
+    配置校验——篡改产物 + 非法 --godot-bin 时必须先报域错误，不得被环境
+    错误抢占。纯本地检查，零 Godot 进程。返回 int 表示已完成的错误响应。"""
+    from pathlib import Path as _P
+
+    from .gherkin.addon import AddonError, compile_preflight, resolve_feature
+    from .gherkin.run import GherkinRunError, replay_check
+    from .gherkin.suite import SuiteError
+    root = getattr(args, "directory", None) or args.project_root
+    root_p = _P(root)
+    schema_exists = (root_p / "addons" / "gqt_gherkin" /
+                      "schema.json").is_file()
+    manifests = []
+    if getattr(args, "suite_dir", None):
+        manifests = sorted((_P(args.suite_dir) / "generated").glob(
+            "*.manifest.json"))
+    elif getattr(args, "key", None):
+        manifests = [root_p / "gherkin" / "generated" /
+                     f"{args.key}.manifest.json"]
+        manifests = [m for m in manifests if m.is_file()]
+    if not schema_exists and not manifests:
+        # 无产物可比对域状态——不抢占既有二进制配置错误契约（§SPEC-1525）。
+        return None
+    try:
+        if args.gherkin_command == "mutate":
+            replay_check(root, args.key)
+        elif getattr(args, "suite_dir", None):
+            gen = _P(args.suite_dir) / "generated"
+            for man in sorted(gen.glob("*.manifest.json")):
+                replay_check(root, man.name.removesuffix(".manifest.json"),
+                            suite_dir=args.suite_dir)
+        elif getattr(args, "gherkin_probe_keys", None):
+            keys = [k.strip() for k in str(args.gherkin_probe_keys).split(",")
+                    if k.strip()]
+            compile_preflight(root)
+            for k in keys:
+                resolve_feature(root, k)
+        elif getattr(args, "key", None):
+            replay_check(root, args.key)
+    except (GherkinRunError, SuiteError, AddonError) as e:
+        return _emit({
+            "tool": "gherkin", "ok": False,
+            "summary": {"error": str(e), "run_error": True},
+            "failures": [{"reason": f"run_error: {e}"}],
+        })
+    return None
+
+
 def cmd_gherkin(args: argparse.Namespace) -> int:
     from .gherkin.run import GherkinRunError, run_suite
     from .gherkin.suite import SuiteError, run_gherkin_probe, run_suite_dir
 
     if args.gherkin_command == "compile":
         return _gherkin_compile(args)
-    # run / mutate
+    # run / mutate：域检查先行（§SPEC-016），再解析二进制配置。
+    domain = _gherkin_domain_precheck(args)
+    if domain is not None:
+        return domain
     early = _apply_godot_bin_or_contract("gherkin", args)
     if early is not None:
         return early
@@ -1848,7 +1900,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cr = mssub.add_parser(
         "suite",
-        help="build the measurement suite definition (measurement-suite/2, "
+        help="build the measurement suite definition (measurement-suite/3, "
              "read-only, SEE-1546 WP3)",
     )
     cr.add_argument("--project-root", default=None,
@@ -1867,9 +1919,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Godot project root (addons/gut + .gutconfig.json); "
                           "omitted = discover from roots/CWD")
     can.add_argument("--recipe", required=True,
-                     help="measurement-suite/2 JSON (from `gqt measure suite --out`)")
+                     help="measurement-suite/3 JSON (from `gqt measure suite --out`)")
     can.add_argument("--out", required=True,
-                     help="measurement-report/2 output JSON path")
+                     help="measurement-report/3 output JSON path")
     can.add_argument("--baseline-failures", default=None,
                      help="JSON file with pre-existing (un-instrumented) "
                           "failing (script, test) pairs ([[..],..] or "
@@ -1967,7 +2019,7 @@ def build_parser() -> argparse.ArgumentParser:
     inc.add_argument("--project-root", default=None,
                      help="Godot project root; omitted = discover from roots/CWD")
     inc.add_argument("--recipe", required=True,
-                     help="measurement-suite/2 JSON (same content as the "
+                     help="measurement-suite/3 JSON (same content as the "
                           "baseline run)")
     inc.add_argument("--baseline", required=True,
                      help="prior attribution artifact "

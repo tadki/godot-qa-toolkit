@@ -213,15 +213,15 @@ def _parse_intolerant_config(cfg: dict) -> tuple:
              "reason": _req_str(l, "reason", "coverage limitation")})
     # §SPEC-ACC-GOVERN：acceptance 不耐受身份（feature/scenario +
     # scenario_line/example_row_line）——同构校验后挂 acceptance 子集
-    from .acc_govern import parse_acceptance_scenarios
+    from .acc_govern import parse_gherkin_scenarios
     try:
-        acc_scenarios = parse_acceptance_scenarios(cfg)
+        acc_scenarios = parse_gherkin_scenarios(cfg)
     except ValueError as e:
         raise MeasurementError(str(e)) from e
     if acc_scenarios:
         intolerant_tests = list(intolerant_tests) + [
             {"name": f"{a['feature']}::{a['scenario']}",
-             "reason": a["reason"], "acceptance": a} for a in acc_scenarios]
+             "reason": a["reason"], "gherkin": a} for a in acc_scenarios]
     return intolerant_tests, declared_scoped, declared_bare, \
         coverage_limitations
 
@@ -560,7 +560,10 @@ def _measure_stage(root, target_files, recipe_hash, block_compress,
 
 
 ENV_FAIL_ON_RED_BASELINE = "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"
-ENV_ACCEPTANCE_DISABLED = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
+ENV_GHERKIN_DISABLED = "GQT_MEASUREMENT_GHERKIN_DISABLED"
+# 退役 env：旧名仍被设置 → 具名 fail-loud（禁止静默忽略：旧名若继续
+# 生效会把"已恢复双臂"读成"仍暂停"，反之亦然）。
+ENV_ACCEPTANCE_DISABLED_RETIRED = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
 
 
 _ENV_ARM_TIMEOUT_S = "GQT_MEASUREMENT_ARM_TIMEOUT_S"
@@ -590,13 +593,22 @@ def resolve_arm_timeout(requested_timeout_s: int,
     return requested_timeout_s, f"parameter timeout_s={requested_timeout_s}s"
 
 
-def acceptance_disabled() -> bool:
-    """§SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——映射
-    构建与默认测量路径不执行、不产出 acceptance；统一披露
-    disabled_pending_atomization。恢复条件：SEE-1619 原子化改造完成后按
-    共享进程分片恢复（设本 env=0）。默认暂停（缺省=1）。"""
+def gherkin_arm_disabled() -> bool:
+    """gherkin 臂暂停（§SPEC-PLANFIRST 任务 2 / SEE-1624 D-n3 改名）——
+    映射构建与默认测量路径不执行 gherkin 臂；统一披露
+    disabled_pending_atomization。恢复：设 GQT_MEASUREMENT_GHERKIN_DISABLED=0。
+    默认暂停（缺省=1）。
+
+    旧 env 名（GQT_MEASUREMENT_ACCEPTANCE_DISABLED）已退役：若仍被设置
+    → 具名 fail-loud（MeasurementError），不静默忽略也不继续按新名判定。"""
     import os as _os
-    return _os.environ.get(ENV_ACCEPTANCE_DISABLED, "1").strip() \
+    retired = _os.environ.get(ENV_ACCEPTANCE_DISABLED_RETIRED, "").strip()
+    if retired:
+        raise MeasurementError(
+            f"{ENV_ACCEPTANCE_DISABLED_RETIRED} is retired — use "
+            f"{ENV_GHERKIN_DISABLED}=0 to restore the gherkin arm "
+            f"(fail-loud: the retired name is never ignored silently)")
+    return _os.environ.get(ENV_GHERKIN_DISABLED, "1").strip() \
         not in ("", "0", "false")
 _BASELINE_TOP_N = 10
 
@@ -789,10 +801,10 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             root, target_files, inp["recipe_hash"], block_compress,
             test_attribution, attribution_causal, evidence_out, scope_roots)
     with clock.stage("gut_full_arm"):
-        if acceptance_disabled():
+        if gherkin_arm_disabled():
             # §SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——
             # 占位臂 state=disabled；恢复条件 SEE-1619 原子化改造后共享
-            # 进程分片（env GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0）。
+            # 进程分片（env GQT_MEASUREMENT_GHERKIN_DISABLED=0）。
             # SEE-1623 H4：暂停契约与归属模式解耦——此前写成
             # `acceptance_disabled() and test_attribution`，普通路径落入
             # 双臂执行（额外成本 + 无关失败劫持 exit + 披露缺位），显式
@@ -858,11 +870,11 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     # §SPEC-PLANFIRST B：映射构建全链分段落盘（消灭 prepare 盲区）
     clock.add("total", time.monotonic() - t_total)
     report["stage_timings"] = clock.disclosure()
-    if acceptance_disabled():
+    if gherkin_arm_disabled():
         report["gherkin_arm"] = ("disabled_pending_atomization — "
                                     "restored after SEE-1619 (shared-"
                                     "process shards); env override "
-                                    "GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0")
+                                    "GQT_MEASUREMENT_GHERKIN_DISABLED=0")
     return report
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")

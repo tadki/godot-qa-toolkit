@@ -25,6 +25,7 @@ from pathlib import Path
 from godot_qa_toolkit.measurement.gherkin_perf import (
     compute_perf_summary,
     DuplicateRoundError,
+    RetiredReportError,
     merge_round_into_report,
 )
 
@@ -109,8 +110,9 @@ def run_single_round(args, round_type: str, round_index: int,
     try:
         merge_round_into_report(doc, rec, args.shards_a, keys,
                                 report_path=report_path)
-    except DuplicateRoundError as e:
-        # §SPEC-026：重复 batch round 具名拒绝，不裸 ValueError 崩溃。
+    except (DuplicateRoundError, RetiredReportError) as e:
+        # §SPEC-026：重复 batch round / 退役 schema 报告具名拒绝，
+        # 不裸 ValueError 崩溃。
         print(f"REFUSAL: {e}", file=sys.stderr)
         return 2
     s = doc["summary"]

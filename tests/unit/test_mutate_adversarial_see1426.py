@@ -69,13 +69,13 @@ def _restore_subprocess():
 
 @pytest.fixture(autouse=True)
 def _stub_preflight(monkeypatch):
-    """SEE-1624：worker 通道测试不涉预检——stub 掉 run_preflight
+    """SEE-1624：worker 通道测试不涉预检——stub 掉 validator 拉起阶段
     的 validator 拉起（真实 Godot 进程不进单元测试）。"""
     import godot_qa_toolkit.gherkin.addon as _addon
-    monkeypatch.setattr(_addon, "run_preflight",
+    monkeypatch.setattr(_addon, "run_validator_preflight",
                         lambda root, **k: {"ok": True})
     import godot_qa_toolkit.gherkin.mutate_runner as _mr
-    monkeypatch.setattr(_mr, "run_preflight",
+    monkeypatch.setattr(_mr, "run_validator_preflight",
                         lambda root, **k: {"ok": True})
     yield
 

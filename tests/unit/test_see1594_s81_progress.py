@@ -33,6 +33,12 @@ def test_progress_lines_shape(tmp_path, capsys):
     t = _load_s63()
     project = t.project.__wrapped__(tmp_path)
     fake = t.LazyScenarioGodot(project, scenario="absorb")
+    # SEE-1624 §SPEC-016：本用例钉进度行契约，不依赖真实 Godot——validator
+    # 拉起阶段（需二进制的预检）显式 stub；预检语义由
+    # test_gherkin_preflight_see1624.py 专项覆盖，断言面不变。
+    import godot_qa_toolkit.measurement.arms as _arms
+    orig_preflight = _arms.run_validator_preflight
+    _arms.run_validator_preflight = lambda root, **k: {"ok": True}
     orig_run = sp.run
     sp.run = fake
     try:
@@ -42,6 +48,7 @@ def test_progress_lines_shape(tmp_path, capsys):
                         attribution_out=str(tmp_path / "map.json"))
     finally:
         sp.run = orig_run
+        _arms.run_validator_preflight = orig_preflight
     err = capsys.readouterr().err
     assert "measure: arm=gut_full start shards=" in err
     assert re.search(

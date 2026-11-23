@@ -34,7 +34,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .addon import AddonError, features_root, resolve_feature, run_preflight
+from .addon import (AddonError, features_root, resolve_feature,
+                    run_validator_preflight)
 from .compile import compile_feature
 from .run import GherkinRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
@@ -234,13 +235,15 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
         raise GherkinRunError(f"GUT runner not found: {gut}")
-    try:
-        run_preflight(root)
-    except AddonError as e:
-        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    # SEE-1624 §SPEC-003/016 次序：重放（含纯解析握手，零 Godot）先行，
+    # validator 拉起紧随其后、业务 GUT 之前。
     snapshot = _snapshot_main(root)
     for k in keys:
         replay_check(root, k, suite_dir=suite_dir)
+    try:
+        run_validator_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     rel = suite_dir.relative_to(root).as_posix()
     try:
         with GlobalGodotGate(str(root)):

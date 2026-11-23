@@ -32,7 +32,8 @@ from ..coverage.runner import (
 )
 from ..coverage.union import arm_record_from_bundle
 from ..gherkin.run import GherkinRunError, replay_check
-from ..gherkin.addon import AddonError, run_preflight
+from ..gherkin.addon import (AddonError, compile_preflight,
+                             run_validator_preflight)
 from ..gherkin.suite import (
     SuiteError,
     _cleanup_suite_dir,
@@ -1285,8 +1286,12 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
                      gherkin_shards: int,
                      arms_parallel: bool, gherkin_adaptive: bool,
                      arm_kwargs: dict) -> dict:
-    """臂 gherkin：预检（addon validator 一次，§SPEC-003）→ 私有 suite
-    按分片分组编译/重放 → 并行扇出 GUT。"""
+    """臂 gherkin：纯解析预检 → 私有 suite 按分片分组编译/重放 →
+    validator 拉起一次（§SPEC-003）→ 并行扇出 GUT。
+
+    SEE-1624 §SPEC-016 次序：compile/replay 的纯域检查（零 Godot）先行，
+    validator（需要 Godot 二进制）在业务扇出之前——缺二进制不得抢占
+    域错误，仍保持"业务执行前恰好一次预检"。"""
     keys = list(gherkin_keys) if gherkin_keys else [
         f["key"] for f in recipe["gherkin_face"]["features"]]
     snapshot = _snapshot_main(root)
@@ -1295,7 +1300,7 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
     cleanup_done = False
     try:
         try:
-            run_preflight(root)
+            compile_preflight(root)
         except AddonError as e:
             # measure 绕过 CLI 的核心路径同样被预检守门：失败具名 invalid
             # 且无 suite 残留（由 except 分支统一回收）。
@@ -1310,6 +1315,12 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
             sd = create_suite_dir(root)
             groups.append({"suite_dir": sd, "keys": list(chunk)})
             _compile_into(sd, root, chunk)
+
+        # 编译/重放（纯域）全过之后、业务扇出之前：validator 恰好一次。
+        try:
+            run_validator_preflight(root)
+        except AddonError as e:
+            raise GherkinRunError(f"gherkin preflight failed: {e}") from e
 
         result = run_arm("gherkin", root=root, recipe=recipe,
                          gherkin={"groups": groups, "snapshot": snapshot},

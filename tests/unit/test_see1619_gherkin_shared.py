@@ -98,10 +98,12 @@ def _wire(monkeypatch, tmp_path: Path, fake_run_arm) -> None:
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
     # SEE-1624：flow 入口预检不在本组测试语义内（stub 两阶段：夹具无
     # addon schema、且不得拉真 Godot）；预检语义有专项测试覆盖。
-    monkeypatch.setattr(arms, "run_preflight",
+# SEE-1624：flow 入口预检不在本组测试语义内（stub 两阶段：夹具无
+    # addon schema、且不得拉真 Godot）；预检语义有专项测试覆盖。
+    monkeypatch.setattr(arms, "compile_preflight",
                         lambda root, **k: {"ok": True})
-    # SEE-1624：flow 入口预检不在本组测试语义内（stub 跳过，不拉 Godot）
-    monkeypatch.setattr(arms, "run_preflight", lambda root, **k: {"ok": True})
+    monkeypatch.setattr(arms, "run_validator_preflight",
+                        lambda root, **k: {"ok": True})
 
 
 KEYS = ["k1", "k2", "k3", "k4"]
@@ -236,7 +238,10 @@ def test_flow_never_touches_harness_contract_position(
     monkeypatch.setattr(arms, "run_arm", fake)
     monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
-    monkeypatch.setattr(arms, "run_preflight", lambda root, **k: {"ok": True})
+    monkeypatch.setattr(arms, "compile_preflight",
+                        lambda root, **k: {"ok": True})
+    monkeypatch.setattr(arms, "run_validator_preflight",
+                        lambda root, **k: {"ok": True})
     real_unlink = Path.unlink
     unlink_targets: list[Path] = []
 
@@ -467,7 +472,9 @@ def test_second_fallback_compile_failure_cleans_fb_suites(
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
     fake, _calls = _make_fake_run_arm({"k1", "k2"}, set())
     monkeypatch.setattr(arms, "run_arm", fake)
-    monkeypatch.setattr(arms, "run_preflight",
+    monkeypatch.setattr(arms, "compile_preflight",
+                        lambda root, **k: {"ok": True})
+    monkeypatch.setattr(arms, "run_validator_preflight",
                         lambda root, **k: {"ok": True})
     out = arms.run_gherkin_flow(
         root=root,
@@ -505,7 +512,9 @@ def test_error_path_suite_cleanup_failure_not_valid(tmp_path, monkeypatch):
     monkeypatch.setattr(arms, "_cleanup_suite_dir", flaky_cleanup)
     fake, _calls = _make_fake_run_arm({"k1", "k2"}, set())
     monkeypatch.setattr(arms, "run_arm", fake)
-    monkeypatch.setattr(arms, "run_preflight",
+    monkeypatch.setattr(arms, "compile_preflight",
+                        lambda root, **k: {"ok": True})
+    monkeypatch.setattr(arms, "run_validator_preflight",
                         lambda root, **k: {"ok": True})
     out = arms.run_gherkin_flow(
         root=root,

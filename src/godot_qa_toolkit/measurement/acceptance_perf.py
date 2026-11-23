@@ -60,15 +60,15 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
     # 披露（旧实现连续 B 覆盖、尾部 B 静默丢弃）。
     rounds_complete = complete and not orphan_b
     med_ratio = (statistics.median(ratios) if len(ratios) >= 3 else None)
-    # §SPEC-026：速度门——median B/A 改善必须超过 A/A 噪声带
-    # （阈值 = 1 + spread_pct/100）；回归方向（B/A<1）与噪声内改善
-    # 一律 INCONCLUSIVE，B 慢于基线反例不得 exit 0。
+    # §SPEC-026：速度门——median B/A 改善必须**严格大于** A/A 噪声带
+    # （阈值 = 1 + spread_pct/100）；等于阈值（改善恰等于噪声带）与
+    # 回归方向（B/A<1）一律 INCONCLUSIVE，B 慢于基线反例不得 exit 0。
     speed_gate = None
     if med_ratio is not None and noise.get("spread_pct") is not None:
         threshold = round(1 + noise["spread_pct"] / 100, 4)
         speed_gate = {"median_ratio_b_over_a": round(med_ratio, 4),
                       "threshold_b_over_a": threshold,
-                      "ok": bool(med_ratio >= threshold)}
+                      "ok": bool(med_ratio > threshold)}
     return {
         "keys": keys,
         "shards_a": shards_a,

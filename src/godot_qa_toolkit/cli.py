@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -526,6 +527,9 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
                       "plan": plan,
                       "summary": {"plan": plan,
                                   "selection_mode": "plan_only",
+                                  "static_preconditions": {
+                                      "baseline_health":
+                                          _plan_only_baseline_health(args)},
                                   "notice": "no usable attribution map — "
                                             "dry-run returned the static "
                                             "plan only; run without "
@@ -533,6 +537,14 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
                                             "or pass --select full to "
                                             "preview sites now"}})
     return None
+
+
+def _plan_only_baseline_health(args: argparse.Namespace) -> dict:
+    """SEE-1623 M3：--check-baseline 在 plan-only 早退形态同样执行
+    （一次未插桩基线 GUT；未请求 → not_checked，与 _core_dry_run 同源）。"""
+    from .mutation.runner import _baseline_health_precondition
+    return _baseline_health_precondition(
+        str(args.project_root), int(getattr(args, "timeout", 600) or 600))
 
 
 def _mutation_numeric_arg_error(args: argparse.Namespace) -> str | None:
@@ -580,6 +592,11 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     _num_err = _mutation_numeric_arg_error(args)
     if _num_err is not None:
         return _usage_exit(_num_err)
+    # SEE-1623 M3：--check-baseline 单点 env 提前到 plan 门之前——此前
+    # 只在 serial 路径设置，dry-run plan-only 早退形态从未执行检查
+    # （Harti BUG-6：承诺的基线检查零发生）。
+    if getattr(args, "check_baseline", False):
+        os.environ["GQT_MUTATION_CHECK_BASELINE"] = "1"
 
     # §SPEC-1525-002 + 修复轮 F-1/F-2：覆盖注入与二进制早验证/重判统一在
     # _apply_godot_bin_or_contract（三子命令同源同形态）——此处取已重钉的
@@ -757,8 +774,11 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
         select_mode=getattr(args, "select_mode", "line"),
-        break_on_baseline_failure=getattr(
-            args, "break_on_baseline_failure", False),
+        break_on_baseline_failure=(
+            getattr(args, "break_on_baseline_failure", False)
+            # SEE-1623 M3：--fail-on-red-baseline 接线（此前只设 measure
+            # 面 env，mutation 自身从未快速失败——Harti BUG-7）。
+            or getattr(args, "fail_on_red_baseline", False)),
         kill_bail=_kill_bail_flag(args))
     if len(files) == 1:
         # SEE-1589 A-M3：单文件对外恒为 flat CLI 契约（--jobs 1 不得套用
@@ -819,8 +839,11 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         # §SPEC-012：串行/卡尺与编排路径同源遵守 --select（SEE-1587 默认
         # line），不可静默退化全脸（HIGH-1 修复点）。
         select_mode=getattr(args, "select_mode", "line"),
-        break_on_baseline_failure=getattr(
-            args, "break_on_baseline_failure", False),
+        break_on_baseline_failure=(
+            getattr(args, "break_on_baseline_failure", False)
+            # SEE-1623 M3：--fail-on-red-baseline 接线（此前只设 measure
+            # 面 env，mutation 自身从未快速失败——Harti BUG-7）。
+            or getattr(args, "fail_on_red_baseline", False)),
         kill_bail=_kill_bail_flag(args),
     )
     result["summary"].setdefault("jobs", 1)

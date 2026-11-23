@@ -179,7 +179,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   — the fair spot-check channel against false negatives. They still use the
   selected lines' runtime test sets unless `--tests` explicitly takes over.
 
-## Command reference (aligned with v0.3.0 `--help`)
+## Command reference (aligned with v0.4.0 `--help`)
 
 `gqt mutation [<files...>] [--project-root <root>] [all options]`
 

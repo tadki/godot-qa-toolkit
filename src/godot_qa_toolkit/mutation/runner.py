@@ -133,10 +133,19 @@ def _gut_extra_args(tests_glob: str | None) -> list[str]:
     gdir = tests_glob if tests_glob else "res://tests/"
     if gdir.endswith(".gd"):
         script_stem = Path(gdir).stem
+        # SEE-1623 H1：文件形态回落的根目录扫描同样不递归（tests 在子目录
+        # 时收集 0 个脚本 → 全腿无测试流）；-gselect 仍按名单过滤。
         return [
             "-gdir=res://tests/",
             f"-gselect={script_stem}",
+            "-ginclude_subdirs",
         ]
+    if tests_glob is None:
+        # SEE-1623 H1：full 审计面（tests_glob=None）的缺省根扫描必须递归
+        # ——GUT 9.6 add_directory「Does not look in sub directories」，
+        # 标准布局（tests/unit/ 等）下 0 脚本 → L4 门全腿 run_error。
+        # 显式目录 glob（上方 return）语义逐字不变。
+        return ["-gdir=res://tests/", "-ginclude_subdirs"]
     return [f"-gdir={gdir}"]
 
 def _run_gut_on_project(project_root: str, timeout_s: int = 600,

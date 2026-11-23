@@ -26,8 +26,13 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 
-# WSL 互通时需显式放行到 Windows 侧的隔离变量（顺序即 WSLENV 追加序）
-_WIN_SHARED_VARS = ("APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "XDG_DATA_HOME")
+# **仅 Windows 侧使用**的变量（顺序即 WSLENV 追加序）：只有这些做 UNC
+# 形态与 WSLENV 放行。Linux 侧使用的 HOME / XDG_* / TMPDIR 始终保持绝对
+# Linux 路径——WSL 同样可运行 Linux 原生 Godot，把 Linux 侧变量改成
+# UNC 会让 user:// 落到未预期位置（甚至相对路径落到项目目录）。
+_WIN_SHARED_VARS = ("APPDATA", "LOCALAPPDATA", "TMP", "TEMP")
+_LINUX_SIDE_VARS = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME", "TMPDIR")
 
 
 def _wsl_distro() -> str | None:
@@ -66,6 +71,9 @@ def isolated_godot_env():
         env["TEMP"] = native["TMPDIR"]
         distro = _wsl_distro()
         if distro:
+            # 按**变量目标侧**分工：仅 Windows 侧变量做 UNC + WSLENV
+            # （Windows Godot 用隔离后的 APPDATA/TMP）；Linux 侧变量仍是
+            # 绝对 Linux 路径（WSL 内 Linux 原生 Godot 用隔离后的 XDG/TMPDIR）。
             win_dirs = {
                 "APPDATA": os.path.join(root, "appdata"),
                 "LOCALAPPDATA": os.path.join(root, "localappdata"),
@@ -78,6 +86,9 @@ def isolated_godot_env():
             existing = os.environ.get("WSLENV", "").rstrip(":")
             ours = ":".join(f"{name}/w" for name in _WIN_SHARED_VARS)
             env["WSLENV"] = f"{existing}:{ours}" if existing else ours
+            for name in _LINUX_SIDE_VARS:
+                if not env.get(name, "").startswith("/"):
+                    env[name] = native[name]
         else:
             # Linux 原生通道：APPDATA 属 win64 语义（不设）；WSLENV 原样
             # 继承——Linux 引擎无副作用，既不放行也不清空。

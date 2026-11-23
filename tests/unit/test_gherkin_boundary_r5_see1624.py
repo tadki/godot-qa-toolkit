@@ -349,19 +349,40 @@ def _iso_env_wsl(monkeypatch) -> dict:
 
 
 def test_wsl_isolation_propagates_wslenv(monkeypatch) -> None:
-    """WSL：隔离值必须经 WSLENV 放行（/w），APPDATA/TMP 为 Windows 侧
-    UNC 形态，且不得透传宿主 Windows 用户路径。"""
+    """WSL：**仅 Windows 侧变量**经 WSLENV 放行（/w）且为 UNC 形态；
+    Linux 侧变量保持绝对 Linux 路径、不进 WSLENV；不得透传宿主
+    Windows 用户路径。"""
     monkeypatch.delenv("WSLENV", raising=False)
     monkeypatch.setenv("APPDATA", "C:\\Users\\real-user\\AppData\\Roaming")
     env = _iso_env_wsl(monkeypatch)
     wslenv = env.get("WSLENV", "")
-    for name in ("APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "XDG_DATA_HOME"):
-        assert f"{name}/w" in wslenv, f"{name} must be shared to Windows side"
     for name in ("APPDATA", "LOCALAPPDATA", "TMP", "TEMP"):
+        assert f"{name}/w" in wslenv, f"{name} must be shared to Windows side"
         assert env[name].startswith("\\\\wsl.localhost\\TestDistro\\"), \
             f"{name} must be a Windows-side UNC path: {env[name]}"
         assert "real-user" not in env[name], "host Windows user path leaked"
-    assert env["HOME"].startswith("/"), "Linux HOME stays native"
+    # Linux 侧变量：绝对 Linux 路径，且不出现在 WSLENV
+    for name in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                 "XDG_CACHE_HOME", "TMPDIR"):
+        assert env[name].startswith("/"), \
+            f"{name} must stay an absolute Linux path in WSL: {env[name]}"
+        assert f"{name}/w" not in wslenv, \
+            f"Linux-side {name} must not be shared to Windows side"
+
+
+def test_wsl_linux_side_xdg_isolated_native(monkeypatch) -> None:
+    """WSL 内 Linux 原生 Godot：XDG_*/HOME/TMPDIR 指向一次性隔离目录
+    （绝对 Linux 路径），不得回落到真实用户目录或项目目录。"""
+    env = _iso_env_wsl(monkeypatch)
+    real_home = os.path.expanduser("~")
+    for name in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                 "XDG_CACHE_HOME", "TMPDIR"):
+        value = env[name]
+        assert value.startswith("/"), f"{name} not absolute: {value}"
+        assert value != real_home, f"{name} must not be the real user dir"
+        assert "\\" not in value, f"{name} must not carry Windows separators"
+        assert value.startswith(env["HOME"].rsplit("/", 1)[0]) or \
+            name == "HOME", f"{name} must live under the isolation root: {value}"
 
 
 def test_wsl_wslenv_appends_existing(monkeypatch) -> None:

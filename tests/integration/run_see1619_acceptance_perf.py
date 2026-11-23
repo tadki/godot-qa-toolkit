@@ -22,6 +22,11 @@ import sys
 import time
 from pathlib import Path
 
+from godot_qa_toolkit.measurement.acceptance_perf import (
+    compute_perf_summary,
+    merge_round_into_report,
+)
+
 
 def _run(cmd: list[str], timeout: int) -> tuple[int, str, str]:
     proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -73,6 +78,39 @@ def _acceptance_wall(project_root: Path, gqt: str, godot: str,
     return rec
 
 
+def run_single_round(args, round_type: str, round_index: int,
+                     project_root: Path, keys: int, recipe: Path,
+                     report_path: Path) -> int:
+    """分批前台模式：执行单轮并合并入既有报告（resume 语义），逐轮
+    追加后重算汇总——测量口径与单次全量模式一致。"""
+    shards = args.shards_a if round_type == "A" else keys
+    rec = _acceptance_wall(project_root, args.gqt, args.godot, recipe,
+                           report_path.parent
+                           / f"perf-{round_type}{round_index}.json",
+                           shards, keys, max(args.timeout, 180) * 12,
+                           args.roots)
+    rec.update({"round": f"{round_type}{round_index}",
+                "mode": ("shared" if round_type == "A"
+                         else "per_feature"),
+                "keys": keys,
+                "fanout": rec.get("shards", 0) * rec.get("repeats", 0)})
+    doc: dict = {"doc": "see1619-acceptance-perf/1", "rounds": []}
+    if report_path.is_file():
+        doc = json.loads(report_path.read_text(encoding="utf-8"))
+    merge_round_into_report(doc, rec, args.shards_a, keys,
+                            report_path=report_path)
+    s = doc["summary"]
+    print(f"[{rec['round']}] valid={rec['valid']} "
+          f"wall={rec.get('acceptance_wall_s')}s "
+          f"fanout={rec['fanout']} "
+          f"verdict={s['verdict']} "
+          f"rounds={len(doc['rounds'])}", flush=True)
+    if not rec["valid"]:
+        print("INCONCLUSIVE round:", rec["round"], rec.get("run_error"),
+              file=sys.stderr)
+    return 0 if rec["valid"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--project-root", required=True)
@@ -90,9 +128,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--roots", default=None,
                     help="gut 臂目标面（目录或 .gd；缺省=project_root）")
+    ap.add_argument("--mode", choices=["A", "B"], default=None,
+                    help="C3-R2 分批前台模式：单轮执行并合并入既有报告")
+    ap.add_argument("--round-index", type=int, default=None,
+                    help="分批模式的轮序号（与 --mode 成对）")
     args = ap.parse_args(argv)
 
-    if args.rounds < 3 or args.aa < 3:
+    if args.mode and args.round_index is None:
+        print("REFUSAL: --mode 需与 --round-index 成对", file=sys.stderr)
+        return 2
+    if not args.mode and (args.rounds < 3 or args.aa < 3):
         print("REFUSAL: --aa 与 --rounds 均 ≥3（噪声带/对比样本下限）",
               file=sys.stderr)
         return 2
@@ -104,17 +149,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     report_path = Path(args.report).resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    work = report_path.parent
     recipe = (Path(args.recipe).resolve() if args.recipe else
               _ensure_recipe(project_root, args.gqt,
                              project_root / "recipe.json",
                              max(args.timeout, 600)))
 
+    if args.mode:
+        # C3-R2 分批前台模式：单轮 ≤ 单次执行上限，逐轮合并入同一报告
+        # （resume 语义，汇总口径与单次全量一致）。
+        return run_single_round(args, args.mode, args.round_index,
+                                project_root, len(keys), recipe,
+                                report_path)
+
     rounds: list[dict] = []
-    # A/A：共享分片同配重复（定噪声带）
     for i in range(1, args.aa + 1):
         rec = _acceptance_wall(project_root, args.gqt, args.godot, recipe,
-                               work / f"perf-a{i}.json", args.shards_a,
+                               report_path.parent
+                               / f"perf-a{i}.json", args.shards_a,
                                len(keys), max(args.timeout, 180) * 12,
                                args.roots)
         rec.update({"round": f"A{i}", "mode": "shared",
@@ -124,11 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[A{i}] valid={rec['valid']} "
               f"wall={rec.get('acceptance_wall_s')}s "
               f"fanout={rec['fanout']}", flush=True)
-    # 交错 A/B：B=per-feature（shards=keys 退化为单 key 组）
-    pairs: list[dict] = []
     for i in range(1, args.rounds + 1):
         rec_b = _acceptance_wall(project_root, args.gqt, args.godot,
-                                 recipe, work / f"perf-b{i}.json",
+                                 recipe, report_path.parent
+                                 / f"perf-b{i}.json",
                                  len(keys), len(keys),
                                  max(args.timeout, 180) * 12, args.roots)
         rec_b.update({"round": f"B{i}", "mode": "per_feature",
@@ -140,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
               f"wall={rec_b.get('acceptance_wall_s')}s "
               f"fanout={rec_b['fanout']}", flush=True)
         rec_a = _acceptance_wall(project_root, args.gqt, args.godot,
-                                 recipe, work / f"perf-a{i+100}.json",
+                                 recipe, report_path.parent
+                                 / f"perf-a{i+100}.json",
                                  args.shards_a, len(keys),
                                  max(args.timeout, 180) * 12, args.roots)
         rec_a.update({"round": f"A{i+100}", "mode": "shared",
@@ -148,54 +199,21 @@ def main(argv: list[str] | None = None) -> int:
                       "fanout": rec_a.get("shards", 0)
                       * rec_a.get("repeats", 0)})
         rounds.append(rec_a)
-        wall_a = rec_a.get("acceptance_wall_s")
-        wall_b = rec_b.get("acceptance_wall_s")
-        ratio = (round(wall_b / wall_a, 3)
-                 if wall_a and wall_b else None)
-        pairs.append({"pair": i, "b_wall_s": wall_b, "a_wall_s": wall_a,
-                      "ratio_b_over_a": ratio,
-                      "b_valid": rec_b["valid"], "a_valid": rec_a["valid"]})
-        print(f"[pair {i}] B/A={ratio}", flush=True)
+        print(f"[A{i+100}] valid={rec_a['valid']} "
+              f"wall={rec_a.get('acceptance_wall_s')}s", flush=True)
 
-    a_walls = [r.get("acceptance_wall_s") for r in rounds
-               if r["mode"] == "shared" and r.get("acceptance_wall_s")]
-    noise = {}
-    if len(a_walls) >= 3:
-        med = statistics.median(a_walls)
-        spread = max(a_walls) - min(a_walls)
-        noise = {"samples": a_walls, "median_s": round(med, 3),
-                 "min_s": min(a_walls), "max_s": max(a_walls),
-                 "spread_s": round(spread, 3),
-                 "spread_pct": round(spread / med * 100, 2)
-                 if med else None}
-    ratios = [p["ratio_b_over_a"] for p in pairs
-              if p["ratio_b_over_a"] is not None]
-    all_valid = all(r["valid"] for r in rounds)
-    summary = {
-        "keys": len(keys),
-        "shards_a": args.shards_a,
-        "reps": rounds[0].get("repeats"),
-        "fanout_shared": args.shards_a * (rounds[0].get("repeats") or 0),
-        "fanout_per_feature": len(keys) * (rounds[0].get("repeats") or 0),
-        "aa_noise_band": noise,
-        "ab_pairs": pairs,
-        "median_ratio_b_over_a": statistics.median(ratios)
-        if len(ratios) >= 3 else None,
-        "all_rounds_valid": all_valid,
-        "verdict": ("MEASURED" if all_valid and len(ratios) >= 3
-                    else "INCONCLUSIVE"),
-    }
+    summary = compute_perf_summary(rounds, args.shards_a, len(keys))
     report = {"doc": "see1619-acceptance-perf/1", "rounds": rounds,
               "summary": summary}
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1),
                            encoding="utf-8")
     print(f"perf: verdict={summary['verdict']} "
-          f"noise_band={noise.get('spread_pct')}% "
+          f"noise_band={summary['aa_noise_band'].get('spread_pct')}% "
           f"median_B/A={summary['median_ratio_b_over_a']} "
           f"fanout_shared={summary['fanout_shared']} "
           f"fanout_per_feature={summary['fanout_per_feature']}")
     for r in rounds:
-        if not r["valid"]:
+        if not r.get("valid"):
             print("INCONCLUSIVE round:", r.get("round"),
                   r.get("run_error"), file=sys.stderr)
     return 0 if summary["verdict"] == "MEASURED" else 1

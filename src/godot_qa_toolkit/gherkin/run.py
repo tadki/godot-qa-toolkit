@@ -12,7 +12,6 @@ gherkin/generated），跑完即弃；输出经归因 manifest 回译为统一�
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -202,7 +201,6 @@ def run_suite(project_root: str | Path, feature_key: str,
         run_validator_preflight(root)
     except AddonError as e:
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
-    env = dict(os.environ)
     try:
         # 一次性隔离环境（§SPEC-019 HIGH-3）：GUT 执行零写真实用户目录。
         with isolated_godot_env() as iso_env:

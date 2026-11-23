@@ -16,7 +16,7 @@ def install_recipe(project_root) -> None:
     """让 canonical recipe 可构建（选面新鲜判据需要）。"""
     project_root = Path(project_root)
     (project_root / "tests").mkdir(parents=True, exist_ok=True)
-    feats = project_root / "acceptance" / "features"
+    feats = project_root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True, exist_ok=True)
     demo = feats / "demo.feature"
     if not demo.is_file():
@@ -29,6 +29,9 @@ def install_recipe(project_root) -> None:
         cfg.write_text(json.dumps({
             "dirs": ["res://tests/"], "include_subdirs": True,
             "prefix": "test_"}), encoding="utf-8")
+    # SEE-1624 单根：recipe 构建前置 addon 元数据（schema/harness/validator）
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(project_root)
 
 
 def write_map(project_root: Path,

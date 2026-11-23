@@ -1,23 +1,27 @@
-"""Measurement suite builder (measurement-suite/2, §SPEC-034).
+"""Measurement suite builder (measurement-suite/3, §SPEC-034).
 
 Read-only: scans `.gutconfig.json` (the live non-quarantine GUT face) and
-`acceptance/features/**/*.feature` (per-feature sha256), folds harness and
-toolchain versions into the hash, and normalizes the whole recipe (sorted
-keys, compact separators) before sha256 — same input, same recipe_hash; any
-byte change in any hashed input changes it. Exclusions REQUIRE a reason: an
-empty reason makes the recipe illegal (plan §4.6 — exclusions enter the hash
-with their justification).
+`addons/gqt_gherkin/features/*.feature` (per-feature sha256), folds harness,
+adapter-source fingerprint and toolchain versions into the hash, and
+normalizes the whole recipe (sorted keys, compact separators) before sha256 —
+same input, same recipe_hash; any byte change in any hashed input changes it.
+Exclusions REQUIRE a reason: an empty reason makes the recipe illegal
+(plan §4.6 — exclusions enter the hash with their justification).
+
+SEE-1624：旧 face 键改 `gherkin_face`（exact-key schema
+major bump /2 → /3，旧 recipe verify fail-loud）；wiring 改指单根
+`addons/gqt_gherkin/harness.gd`（缺文件 = 布局错误，不再退化为 "missing"）；
+新增 `adapter_source_sha256`（addon 全部 .gd/.feature 递归指纹，D-c）。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
-from ..digest import canonical_sha256, sha256_file
+from ..digest import canonical_sha256, sha256_file, sha256_text
 
-RECIPE_VERSION = "measurement-suite/2"
+RECIPE_VERSION = "measurement-suite/3"
 _GUTCONFIG = ".gutconfig.json"
 
 def _sha256_file(path: Path) -> str:
@@ -36,15 +40,18 @@ def load_gutconfig(project_root: Path) -> tuple[dict | None, str | None]:
         return None, f"{_GUTCONFIG} is not a JSON object"
     return config, None
 
-def scan_acceptance_features(project_root: Path) -> tuple[list[dict], int, str | None]:
-    """Scan acceptance/features/**/*.feature; returns (rows, count, error).
+def scan_gherkin_features(project_root: Path) -> tuple[list[dict], int, str | None]:
+    """Scan the strict single root addons/gqt_gherkin/features/*.feature;
+    returns (rows, count, error).
 
-    Each row: {key (GUT 9.x stem convention), source, sha256}."""
-    features_dir = project_root / "acceptance" / "features"
+    Each row: {key (GUT 9.x stem convention), source, sha256}. SEE-1624：
+    缺根/空集 fail-loud（单根裁决，无双根回退）。"""
+    features_dir = project_root / "addons" / "gqt_gherkin" / "features"
     if not features_dir.is_dir():
-        return [], 0, "acceptance/features not found in project root"
+        return [], 0, ("addons/gqt_gherkin/features not found in project "
+                       "root — strict single root required")
     rows: list[dict] = []
-    for path in sorted(features_dir.glob("**/*.feature")):
+    for path in sorted(features_dir.glob("*.feature")):
         key = path.stem
         rel = path.relative_to(project_root).as_posix()
         rows.append(
@@ -56,7 +63,7 @@ def scan_acceptance_features(project_root: Path) -> tuple[list[dict], int, str |
         )
     return rows, len(rows), None
 
-LEGAL_SCOPES = frozenset({"gut_dir", "acceptance_feature"})
+LEGAL_SCOPES = frozenset({"gut_dir", "gherkin_feature"})
 
 def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
     # §SPEC-066：exclusions 是外部 JSON 输入的直接消费结构——容器/行/字段
@@ -123,18 +130,48 @@ def _recipe_gut_face(gutconfig: dict, dirs: list[str],
         ],
     }
 
-def _recipe_acceptance_face(features: list, feature_count: int,
-                            normalized_exclusions: list[dict],
-                            root: Path, ops_version: str) -> dict:
-    """acceptance_face 块组装（harness wiring sha256 缺文件 → "missing"）。"""
+def adapter_source_sha256(root: Path) -> tuple[str, int]:
+    """适配源指纹（SEE-1624 D-c）：递归折叠 `addons/gqt_gherkin/**` 下全部
+    `.gd`/`.feature` 为排序 (relpath, sha256) 的 sha256（no-follow、排除
+    `.uid`/README/`.json`、无文件数上限）——任一域文件/validator 字节变化
+    即改变 recipe_hash，旧缓存一次性失效。空源集 fail-loud。
+    返回 (fingerprint, file_count)。"""
+    addon = root / "addons" / "gqt_gherkin"
+    if not addon.is_dir():
+        raise ValueError(
+            "addons/gqt_gherkin not found in project root — strict "
+            "single root required for the adapter-source fingerprint")
+    entries: list[tuple[str, str]] = []
+    for path in sorted(addon.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.suffix not in (".gd", ".feature"):
+            continue
+        rel = path.relative_to(root).as_posix()
+        entries.append((rel, _sha256_file(path)))
+    if not entries:
+        raise ValueError(
+            "addons/gqt_gherkin has no .gd/.feature adapter sources — "
+            "empty run-root source set is not a valid addon layout")
+    basis = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+    return sha256_text(basis), len(entries)
+
+
+def _recipe_gherkin_face(features: list, feature_count: int,
+                         normalized_exclusions: list[dict],
+                         root: Path, ops_version: str) -> dict:
+    """gherkin_face 块组装（SEE-1624）：wiring 改指单根 harness（缺文件 =
+    布局错误 fail-loud，不再退化为 "missing"）；新增 adapter_source_sha256。"""
+    harness_path = root / "addons" / "gqt_gherkin" / "harness.gd"
+    if not harness_path.is_file():
+        raise ValueError(
+            "addons/gqt_gherkin/harness.gd missing — gqt only loads the "
+            "strict single root (layout error, not a 'missing' marker)")
+    fingerprint, adapter_files = adapter_source_sha256(root)
     harness = {
-        "worker": "generated/accept_worker.gd",
+        "worker": "generated/gherkin_worker.gd",
         "ops_version": ops_version,
-        "wiring_sha256": _sha256_file(
-            root / "acceptance" / "harness" / "harness.gd"
-        )
-        if (root / "acceptance" / "harness" / "harness.gd").is_file()
-        else "missing",
+        "wiring_sha256": _sha256_file(harness_path),
     }
     return {
         "features": features,
@@ -142,9 +179,11 @@ def _recipe_acceptance_face(features: list, feature_count: int,
         "excluded": [
             {"key": x["entry"], "reason": x["reason"]}
             for x in normalized_exclusions
-            if x["scope"] == "acceptance_feature"
+            if x["scope"] == "gherkin_feature"
         ],
         "harness": harness,
+        "adapter_source_sha256": fingerprint,
+        "adapter_source_files": adapter_files,
     }
 
 def _recipe_inputs(root: Path, exclusions: "list[dict] | None"
@@ -172,12 +211,12 @@ def _recipe_inputs(root: Path, exclusions: "list[dict] | None"
         return (normalized_exclusions, gutconfig, None, None, None,
                 "gutconfig has no dirs — empty GUT face is not a valid "
                 "measurement suite")
-    features, feature_count, error = scan_acceptance_features(root)
+    features, feature_count, error = scan_gherkin_features(root)
     if error is not None:
         return (normalized_exclusions, gutconfig, dirs, None, None, error)
     if feature_count == 0:
         return (normalized_exclusions, gutconfig, dirs, None, None,
-                "acceptance/features has no .feature files")
+                "addons/gqt_gherkin/features has no .feature files")
     return normalized_exclusions, gutconfig, dirs, features, feature_count, None
 
 
@@ -190,20 +229,26 @@ def build_recipe(
     godot_version: str = "unknown",
     gut_version: str = "unknown",
 ) -> tuple[dict | None, str | None]:
-    """Build the measurement-suite/2 dict; returns (recipe, None) or
+    """Build the measurement-suite/3 dict; returns (recipe, None) or
     (None, reason) on illegal layout/exclusion."""
     root = Path(project_root)
     (normalized_exclusions, gutconfig, dirs, features, feature_count,
      error) = _recipe_inputs(root, exclusions)
     if error is not None:
         return None, error
+    try:
+        gherkin_face = _recipe_gherkin_face(
+            features, feature_count, normalized_exclusions, root, ops_version)
+    except ValueError as e:
+        # 单根布局错误（wiring 缺失/适配源空集）走统一领域错误形态，
+        # 不裸抛（§SPEC-066 同款纪律）。
+        return None, str(e)
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "project_root": str(root),
         "gut_face": _recipe_gut_face(gutconfig, dirs, normalized_exclusions,
                                      root),
-        "acceptance_face": _recipe_acceptance_face(
-            features, feature_count, normalized_exclusions, root, ops_version),
+        "gherkin_face": gherkin_face,
         "toolchain": {
             "gqt_version": gqt_version,
             "ops_version": ops_version,
@@ -239,21 +284,21 @@ def _verify_faces(recipe: dict) -> "tuple[list, list] | tuple[None, str]":
             isinstance(d, str) and d.strip() for d in dirs):
         return None, (f"recipe 'gut_face.dirs' must be a list of "
                       f"non-empty strings, got {dirs!r} (§SPEC-067)")
-    acceptance_face = recipe.get("acceptance_face")
-    if not isinstance(acceptance_face, dict):
-        return None, (f"recipe 'acceptance_face' must be an object, "
-                      f"got {acceptance_face!r} (§SPEC-067)")
-    features = acceptance_face.get("features")
+    gherkin_face = recipe.get("gherkin_face")
+    if not isinstance(gherkin_face, dict):
+        return None, (f"recipe 'gherkin_face' must be an object, "
+                      f"got {gherkin_face!r} (§SPEC-067)")
+    features = gherkin_face.get("features")
     if not isinstance(features, list):
-        return None, (f"recipe 'acceptance_face.features' must be a list, "
+        return None, (f"recipe 'gherkin_face.features' must be a list, "
                       f"got {features!r} (§SPEC-067)")
     for feature in features:
         if not isinstance(feature, dict):
-            return None, (f"recipe acceptance feature must be an object, "
+            return None, (f"recipe gherkin feature must be an object, "
                           f"got {feature!r} (§SPEC-067)")
         key = feature.get("key")
         if not isinstance(key, str) or not key.strip():
-            return None, (f"recipe acceptance feature 'key' must be a "
+            return None, (f"recipe gherkin feature 'key' must be a "
                           f"non-empty string, got {key!r} (§SPEC-067)")
     return dirs, features
 
@@ -320,7 +365,7 @@ def verify_recipe(recipe: dict) -> tuple[bool, str | None]:
         return False, (f"recipe 'gut_face.dirs' must be a non-empty list "
                        f"of non-empty strings, got {dirs!r} (§SPEC-068)")
     if not features:
-        return False, (f"recipe 'acceptance_face.features' must be a "
+        return False, (f"recipe 'gherkin_face.features' must be a "
                        f"non-empty list, got {features!r} (§SPEC-068)")
     toolchain = recipe.get("toolchain", {})
     if not isinstance(toolchain, dict):

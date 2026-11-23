@@ -41,7 +41,7 @@ def _wire(monkeypatch, tmp_path):
     monkeypatch.setattr(orch, "_recover_stale_backups", lambda root: 3)
     monkeypatch.setattr(orch, "execute_arms",
                         lambda **k: ({"arm": "gut_full"},
-                                     {"arm": "acceptance"}))
+                                     {"arm": "gherkin"}))
     monkeypatch.setattr(orch, "_build_unions",
                         lambda a, b, rh: [{"valid": True, "file": "res://a.gd"}])
     monkeypatch.setattr(orch, "_gate_comparable",
@@ -72,7 +72,7 @@ def _wire(monkeypatch, tmp_path):
 
 def test_run_measurement_contract_flow(tmp_path, monkeypatch):
     seen = _wire(monkeypatch, tmp_path)
-    recipe = {"recipe_version": "measurement-suite/2", "gut_face": {"dirs": []},
+    recipe = {"recipe_version": "measurement-suite/3", "gut_face": {"dirs": []},
               "recipe_hash": "OLD"}
     report = orch.run_measurement(
         tmp_path, ["a.gd"], recipe, evidence_out=str(tmp_path / "evout"),

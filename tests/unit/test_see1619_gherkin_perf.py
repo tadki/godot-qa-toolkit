@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from godot_qa_toolkit.measurement.acceptance_perf import (
+from godot_qa_toolkit.measurement.gherkin_perf import (
     compute_perf_summary,
     merge_round_into_report,
 )
@@ -21,14 +21,14 @@ from godot_qa_toolkit.measurement.acceptance_perf import (
 def _round(name: str, mode: str, wall: float, valid: bool = True,
            repeats: int = 3) -> dict:
     return {"round": name, "mode": mode,
-            "acceptance_wall_s": wall, "valid": valid,
+            "gherkin_wall_s": wall, "valid": valid,
             "repeats": repeats, "shards": (4 if mode == "shared" else 44)}
 
 
 # ---------- 单轮合并（resume） ----------
 
 def test_merge_round_appends_and_recomputes() -> None:
-    doc = {"doc": "see1619-acceptance-perf/1",
+    doc = {"doc": "see1619-gherkin-perf/1",
            "rounds": [_round("A1", "shared", 29.0)],
            "summary": compute_perf_summary(
                [_round("A1", "shared", 29.0)], 4, 44)}
@@ -223,7 +223,7 @@ def test_consecutive_bs_each_pair_own_next_a() -> None:
 
 def test_duplicate_round_raises_named_error(tmp_path) -> None:
     """重复 batch round 具名拒绝：专用异常类型（仍为 ValueError 子类）。"""
-    from godot_qa_toolkit.measurement.acceptance_perf import (
+    from godot_qa_toolkit.measurement.gherkin_perf import (
         DuplicateRoundError,
     )
     doc = {"rounds": [_round("A1", "shared", 29.0)]}
@@ -236,20 +236,20 @@ def test_driver_refuses_duplicate_round_with_exit_2(
     """分批驱动器：重复轮必须具名拒绝 exit 2，不得裸 ValueError 崩溃。"""
     import importlib.util
     script = Path(__file__).resolve().parents[1] / "integration" / \
-        "run_see1619_acceptance_perf.py"
+        "run_see1619_gherkin_perf.py"
     spec = importlib.util.spec_from_file_location("perf_driver", script)
     driver = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(driver)
     report = tmp_path / "perf.json"
     report.write_text(json.dumps(
-        {"doc": "see1619-acceptance-perf/1",
+        {"doc": "see1619-gherkin-perf/1",
          "rounds": [_round("A1", "shared", 29.0)]}), encoding="utf-8")
     args = argparse.Namespace(gqt="unused", godot="unused", timeout=60,
                               shards_a=4, roots=None, mode="A",
                               round_index=1, report=report)
-    monkeypatch.setattr(driver, "_acceptance_wall",
+    monkeypatch.setattr(driver, "_gherkin_wall",
                         lambda *a, **k: {"valid": True, "rc": 0,
-                                         "acceptance_wall_s": 30.0,
+                                         "gherkin_wall_s": 30.0,
                                          "shards": 4, "repeats": 3})
     rc = driver.run_single_round(args, "A", 1, tmp_path, 44,
                                  tmp_path / "recipe.json", report)
@@ -262,7 +262,7 @@ def test_driver_refuses_duplicate_round_with_exit_2(
 def _load_driver():
     import importlib.util
     script = Path(__file__).resolve().parents[1] / "integration" / \
-        "run_see1619_acceptance_perf.py"
+        "run_see1619_gherkin_perf.py"
     spec = importlib.util.spec_from_file_location("perf_driver_s", script)
     driver = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(driver)
@@ -277,7 +277,7 @@ def _batch_args(tmp_path, report):
 
 def _seed_report(report: Path, rounds: list[dict]) -> None:
     report.write_text(json.dumps(
-        {"doc": "see1619-acceptance-perf/1", "rounds": rounds}),
+        {"doc": "see1619-gherkin-perf/1", "rounds": rounds}),
         encoding="utf-8")
 
 
@@ -294,9 +294,9 @@ def _eight_round_prefix(b_wall: float) -> list[dict]:
 
 def _append_round(driver, monkeypatch, tmp_path, report, wall, rtype="A",
                   ridx=103):
-    monkeypatch.setattr(driver, "_acceptance_wall",
+    monkeypatch.setattr(driver, "_gherkin_wall",
                         lambda *a, **k: {"valid": True, "rc": 0,
-                                         "acceptance_wall_s": wall,
+                                         "gherkin_wall_s": wall,
                                          "shards": 4, "repeats": 3})
     return driver.run_single_round(
         _batch_args(tmp_path, report), rtype, ridx, tmp_path, 44,

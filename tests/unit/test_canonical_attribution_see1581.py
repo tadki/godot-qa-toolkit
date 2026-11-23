@@ -366,7 +366,7 @@ def _project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -449,7 +449,10 @@ class FakeGodot:
 
 
 def _recipe_and_targets(project: Path, tmp_path: Path):
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(project)
     from godot_qa_toolkit.measurement.recipe import build_recipe
+
     recipe, error = build_recipe(project)
     assert error is None, error
     path = tmp_path / "recipe.json"
@@ -492,8 +495,8 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     assert gut["unattributed_phases"]["bootstrap"]["hit_events"] == 4
     # acceptance 臂不做归属（方向②③：plain 模板 + 默认钩子）
     # §SPEC-PLANFIRST 任务 2：acceptance 占位臂（disabled）在场
-    assert "acceptance" not in gut
-    assert set(summary["arms"].keys()) == {"gut_full", "acceptance"}
+    assert "gherkin" not in gut
+    assert set(summary["arms"].keys()) == {"gut_full", "gherkin"}
     # 默认关闭的键不得出现
     assert all("attribution" not in arm for arm in report["arms"])
 

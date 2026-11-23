@@ -112,11 +112,11 @@ def test_gate_message_carries_reason_and_evidence():
 
 def test_stage_keys_carry_prepare_phases():
     """§SPEC-PLANFIRST B：prepare 盲区消灭——映射构建路径的分段键
-    （instrument_prepare/baseline_preflight/gut_full_arm/acceptance_arm）
+    （instrument_prepare/baseline_preflight/gut_full_arm/gherkin_arm）
     在 STAGE_KEYS 契约内（run_measurement 落 report.stage_timings）。"""
     from godot_qa_toolkit.mutation.stagetiming import STAGE_KEYS
     for k in ("instrument_prepare", "baseline_preflight", "gut_full_arm",
-              "acceptance_arm", "total"):
+              "gherkin_arm", "total"):
         assert k in STAGE_KEYS
     clock = __import__("godot_qa_toolkit.mutation.stagetiming",
                        fromlist=["StageClock"]).StageClock()

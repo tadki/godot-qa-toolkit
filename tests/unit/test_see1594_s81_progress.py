@@ -51,7 +51,7 @@ def test_progress_lines_shape(tmp_path, capsys):
     assert re.search(
         r"measure: arm=gut_full done state=(valid|invalid) "
         r"wall_s=[0-9.]+", err), err
-    # §SPEC-PLANFIRST 任务 2：acceptance 暂停——不再出现 acceptance
+    # §SPEC-PLANFIRST 任务 2：gherkin 暂停——不再出现 gherkin
     # 分片行与 done 行（占位臂无分片执行）
-    assert "measure: arm=acceptance start shards=" not in err
-    assert not re.search(r"measure: arm=acceptance done state=", err), err
+    assert "measure: arm=gherkin start shards=" not in err
+    assert not re.search(r"measure: arm=gherkin done state=", err), err

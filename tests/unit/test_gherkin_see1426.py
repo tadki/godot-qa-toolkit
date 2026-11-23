@@ -15,7 +15,24 @@ import pytest
 
 from godot_qa_toolkit.gherkin import OPS_VERSION
 from godot_qa_toolkit.gherkin.compile import compile_feature
-from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check, run_suite
+from godot_qa_toolkit.gherkin.run import GherkinRunError, replay_check, run_suite
+
+
+def _schema_ensure(project: Path) -> None:
+    """SEE-1624：compile 前置 schema 握手 + run/mutate 预检 validator——
+    夹具补最小合法 schema.json 与可通过 V 检查的 validator.gd stub。"""
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    s = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not s.is_file():
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    v = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not v.is_file():
+        v.write_text(VALIDATOR_OK_GD, encoding="utf-8")
+
+
+
 
 FEATURE = """Feature: 生命值扣减
   Scenario Outline: 受到 <dmg> 点伤害
@@ -41,12 +58,25 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut stub\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path, feature: str = FEATURE,
              write: bool = True):
-    f = tmp_path / "demo.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         "demo.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     return compile_feature(f, project, write=write)
 
@@ -109,12 +139,12 @@ def test_compile_attribution_chinese_names(project: Path, tmp_path: Path) -> Non
 def test_write_layout_and_clean_then_generate(project: Path, tmp_path: Path) -> None:
     suite, error = _compile(project, tmp_path, write=True)
     assert error is None
-    ir_file = project / "acceptance/ir" / f"{suite.feature_key}.json"
-    gd_file = project / "acceptance/generated" / f"test_{suite.feature_key}.gd"
-    man_file = project / "acceptance/generated" / f"{suite.feature_key}.manifest.json"
+    ir_file = project / "gherkin/ir" / f"{suite.feature_key}.json"
+    gd_file = project / "gherkin/generated" / f"test_{suite.feature_key}.gd"
+    man_file = project / "gherkin/generated" / f"{suite.feature_key}.manifest.json"
     assert ir_file.is_file() and gd_file.is_file() and man_file.is_file()
     # 先清空再生成：放一个陈旧文件，重编译后必须消失。
-    stale = project / "acceptance/generated/stale.gd"
+    stale = project / "gherkin/generated/stale.gd"
     stale.write_text("# stale\n")
     _compile(project, tmp_path, write=True)
     assert not stale.exists()
@@ -138,31 +168,31 @@ def test_unchanged_slot_flows_into_ir(project: Path, tmp_path: Path) -> None:
 
 def test_replay_tampered_ir_rejected(project: Path, tmp_path: Path) -> None:
     suite, _ = _compile(project, tmp_path, write=True)
-    ir_file = project / "acceptance/ir" / f"{suite.feature_key}.json"
+    ir_file = project / "gherkin/ir" / f"{suite.feature_key}.json"
     ir = json.loads(ir_file.read_text(encoding="utf-8"))
     ir["cases"][0]["values"]["left"] = "999"
     ir_file.write_text(json.dumps(ir, ensure_ascii=False))
-    with pytest.raises(AcceptRunError, match="IR hash mismatch"):
+    with pytest.raises(GherkinRunError, match="IR hash mismatch"):
         replay_check(project, suite.feature_key)
 
 
 def test_replay_tampered_generated_rejected(project: Path, tmp_path: Path) -> None:
     suite, _ = _compile(project, tmp_path, write=True)
-    gd = project / "acceptance/generated" / f"test_{suite.feature_key}.gd"
+    gd = project / "gherkin/generated" / f"test_{suite.feature_key}.gd"
     gd.write_text(gd.read_text(encoding="utf-8") + "\n# tampered\n")
-    with pytest.raises(AcceptRunError, match="generated test hash mismatch"):
+    with pytest.raises(GherkinRunError, match="generated test hash mismatch"):
         replay_check(project, suite.feature_key)
 
 
 def test_replay_missing_manifest_rejected(project: Path) -> None:
-    with pytest.raises(AcceptRunError, match="manifest missing"):
+    with pytest.raises(GherkinRunError, match="manifest missing"):
         replay_check(project, "nope")
 
 
 def test_run_gut_missing_is_run_error(project: Path, tmp_path: Path) -> None:
     suite, _ = _compile(project, tmp_path, write=True)
     (project / "addons/gut/gut_cmdln.gd").unlink()
-    with pytest.raises(AcceptRunError, match="GUT runner not found"):
+    with pytest.raises(GherkinRunError, match="GUT runner not found"):
         run_suite(project, suite.feature_key)
 
 
@@ -172,13 +202,17 @@ def test_run_launch_failure_is_run_error(project: Path, tmp_path: Path,
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 1
             stdout = "Godot Engine v4.6\nAttempt to open script file not found"
             stderr = ""
         return R()
     monkeypatch.setattr(run_mod.subprocess, "run", fake_run)
-    with pytest.raises(AcceptRunError, match="launch failed|GUT"):
+    with pytest.raises(GherkinRunError, match="launch failed|GUT"):
         run_suite(project, suite.feature_key)
 
 
@@ -188,6 +222,10 @@ def test_run_attributed_failures_contract(project: Path, tmp_path: Path,
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 1
             tn = suite.manifest["attribution"][0]["test_name"]
@@ -210,6 +248,10 @@ def test_run_ok_contract(project: Path, tmp_path: Path, monkeypatch) -> None:
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 0
             stdout = "* test_x [passed]\n"
@@ -225,7 +267,9 @@ def test_run_ok_contract(project: Path, tmp_path: Path, monkeypatch) -> None:
 def test_cli_accept_compile_contract(project: Path, tmp_path: Path) -> None:
     import subprocess, sys, os
     repo = Path(__file__).resolve().parents[2]
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text(FEATURE, encoding="utf-8")
     env = dict(os.environ, PYTHONPATH=str(repo / "src"))
     # dry compile（无 --write）：只出 summary。
@@ -243,4 +287,4 @@ def test_cli_accept_compile_contract(project: Path, tmp_path: Path) -> None:
         capture_output=True, text=True, env=env)
     out = json.loads(r.stdout)
     assert len(out["summary"]["wrote"]) == 4  # ir/generated/worker/manifest
-    assert all(w.startswith("acceptance/") for w in out["summary"]["wrote"])
+    assert all(w.startswith("gherkin/") for w in out["summary"]["wrote"])

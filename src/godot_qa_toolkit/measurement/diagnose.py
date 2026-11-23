@@ -1,4 +1,4 @@
-"""SEE-1594 BTIDY（零行为拆分）：§SPEC-048 diagnostic-only acceptance
+"""SEE-1594 BTIDY（零行为拆分）：§SPEC-048 diagnostic-only gherkin
 计时模式（双腿计时/进度落盘/墙钟归因）。自 orchestrator.py 原行段物理
 迁移；`run_measurement_diagnose` 按「单 feature 条目构建 / 编排循环」
 分解为 ≤50 行函数，逻辑逐语句等价。"""
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..coverage.evidence import clear_sink, make_run_uuid
 from ..coverage.runner import _instrument, _read_hits
-from ..gherkin.run import AcceptRunError
+from ..gherkin.run import GherkinRunError
 from ..gherkin.suite import (
     SuiteError,
     _cleanup_suite_dir,
@@ -82,11 +82,11 @@ def _diagnose_prepare(recipe: dict, feature_keys: list[str],
     if not ok:
         raise MeasurementError(f"recipe invalid: {reason}")
     feature_by_key = {f["key"]: f
-                      for f in recipe["acceptance_face"]["features"]}
+                      for f in recipe["gherkin_face"]["features"]}
     unknown = [k for spec in feature_keys for k in spec.split("+")
                if k and k not in feature_by_key]
     if unknown:
-        raise MeasurementError(f"unknown acceptance features: {unknown}")
+        raise MeasurementError(f"unknown gherkin features: {unknown}")
     sources: dict[str, str] = {}
     for path_str in target_files:
         p = Path(path_str)
@@ -270,7 +270,7 @@ def _diagnose_feature_entry(root: Path, key_spec: str,
             "timed_out": timed_out, "tests": _parse_gut_summary(out),
             "hit_files": hit_files, "probes_fired_total": probes_total,
             "output_tail": out[-1500:]}
-    except (SuiteError, AcceptRunError) as e:
+    except (SuiteError, GherkinRunError) as e:
         entry["attribution"] = f"suite_error:{e}"
     finally:
         if suite_dir is not None:
@@ -285,7 +285,7 @@ def run_measurement_diagnose(project_root: str | Path,
                            feature_keys: list[str], *,
                            timeout_s: int = 480,
                            progress_out: str | None = None) -> dict:
-    """§SPEC-048 diagnostic-only acceptance 计时模式。
+    """§SPEC-048 diagnostic-only gherkin 计时模式。
 
     在相同 flags 插桩（默认全 149 文件）下逐 feature 执行：同一编译套件
     先跑未插桩基线腿、再跑 flags 插桩腿，记录绝对墙钟、GUT 测试汇总、

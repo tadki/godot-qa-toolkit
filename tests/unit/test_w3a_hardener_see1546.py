@@ -31,12 +31,14 @@ def kol_like(tmp_path: Path) -> Path:
     (root / _GUTCONFIG).write_text(
         json.dumps(GUTCONFIG, indent=1), encoding="utf-8"
     )
-    features = root / "acceptance" / "features"
+    features = root / "addons" / "gqt_gherkin" / "features"
     features.mkdir(parents=True)
     for i in range(3):
         (features / f"feature_{i}.feature").write_text(
             f"Feature: f{i}\n  Scenario: s{i}\n    Given a\n", encoding="utf-8"
         )
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
@@ -47,17 +49,19 @@ def kol_like(tmp_path: Path) -> Path:
     (root / _GUTCONFIG).write_text(
         json.dumps(GUTCONFIG, indent=1), encoding="utf-8"
     )
-    features = root / "acceptance" / "features"
+    features = root / "addons" / "gqt_gherkin" / "features"
     features.mkdir(parents=True)
     for i in range(3):
         (features / f"feature_{i}.feature").write_text(
             f"Feature: f{i}\n  Scenario: s{i}\n    Given a\n", encoding="utf-8"
         )
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _write_harness(root: Path) -> None:
-    h = root / "acceptance" / "harness"
+    h = root / "addons" / "gqt_gherkin" / "harness"
     h.mkdir(parents=True, exist_ok=True)
     (h / "harness.gd").write_text("# harness\n", encoding="utf-8")
 
@@ -105,17 +109,21 @@ def test_build_recipe_rejects_empty_gutconfig_dirs(kol_like):
 
 
 def test_build_recipe_rejects_zero_features(kol_like):
-    for f in (kol_like / "acceptance" / "features").glob("*.feature"):
+    for f in (kol_like / "addons" / "gqt_gherkin" / "features").glob("*.feature"):
         f.unlink()
     recipe, error = build_recipe(kol_like, exclusions=[])
     assert recipe is None
     assert error is not None and "no .feature files" in error
 
 
-def test_build_recipe_hashes_missing_harness_as_missing(kol_like):
+def test_build_recipe_fails_loud_on_missing_harness(kol_like):
+    """SEE-1624 单根：wiring 缺文件 = 布局错误 fail-loud（不再退化为
+    "missing" 常量占位）。"""
+    (kol_like / "addons" / "gqt_gherkin" / "harness.gd").unlink()
     recipe, error = build_recipe(kol_like, exclusions=[])
-    assert error is None
-    assert recipe["acceptance_face"]["harness"]["wiring_sha256"] == "missing"
+    assert recipe is None
+    assert error is not None
+    assert "addons/gqt_gherkin/harness.gd missing" in error
 
 
 def test_verify_recipe_rejects_version_mismatch(kol_like):
@@ -185,19 +193,19 @@ def test_cmd_recipe_success_writes_recipe_and_summary(tmp_path, kol_like, capsys
     args = _parse("measure", "suite", "--project-root", str(root),
         "--out", str(out_path),
         "--exclude", "gut_dir:tests/old/:retired face",
-        "--exclude", "acceptance_feature:feature_2:quarantined",
+        "--exclude", "gherkin_feature:feature_2:quarantined",
     )
     rc = cli_mod.cmd_measure_suite(args)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["ok"] is True and out["tool"] == "measure.suite"
     assert out["summary"]["exclusions"] == 2
     assert out["summary"]["gut_dirs"] == 2
-    assert out["summary"]["acceptance_features"] == 3
+    assert out["summary"]["gherkin_features"] == 3
     recipe = json.loads(out_path.read_text(encoding="utf-8"))
     assert recipe["recipe_hash"] == out["summary"]["recipe_hash"]
     assert len(recipe["exclusions"]) == 2
     assert recipe["gut_face"]["excluded"][0]["pattern"] == "tests/old/"
-    assert recipe["acceptance_face"]["excluded"][0]["key"] == "feature_2"
+    assert recipe["gherkin_face"]["excluded"][0]["key"] == "feature_2"
     # hash roundtrip on the landed file
     from godot_qa_toolkit.measurement.recipe import recipe_hash, verify_recipe
     assert recipe["recipe_hash"] == recipe_hash(recipe)

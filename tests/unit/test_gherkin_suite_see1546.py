@@ -1,8 +1,8 @@
 """SEE-1546 WP3 PR-B — accept 私有目录管线单测（§SPEC-035）。
 
 判据先行（TDD RED）：compile --out-dir/--keys、run --suite-dir、私有目录
-`acceptance/generated/.gqt-run-<uuid>/`（事先为空、跑完清理零残留）、
-acceptance-suite/1 对账五项（生成数==选中数、执行脚本集==生成词干集、
+`gherkin/generated/.gqt-run-<uuid>/`（事先为空、跑完清理零残留）、
+gherkin-suite/1 对账五项（生成数==选中数、执行脚本集==生成词干集、
 计数相等、未选/旧 generated 缺席、私有目录重放语义）、W4 成本探针记录。
 反向探针：植入 test_extra.gd → 对账必须失败。缺省行为不变单独钉住。
 """
@@ -16,13 +16,14 @@ from pathlib import Path
 import pytest
 
 from godot_qa_toolkit.gherkin.compile import compile_feature
-from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check
+from godot_qa_toolkit.gherkin.run import GherkinRunError, replay_check
+from godot_qa_toolkit.gherkin.addon import AddonError
 from godot_qa_toolkit.gherkin.suite import (
     SUITES_VERSION,
     SuiteError,
     compile_keys_to_suite,
     create_suite_dir,
-    run_acceptance_probe,
+    run_gherkin_probe,
     run_suite_dir,
 )
 
@@ -49,15 +50,21 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     for name in ("demo", "demo_x", "a", "ab"):
         (feats / f"{name}.feature").write_text(FEATURE, encoding="utf-8")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _fake_gut(output: str, returncode: int = 0, capture: list | None = None):
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         if capture is not None:
             capture.append(a[0])
 
@@ -83,7 +90,7 @@ def _gut_ok_output(rec: dict) -> str:
     段内 `* test_x`。同名测试跨脚本靠段区分。"""
     sections = []
     for key, man in sorted(rec["manifests"].items()):
-        lines = [f"res://acceptance/generated/.gqt-run-x/generated/"
+        lines = [f"res://gherkin/generated/.gqt-run-x/generated/"
                  f"test_{key}.gd"]
         for a in man["attribution"]:
             lines.append(f"* {a['test_name']}")
@@ -93,8 +100,8 @@ def _gut_ok_output(rec: dict) -> str:
 
 
 def _main_artifacts(root: Path) -> list[str]:
-    ir = root / "acceptance" / "ir"
-    gen = root / "acceptance" / "generated"
+    ir = root / "gherkin" / "ir"
+    gen = root / "gherkin" / "generated"
     out = []
     for d in (ir, gen):
         if d.is_dir():
@@ -110,7 +117,7 @@ def _main_artifacts(root: Path) -> list[str]:
 def test_create_suite_dir_fresh_empty_under_generated(project: Path):
     d = create_suite_dir(project)
     assert d.is_dir()
-    assert d.parent == project / "acceptance" / "generated"
+    assert d.parent == project / "gherkin" / "generated"
     assert d.name.startswith(".gqt-run-")
     assert list(d.iterdir()) == []  # 事先为空
 
@@ -129,7 +136,7 @@ def test_run_suite_dir_cleans_up_zero_residue(project: Path):
     record = run_suite_dir(project, Path(rec["suite_dir"]))
     assert record["ok"] is True
     assert record["cleanup"] == "removed"
-    gen_root = project / "acceptance" / "generated"
+    gen_root = project / "gherkin" / "generated"
     assert not list(gen_root.glob(".gqt-run-*"))  # 零残留
     # 私有目录里的文件不落主目录（main 只读不碰）
     assert _main_artifacts(project) == []
@@ -148,7 +155,7 @@ def test_compile_keys_writes_only_selected_into_private_dir(project: Path):
     assert sorted(p.name for p in gen.glob("test_*.gd")) == ["test_demo.gd"]
     assert sorted(p.name for p in ir.glob("*.json")) == ["demo.json"]
     assert (gen / "demo.manifest.json").is_file()
-    assert (gen / "accept_worker.gd").is_file()
+    assert (gen / "gherkin_worker.gd").is_file()
     # 主目录零写入
     assert _main_artifacts(project) == []
 
@@ -170,14 +177,16 @@ def test_compile_keys_collision_pair_a_vs_ab_isolated(project: Path):
     assert ".gqt-run-" in gdir and gdir.endswith("/generated")
 
 
-def test_compile_keys_unknown_key_is_suite_error(project: Path):
+def test_compile_keys_unknown_key_is_named_error(project: Path):
+    # SEE-1624：features 发现收口 addon 单根——未知 key 属发现面违例，
+    # 具名 AddonError（缺根/空集同族），不再走 SuiteError 车道。
     d = create_suite_dir(project)
-    with pytest.raises(SuiteError, match="unknown key"):
+    with pytest.raises(AddonError, match="unknown key"):
         compile_keys_to_suite(project, ["nope"], d)
 
 
 # ------------------------------------------------------------------
-# 对账五项（acceptance-suite/1）
+# 对账五项（gherkin-suite/1）
 # ------------------------------------------------------------------
 
 
@@ -206,7 +215,7 @@ def test_run_suite_dir_gdir_points_at_private_dir(project: Path):
     run_suite_dir(project, Path(rec["suite_dir"]))
     gdir = [a for a in capture[0] if a.startswith("-gdir=")][0]
     assert ".gqt-run-" in gdir
-    assert "acceptance/generated" in gdir
+    assert "gherkin/generated" in gdir
 
 
 def test_reverse_probe_extra_script_fails_reconcile(project: Path):
@@ -216,7 +225,7 @@ def test_reverse_probe_extra_script_fails_reconcile(project: Path):
     d = Path(rec["suite_dir"])
     (d / "generated" / "test_extra.gd").write_text("# planted\n",
                                                    encoding="utf-8")
-    extra = ("res://acceptance/generated/.gqt-run-x/generated/"
+    extra = ("res://gherkin/generated/.gqt-run-x/generated/"
              "test_extra.gd\n* test_extra_thing\n  [Passed]\n")
     out = _gut_ok_output(rec) + "\n" + extra
     _fake_gut(out)
@@ -249,7 +258,7 @@ def test_missing_executed_test_fails_count_rule(project: Path):
                         create_suite_dir(project))
     # demo_x 的脚本段整体缺席（GUT 只跑了 demo）
     man = rec["manifests"]["demo"]
-    lines = ["res://acceptance/generated/.gqt-run-x/generated/test_demo.gd"]
+    lines = ["res://gherkin/generated/.gqt-run-x/generated/test_demo.gd"]
     lines += [f"* {a['test_name']}" for a in man["attribution"]]
     _fake_gut("\n".join(lines) + "\n")
     record = run_suite_dir(project, Path(rec["suite_dir"]))
@@ -280,7 +289,7 @@ def test_tampered_private_generated_gd_is_run_error(project: Path):
                   encoding="utf-8")
     called: list = []
     _fake_gut("nothing", capture=called)
-    with pytest.raises(AcceptRunError):
+    with pytest.raises(GherkinRunError):
         run_suite_dir(project, d)
     assert called == []  # 重放失败绝不进 GUT
 
@@ -292,7 +301,7 @@ def test_replay_check_suite_dir_variant_reads_private_manifests(
     man = replay_check(project, "demo", suite_dir=d)
     assert man["ir_hash"] == rec["manifests"]["demo"]["ir_hash"]
     assert man["ir_path"].startswith(
-        "res://acceptance/generated/.gqt-run-")
+        "res://gherkin/generated/.gqt-run-")
 
 
 def test_gut_lifecycle_hooks_not_counted_as_tests(project: Path):
@@ -300,7 +309,7 @@ def test_gut_lifecycle_hooks_not_counted_as_tests(project: Path):
     打进脚本段——钩子不是测试，对账计数必须排除，否则 R3 假红。"""
     rec = _compile_keys(project, ["demo"], create_suite_dir(project))
     man = rec["manifests"]["demo"]
-    lines = ["res://acceptance/generated/.gqt-run-x/generated/test_demo.gd",
+    lines = ["res://gherkin/generated/.gqt-run-x/generated/test_demo.gd",
              "* before_all"]
     lines += [f"* {a['test_name']}" for a in man["attribution"]]
     _fake_gut("\n".join(lines) + "\n")
@@ -315,7 +324,7 @@ def test_gut_orphan_report_lines_not_counted_as_tests(project: Path):
     前缀条目不是测试，对账必须排除，否则 R3 假红、臂被误判 invalid。"""
     rec = _compile_keys(project, ["demo"], create_suite_dir(project))
     man = rec["manifests"]["demo"]
-    lines = ["res://acceptance/generated/.gqt-run-x/generated/test_demo.gd",
+    lines = ["res://gherkin/generated/.gqt-run-x/generated/test_demo.gd",
              "* [LikeHeartComputer:<Node2D#1355984946042>(likeheart_computer.gd)]",
              "* [DecorMode:<CanvasItem#42>(decor_mode.gd)]"]
     lines += [f"* {a['test_name']}" for a in man["attribution"]]
@@ -334,16 +343,16 @@ def test_gut_orphan_report_lines_not_counted_as_tests(project: Path):
 def test_probe_record_shape_and_cleanup(project: Path):
     # write=False 拿 manifest 构造真机形态 fake 输出（探针自建私有目录，
     # 预先落盘编译会留孤儿 .gqt-run-* 污染零残留断言）
-    f = project / "acceptance" / "features" / "demo.feature"
+    f = project / "addons" / "gqt_gherkin" / "features" / "demo.feature"
     suite, error = compile_feature(f, project, write=False)
     assert error is None
     _fake_gut(_gut_ok_output({"manifests": {"demo": suite.manifest}}))
-    probe = run_acceptance_probe(project, ["demo"])
+    probe = run_gherkin_probe(project, ["demo"])
     assert probe["suite_ok"] is True
     assert probe["keys"] == ["demo"]
     assert probe["compile_s"] >= 0 and probe["run_s"] >= 0
     assert probe["extrapolation_assumption"]
-    gen_root = project / "acceptance" / "generated"
+    gen_root = project / "gherkin" / "generated"
     assert not list(gen_root.glob(".gqt-run-*"))
 
 
@@ -353,23 +362,23 @@ def test_probe_record_shape_and_cleanup(project: Path):
 
 
 def test_default_compile_without_out_dir_unchanged(project: Path):
-    f = project / "acceptance" / "features" / "demo.feature"
+    f = project / "addons" / "gqt_gherkin" / "features" / "demo.feature"
     suite, error = compile_feature(f, project, write=True)
     assert error is None
-    assert (project / "acceptance" / "ir" / "demo.json").is_file()
-    assert (project / "acceptance" / "generated"
+    assert (project / "gherkin" / "ir" / "demo.json").is_file()
+    assert (project / "gherkin" / "generated"
             / "test_demo.gd").is_file()
-    assert (project / "acceptance" / "generated"
+    assert (project / "gherkin" / "generated"
             / "demo.manifest.json").is_file()
 
 
 def test_default_replay_check_main_dirs_unchanged(project: Path):
-    f = project / "acceptance" / "features" / "demo.feature"
+    f = project / "addons" / "gqt_gherkin" / "features" / "demo.feature"
     suite, error = compile_feature(f, project, write=True)
     assert error is None
     man = replay_check(project, "demo")
     assert man["feature_key" if "feature_key" in man else "feature"]
-    assert man["ir_path"] == "res://acceptance/ir/demo.json"
+    assert man["ir_path"] == "res://gherkin/ir/demo.json"
 
 
 # ------------------------------------------------------------------
@@ -423,14 +432,14 @@ def test_cli_run_suite_dir_happy_and_exit_code(project: Path):
     assert code == 0 and out["ok"] is True
     assert out["summary"]["rules"]["replay_checked"] is True
     assert out["summary"]["cleanup"] == "removed"
-    assert not list((project / "acceptance" / "generated")
+    assert not list((project / "gherkin" / "generated")
                     .glob(".gqt-run-*"))
 
 
 def test_cli_probe_default_key_is_aidomain_integration(project: Path):
     _fake_gut("")
     code, out = _run_cli(["gherkin", "run", "--project-root", str(project),
-        "--acceptance-probe-keys",
+        "--gherkin-probe-keys",
     ])
     assert code == 1 and out["ok"] is False  # 该键在 fixture 不存在
     assert "aidomain_integration" in out["summary"]["error"]

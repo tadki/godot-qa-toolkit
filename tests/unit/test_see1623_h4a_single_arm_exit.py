@@ -2,7 +2,7 @@
 
 Owner 2026-11-23 裁决 A（§SPEC-004 更新判据）：暂停期间普通 `measure
 run`（无 --test-attribution）gut_full 臂有效且通过 → ok=true / exit 0、
-certification=uncertified、具名单臂 exit_semantics，保留 acceptance_arm
+certification=uncertified、具名单臂 exit_semantics，保留 gherkin_arm
 暂停披露；gut_full 无效/失败仍 failed / exit 1；--test-attribution 路径
 与显式 env=0 恢复双臂路径语义零变化。
 """
@@ -34,7 +34,7 @@ def _report(*, gut_state="valid", paused=True, union_ok=False,
         "ok": union_ok,
     }
     if paused:
-        rep["acceptance_arm"] = _PAUSE_DISCLOSURE
+        rep["gherkin_arm"] = _PAUSE_DISCLOSURE
     if attribution is not None:
         rep["test_attribution"] = attribution
     return rep
@@ -49,7 +49,7 @@ class TestSingleArmDecision:
         assert summary["exit_semantics"] == \
             "single_arm_usable_acceptance_paused"
         assert summary["union_certified"] is False
-        assert summary["acceptance_arm"] == _PAUSE_DISCLOSURE
+        assert summary["gherkin_arm"] == _PAUSE_DISCLOSURE
 
     def test_paused_plain_invalid_gut_stays_failed(self):
         summary, ok = cli._measure_run_summary(
@@ -61,7 +61,7 @@ class TestSingleArmDecision:
     def test_paused_plain_missing_arms_stays_failed(self):
         rep = {"report_version": "measurement-report/2", "arms": [],
                "unions": [], "ok": False,
-               "acceptance_arm": _PAUSE_DISCLOSURE}
+               "gherkin_arm": _PAUSE_DISCLOSURE}
         _summary, ok = cli._measure_run_summary(rep, None, False)
         assert ok is False
 
@@ -136,7 +136,7 @@ class TestMeasureRunCliExit:
         s = payload["summary"]
         assert s["exit_semantics"] == "single_arm_usable_acceptance_paused"
         assert s["certification"] == "uncertified"
-        assert "acceptance_arm" in s
+        assert "gherkin_arm" in s
 
     def test_plain_run_invalid_gut_exit_one_named(self, tmp_path,
                                                   monkeypatch):

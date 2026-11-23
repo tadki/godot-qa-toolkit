@@ -22,7 +22,7 @@ from godot_qa_toolkit.gherkin import OPS_VERSION
 from godot_qa_toolkit.gherkin.compile import compile_feature
 from godot_qa_toolkit.gherkin.mutate import Mutant, mutate_case, mutate_ir
 from godot_qa_toolkit.gherkin.mutate_runner import (
-    AcceptRunError,
+    GherkinRunError,
     _mutated_ir,
     run_mutate,
 )
@@ -39,6 +39,19 @@ def _restore_subprocess():
     yield
     sp.run, sp.Popen = orig_run, orig_popen
     mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
+
+
+@pytest.fixture(autouse=True)
+def _stub_preflight(monkeypatch):
+    """SEE-1624：worker 通道测试不涉预检——stub 掉 run_preflight
+    的 validator 拉起（真实 Godot 进程不进单元测试）。"""
+    import godot_qa_toolkit.gherkin.addon as _addon
+    monkeypatch.setattr(_addon, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    import godot_qa_toolkit.gherkin.mutate_runner as _mr
+    monkeypatch.setattr(_mr, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    yield
 
 
 FEATURE_UNCHANGED = """Feature: U
@@ -60,11 +73,24 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path, feature: str = FEATURE_UNCHANGED):
-    f = tmp_path / "demo.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         "demo.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -97,9 +123,9 @@ def test_def1_generator_carries_pollution_probe(project: Path,
                                                 tmp_path: Path) -> None:
     """生成器/worker 双侧都带基线污染语义——比对块被剥离则探针失效。"""
     suite = _compile(project, tmp_path)
-    gd = (project / "acceptance/generated/test_s_..._gd").exists() or True
-    gen = (project / "acceptance/generated/test_demo.gd").read_text(encoding="utf-8")
-    worker = (project / "acceptance/generated/accept_worker.gd").read_text(
+    gd = (project / "gherkin/generated/test_s_..._gd").exists() or True
+    gen = (project / "gherkin/generated/test_demo.gd").read_text(encoding="utf-8")
+    worker = (project / "gherkin/generated/gherkin_worker.gd").read_text(
         encoding="utf-8")
     for src in (gen, worker):
         assert "mutated_unchanged" in src, "基线污染探针必须在生成面"
@@ -117,6 +143,10 @@ def test_def1_unchanged_round_judged(project: Path, tmp_path: Path) -> None:
     calls = {"n": 0}
 
     def fake_stateful(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         calls["n"] += 1
         kill_after_baseline = kills_at >= 2  # F-C：n=1 恒基线绿
         class R:
@@ -158,6 +188,10 @@ def test_def2_poison_test_cannot_inflate_kills(project: Path,
     calls = {"n": 0}
 
     def fake_poison(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         calls["n"] += 1
         class R:
             # F-C：n=1 基线绿（真实判据流），毒测试落在 mutant 轮
@@ -324,18 +358,18 @@ def test_disclosure3_worker_artifact_hash_bound(project: Path,
                                                 tmp_path: Path) -> None:
     suite = _compile(project, tmp_path)
     # worker 在场且进哈希绑定：手改 worker = run_error
-    worker = project / "acceptance/generated/accept_worker.gd"
+    worker = project / "gherkin/generated/gherkin_worker.gd"
     worker.write_text(worker.read_text(encoding="utf-8") + "\n# tampered\n")
-    with pytest.raises(AcceptRunError, match="worker hash mismatch"):
+    with pytest.raises(GherkinRunError, match="worker hash mismatch"):
         replay_check(project, "demo")
 
 
 def test_disclosure3_worker_missing_rejected(project: Path,
                                              tmp_path: Path) -> None:
     _compile(project, tmp_path)
-    (project / "acceptance/generated/accept_worker.gd").unlink()
+    (project / "gherkin/generated/gherkin_worker.gd").unlink()
     import godot_qa_toolkit.gherkin.mutate_runner as mr
-    with pytest.raises(AcceptRunError, match="worker artifact missing"):
+    with pytest.raises(GherkinRunError, match="worker artifact missing"):
         run_mutate(project, "demo", use_worker=True)
 
 
@@ -343,7 +377,7 @@ def test_disclosure3_worker_in_clean_then_generate(project: Path,
                                                    tmp_path: Path) -> None:
     """worker 受先清空再生成管辖：陈旧 worker 重编译后消失重建。"""
     _compile(project, tmp_path)
-    stale = project / "acceptance/generated/accept_worker.gd"
+    stale = project / "gherkin/generated/gherkin_worker.gd"
     assert stale.is_file()
     _compile(project, tmp_path)  # 重编译
     assert stale.is_file()
@@ -440,7 +474,7 @@ def test_worker_spawn_oserror_is_run_error(project: Path,
         raise OSError("no exec")
     _compile(project, tmp_path)
     mr.subprocess.Popen = boom
-    with pytest.raises(AcceptRunError, match="worker process spawn failed"):
+    with pytest.raises(GherkinRunError, match="worker process spawn failed"):
         run_mutate(project, "demo", use_worker=True)
 
 

@@ -43,7 +43,7 @@ def _call(tmp_path: Path, **over):
     xdg.mkdir()
     kw = dict(
         name="gut_full", root=tmp_path, prepared={"a.gd": {}},
-        acceptance=None,
+        gherkin=None,
         arms_parallel=False, evidence_dir=None, shard_log_dir=None,
         timeout_s=10, adaptive_reps=False, test_attribution=True,
         results=[{"reps": [], "shadow_disclosure":
@@ -101,12 +101,12 @@ def test_arm_result_explicit_invalid_reason_wins(tmp_path, monkeypatch):
     assert doc["invalid_reason"] == "reconciliation_failed"
 
 
-def test_arm_result_acceptance_convergence(tmp_path, monkeypatch):
+def test_arm_result_gherkin_convergence(tmp_path, monkeypatch):
     _wire(monkeypatch)
     from godot_qa_toolkit.measurement import orchestrator as orch
-    monkeypatch.setattr(orch, "_acceptance_convergence",
+    monkeypatch.setattr(orch, "_gherkin_convergence",
                         lambda *a, **k: {"rounds_used": 2})
-    doc, _ = _call(tmp_path, name="acceptance", reps=3, acceptance={"x": 1},
+    doc, _ = _call(tmp_path, name="gherkin", reps=3, gherkin={"x": 1},
                    test_attribution=False, adaptive_reps=True,
                    results=[{"reps": [{}, {}], "shadow_disclosure": {}}])
     assert doc["convergence"] == {"rounds_used": 2}

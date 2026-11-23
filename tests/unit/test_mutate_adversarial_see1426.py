@@ -30,10 +30,27 @@ from godot_qa_toolkit.gherkin import OPS_VERSION
 from godot_qa_toolkit.gherkin.compile import compile_feature
 from godot_qa_toolkit.gherkin.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.gherkin.mutate_runner import (
-    AcceptRunError,
+    GherkinRunError,
     _mutated_ir,
     run_mutate,
 )
+
+
+def _schema_ensure(project: Path) -> None:
+    """SEE-1624：compile 前置 schema 握手 + run/mutate 预检 validator——
+    夹具补最小合法 schema.json 与可通过 V 检查的 validator.gd stub。"""
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    s = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not s.is_file():
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    v = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not v.is_file():
+        v.write_text(VALIDATOR_OK_GD, encoding="utf-8")
+
+
+
 
 KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n* test_s_000_01\n  [Failed]\n"  # 双 case 各自 [Failed]——DEF-2 归因核对要求当轮 case 名在失败集合内
 PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
@@ -50,6 +67,19 @@ def _restore_subprocess():
     mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
+@pytest.fixture(autouse=True)
+def _stub_preflight(monkeypatch):
+    """SEE-1624：worker 通道测试不涉预检——stub 掉 run_preflight
+    的 validator 拉起（真实 Godot 进程不进单元测试）。"""
+    import godot_qa_toolkit.gherkin.addon as _addon
+    monkeypatch.setattr(_addon, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    import godot_qa_toolkit.gherkin.mutate_runner as _mr
+    monkeypatch.setattr(_mr, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    yield
+
+
 def _fake_gut(returncode: int, output: str,
               baseline: tuple[int, str] | None = None) -> None:
     """F-C：baseline=(rc, output) 时首调用（未变异基线轮）单独供给。"""
@@ -58,6 +88,10 @@ def _fake_gut(returncode: int, output: str,
     calls = {"n": 0}
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         calls["n"] += 1
         if baseline is not None and calls["n"] == 1:
             rc, out = baseline
@@ -235,11 +269,24 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path, feature: str = FEATURE) -> Path:
-    f = tmp_path / "demo.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         "demo.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -248,7 +295,7 @@ def _compile(project: Path, tmp_path: Path, feature: str = FEATURE) -> Path:
 
 def _disk_ir(project: Path) -> dict:
     return json.loads(
-        (project / "acceptance/ir/demo.json").read_text(encoding="utf-8"))
+        (project / "gherkin/ir/demo.json").read_text(encoding="utf-8"))
 
 
 def test_mutant_rounds_isolated_no_accumulation(project: Path,
@@ -263,6 +310,10 @@ def test_mutant_rounds_isolated_no_accumulation(project: Path,
     snapshots: list[set] = []
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         cur = _disk_ir(project)
         diffs = set()
         for case in cur["cases"]:
@@ -294,14 +345,18 @@ def test_ir_restored_after_timeout_run_error(project: Path,
     病变 IR——恢复竞态的异常分支）。"""
     import godot_qa_toolkit.gherkin.mutate_runner as mr
     _compile(project, tmp_path)
-    original = (project / "acceptance/ir/demo.json").read_text(encoding="utf-8")
+    original = (project / "gherkin/ir/demo.json").read_text(encoding="utf-8")
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         raise subprocess.TimeoutExpired(cmd="godot", timeout=1)
     mr.subprocess.run = fake_run
-    with pytest.raises(AcceptRunError, match="timed out"):
+    with pytest.raises(GherkinRunError, match="timed out"):
         run_mutate(project, "demo")
-    assert (project / "acceptance/ir/demo.json").read_text(
+    assert (project / "gherkin/ir/demo.json").read_text(
         encoding="utf-8") == original, "IR must be restored even on timeout"
 
 
@@ -309,11 +364,11 @@ def test_mutate_replay_guard_rejects_tampered_ir(project: Path,
                                                  tmp_path: Path) -> None:
     """手改磁盘 IR 后 mutate：入口重放校验必拒（带病 IR 不得进变异轮）。"""
     _compile(project, tmp_path)
-    ir_file = project / "acceptance/ir/demo.json"
+    ir_file = project / "gherkin/ir/demo.json"
     ir = json.loads(ir_file.read_text(encoding="utf-8"))
     ir["cases"][0]["values"]["left"] = "777"
     ir_file.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="IR hash mismatch"):
+    with pytest.raises(GherkinRunError, match="IR hash mismatch"):
         run_mutate(project, "demo")
 
 
@@ -322,14 +377,16 @@ def test_mutate_reanchor_guard_rejects_manifest_repoint(
     """重锚绕过新向量：manifest.source_path 换指另一合法 .feature——
     重编译 IR 的 source_path 字段随之漂移，哈希必失配 → run_error。"""
     _compile(project, tmp_path)
-    other = tmp_path / "other.feature"
+    other = ((project / "addons" / "gqt_gherkin" / "features") /
+         "other.feature")
+    _schema_ensure(project)
     other.write_text("Feature: Other\n  Scenario: s\n    Given a\n",
                      encoding="utf-8")
-    man = project / "acceptance/generated/demo.manifest.json"
+    man = project / "gherkin/generated/demo.manifest.json"
     m = json.loads(man.read_text(encoding="utf-8"))
     m["source_path"] = str(other)
     man.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="recompile hash mismatch"):
+    with pytest.raises(GherkinRunError, match="recompile hash mismatch"):
         run_mutate(project, "demo")
 
 
@@ -356,6 +413,10 @@ def test_sentinel_partial_kill_does_not_shortcircuit(project: Path,
     calls = {"n": 0}
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         calls["n"] += 1
         class R:
             # F-C：n=1 基线绿，n=2 首 mutant kill，其余绿
@@ -425,11 +486,13 @@ def test_empty_enum_domain_feature_is_fail_closed(project: Path,
       | mode |
       | a    |
 """
-    f = tmp_path / "empty.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "empty.feature")
+    _schema_ensure(project)
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
-    with pytest.raises(AcceptRunError, match="no mutants generated"):
+    with pytest.raises(GherkinRunError, match="no mutants generated"):
         run_mutate(project, "empty")
 
 
@@ -449,10 +512,12 @@ def test_feature_key_same_source_recompile_is_idempotent(
         project: Path, tmp_path: Path) -> None:
     """-27 不误伤常规流程：同源 .feature 重编译（clean-then-generate）
     幂等放行，冲突检测只对异源同 key 报错。"""
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text("Feature: One\n  Scenario: s\n    Given a\n", encoding="utf-8")
     suite1, err1 = compile_feature(f, project, write=True)
     suite2, err2 = compile_feature(f, project, write=True)
     assert err1 is None and err2 is None
     assert suite1.feature_key == suite2.feature_key
-    assert (project / "acceptance/ir" / f"{suite2.feature_key}.json").is_file()
+    assert (project / "gherkin/ir" / f"{suite2.feature_key}.json").is_file()

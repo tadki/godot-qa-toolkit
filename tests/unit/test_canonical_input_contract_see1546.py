@@ -1,7 +1,7 @@
 """SEE-1562 R21 — §SPEC-067 canonical 外部 JSON 全量输入校验。
 
 回归基线来自 Revy R20 定向复验（157 项扩展矩阵 + 6 项嵌套反例）：
-recipe 的 toolchain / gut_face / acceptance_face / features / key、
+recipe 的 toolchain / gut_face / gherkin_face / features / key、
 exclusions scope/entry/reason，以及 stability-baseline 的
 file/fid/function_id/covered_line_ids/total/crap_line/provenance
 等全部下游直接消费字段，必须在编排/注入前系统校验；布尔不得当数字，
@@ -50,7 +50,7 @@ def project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -61,6 +61,8 @@ def project(tmp_path: Path) -> Path:
     (game / "cell.gd").write_text(
         "extends RefCounted\n\n\nfunc work(n: int) -> int:\n"
         "\tvar acc = 0\n\tfor i in range(n):\n\t\tacc += i\n\treturn acc\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
@@ -76,7 +78,7 @@ def _legal_recipe(**overrides) -> dict:
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": {"dirs": ["res://tests/"]},
-        "acceptance_face": {"features": [{"key": "demo"}]},
+        "gherkin_face": {"features": [{"key": "demo"}]},
         "toolchain": {},
         "exclusions": [],
     }
@@ -153,7 +155,7 @@ def test_recipe_gut_face_must_be_object_with_list_dirs(value):
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": value,
-        "acceptance_face": {"features": []},
+        "gherkin_face": {"features": []},
         "exclusions": [],
     }
     recipe["recipe_hash"] = recipe_hash(recipe)
@@ -165,7 +167,7 @@ def test_recipe_gut_face_dirs_must_be_list(dirs):
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": {"dirs": dirs},
-        "acceptance_face": {"features": []},
+        "gherkin_face": {"features": []},
         "exclusions": [],
     }
     recipe["recipe_hash"] = recipe_hash(recipe)
@@ -173,15 +175,15 @@ def test_recipe_gut_face_dirs_must_be_list(dirs):
 
 
 @pytest.mark.parametrize("value", [7, 1.5, True, "x", [], None])
-def test_recipe_acceptance_face_must_be_object_with_feature_list(value):
+def test_recipe_gherkin_face_must_be_object_with_feature_list(value):
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": {"dirs": []},
-        "acceptance_face": value,
+        "gherkin_face": value,
         "exclusions": [],
     }
     recipe["recipe_hash"] = recipe_hash(recipe)
-    assert "acceptance_face" in _verify_recipe_err(recipe)
+    assert "gherkin_face" in _verify_recipe_err(recipe)
 
 
 @pytest.mark.parametrize("features", [
@@ -190,7 +192,7 @@ def test_recipe_acceptance_face_must_be_object_with_feature_list(value):
 ])
 def test_recipe_features_must_be_objects_with_legal_key(features):
     assert "feature" in _verify_recipe_err(
-        _legal_recipe(acceptance_face={"features": features}))
+        _legal_recipe(gherkin_face={"features": features}))
 
 
 @pytest.mark.parametrize("value", [7, 1.5, True, "x", [], ["x"], None])
@@ -434,18 +436,18 @@ def test_api_run_canonical_bad_gut_face_is_domain_error(
         run_measurement(project, _targets(project), recipe)
 
 
-@pytest.mark.parametrize("acceptance_face", [None, 7, "x",
+@pytest.mark.parametrize("gherkin_face", [None, 7, "x",
                                              {"features": 7},
                                              {"features": [{"source": "s"}]}])
-def test_api_run_canonical_bad_acceptance_face_is_domain_error(
-        project, tmp_path, acceptance_face):
-    """R20-H1：acceptance_face/features/key 原在 feature key 展开
+def test_api_run_canonical_bad_gherkin_face_is_domain_error(
+        project, tmp_path, gherkin_face):
+    """R20-H1：gherkin_face/features/key 原在 feature key 展开
     （orchestrator.py:878 / 1448）崩溃或静默错配。"""
     recipe = _full_recipe(project, tmp_path)
-    if acceptance_face is None:
-        recipe.pop("acceptance_face")
+    if gherkin_face is None:
+        recipe.pop("gherkin_face")
     else:
-        recipe["acceptance_face"] = acceptance_face
+        recipe["gherkin_face"] = gherkin_face
     recipe["recipe_hash"] = recipe_hash(recipe)
     with pytest.raises(MeasurementError):
         run_measurement(project, _targets(project), recipe)
@@ -611,27 +613,27 @@ def test_verify_dirs_elements_strip_aligned_with_build():
 
 def test_verify_rejects_empty_faces_structural_errors_first():
     """§SPEC-068：空 features/dirs 拒绝（与 build 非空要求一致）；面结构
-    错误优先于面空性——dirs 空列表不得抢在 acceptance_face 类型错之前。"""
+    错误优先于面空性——dirs 空列表不得抢在 gherkin_face 类型错之前。"""
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": {"dirs": []},
-        "acceptance_face": {"features": []},
+        "gherkin_face": {"features": []},
         "toolchain": {},
         "exclusions": [],
     }
     recipe["recipe_hash"] = recipe_hash(recipe)
     reason = _verify_recipe_err(recipe)
     assert "dirs" in reason or "features" in reason
-    # 结构错误优先：acceptance_face 类型错不被 dirs 空列表抢先
+    # 结构错误优先：gherkin_face 类型错不被 dirs 空列表抢先
     recipe2 = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": {"dirs": []},
-        "acceptance_face": 7,
+        "gherkin_face": 7,
         "toolchain": {},
         "exclusions": [],
     }
     recipe2["recipe_hash"] = recipe_hash(recipe2)
-    assert "acceptance_face" in _verify_recipe_err(recipe2)
+    assert "gherkin_face" in _verify_recipe_err(recipe2)
 
 
 @pytest.mark.parametrize("scope", [[], {}, ["gut_dir"], {"a": 1}])
@@ -653,9 +655,9 @@ def test_verify_rejects_empty_dirs_with_valid_features():
 
 
 def test_verify_rejects_empty_features_with_valid_dirs():
-    """§SPEC-069 hardener: empty `acceptance_face.features` is rejected on its
+    """§SPEC-069 hardener: empty `gherkin_face.features` is rejected on its
     own even when the gut face is structurally valid and non-empty."""
-    reason = _verify_recipe_err(_legal_recipe(acceptance_face={"features": []}))
+    reason = _verify_recipe_err(_legal_recipe(gherkin_face={"features": []}))
     assert "features" in reason
 
 

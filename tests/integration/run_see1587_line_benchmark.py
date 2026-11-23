@@ -302,7 +302,7 @@ def _ensure_map_faces(env, kol: Path, faces: list[str], map_path: Path,
                           "--out", str(work / "bench-measure-report.json"),
                           "--test-attribution",
                           "--test-attribution-out", str(map_path),
-                          "--acceptance-repeats", "1", "--timeout", "300"],
+                          "--gherkin-repeats", "1", "--timeout", "300"],
                    env, work)
         _atomic_write(work / "prepare-measure.json", rec)
     # 孤立副本 acceptance 臂 run_error 属已知边界；gut_full 有效性由映射

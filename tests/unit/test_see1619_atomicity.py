@@ -54,11 +54,24 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut stub\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path, feature: str = FEATURE):
-    f = tmp_path / "demo.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         "demo.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=False)
     assert error is None
@@ -95,7 +108,7 @@ def test_all_body_paths_own_no_reset(project: Path, tmp_path: Path) -> None:
         "_run_case_by_name 不得自带 reset（提前 return 会绕过）"
     before = body.split("func before_each() -> void:", 1)[1].split("\nfunc ", 1)[0]
     assert "_harness.reset()" not in before
-    for sentinel in ('fail_test("acceptance harness unavailable',
+    for sentinel in ('fail_test("gherkin harness unavailable',
                      "case missing from IR"):
         idx = body.index(sentinel)
         seg = body[idx:]
@@ -115,7 +128,7 @@ def test_before_each_carries_post_reset_evidence(
 def test_existing_smoke_sentinels_preserved(project: Path, tmp_path: Path) -> None:
     body = _compile(project, tmp_path).generated_gd
     assert "if not h.smoke_check():" in body
-    assert 'fail_test("acceptance harness unavailable' in body
+    assert 'fail_test("gherkin harness unavailable' in body
     assert "case missing from IR" in body
     assert body.index("for e in errs:") < body.index("assert_true(errs.is_empty()"), \
         "错误传播先于正断言（既有顺序语义不变）"
@@ -137,7 +150,7 @@ def _gut_ok_output_with_hooks(rec: dict) -> str:
     不得计入 executed 计数，也不破坏五项对账。"""
     sections = []
     for key, man in sorted(rec["manifests"].items()):
-        lines = [f"res://acceptance/generated/.gqt-run-x/generated/"
+        lines = [f"res://gherkin/generated/.gqt-run-x/generated/"
                  f"test_{key}.gd"]
         for a in man["attribution"]:
             lines.append("* before_each")
@@ -152,9 +165,11 @@ def test_suite_reconciliation_unchanged_with_hooks(tmp_path: Path) -> None:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(FEATURE, encoding="utf-8")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     d = create_suite_dir(root)
     rec = compile_keys_to_suite(root, ["demo"], d)
     rec = dict(rec)
@@ -164,7 +179,16 @@ def test_suite_reconciliation_unchanged_with_hooks(tmp_path: Path) -> None:
         stdout = _gut_ok_output_with_hooks(rec)
         stderr = ""
 
-    sp.run = lambda *a, **k: R()
+    def _routed_run(*a, **k):
+        # SEE-1624：入口预检的 validator 拉起回正例 verdict；GUT 拉起回
+        # 钩子运行流输出。
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
+        return R()
+
+    sp.run = _routed_run
     record = run_suite_dir(root, Path(rec["suite_dir"]))
     assert record["ok"] is True
     # hook 排除：executed 计数 == 生成用例数，before_each/after_each 不计。

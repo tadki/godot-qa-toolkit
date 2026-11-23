@@ -46,12 +46,15 @@ def _mk_virgin(root: Path) -> Path:
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n",
         encoding="utf-8")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
         "    # types: <hp>:int, <left>:numeric\n    Examples:\n"
         "      | hp | left |\n      | 10 | 7    |\n", encoding="utf-8")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
+
     return root
 
 

@@ -51,7 +51,7 @@ def _project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -66,6 +66,8 @@ def _project(tmp_path: Path) -> Path:
 
 def _recipe(project: Path, tmp_path: Path) -> dict:
     from godot_qa_toolkit.measurement.recipe import build_recipe
+    from attribution_fixtures import install_recipe
+    install_recipe(project)
     recipe, error = build_recipe(project)
     assert error is None, error
     path = tmp_path / "recipe.json"

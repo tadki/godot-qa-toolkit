@@ -25,7 +25,24 @@ from pathlib import Path
 import pytest
 
 from godot_qa_toolkit.gherkin.compile import compile_feature
-from godot_qa_toolkit.gherkin.run import AcceptRunError, run_suite
+from godot_qa_toolkit.gherkin.run import GherkinRunError, run_suite
+
+
+def _schema_ensure(project: Path) -> None:
+    """SEE-1624：compile 前置 schema 握手 + run/mutate 预检 validator——
+    夹具补最小合法 schema.json 与可通过 V 检查的 validator.gd stub。"""
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    s = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not s.is_file():
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    v = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not v.is_file():
+        v.write_text(VALIDATOR_OK_GD, encoding="utf-8")
+
+
+
 
 FEATURE = """Feature: 生命值扣减
   Scenario Outline: 受到 <dmg> 点伤害
@@ -46,12 +63,25 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut stub\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile_written(project: Path, tmp_path: Path,
                      feature: str = FEATURE):
-    f = tmp_path / "demo.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         "demo.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -59,7 +89,7 @@ def _compile_written(project: Path, tmp_path: Path,
 
 
 def _gd_path(project: Path, suite) -> Path:
-    return project / "acceptance/generated" / f"test_{suite.feature_key}.gd"
+    return project / "gherkin/generated" / f"test_{suite.feature_key}.gd"
 
 
 # ---------- 恒真断言（必 run_error） ----------
@@ -73,7 +103,7 @@ def test_always_true_generated_rewrite_rejected(project: Path,
     tampered = original.replace('fail_test(String(e))', "pass")
     assert tampered != original, "tamper must change bytes"
     gd.write_text(tampered, encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="generated test hash mismatch"):
+    with pytest.raises(GherkinRunError, match="generated test hash mismatch"):
         run_suite(project, suite.feature_key)
 
 
@@ -83,11 +113,11 @@ def test_tampered_ir_full_pipeline_rejected(project: Path,
                                             tmp_path: Path) -> None:
     # 既有套件只在 replay_check 层测 IR tamper；这里走 run_suite 全链路。
     suite = _compile_written(project, tmp_path)
-    ir_file = project / "acceptance/ir" / f"{suite.feature_key}.json"
+    ir_file = project / "gherkin/ir" / f"{suite.feature_key}.json"
     ir = json.loads(ir_file.read_text(encoding="utf-8"))
     ir["cases"][0]["steps"][2]["text"] = "hero hp is 999"
     ir_file.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="IR hash mismatch"):
+    with pytest.raises(GherkinRunError, match="IR hash mismatch"):
         run_suite(project, suite.feature_key)
 
 
@@ -96,7 +126,7 @@ def test_tampered_generated_full_pipeline_rejected(project: Path,
     suite = _compile_written(project, tmp_path)
     gd = _gd_path(project, suite)
     gd.write_text(gd.read_text(encoding="utf-8") + "\n# innocent comment\n")
-    with pytest.raises(AcceptRunError, match="generated test hash mismatch"):
+    with pytest.raises(GherkinRunError, match="generated test hash mismatch"):
         run_suite(project, suite.feature_key)
 
 
@@ -104,20 +134,20 @@ def test_manifest_hash_reanchoring_rejected(project: Path,
                                             tmp_path: Path) -> None:
     # 手改 manifest 哈希字段为伪造值（不同步改磁盘文件）→ 与磁盘失配必抓。
     suite = _compile_written(project, tmp_path)
-    man = (project / "acceptance/generated"
+    man = (project / "gherkin/generated"
            / f"{suite.feature_key}.manifest.json")
     m = json.loads(man.read_text(encoding="utf-8"))
     m["ir_hash"] = "0" * 64
     m["bindings"]["ir"] = "0" * 64
     man.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="IR hash mismatch"):
+    with pytest.raises(GherkinRunError, match="IR hash mismatch"):
         run_suite(project, suite.feature_key)
 
 
 def test_missing_ir_file_rejected(project: Path, tmp_path: Path) -> None:
     suite = _compile_written(project, tmp_path)
-    (project / "acceptance/ir" / f"{suite.feature_key}.json").unlink()
-    with pytest.raises(AcceptRunError, match="IR file missing"):
+    (project / "gherkin/ir" / f"{suite.feature_key}.json").unlink()
+    with pytest.raises(GherkinRunError, match="IR file missing"):
         run_suite(project, suite.feature_key)
 
 
@@ -125,19 +155,19 @@ def test_missing_generated_file_rejected(project: Path,
                                          tmp_path: Path) -> None:
     suite = _compile_written(project, tmp_path)
     _gd_path(project, suite).unlink()
-    with pytest.raises(AcceptRunError, match="generated test missing"):
+    with pytest.raises(GherkinRunError, match="generated test missing"):
         run_suite(project, suite.feature_key)
 
 
 def test_manifest_version_mismatch_rejected(project: Path,
                                             tmp_path: Path) -> None:
     suite = _compile_written(project, tmp_path)
-    man = (project / "acceptance/generated"
+    man = (project / "gherkin/generated"
            / f"{suite.feature_key}.manifest.json")
     m = json.loads(man.read_text(encoding="utf-8"))
     m["ops_version"] = "see1426-accept/0"
     man.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="ops_version"):
+    with pytest.raises(GherkinRunError, match="ops_version"):
         run_suite(project, suite.feature_key)
 
 
@@ -153,7 +183,7 @@ def test_stripped_unchanged_comparison_rejected(project: Path,
     tampered = gd.read_text(encoding="utf-8").replace(
         "unchanged slot violated", "never fires")
     gd.write_text(tampered, encoding="utf-8")
-    with pytest.raises(AcceptRunError):
+    with pytest.raises(GherkinRunError):
         run_suite(project, suite.feature_key)
 
 
@@ -164,7 +194,18 @@ def test_generated_translates_unchanged_slot_faithfully(
     feature = FEATURE.replace(
         "    # types:",
         "    # unchanged: world.tick, player.gold\n    # types:")
-    f = tmp_path / "demo.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         "demo.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=False)
     assert error is None
@@ -196,6 +237,10 @@ def test_same_name_scenarios_attributed_distinctly(
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 1
             stdout = f"* {names[1]}\n  [Failed]\n"
@@ -214,13 +259,15 @@ def test_generated_carries_smoke_sentinel(project: Path,
                                           tmp_path: Path) -> None:
     # 哨兵失真对抗的文本级守卫：生成脚本必须真实调用 smoke_check，且
     # harness 缺失/冒烟失败必须 fail_test——不存在静默通过路径。
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text(FEATURE, encoding="utf-8")
     suite, error = compile_feature(f, project, write=False)
     assert error is None
     gd = suite.generated_gd
     assert "if not h.smoke_check():" in gd, "smoke sentinel call missing"
-    assert 'fail_test("acceptance harness unavailable' in gd, \
+    assert 'fail_test("gherkin harness unavailable' in gd, \
         "harness-unavailable fallback missing"
     assert "case missing from IR" in gd, "IR/generated drift fallback missing"
 
@@ -233,7 +280,11 @@ def test_run_timeout_is_run_error(project: Path, tmp_path: Path,
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         raise subprocess.TimeoutExpired(cmd="godot", timeout=1)
     monkeypatch.setattr(run_mod.subprocess, "run", fake_run)
-    with pytest.raises(AcceptRunError, match="timed out"):
+    with pytest.raises(GherkinRunError, match="timed out"):
         run_suite(project, suite.feature_key)

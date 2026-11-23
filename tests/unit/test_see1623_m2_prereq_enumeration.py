@@ -26,7 +26,7 @@ class TestPreparePrereqEnumeration:
             'config_version=5\n[application]\nconfig/name="m2"\n')
         plan = static_plan(str(root), None, None)
         codes = {p["code"] for p in plan["problems"]}
-        assert {"gutconfig_missing", "acceptance_features_dir_missing"} \
+        assert {"gutconfig_missing", "gherkin_features_dir_missing"} \
             <= codes
 
     def test_features_dir_without_feature_files_named(self, tmp_path):
@@ -35,11 +35,11 @@ class TestPreparePrereqEnumeration:
         (root / "project.godot").write_text(
             'config_version=5\n[application]\nconfig/name="m2"\n')
         (root / ".gutconfig.json").write_text("{}")
-        (root / "acceptance" / "features").mkdir(parents=True)
+        (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
         plan = static_plan(str(root), None, None)
         codes = {p["code"] for p in plan["problems"]}
-        assert "acceptance_features_dir_missing" not in codes
-        assert "acceptance_features_empty" in codes
+        assert "gherkin_features_dir_missing" not in codes
+        assert "gherkin_features_empty" in codes
 
     def test_complete_prereqs_no_noise(self, tmp_path):
         root = tmp_path / "proj"
@@ -48,14 +48,14 @@ class TestPreparePrereqEnumeration:
             'config_version=5\n[application]\nconfig/name="m2"\n')
         (root / ".gutconfig.json").write_text(
             '{"dirs": ["res://tests/"], "include_subdirs": true}')
-        (root / "acceptance" / "features").mkdir(parents=True)
-        (root / "acceptance" / "features" / "a.feature").write_text(
+        (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
+        (root / "addons" / "gqt_gherkin" / "features" / "a.feature").write_text(
             "Feature: a\nScenario: s\nGiven x\n")
         plan = static_plan(str(root), None, None)
         codes = {p["code"] for p in plan["problems"]}
         assert not (codes & {"gutconfig_missing",
-                             "acceptance_features_dir_missing",
-                             "acceptance_features_empty"})
+                             "gherkin_features_dir_missing",
+                             "gherkin_features_empty"})
 
     def test_prereq_problems_carry_fix_actions(self, tmp_path):
         root = tmp_path / "proj"
@@ -65,7 +65,7 @@ class TestPreparePrereqEnumeration:
         plan = static_plan(str(root), None, None)
         for p in plan["problems"]:
             if p["code"] in ("gutconfig_missing",
-                             "acceptance_features_dir_missing"):
+                             "gherkin_features_dir_missing"):
                 assert p["fix"]
                 assert p["auto_prepare_covered"] is False
 

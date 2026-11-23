@@ -180,7 +180,7 @@ def main() -> int:
         "--recipe", str(recipe_path),
         "--out", str(work / "measure-report.json"),
         "--test-attribution", "--test-attribution-out", str(map_path),
-        "--acceptance-repeats", "1", "--timeout", "300"], env, cwd=work)
+        "--gherkin-repeats", "1", "--timeout", "300"], env, cwd=work)
     runs.append(("measure run --test-attribution", measure))
     renewal = _map_renewal_checks(map_path, map_pre_hash, measure["rc"])
     for c in renewal:

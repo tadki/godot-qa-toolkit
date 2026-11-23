@@ -385,10 +385,12 @@ def test_check_baseline_red_named_in_preconditions(tmp_path, monkeypatch):
     (root / ".gutconfig.json").write_text('{"dirs": ["res://tests/unit"]}',
                                           encoding="utf-8")
     (root / "tests" / "unit").mkdir(parents=True)
-    (root / "acceptance" / "features").mkdir(parents=True)
-    (root / "acceptance" / "features" / "pf.feature").write_text(
+    (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
+    (root / "addons" / "gqt_gherkin" / "features" / "pf.feature").write_text(
         "Feature: pf\n\n  Scenario: s\n    Given x\n",
         encoding="utf-8")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     monkeypatch.setenv(runner_mod._ENV_CHECK_BASELINE, "1")
     monkeypatch.setattr(mo, "_acquire_lazy_baseline", lambda root, a, t: (
         {("res://tests/a.gd", "test_red1"), ("res://tests/b.gd", "test_red2"),

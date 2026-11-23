@@ -93,7 +93,7 @@ def project(tmp_path: Path) -> Path:
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nconst TARGET := preload(\"res://src_game/cell.gd\")\n"
         "func test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -102,6 +102,8 @@ def project(tmp_path: Path) -> Path:
     game = root / "src_game"
     game.mkdir()
     (game / "cell.gd").write_text(TARGET_SRC)
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
@@ -1278,14 +1280,14 @@ def _mutation_target(project):
 
 
 def _compile_demo_suite(project, tmp_path):
-    """编译 fixture 的 demo 特性到标准 acceptance/ir（mutate 前置——
+    """编译 fixture 的 demo 特性到标准 gherkin/ir（mutate 前置——
     replay_check 需要已编译 IR；compile 不拉 Godot）。"""
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
            "TMPDIR": str(tmp_path / "tmp"), "LANG": "C.UTF-8",
            "PYTHONPATH": str(REPO / "src")}
     proc = sp.run(
         [sys.executable, "-m", "godot_qa_toolkit.cli","gherkin", "compile",
-         str(project / "acceptance" / "features" / "demo.feature"),
+         str(project / "addons" / "gqt_gherkin" / "features" / "demo.feature"),
          "--project-root", str(project), "--write"],
         capture_output=True, text=True, timeout=60, env=env,
         cwd=str(REPO))
@@ -1294,7 +1296,7 @@ def _compile_demo_suite(project, tmp_path):
 
 def test_accept_run_probe_missing_godot_clean_env(project, tmp_path):
     payload = _spawn_clean_env(
-        ["gherkin", "run", "--acceptance-probe-keys", "demo"],
+        ["gherkin", "run", "--gherkin-probe-keys", "demo"],
         project, tmp_path)
     assert payload["tool"] == "gherkin"
     assert "godot binary not found in PATH" in payload["summary"]["error"]
@@ -1367,7 +1369,7 @@ def _bad_interpreter_godot(tmp_path):
 @pytest.mark.parametrize("bad", ["pseudo_elf", "bad_interpreter"])
 @pytest.mark.parametrize("route", [("measure", "run"), ("measure", "diagnose"),
                                    ("mutation",), ("measure", "coverage"),
-                                   ("gherkin", "run", "--acceptance-probe-keys",
+                                   ("gherkin", "run", "--gherkin-probe-keys",
                                     "demo")])
 def test_pseudo_format_five_routes_domain_json(route, bad, project,
                                                tmp_path):

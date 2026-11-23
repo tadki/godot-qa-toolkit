@@ -798,6 +798,28 @@ def _stale_decision_reason(evaluation_reason: str, *, explicit: bool,
     return ("auto_update_still_stale:" if auto else "") + evaluation_reason
 
 
+def _universe_target_gate(base: dict, evaluation: dict, doc: dict, rel: str,
+                          *, auto: bool, renew: bool, explicit) -> bool:
+    """SEE-1623 M10：预存映射 universe 不含目标 → 增量通道无法归类该路径
+    （unknown_changed_paths 必失败且白跑一次 gut_full 臂）——零 GUT 具名
+    失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。
+
+    命中时写入 base（reason= target_not_in_map_universe + universe_guidance）
+    并返回 True（调用方 `_finish(base, strict)` 终止）。"""
+    if (auto and renew and not explicit
+            and evaluation.get("reason") == "file_binding_missing_or_stale"
+            and (doc.get("file_sha256") or {})
+            and rel not in (doc.get("file_sha256") or {})):
+        base["reason"] = "target_not_in_map_universe"
+        base["universe_guidance"] = (
+            f"the existing attribution map does not bind {rel} — rebuild "
+            "the map so the target enters its universe (delete "
+            ".qa-cache/attribution-map.json and rerun, or gqt measure "
+            "map-update --changed <path>)")
+        return True
+    return False
+
+
 def resolve_selection(project_root: str | Path, target_file: str,
                       map_path_override: str | None = None,
                       strict: bool = True,
@@ -831,19 +853,8 @@ def resolve_selection(project_root: str | Path, target_file: str,
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path
-    # SEE-1623 M10：预存映射 universe 不含目标 → 增量通道无法归类该路径
-    # （unknown_changed_paths 必失败且白跑一次 gut_full 臂）——零 GUT
-    # 具名失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。
-    if (auto and renew and not explicit
-            and evaluation.get("reason") == "file_binding_missing_or_stale"
-            and (doc.get("file_sha256") or {})
-            and rel not in (doc.get("file_sha256") or {})):
-        base["reason"] = "target_not_in_map_universe"
-        base["universe_guidance"] = (
-            f"the existing attribution map does not bind {rel} — rebuild "
-            "the map so the target enters its universe (delete "
-            ".qa-cache/attribution-map.json and rerun, or gqt measure "
-            "map-update --changed <path>)")
+    if _universe_target_gate(base, evaluation, doc, rel,
+                             auto=auto, renew=renew, explicit=explicit):
         return _finish(base, strict)
     evaluation, terminal = _auto_renew_step(
         root, path, doc, rel, evaluation, explicit=explicit, auto=auto,

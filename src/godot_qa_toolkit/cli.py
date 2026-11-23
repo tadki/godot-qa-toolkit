@@ -595,6 +595,52 @@ def _usage_exit(message: str) -> int:
     return 2
 
 
+def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
+    """默认映射面的运行前准备链（非 dry-run 且 full-face / 显式 --tests
+    接管面以外）：单文件目标存在性校验 → 自动导入 → ensure_map。
+
+    A20（SEE-1594 S5）：显式 `--select full` 是全脸审计——不需要映射，不得
+    被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file 默认路径
+    仍自动生成/复用新鲜映射；不可用 fail-loud）。
+    SEE-1623 M1：显式 `--tests` 同理——用户接管测试面，映射非必需，不触发
+    ensure_map（prepare_required/映射构建都不该拦显式面）。
+
+    返回 rc 非 None 即终止（调用方原样返回）。"""
+    if getattr(args, "dry_run", False):
+        return None
+    full_face = getattr(args, "select_mode", "line") == "full"
+    if full_face or getattr(args, "tests", None):
+        return None
+    # SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
+    # （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig 错误）。
+    # 多文件收集失败契约（SEE-1321 LOW-6：缺失文件以 per-file error 进
+    # results）不在此拦——处理仍在 dispatch 层。
+    from .mutation.truth_select import MutationSelectionError
+    from .source_io import anchor_to_project_root as _anchor_t
+    _files = getattr(args, "files", None) or []
+    _t = _files[0] if len(_files) == 1 else None
+    if _t is not None:
+        _anchored = Path(_anchor_t(_t, args.project_root))
+        if not _anchored.is_file():
+            _msg = (f"mutation target not found: {_t} (anchored: "
+                    f"{_anchored})")
+            return _emit({"tool": "mutation", "ok": False,
+                          "summary": {"files": args.files,
+                                      "error": _msg},
+                          "failures": [{"reason": _msg}]})
+    # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
+    rc = _bootstrap_import_or_contract("mutation", args)
+    if rc is not None:
+        return rc
+    # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
+    try:
+        _truth.ensure_map(str(Path(args.project_root)),
+                          [str(f) for f in args.files])
+    except MutationSelectionError as e:
+        return _selection_error_payload(args, e)
+    return None
+
+
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import detect_binary_kind
 
@@ -642,39 +688,9 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     _plan_early = _plan_gate_mutation(args)
     if _plan_early is not None:
         return _plan_early
-    if not getattr(args, "dry_run", False):
-        # A20（SEE-1594 S5）：显式 --select full 是全脸审计——不需要映射，
-        # 不得被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file
-        # 默认路径仍自动生成/复用新鲜映射；不可用 fail-loud）。
-        # SEE-1623 M1：显式 --tests 同理——用户接管测试面，映射非必需，
-        # 不触发 ensure_map（prepare_required/映射构建都不该拦显式面）。
-        full_face = getattr(args, "select_mode", "line") == "full"
-        if not full_face and not getattr(args, "tests", None):
-            # SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
-            # （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig
-            # 错误）。多文件收集失败契约（SEE-1321 LOW-6：缺失文件以
-            # per-file error 进 results）不在此拦——处理仍在 dispatch 层。
-            from .source_io import anchor_to_project_root as _anchor_t
-            _files = getattr(args, "files", None) or []
-            _t = _files[0] if len(_files) == 1 else None
-            if _t is not None and \
-                    not Path(_anchor_t(_t, args.project_root)).is_file():
-                _msg = (f"mutation target not found: {_t} (anchored: "
-                        f"{Path(_anchor_t(_t, args.project_root))})")
-                return _emit({"tool": "mutation", "ok": False,
-                              "summary": {"files": args.files,
-                                          "error": _msg},
-                              "failures": [{"reason": _msg}]})
-            # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
-            rc = _bootstrap_import_or_contract("mutation", args)
-            if rc is not None:
-                return rc
-            # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
-            try:
-                _truth.ensure_map(str(Path(args.project_root)),
-                                  [str(f) for f in args.files])
-            except MutationSelectionError as e:
-                return _selection_error_payload(args, e)
+    rc = _prepare_mapping_face(args, _truth)
+    if rc is not None:
+        return rc
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
@@ -734,6 +750,13 @@ def _kill_bail_flag(args: argparse.Namespace) -> bool | None:
     return None if not getattr(args, "no_kill_bail", False) else False
 
 
+def _baseline_break_flag(args: argparse.Namespace) -> bool:
+    """SEE-1623 M3：`--fail-on-red-baseline` 与 break-on-baseline-failure
+    通道合流（红基线快速失败）——编排与串行两条路径的单一出处。"""
+    return (getattr(args, "break_on_baseline_failure", False)
+            or getattr(args, "fail_on_red_baseline", False))
+
+
 def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
     """mutation 子命令派发（串行 / 并发编排两径，<800/复杂度纪律拆分）。"""
     from .timing import TimingStore
@@ -786,11 +809,7 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
         reuse_coverage=_reuse_coverage_flag(args),
         worker_channel=True if getattr(args, "worker_channel", False) else None,
         select_mode=getattr(args, "select_mode", "line"),
-        break_on_baseline_failure=(
-            getattr(args, "break_on_baseline_failure", False)
-            # SEE-1623 M3：--fail-on-red-baseline 接线（此前只设 measure
-            # 面 env，mutation 自身从未快速失败——Harti BUG-7）。
-            or getattr(args, "fail_on_red_baseline", False)),
+        break_on_baseline_failure=_baseline_break_flag(args),
         kill_bail=_kill_bail_flag(args))
     if len(files) == 1:
         # SEE-1589 A-M3：单文件对外恒为 flat CLI 契约（--jobs 1 不得套用
@@ -851,11 +870,7 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
         # §SPEC-012：串行/卡尺与编排路径同源遵守 --select（SEE-1587 默认
         # line），不可静默退化全脸（HIGH-1 修复点）。
         select_mode=getattr(args, "select_mode", "line"),
-        break_on_baseline_failure=(
-            getattr(args, "break_on_baseline_failure", False)
-            # SEE-1623 M3：--fail-on-red-baseline 接线（此前只设 measure
-            # 面 env，mutation 自身从未快速失败——Harti BUG-7）。
-            or getattr(args, "fail_on_red_baseline", False)),
+        break_on_baseline_failure=_baseline_break_flag(args),
         kill_bail=_kill_bail_flag(args),
     )
     result["summary"].setdefault("jobs", 1)
@@ -867,6 +882,37 @@ def _reuse_coverage_flag(args: argparse.Namespace) -> bool:
     显式关断。旧 --reuse-coverage 旗标已随 A13（SEE-1594 S5）物理退役
     （不再注册，传参即 argparse exit 2）——prefilter 无旗标即默认开。"""
     return not getattr(args, "no_reuse_coverage", False)
+
+
+def _load_performance_input(args: argparse.Namespace) -> tuple:
+    """SEE-1623 H6：坏 JSON / 不可读 performance 文件转结构化信封——原始
+    JSONDecodeError/OSError traceback 即工具崩溃形态（§5 exit 1 判定失败；
+    stdout 恒有 JSON）。
+
+    返回 (error_payload, performance_input)：error_payload 非 None 即调用方
+    `_emit` 后终止；未请求 performance 文件时两者皆 None。"""
+    if not args.performance_file:
+        return None, None
+    try:
+        return None, json.loads(
+            Path(args.performance_file).read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, OSError) as e:
+        return ({
+            "tool": "measure.risk",
+            "ok": False,
+            "summary": {
+                "error": (f"performance file not usable: "
+                          f"{args.performance_file}"),
+                "reason": "performance_file_unparseable",
+                "reason_detail": f"{type(e).__name__}: {e}",
+                "suggested_action": (
+                    "pass a JSON file written by a prior measure run "
+                    "(performance block); check the path is readable"),
+            },
+            "failures": [{"reason": "performance_file_unparseable: "
+                                    f"{type(e).__name__}: {e}"}],
+        }), None
 
 
 def cmd_measure_risk(args: argparse.Namespace) -> int:
@@ -894,31 +940,9 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
                 "failures": [{"reason": f"target files not found: {missing}"}],
             }
         )
-    performance_input = None
-    if args.performance_file:
-        # SEE-1623 H6：坏 JSON / 不可读 performance 文件转结构化信封——
-        # 原始 JSONDecodeError/OSError traceback 即工具崩溃形态（§5 exit 1
-        # 判定失败；stdout 恒有 JSON）。
-        try:
-            performance_input = json.loads(
-                Path(args.performance_file).read_text(encoding="utf-8")
-            )
-        except (json.JSONDecodeError, OSError) as e:
-            return _emit({
-                "tool": "measure.risk",
-                "ok": False,
-                "summary": {
-                    "error": (f"performance file not usable: "
-                              f"{args.performance_file}"),
-                    "reason": "performance_file_unparseable",
-                    "reason_detail": f"{type(e).__name__}: {e}",
-                    "suggested_action": (
-                        "pass a JSON file written by a prior measure run "
-                        "(performance block); check the path is readable"),
-                },
-                "failures": [{"reason": "performance_file_unparseable: "
-                                        f"{type(e).__name__}: {e}"}],
-            })
+    _perf_err, performance_input = _load_performance_input(args)
+    if _perf_err is not None:
+        return _emit(_perf_err)
     # SEE-1605 §SPEC-001：首触 auto 生成须一次覆盖全部请求文件的首层目录——
     # 车道内逐文件 ensure_map 只绑定当前文件目录，跨目录文件会退化为逐车道
     # 增量（virgin 上即 QA 实测的静默落空）。预温生成失败 = 本轮测量面不可
@@ -1317,6 +1341,65 @@ def _measure_run_summary(report: dict, attribution_out,
     return summary, (union_certified or attribution_usable)
 
 
+def _load_baseline_failures(bf_path) -> tuple:
+    """§SPEC-064b：`--baseline-failures` 装载与形态校验（自 cmd_measure_run
+    原样搬移）。返回 (error_payload, pairs)：error_payload 非 None 即调用方
+    `_emit` 后终止；未请求时两者皆 None。"""
+    if not bf_path:
+        return None, None
+    try:
+        doc = json.loads(Path(bf_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return ({"tool": "measure.run", "ok": False,
+                 "summary": {"error": f"baseline-failures load failed: {e}"},
+                 "failures": [{"reason":
+                               f"baseline-failures load failed: {e}"}]},
+                None)
+    pairs = doc.get("pairs") if isinstance(doc, dict) else doc
+    if not isinstance(pairs, list) \
+            or not all(isinstance(x, list) and len(x) == 2
+                       and all(isinstance(y, str) for y in x)
+                       for x in pairs):
+        return ({"tool": "measure.run", "ok": False,
+                 "summary": {"error":
+                             "baseline-failures must be a JSON "
+                             "array of [script, test] pairs (or "
+                             "{\"pairs\": [...]}) — bare names are "
+                             "identity-ambiguous (§SPEC-064b)"},
+                 "failures": [{"reason": "baseline-failures "
+                                         "malformed"}]},
+                None)
+    return None, {(x[0], x[1]) for x in pairs}
+
+
+def _load_intolerant_config(it_path) -> tuple:
+    """`--intolerant-tests` 装载与形态校验（自 cmd_measure_run 原样搬移）。
+    返回 (error_payload, config)：error_payload 非 None 即调用方 `_emit`
+    后终止；未请求时两者皆 None。"""
+    if not it_path:
+        return None, None
+    try:
+        it_doc = json.loads(Path(it_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return ({"tool": "measure.run", "ok": False,
+                 "summary": {"error":
+                             f"intolerant-tests load failed: {e}"},
+                 "failures": [{"reason":
+                               f"intolerant-tests load failed: "
+                               f"{e}"}]},
+                None)
+    if not isinstance(it_doc, dict):
+        return ({"tool": "measure.run", "ok": False,
+                 "summary": {"error":
+                             "intolerant-tests must be an object "
+                             "with optional tests/coverage_"
+                             "limitations arrays"},
+                 "failures": [{"reason": "intolerant-tests "
+                                         "malformed"}]},
+                None)
+    return None, it_doc
+
+
 def cmd_measure_run(args: argparse.Namespace) -> int:
     import json as _json
     import time as _time
@@ -1353,8 +1436,7 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     if rc is not None:
         return rc
     roots = [_P(r) for r in args.roots]
-    targets = sorted({str(p) for root in roots
-                      for p in root.rglob("*.gd") if p.is_file()})
+    targets = _gd_targets_under_roots(roots)
     if not targets:
         return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": "no .gd targets under roots"},
@@ -1362,53 +1444,14 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     probe_keys = (args.acceptance_probe_keys or None)
     if probe_keys:
         probe_keys = [k.strip() for k in probe_keys.split(",") if k.strip()]
-    baseline_failures = None
-    bf_path = getattr(args, "baseline_failures", None)
-    if bf_path:
-        try:
-            doc = _json.loads(_P(bf_path).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            return _emit({"tool": "measure.run", "ok": False,
-                          "summary": {"error":
-                                      f"baseline-failures load failed: {e}"},
-                          "failures": [{"reason":
-                                        f"baseline-failures load failed: "
-                                        f"{e}"}]})
-        pairs = doc.get("pairs") if isinstance(doc, dict) else doc
-        if not isinstance(pairs, list) \
-                or not all(isinstance(x, list) and len(x) == 2
-                           and all(isinstance(y, str) for y in x)
-                           for x in pairs):
-            return _emit({"tool": "measure.run", "ok": False,
-                          "summary": {"error":
-                                      "baseline-failures must be a JSON "
-                                      "array of [script, test] pairs (or "
-                                      "{\"pairs\": [...]}) — bare names are "
-                                      "identity-ambiguous (§SPEC-064b)"},
-                          "failures": [{"reason": "baseline-failures "
-                                                  "malformed"}]})
-        baseline_failures = {(x[0], x[1]) for x in pairs}
-    intolerant_config = None
-    it_path = getattr(args, "intolerant_tests", None)
-    if it_path:
-        try:
-            it_doc = _json.loads(_P(it_path).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            return _emit({"tool": "measure.run", "ok": False,
-                          "summary": {"error":
-                                      f"intolerant-tests load failed: {e}"},
-                          "failures": [{"reason":
-                                        f"intolerant-tests load failed: "
-                                        f"{e}"}]})
-        if not isinstance(it_doc, dict):
-            return _emit({"tool": "measure.run", "ok": False,
-                          "summary": {"error":
-                                      "intolerant-tests must be an object "
-                                      "with optional tests/coverage_"
-                                      "limitations arrays"},
-                          "failures": [{"reason": "intolerant-tests "
-                                                  "malformed"}]})
-        intolerant_config = it_doc
+    _bf_err, baseline_failures = _load_baseline_failures(
+        getattr(args, "baseline_failures", None))
+    if _bf_err is not None:
+        return _emit(_bf_err)
+    _it_err, intolerant_config = _load_intolerant_config(
+        getattr(args, "intolerant_tests", None))
+    if _it_err is not None:
+        return _emit(_it_err)
     # §SPEC-075/076：拉起任何 Godot 子进程前校验解析结果——不可用即领域错误
     godot_cmd, godot_ok, godot_reason = _godot_bin_ready(_P(args.project_root))
     if not godot_ok:
@@ -1454,7 +1497,7 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
                                [{"reason": "union invalid or arms invalid"}])})
 
 
-def _diagnose_gd_targets(roots: list[Path]) -> list[str]:
+def _gd_targets_under_roots(roots: list[Path]) -> list[str]:
     targets = sorted({str(p) for root in roots
                       for p in root.rglob("*.gd") if p.is_file()})
     return targets
@@ -1522,7 +1565,7 @@ def cmd_measure_diagnose(args: argparse.Namespace) -> int:
         return _emit({"tool": "measure.diagnose", "ok": False,
                       "summary": {"error": f"recipe invalid: {reason}"},
                       "failures": [{"reason": f"recipe invalid: {reason}"}]})
-    targets = _diagnose_gd_targets([_P(r) for r in args.roots])
+    targets = _gd_targets_under_roots([_P(r) for r in args.roots])
     if not targets:
         return _emit({"tool": "measure.diagnose", "ok": False,
                       "summary": {"error": "no .gd targets under roots"},

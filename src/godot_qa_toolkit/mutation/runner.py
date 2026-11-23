@@ -413,6 +413,43 @@ def _godot_binary_precondition(project_root: str, godot_ok: bool,
     return {"ok": godot_ok, "evidence": evidence}
 
 
+def _dry_run_lines_disclosure(select_lines, mutants) -> "dict | None":
+    """卡尺 `--lines` 的求交披露在 dry-run 也与完整路径同源（requested/
+    hit/skipped_no_site），避免只在实际执行轮才可见（自 _core_dry_run
+    原样搬移）。未请求 `--lines` 返回 None。"""
+    if select_lines is None:
+        return None
+    lines = {int(v) for v in select_lines}
+    dry_hit = sorted({m.line for m in mutants if m.line in lines})
+    return {
+        "requested": sorted(lines),
+        "requested_count": len(lines),
+        "hit": dry_hit,
+        "hit_count": len(dry_hit),
+        "skipped_no_site": sorted(lines - set(dry_hit)),
+    }
+
+
+def _dry_run_selected_sites(path, mutants, select_ids, select_lines) -> tuple:
+    """SEE-1623 M5：dry-run 预览与真实执行同构（自 _core_dry_run 原样搬移）
+    ——显式寻址（--mutation/--lines）先于估算应用（此前计数用全量位点，
+    预览失真且掩盖数值校验）；全无位点抛与真实运行同文的显式错误（不再
+    exit 0 假成功）。
+
+    返回 (error_result, mutants, total_sites)：error_result 非 None 即调用
+    方原样返回终止；未显式寻址时 total_sites 为 None（调用方保持原值）。"""
+    if select_ids is None and select_lines is None:
+        return None, mutants, None
+    from .planner import selection_preview
+    from .reporting import _setup_error_result
+    try:
+        selected, _sel_disc = selection_preview(mutants, select_ids,
+                                                select_lines)
+    except ValueError as e:
+        return _setup_error_result(str(path), e), mutants, None
+    return None, selected, len(selected)
+
+
 def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
                   tests_glob, binary_kind, resume2_store, mutate_all,
                   header_hash, scope_hashes, attention, identity,
@@ -429,18 +466,12 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
         clock = StageClock()
     if t0 is None:
         t0 = time.monotonic()
-    # SEE-1623 M5：dry-run 预览与真实执行同构——显式寻址（--mutation/
-    # --lines）先于估算应用（此前计数用全量位点，预览失真且掩盖数值
-    # 校验）；全无位点抛与真实运行同文的显式错误（不再 exit 0 假成功）。
-    if select_ids is not None or select_lines is not None:
-        from .planner import selection_preview
-        from .reporting import _setup_error_result
-        try:
-            mutants, sel_disc = selection_preview(mutants, select_ids,
-                                                  select_lines)
-        except ValueError as e:
-            return _setup_error_result(str(path), e)
-        total_sites = len(mutants)
+    _sel_err, mutants, _sel_total = _dry_run_selected_sites(
+        path, mutants, select_ids, select_lines)
+    if _sel_err is not None:
+        return _sel_err
+    if _sel_total is not None:
+        total_sites = _sel_total
     with clock.stage("planning"):
         estimate = dry_run_estimate(
             str(path), mutants, budget, scoped, total_sites,
@@ -456,16 +487,9 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
                                select_ids, select_lines))
     # 卡尺 `--lines` 的求交披露在 dry-run 也与完整路径同源（requested/
     # hit/skipped_no_site），避免只在实际执行轮才可见。
-    if select_lines is not None:
-        lines = {int(v) for v in select_lines}
-        dry_hit = sorted({m.line for m in mutants if m.line in lines})
-        estimate["summary"]["lines_selection"] = {
-            "requested": sorted(lines),
-            "requested_count": len(lines),
-            "hit": dry_hit,
-            "hit_count": len(dry_hit),
-            "skipped_no_site": sorted(lines - set(dry_hit)),
-        }
+    _lines_disc = _dry_run_lines_disclosure(select_lines, mutants)
+    if _lines_disc is not None:
+        estimate["summary"]["lines_selection"] = _lines_disc
     # SEE-1610 §SPEC-PLAN Phase 0：选面披露落定后重建同构 plan（V7 同构）。
     # SEE-1606 §SPEC-DERIVED-A：三静态输入独立成 derived 键（显式 timeout/
     # wiring hash/显式 tests glob；缺席不造）+ 只读静态前置块。

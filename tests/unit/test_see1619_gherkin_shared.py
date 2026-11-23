@@ -87,7 +87,7 @@ def _wire(monkeypatch, tmp_path: Path, fake_run_arm) -> None:
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = (Path(tmp_path) / "gherkin" / "generated" /
+        d = (Path(r) / "gherkin" / "generated" /
              f".gqt-run-{counter['n']}")
         d.mkdir(parents=True, exist_ok=True)
         # 所有权标记内容 = 目录名（绑定身份契约）
@@ -232,7 +232,7 @@ def test_flow_never_touches_harness_contract_position(
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = (Path(tmp_path) / "gherkin" / "generated" /
+        d = (Path(r) / "gherkin" / "generated" /
              f".gqt-run-{counter['n']}")
         d.mkdir(parents=True, exist_ok=True)
         # 所有权标记内容 = 目录名（绑定身份契约）
@@ -336,7 +336,7 @@ def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = (Path(tmp_path) / "gherkin" / "generated" /
+        d = (Path(r) / "gherkin" / "generated" /
              f".gqt-run-{counter['n']}")
         d.mkdir(parents=True, exist_ok=True)
         # 所有权标记内容 = 目录名（绑定身份契约）
@@ -395,7 +395,7 @@ def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
         counter["n"] += 1
         n = counter["n"]
         counter["n"] += 1
-        d = (Path(tmp_path) / "gherkin" / "generated" / f".gqt-run-{n}")
+        d = (Path(r) / "gherkin" / "generated" / f".gqt-run-{n}")
         d.mkdir(parents=True, exist_ok=True)
         made.append(d)
         # 所有权标记内容 = 目录名（绑定身份契约）
@@ -461,7 +461,7 @@ def _fb_compile_setup(monkeypatch, tmp_path):
         counter["n"] += 1
         n = counter["n"]
         counter["n"] += 1
-        d = (Path(tmp_path) / "gherkin" / "generated" / f".gqt-run-{n}")
+        d = (Path(r) / "gherkin" / "generated" / f".gqt-run-{n}")
         d.mkdir(parents=True, exist_ok=True)
         made.append(d)
         # 所有权标记内容 = 目录名（绑定身份契约）
@@ -520,11 +520,11 @@ def test_error_path_suite_cleanup_failure_not_valid(tmp_path, monkeypatch):
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
     real_cleanup = arms._cleanup_suite_dir
 
-    def flaky_cleanup(sd):
+    def flaky_cleanup(sd, project_root):
         fb_dir_seen.append(Path(sd))
         if len(fb_dir_seen) >= 2:
             raise OSError("injected cleanup failure")
-        return real_cleanup(sd)
+        return real_cleanup(sd, project_root)
 
     monkeypatch.setattr(arms, "_cleanup_suite_dir", flaky_cleanup)
     fake, _calls = _make_fake_run_arm({"k1", "k2"}, set())

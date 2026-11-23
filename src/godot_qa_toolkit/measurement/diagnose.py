@@ -274,7 +274,7 @@ def _diagnose_feature_entry(root: Path, key_spec: str,
         entry["attribution"] = f"suite_error:{e}"
     finally:
         if suite_dir is not None:
-            _cleanup_suite_dir(suite_dir)
+            _cleanup_suite_dir(suite_dir, root)
     if entry["attribution"] is None:
         _diagnose_attribute(entry, wait_commands, timeout_s)
     return entry

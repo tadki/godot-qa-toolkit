@@ -511,7 +511,7 @@ def _arm_reconcile(root: Path, gherkin: dict | None, results: list[dict],
     if gherkin is not None:
         for r in results:
             if r["plan"].get("suite_dir") is not None:
-                _cleanup_suite_dir(Path(r["plan"]["suite_dir"]))
+                _cleanup_suite_dir(Path(r["plan"]["suite_dir"]), root)
     return (reconciliation, arm_valid, invalid_reason, gut_ok_delta,
             run_error)
 
@@ -1262,13 +1262,14 @@ def _finish_gherkin_result(result: dict, fb_groups: list[dict]) -> dict:
     return result
 
 
-def _gherkin_error_result(e: Exception, groups: list[dict]) -> dict:
+def _gherkin_error_result(e: Exception, groups: list[dict],
+                          root: Path) -> dict:
     """异常路径：回收已建 suite 并组装 invalid 结果。
     §SPEC-025：清理失败 = 残留 = 具名 suite_residue，不得静默。"""
     residue: list[str] = []
     for g in groups:
         try:
-            _cleanup_suite_dir(Path(g["suite_dir"]))
+            _cleanup_suite_dir(Path(g["suite_dir"]), root)
         except OSError as ce:
             residue.append(f"{g['suite_dir']}: {ce}")
     reason = f"suite_error:{e}"
@@ -1358,7 +1359,7 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
         # §SPEC-025：异常路径必须连 fallback singleton suite 一并回收
         # （旧实现只清 shared groups，cleanup_done=True 跳过 finally，
         # 第二个 singleton 编译失败时前一个 singleton 目录泄漏）。
-        result = _gherkin_error_result(e, groups + fb_groups)
+        result = _gherkin_error_result(e, groups + fb_groups, root)
         cleanup_done = True
         return result
     finally:
@@ -1369,7 +1370,7 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
         if not cleanup_done:
             for g in groups + fb_groups:
                 try:
-                    _cleanup_suite_dir(Path(g["suite_dir"]))
+                    _cleanup_suite_dir(Path(g["suite_dir"]), root)
                 except OSError as e:
                     print(f"measure: gherkin suite cleanup failed "
                           f"({g['suite_dir']}): {e}", file=sys.stderr)

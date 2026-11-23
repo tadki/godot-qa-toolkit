@@ -50,14 +50,18 @@ SUITE_OWNER_MARKER = ".gqt-owner"
 _PRIVATE_SUITE_RE = re.compile(r"^\.gqt-run-[A-Za-z0-9_.-]{1,64}$")
 
 
-def is_owned_suite_dir(suite_dir: str | Path) -> bool:
-    """私有套件目录的**工具所有权绑定**（§SPEC-019 CRITICAL-1）。
+def is_owned_suite_dir(suite_dir: str | Path, project_root: str | Path) -> bool:
+    """私有套件目录的**工具所有权绑定**（§SPEC-019 CRITICAL-1 / DEF-1）。
 
-    三重条件全中才算工具自有：
+    四重条件全中才算工具自有：
     1. `.gqt-owner` 是普通文件（非 symlink），且**内容 == 本目录名**——
        复制来的合法 marker 内容指向原目录，与调用方目录名不符 → 永不删；
     2. 目录名形如 `.gqt-run-<token>`；
-    3. 位置在受管暂存根内：`<project>/gherkin/generated/`。
+    3. 物理父目录必须**就是当前项目的**受管暂存根
+       `<project_root>/gherkin/generated`——仅比较 `generated`/`gherkin`
+       目录名不够：任意其它 `.../gherkin/generated/.gqt-run-*` 形路径
+       （如 `<project>/backup/gherkin/generated/.gqt-run-copy7`）都可
+       冒充，会误删调用方备份。
 
     任一不中即视为调用方持有（`--suite-dir`/`--out-dir`/备份目录），
     清理一律跳过——调用方文件与目录永不被递归删除。"""
@@ -73,9 +77,13 @@ def is_owned_suite_dir(suite_dir: str | Path) -> bool:
         return False
     if not _PRIVATE_SUITE_RE.match(sd.name):
         return False
-    if sd.parent.name != "generated" or sd.parent.parent.name != "gherkin":
+    try:
+        managed = (Path(project_root).resolve() / "gherkin" /
+                   "generated").resolve()
+        physical_parent = sd.resolve().parent
+    except OSError:
         return False
-    return True
+    return physical_parent == managed
 
 
 def _addon_physical_root(project_root: str | Path) -> Path:

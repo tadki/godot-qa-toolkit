@@ -101,7 +101,7 @@ def compile_keys_auto_suite(project_root: str | Path,
     except BaseException:
         # 编译中失败（含 parse 错误、写入异常）：回收已建目录，零残留。
         try:
-            _cleanup_suite_dir(suite_dir)
+            _cleanup_suite_dir(suite_dir, root)
         except OSError:
             pass
         raise
@@ -242,9 +242,27 @@ def reconcile(project_root: str | Path, suite_dir: str | Path,
     }
 
 
-def _cleanup_suite_dir(suite_dir: Path) -> str:
+def ensure_suite_dir_in_project(project_root: str | Path,
+                                suite_dir: str | Path) -> Path:
+    """入口 containment（§SPEC-019 DEF-2）：私有套件目录必须在**项目内**。
+
+    在重放/validator/Godot 之前调用：项目外路径具名失败（SuiteError →
+    CLI 单 JSON、无 traceback），不读取 caller 文件。返回解析后的路径。"""
+    root = Path(project_root).resolve()
+    sd = Path(suite_dir).resolve()
+    try:
+        sd.relative_to(root)
+    except ValueError:
+        raise SuiteError(
+            f"--suite-dir is outside the project root: {sd} — a private "
+            f"suite dir must live under {root} (caller-owned dirs outside "
+            f"the project are never touched by gqt)") from None
+    return sd
+
+
+def _cleanup_suite_dir(suite_dir: Path, project_root: str | Path) -> str:
     sd = Path(suite_dir)
-    if not is_owned_suite_dir(sd):
+    if not is_owned_suite_dir(sd, project_root):
         # 调用方持有目录：永不清空/删除（可能含调用方文件）。
         return "kept-caller-owned"
     parent = sd.parent
@@ -268,7 +286,9 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     业务执行。
     """
     root = Path(project_root).resolve()
-    suite_dir = Path(suite_dir).resolve()
+    # 入口 containment 必须先于一切读取与 Godot 拉起（DEF-2）：项目外
+    # 路径具名失败，不 glob、不 replay、不拉起 validator。
+    suite_dir = ensure_suite_dir_in_project(root, suite_dir)
     gen = suite_dir / "generated"
     keys = sorted(p.name.removesuffix(".manifest.json")
                   for p in gen.glob("*.manifest.json"))
@@ -308,7 +328,7 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     record = reconcile(root, suite_dir, keys, output,
                        replay_ok=True, main_snapshot=snapshot)
     if record["ok"]:
-        record["cleanup"] = _cleanup_suite_dir(suite_dir)
+        record["cleanup"] = _cleanup_suite_dir(suite_dir, root)
     else:
         record["cleanup"] = "kept-on-failure"
     return record
@@ -340,7 +360,7 @@ def run_gherkin_probe(project_root: str | Path, keys: list[str],
         # 业务 GUT 前失败（重放/预检）：探针创建的目录零残留后按原
         # 异常路径上抛（CLI JSON 出口具名披露）。
         try:
-            _cleanup_suite_dir(suite_dir)
+            _cleanup_suite_dir(suite_dir, root)
         except OSError:
             pass
         raise

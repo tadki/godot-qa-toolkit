@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,13 +37,13 @@ def test_copied_owner_marker_never_deletes_caller_dir(
     目录与文件均存活（所有权绑定：marker 内容须等于目录名且位于受管根）。"""
     from godot_qa_toolkit.gherkin.suite import _cleanup_suite_dir
 
-    caller = tmp_path / "caller-backup"
+    caller = project / "caller-backup"
     caller.mkdir()
     (caller / "notes.txt").write_text("caller data", encoding="utf-8")
     # 复制自一个真实私有套件的合法 marker（内容是**别的**目录名）
     (caller / ".gqt-owner").write_text(".gqt-run-someoneelse\n",
                                        encoding="utf-8")
-    result = _cleanup_suite_dir(caller)
+    result = _cleanup_suite_dir(caller, project)
     assert result == "kept-caller-owned"
     assert caller.is_dir() and (caller / "notes.txt").is_file()
 
@@ -51,11 +53,11 @@ def test_marker_naming_own_dir_outside_managed_root_is_kept(
     """marker 内容与目录名一致但**不在受管暂存根**内 → 仍属调用方持有。"""
     from godot_qa_toolkit.gherkin.suite import _cleanup_suite_dir
 
-    caller = tmp_path / ".gqt-run-abc123"
+    caller = project / ".gqt-run-abc123"
     caller.mkdir()
     (caller / ".gqt-owner").write_text(caller.name + "\n", encoding="utf-8")
     (caller / "keep.txt").write_text("x", encoding="utf-8")
-    assert _cleanup_suite_dir(caller) == "kept-caller-owned"
+    assert _cleanup_suite_dir(caller, project) == "kept-caller-owned"
     assert (caller / "keep.txt").is_file()
 
 
@@ -65,7 +67,7 @@ def test_tool_private_suite_still_cleaned(project: Path) -> None:
 
     d = create_suite_dir(project)
     assert d.is_dir()
-    assert _cleanup_suite_dir(d) == "removed"
+    assert _cleanup_suite_dir(d, project) == "removed"
     assert not d.exists()
 
 
@@ -400,3 +402,75 @@ def test_linux_isolation_leaves_wslenv_untouched(monkeypatch) -> None:
     monkeypatch.setenv("WSLENV", "FOO/p")
     with iso_mod.isolated_godot_env() as env:
         assert env["WSLENV"] == "FOO/p"
+
+
+# ============ R5-9 所有权绑定当前项目根（DEF-1） ============
+
+def test_same_shape_backup_in_project_is_not_owned(project: Path) -> None:
+    """项目内 `<project>/backup/gherkin/generated/.gqt-run-copy7`：目录名、
+    marker 内容、父/祖父目录名全部形似受管暂存根，但不是**当前项目**的
+    受管根 → 调用方持有，永不清除。"""
+    from godot_qa_toolkit.gherkin.addon import is_owned_suite_dir
+    from godot_qa_toolkit.gherkin.suite import _cleanup_suite_dir
+
+    decoy = (project / "backup" / "gherkin" / "generated" / ".gqt-run-copy7")
+    decoy.mkdir(parents=True)
+    (decoy / ".gqt-owner").write_text(decoy.name + "\n", encoding="utf-8")
+    (decoy / "notes.txt").write_text("backup data", encoding="utf-8")
+
+    assert is_owned_suite_dir(decoy, project) is False
+    assert _cleanup_suite_dir(decoy, project) == "kept-caller-owned"
+    assert decoy.is_dir()
+    assert (decoy / "notes.txt").read_text(encoding="utf-8") == "backup data"
+
+
+def test_managed_root_of_other_project_is_not_owned(project: Path,
+                                                    tmp_path: Path) -> None:
+    """另一个项目的受管暂存根同样不算本项目的工具自有目录。"""
+    from godot_qa_toolkit.gherkin.addon import is_owned_suite_dir
+    from godot_qa_toolkit.gherkin.suite import create_suite_dir
+
+    other = make_addon_project(tmp_path / "other-proj")
+    d = create_suite_dir(other)
+    assert is_owned_suite_dir(d, other) is True
+    assert is_owned_suite_dir(d, project) is False
+
+
+# ============ R5-10 项目外 suite-dir 入口具名失败（DEF-2） ============
+
+def test_run_suite_dir_outside_project_fails_named(project: Path,
+                                                   tmp_path: Path) -> None:
+    """项目外 suite-dir：在 manifest 读取/replay/validator/Godot 之前以
+    SuiteError 具名失败（不得裸 ValueError 逃逸）。"""
+    from godot_qa_toolkit.gherkin.suite import SuiteError, run_suite_dir
+
+    outside = (tmp_path / "outside-suite")
+    (outside / "generated").mkdir(parents=True)
+    (outside / "generated" / "demo.manifest.json").write_text(
+        "{}", encoding="utf-8")
+    (outside / "caller.txt").write_text("keep", encoding="utf-8")
+    with pytest.raises(SuiteError, match="outside the project root"):
+        run_suite_dir(project, outside)
+    assert (outside / "caller.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_cli_outside_suite_dir_single_json(project: Path,
+                                           tmp_path: Path) -> None:
+    """公开面：项目外 --suite-dir → stdout 单 JSON（ok=false、suite_error），
+    无 traceback，caller 文件不动。"""
+    outside = (tmp_path / "outside-suite")
+    (outside / "generated").mkdir(parents=True)
+    (outside / "generated" / "demo.manifest.json").write_text(
+        "{}", encoding="utf-8")
+    (outside / "caller.txt").write_text("keep", encoding="utf-8")
+    env = dict(os.environ, PYTHONPATH=str(Path("src").resolve()))
+    r = subprocess.run(
+        [sys.executable, "-m", "godot_qa_toolkit.cli", "gherkin", "run",
+         "--project-root", str(project), "--suite-dir", str(outside)],
+        capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode != 0
+    payload = json.loads(r.stdout)  # 单 JSON、可解析
+    assert payload["ok"] is False
+    assert "outside the project root" in payload["summary"]["error"]
+    assert "Traceback" not in r.stderr
+    assert (outside / "caller.txt").read_text(encoding="utf-8") == "keep"

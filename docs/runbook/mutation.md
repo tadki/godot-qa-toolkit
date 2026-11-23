@@ -143,10 +143,16 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   path (zero tests and zero mutation sites) carries the same key plus
   `summary.short_circuit_reason=no_mutation_sites`.
 - `full`: the only explicit audit face (`tests_glob=None`); use only when you
-  deliberately want the whole suite. GUT collection includes test
-  subdirectories recursively (`-ginclude_subdirs`). A worker leg that actually
-  ran zero tests is a named `run_error`, not a survivor; the L4 evidence gate
-  remains fail-closed.
+  deliberately want the whole suite. Both cold and resident-worker channels
+  collect test subdirectories recursively on this face (cold uses
+  `-ginclude_subdirs`; worker uses the equivalent GUT `include_subdirectories`
+  setting), so tests in layouts such as `tests/unit/` actually run on the
+  worker channel. Worker collection for an explicit `--tests <dir>` remains
+  non-recursive as before; the cold channel's explicit-directory behavior is
+  unchanged. An explicit `.gd` path runs exactly that script. A genuinely empty
+  face still makes any worker leg that ran zero tests a named `run_error`, not
+  a survivor; fail-closed evidence, canary/parity and R-C reset semantics are
+  unchanged.
 - `--jobs 1`: the explicit serial path still uses a file-level union glob. It is
   a correct superset, but less converged than line-signature grouping.
 

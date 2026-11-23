@@ -573,7 +573,10 @@ def _impl_prep(files, project_root, binary_kind, clock, knob_state) -> tuple:
     files = anchor_targets_to_project_root(_group_by_file(files),
                                            project_root)
     kind = binary_kind or _detect_binary_kind()
-    identity = identity_pack(project_root, kind)
+    # SEE-1623 H2：编排层占位身份不声称权威 scheme——缺省 cold 值在
+    # dry-run 直通权威比对门（worker 默认启用下假性 route_drift，只读
+    # 预览被拦）。None = 未解析；planning/core 首次解析即权威。
+    identity = identity_pack(project_root, kind, exec_scheme=None)
     clock = clock or StageClock()
     knob_state = knob_state if knob_state is not None else {}
     return files, kind, identity, clock, knob_state

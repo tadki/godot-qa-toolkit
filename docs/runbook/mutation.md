@@ -16,7 +16,7 @@ default non-dry-run path):
    inspects `project.godot` autoload targets, every `preload`/`load` call in
    the test surface, the Godot binary and the GUT addon, and the state of the
    attribution map. It enumerates missing `.gutconfig.json`,
-   `acceptance/features/`, and `.feature` prerequisites in one pass, and
+   `addons/gqt_gherkin/features/`, and `.feature` prerequisites in one pass, and
    validates an explicit `--tests` glob before any GUT leg. A missing
    single-file target fails before map build/prepare. Each finding is recorded
    as a problem entry `{severity, code, evidence, fix}` in `plan.problems[]`.

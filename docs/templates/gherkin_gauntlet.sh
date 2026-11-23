@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# accept_gauntlet.sh 模板（SEE-1426 P4，决策 rev1 §3.5）
+# gherkin_gauntlet.sh 模板（SEE-1426 P4，决策 rev1 §3.5）
 #
 # 硬序：互斥锁 → 清空 → 生成 → 冒烟(run) → run → mutate（每轮全量）。
 # exit 非 0 即打回（CI 与本地同规则，v1 无 stamp）。
 #
-# 用法：bash accept_gauntlet.sh <project-root> <feature-path> [feature-key]
-# 锁文件落 <project-root>/.qa-cache/accept-gauntlet.lock（flock，进程死
+# 用法：bash gherkin_gauntlet.sh <project-root> <feature-path> [feature-key]
+# 锁文件落 <project-root>/.qa-cache/gherkin-gauntlet.lock（flock，进程死
 # 亡自动释放；复用 godot_gate.py 的 flock 模式）。并行双会话：第二条
 # 流水线等待锁而非互删生成物。
 set -euo pipefail
 
-PROJECT_ROOT="${1:?usage: accept_gauntlet.sh <project-root> <feature-path> [feature-key]}"
-FEATURE="${2:?usage: accept_gauntlet.sh <project-root> <feature-path> [feature-key]}"
+PROJECT_ROOT="${1:?usage: gherkin_gauntlet.sh <project-root> <feature-path> [feature-key]}"
+FEATURE="${2:?usage: gherkin_gauntlet.sh <project-root> <feature-path> [feature-key]}"
 KEY="${3:-$(basename "${FEATURE%.feature}" | tr -c 'A-Za-z0-9_' '_')}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 GQT="PYTHONPATH=\"$(dirname "$0")/../../src\" $PYTHON_BIN -m godot_qa_toolkit.cli"
 
 mkdir -p "$PROJECT_ROOT/.qa-cache"
-exec 9>"$PROJECT_ROOT/.qa-cache/accept-gauntlet.lock"
+exec 9>"$PROJECT_ROOT/.qa-cache/gherkin-gauntlet.lock"
 echo "[gauntlet] waiting for project mutex: $PROJECT_ROOT"
 flock 9
 echo "[gauntlet] lock acquired: $PROJECT_ROOT"

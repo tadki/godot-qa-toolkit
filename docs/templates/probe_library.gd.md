@@ -1,6 +1,6 @@
-# gqt_accept_probe.gd 探针库参考模板（SEE-1468 M0a /2，定案 §2 目标 3）
+# gqt_gherkin_probe.gd 探针库参考模板（SEE-1468 M0a /2，定案 §2 目标 3）
 
-> 复制到被测项目 `res://addons/gqt_accept/`（随 harness.gd 同目录），供
+> 复制到被测项目 `res://addons/gqt_gherkin/`（随 harness.gd 同目录），供
 > harness 的 run_step / run_probe / query_state 扩展路径调用。**参考实现**
 > ——接线由人完成（gqt 不嗅探不推断）；op 词表收编自 KOL
 > `tests/devtests/_shared/bridge.gd` 的 **12-op 超集**（§10.2 定案），
@@ -8,7 +8,7 @@
 
 ## arch 边界（明写，定案 §2 原文）
 
-**harness 与探针库（`addons/gqt_accept/`）不在 `gqt measure arch` 扫描路径内**：
+**harness 与探针库（`addons/gqt_gherkin/`）不在 `gqt measure arch` 扫描路径内**：
 arch 守卫的扫描集由调用方显式传 paths（`gqt measure arch <paths...>`，通常是业务
 core/ 目录），addons/ 不在其中。因此 harness/探针库可以自由使用
 Node/SceneTree/get_tree 等引擎 API——它们是**观测与驱动面**，不是被判定

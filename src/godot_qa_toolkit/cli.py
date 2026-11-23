@@ -1321,24 +1321,55 @@ def _attribution_usable(attribution_out, run_started: float,
         return False
 
 
+def _acceptance_paused_single_arm(report: dict) -> bool:
+    """SEE-1623 H4-A（Owner 2026-11-23 裁决 A）：暂停期间单臂可用判定。
+
+    acceptance_arm 暂停披露在场 且 gut_full 臂 state=valid（臂门控已覆盖
+    new_failures/超时/run_error/空测试面等 invalid 原因）→ 单臂可用。
+    恢复双臂运行时无该披露 → 恒 False（回到 union 认证语义）。"""
+    if not isinstance(report.get("acceptance_arm"), str):
+        return False
+    arms = report.get("arms") or []
+    gut = next((a for a in arms
+                if isinstance(a, dict) and a.get("arm") == "gut_full"), None)
+    return bool(gut and gut.get("state") == "valid")
+
+
 def _measure_run_summary(report: dict, attribution_out,
                          attribution_usable: bool) -> tuple[dict, bool]:
-    """measure run 摘要 + 退出判定：区分映射可用与 union 未认证。"""
+    """measure run 摘要 + 退出判定：区分映射可用与 union 未认证。
+
+    SEE-1623 H4-A（Owner 裁决 A）：acceptance 暂停期间普通 run（无
+    --test-attribution，即 attribution_out 缺省）按单臂可用语义——
+    gut_full 有效且通过 → ok=true / exit 0、certification=uncertified、
+    exit_semantics=single_arm_usable_acceptance_paused（保留
+    acceptance_arm 暂停披露）；gut_full 无效/失败仍 failed / exit 1。
+    归属路径（--test-attribution）与恢复双臂路径语义零变化。"""
     union_certified = bool(report.get("ok"))
-    certification = ("certified" if union_certified
-                     else "uncertified" if attribution_usable else "unusable")
+    single_arm_usable = (attribution_out is None and not union_certified
+                         and not attribution_usable
+                         and _acceptance_paused_single_arm(report))
+    if union_certified:
+        certification, exit_semantics, ok = (
+            "certified", "certified", True)
+    elif single_arm_usable:
+        certification, exit_semantics, ok = (
+            "uncertified", "single_arm_usable_acceptance_paused", True)
+    elif attribution_usable:
+        certification, exit_semantics, ok = (
+            "uncertified", "artifacts_usable_union_uncertified", True)
+    else:
+        certification, exit_semantics, ok = ("unusable", "failed", False)
     summary = dict(report)
     summary.update({
         "certification": certification,
         "union_certified": union_certified,
         "attribution_usable": attribution_usable,
-        "exit_semantics": ("certified" if union_certified
-                           else "artifacts_usable_union_uncertified"
-                           if attribution_usable else "failed"),
+        "exit_semantics": exit_semantics,
     })
     if attribution_out:
         summary["attribution_map"] = str(attribution_out)
-    return summary, (union_certified or attribution_usable)
+    return summary, ok
 
 
 def _load_baseline_failures(bf_path) -> tuple:

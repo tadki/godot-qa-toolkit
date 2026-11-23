@@ -98,13 +98,33 @@ def test_summary_pairs_b_with_next_shared_round() -> None:
     assert s["ab_pairs"][0]["a_round"] == "A101"
 
 
-def test_summary_noise_band_over_all_shared_samples() -> None:
+def test_summary_noise_band_from_independent_aa_baseline() -> None:
+    """§SPEC-029：噪声带只取首个 B 之前的独立 A/A 基线——交错 A 轮
+    不得稀释/替换基线；基线样本与交错对数量必须显式披露。"""
     s = compute_perf_summary(_full_rounds(), 4, 44)
     nb = s["aa_noise_band"]
-    assert len(nb["samples"]) == 6, "A/A 与交错 A 全部计入噪声带"
-    assert nb["min_s"] == 30.0 and nb["max_s"] == 33.0
+    assert len(nb["samples"]) == 3, "仅独立 A/A 基线计入噪声带"
+    assert nb["samples"] == [30.0, 31.0, 32.0]
+    assert nb["min_s"] == 30.0 and nb["max_s"] == 32.0
     assert nb["spread_pct"] == pytest.approx(
-        (33.0 - 30.0) / 31.5 * 100, abs=0.1)
+        (32.0 - 30.0) / 31.0 * 100, abs=0.1)
+    assert s["baseline_samples"] == 3
+    assert s["interleaved_shared_rounds"] == 3
+    assert s["interleaved_pairs"] == 3
+
+
+def test_interleaved_only_report_not_complete() -> None:
+    """§SPEC-029 HIGH：仅 B1,A1,B2,A2,B3,A3（无独立 A/A 基线）不得
+    complete/MEASURED——不得把交错 A 充作 A/A 噪声依据。"""
+    rounds = []
+    for i in (1, 2, 3):
+        rounds.append(_round(f"B{i}", "per_feature", 200.0))
+        rounds.append(_round(f"A{i}", "shared", 30.0))
+    s = compute_perf_summary(rounds, 4, 44)
+    assert s["baseline_samples"] == 0
+    assert s["interleaved_pairs"] == 3
+    assert s["rounds_complete"] is False, "缺独立 A/A 基线必须 incomplete"
+    assert s["verdict"] == "INCONCLUSIVE"
 
 
 def test_summary_measured_only_when_complete_and_valid() -> None:
@@ -342,3 +362,35 @@ def test_batch_orphan_b_disclosed_and_resumable(tmp_path, monkeypatch,
     assert doc["summary"]["orphan_b_rounds"] == ["B2"]
     assert rc == 0, "孤立 B 可被后继 A 修复，中间态可 resume"
     assert "unpaired B" in err and "B2" in err, "孤立 B 必须显式披露"
+
+
+def test_batch_interleaved_only_report_terminal_exit_1(
+        tmp_path, monkeypatch, capsys):
+    """§SPEC-029：交错-only 报告在 batch 中必须 exit≠0——基线无法通过
+    末尾追加修复（基线块固定于报告开头），属终态失败而非可 resume。"""
+    driver = _load_driver()
+    report = tmp_path / "perf.json"
+    _seed_report(report, [
+        _round("B1", "per_feature", 200.0), _round("A1", "shared", 30.0),
+        _round("B2", "per_feature", 200.0), _round("A2", "shared", 30.0)])
+    rc = _append_round(driver, monkeypatch, tmp_path, report, wall=200.0,
+                       rtype="B", ridx=3)
+    doc = json.loads(report.read_text(encoding="utf-8"))
+    assert doc["summary"]["baseline_samples"] == 0
+    assert doc["summary"]["rounds_complete"] is False
+    assert rc == 1, "交错-only 报告不得 exit 0"
+    assert "baseline" in capsys.readouterr().err
+
+
+def test_batch_pure_aa_intermediate_still_resumable(tmp_path, monkeypatch,
+                                                    capsys):
+    """纯 A/A 阶段（尚无 B）仍可 resume：追加 A 轮可补足基线。"""
+    driver = _load_driver()
+    report = tmp_path / "perf.json"
+    _seed_report(report, [_round("A1", "shared", 30.0),
+                          _round("A2", "shared", 30.0)])
+    rc = _append_round(driver, monkeypatch, tmp_path, report, wall=30.0,
+                       rtype="A", ridx=3)
+    err = capsys.readouterr().err
+    assert rc == 0, "纯 A/A 中间轮必须可 resume"
+    assert "report incomplete" in err

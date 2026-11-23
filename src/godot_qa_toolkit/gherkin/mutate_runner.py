@@ -47,7 +47,7 @@ import subprocess
 from pathlib import Path
 
 from . import OPS_VERSION
-from .addon import AddonError, run_preflight
+from .addon import AddonError, run_validator_preflight
 from .compile import GENERATED_DIR, WORKER_FILENAME
 from .mutate import Mutant, mutate_ir
 from .run import GherkinRunError, replay_check
@@ -133,11 +133,13 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
         raise GherkinRunError(f"GUT runner not found: {gut}")
+    # SEE-1624 §SPEC-003/016 次序：重放（含纯解析握手）先行——域错误不
+    # 被缺 Godot 的环境错误抢占；validator 拉起随后、业务变异轮之前。
+    manifest = replay_check(project_root, feature_key)
     try:
-        run_preflight(root)
+        run_validator_preflight(root)
     except AddonError as e:
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
-    manifest = replay_check(project_root, feature_key)
     ir_path = root / manifest["ir_path"].removeprefix("res://")
     ir = json.loads(ir_path.read_text(encoding="utf-8"))
     mutants = mutate_ir(ir)

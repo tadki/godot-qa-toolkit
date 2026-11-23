@@ -450,12 +450,12 @@ def test_run_shadow_from_paths_static_only(tmp_path: Path):
         performance_input={
             "complexity": {"baseline_median_s": 1.0, "head_median_s": 1.0},
             "coverage": [],
-            "acceptance_cost": {"samples": [{"feature": "f", "total_s": 1.0}]},
+            "gherkin_cost": {"samples": [{"feature": "f", "total_s": 1.0}]},
         },
     )
     assert report["confidence"]["sample_files"] == 1
     assert report["performance"]["extra_gut_rounds"] == 0
-    assert report["acceptance_cost"]["samples"][0]["feature"] == "f"
+    assert report["gherkin_cost"]["samples"][0]["feature"] == "f"
     assert report["unknown"]["share"] == 1.0  # static-only: everything unknown
 
 
@@ -758,9 +758,9 @@ def test_recipe_cli_res_scheme_exclude_survives_colons(tmp_path: Path, monkeypat
 
     def spy_build(project_root, exclusions=None, **kwargs):
         captured["exclusions"] = list(exclusions or [])
-        return {"recipe_version": "measurement-suite/2", "recipe_hash": "x",
+        return {"recipe_version": "measurement-suite/3", "recipe_hash": "x",
                 "gut_face": {"dirs": ["res://tests/unit/"]},
-                "acceptance_face": {"features": [], "count": 1,
+                "gherkin_face": {"features": [], "count": 1,
                                     "excluded": [], "harness": {}},
                 "toolchain": {}, "exclusions": [], "failures": []}, None
 

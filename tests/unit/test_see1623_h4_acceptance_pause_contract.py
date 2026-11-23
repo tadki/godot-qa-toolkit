@@ -3,15 +3,15 @@
 根因（SEE-1622 Refacty BUG-1，9/9 复现）：两处门控写成
 `acceptance_disabled() and test_attribution`——普通 `measure run`
 （无 env、无 --test-attribution）落入双臂执行分支：acceptance 臂真实
-执行（额外成本 + 无关失败劫持 exit）、`acceptance_arm` 披露缺位；
+执行（额外成本 + 无关失败劫持 exit）、`gherkin_arm` 披露缺位；
 显式 `GQT_MEASUREMENT_ACCEPTANCE_DISABLED=1` 同样被无视。
 
 行为契约（§SPEC-PLANFIRST 任务 2 / Owner 裁定：暂停是有意契约，
 恢复需显式 env=0）：
 1. 普通路径（test_attribution=False，env 缺省）不执行 acceptance 臂：
    双臂 execute_arms 不进入，单臂 gut_full run_arm，占位臂
-   state=disabled，stage_timings.acceptance_arm=0.0。
-2. `acceptance_arm` 具名披露在普通路径同样在场。
+   state=disabled，stage_timings.gherkin_arm=0.0。
+2. `gherkin_arm` 具名披露在普通路径同样在场。
 3. 显式 env=0 恢复双臂（普通路径与归属路径同权）；显式 env=1 保持暂停。
 """
 
@@ -74,7 +74,7 @@ def _setup_env(monkeypatch, value: str | None):
         monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", value)
 
 
-def test_plain_run_paused_no_acceptance_arm(monkeypatch):
+def test_plain_run_paused_no_gherkin_arm(monkeypatch):
     """普通 measure run（无 env、无 --test-attribution）：acceptance 臂
     不执行——单臂 gut_full + 占位 disabled 臂 + 0.0 计时 + 具名披露。"""
     emit_capture: list = []
@@ -85,8 +85,8 @@ def test_plain_run_paused_no_acceptance_arm(monkeypatch):
     _args, _inp, _st, arm_a, arm_b = emit_capture[0][:5]
     assert (arm_a or {}).get("arm") == "gut_full"
     assert (arm_b or {}).get("state") == "disabled"
-    assert report["stage_timings"]["acceptance_arm"] == 0.0
-    assert "disabled_pending_atomization" in report["acceptance_arm"]
+    assert report["stage_timings"]["gherkin_arm"] == 0.0
+    assert "disabled_pending_atomization" in report["gherkin_arm"]
 
 
 def test_plain_run_explicit_env_one_still_paused(monkeypatch):
@@ -96,8 +96,8 @@ def test_plain_run_explicit_env_one_still_paused(monkeypatch):
     _setup_env(monkeypatch, "1")
     report = mo.run_measurement("/p", ["a.gd"], _RECIPE,
                                 test_attribution=False)
-    assert report["stage_timings"]["acceptance_arm"] == 0.0
-    assert "disabled_pending_atomization" in report["acceptance_arm"]
+    assert report["stage_timings"]["gherkin_arm"] == 0.0
+    assert "disabled_pending_atomization" in report["gherkin_arm"]
 
 
 def test_plain_run_env_zero_restores_dual_arms(monkeypatch):
@@ -122,5 +122,5 @@ def test_plain_run_env_zero_restores_dual_arms(monkeypatch):
     report = mo.run_measurement("/p", ["a.gd"], _RECIPE,
                                 test_attribution=False)
     assert len(calls) == 1
-    assert report["stage_timings"]["acceptance_arm"] == 2.0
-    assert "acceptance_arm" not in report
+    assert report["stage_timings"]["gherkin_arm"] == 2.0
+    assert "gherkin_arm" not in report

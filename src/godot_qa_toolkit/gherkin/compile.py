@@ -1,15 +1,20 @@
 """gherkin compile：.feature → 版本化 IR JSON → 数据驱动 GUT 测试 + manifest。
 
 产物三件（三件哈希绑定，§SPEC-1426-06）：
-- acceptance/ir/<feature-key>.json        带版本 IR（OPS_VERSION）
-- acceptance/generated/<feature-key>.gd   数据驱动 GUT 测试（运行时读 IR，
+- gherkin/ir/<feature-key>.json        带版本 IR（OPS_VERSION）
+- gherkin/generated/<feature-key>.gd   数据驱动 GUT 测试（运行时读 IR，
   不把数字烤进代码——契约变异与交付验收共用同一套测试）
-- acceptance/generated/<feature-key>.manifest.json  scenario→test 归因
+- gherkin/generated/<feature-key>.manifest.json  scenario→test 归因
   manifest + 三件 sha256 绑定（ir_hash / generated_hash / manifest 自身除外）
 
-写入面（contract §6 白名单登记）：仅 <project>/acceptance/ir 与
-acceptance/generated 两目录；先清空再生成；opt-in flag；
+写入面（contract §6 白名单登记）：仅 <project>/gherkin/ir 与
+gherkin/generated 两目录；先清空再生成；opt-in flag；
 summary.wrote 逐文件披露。
+
+SEE-1624 严格单根（§SPEC-002/003）：.feature 只能来自
+`addons/gqt_gherkin/features/`；compile 前置 schema 纯解析握手（零
+Godot）——旧布局（旧 addon 根、项目侧旧 acceptance 目录）不再是合法
+输入，无双根、无回退、无自动复制。
 """
 
 from __future__ import annotations
@@ -23,9 +28,17 @@ from pathlib import Path
 
 from .parser import GherkinSyntaxError, Scenario, parse
 from . import OPS_VERSION
+from .addon import (
+    FEATURES_DIR_RELPATH,
+    HARNESS_RES,
+    AddonError,
+    compile_preflight,
+    features_root,
+)
 
-IR_DIR = "acceptance/ir"
-GENERATED_DIR = "acceptance/generated"
+IR_DIR = "gherkin/ir"
+GENERATED_DIR = "gherkin/generated"
+WORKER_FILENAME = "gherkin_worker.gd"
 
 # 中文/非 ASCII 场景名 → GUT 合法测试函数名后缀的标识符化：非 [A-Za-z0-9_]
 # 全部映射为 _ + 码点序号（同 Feature 内 scenario 名唯一性由序号保障——
@@ -96,7 +109,7 @@ def _generated_gd_source(ir: dict, ir_path_res: str) -> str:
     """数据驱动 GUT 测试：运行时读 IR JSON，逐 case 一个 GUT 测试方法
     （归因粒度 = case，失败测试名经 manifest 直接对回场景），按类型断言。
 
-    harness 约定（被测项目侧须提供 res://addons/gqt_accept/harness.gd，
+    harness 约定（被测项目侧须提供 res://addons/gqt_gherkin/harness.gd，
     遵循 testing_api 模板 init/execute/apply/query 连招）；生成脚本本身
     零业务逻辑，只有 IR 驱动循环——数字全部来自 IR。成功路径每 case 携带
     errs 空正断言（GUT 零断言测试判 [Risky]，hollow-green 防线）。
@@ -154,9 +167,9 @@ func after_each() -> void:
 \t\t_harness.reset()
 
 func _make_harness() -> Object:
-\tif not ResourceLoader.exists("res://addons/gqt_accept/harness.gd"):
+\tif not ResourceLoader.exists("res://addons/gqt_gherkin/harness.gd"):
 \t\treturn null
-\tvar script: GDScript = load("res://addons/gqt_accept/harness.gd")
+\tvar script: GDScript = load("res://addons/gqt_gherkin/harness.gd")
 \tvar h: Object = script.new()
 \tif not h.smoke_check():
 \t\treturn null
@@ -166,7 +179,7 @@ func _run_case_by_name(case_name: String) -> void:
 \tif _harness == null:
 \t\t_harness = _make_harness()
 \tif _harness == null:
-\t\tfail_test("acceptance harness unavailable (res://addons/gqt_accept/harness.gd missing or smoke_check failed)")
+\t\tfail_test("gherkin harness unavailable (res://addons/gqt_gherkin/harness.gd missing or smoke_check failed)")
 \t\treturn
 \tvar case: Dictionary = _cases_by_name.get(case_name, {{}})
 \tif case.is_empty():
@@ -298,9 +311,9 @@ func _fresh_harness(harness: Object) -> Object:
 \t# 硬纪律释放面：旧实例引用全部置空后重建（drop = 释放全部
 \t# testing_api 实例），重建即 reload 形态的 v1 落点。
 \tharness = null
-\tif not ResourceLoader.exists("res://addons/gqt_accept/harness.gd"):
+\tif not ResourceLoader.exists("res://addons/gqt_gherkin/harness.gd"):
 \t\treturn null
-\tvar script: GDScript = load("res://addons/gqt_accept/harness.gd")
+\tvar script: GDScript = load("res://addons/gqt_gherkin/harness.gd")
 \tvar h: Object = script.new()
 \tif not h.smoke_check():
 \t\treturn null
@@ -379,7 +392,7 @@ def _build_manifest(ir: dict, ir_json: str, gd: str, worker_gd: str,
         "ir_hash": ir_hash,
         "generated_hash": generated_hash,
         "worker_hash": worker_hash,
-        "worker_path": "res://" + f"{GENERATED_DIR}/accept_worker.gd",
+        "worker_path": "res://" + f"{GENERATED_DIR}/{WORKER_FILENAME}",
         "bindings": {"ir": ir_hash, "generated": generated_hash,
                      "worker": worker_hash},
         "attribution": [
@@ -431,11 +444,26 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
                     ) -> tuple[CompiledSuite | None, dict]:
     """编译一个 .feature。write=False 时纯内存（golden-file 单测用）。
 
+    SEE-1624 单根 + schema 握手前置（CLI/measure 核心路径共用同一预检，
+    §SPEC-002/003）：源 .feature 必须位于
+    `<root>/addons/gqt_gherkin/features/`，且项目 addon schema 通过纯
+    解析握手——违反即具名拒绝，零产物。
+
     Returns (suite, error) — error 非空 = parse 失败等 caller 错误。
     """
     # 源身份一律绝对化：manifest.source_path 与 key 冲突检测都以此比对
     # （相对路径会随调用方 CWD 漂移，造成同源误报冲突/异源漏报）。
     p = Path(feature_path).resolve()
+    root = Path(project_root)
+    allowed = features_root(root).resolve()
+    if p.parent != allowed:
+        return None, {"reason": (
+            f"feature outside the strict single root: {p} — gqt only "
+            f"compiles sources under {FEATURES_DIR_RELPATH}/")}
+    try:
+        compile_preflight(root)
+    except AddonError as e:
+        return None, {"reason": str(e)}
     try:
         text = p.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
@@ -493,8 +521,8 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
         (ir_out / f"{feature_key}.json").write_text(ir_json, encoding="utf-8")
         (gen_out / f"test_{feature_key}.gd").write_text(gd,
                                                         encoding="utf-8")
-        (gen_out / "accept_worker.gd").write_text(worker_gd,
-                                                  encoding="utf-8")
+        (gen_out / WORKER_FILENAME).write_text(worker_gd,
+                                               encoding="utf-8")
         (gen_out / f"{feature_key}.manifest.json").write_text(
             manifest_json, encoding="utf-8")
         return suite, None
@@ -513,8 +541,8 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     (root / ir_rel).write_text(ir_json, encoding="utf-8")
     gd_path = root / gd_rel
     gd_path.write_text(gd, encoding="utf-8")
-    (root / GENERATED_DIR / "accept_worker.gd").write_text(worker_gd,
-                                                           encoding="utf-8")
+    (root / GENERATED_DIR / WORKER_FILENAME).write_text(worker_gd,
+                                                        encoding="utf-8")
     man_path = root / GENERATED_DIR / f"{feature_key}.manifest.json"
     man_path.write_text(manifest_json, encoding="utf-8")
     return suite, None

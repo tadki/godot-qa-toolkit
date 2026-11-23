@@ -14,9 +14,26 @@ from pathlib import Path
 import pytest
 
 from godot_qa_toolkit.gherkin.compile import compile_feature
-from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check, run_suite
+from godot_qa_toolkit.gherkin.run import GherkinRunError, replay_check, run_suite
 from godot_qa_toolkit.arch.collector import collect_file
 from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
+
+
+def _schema_ensure(project: Path) -> None:
+    """SEE-1624：compile 前置 schema 握手 + run/mutate 预检 validator——
+    夹具补最小合法 schema.json 与可通过 V 检查的 validator.gd stub。"""
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    s = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not s.is_file():
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    v = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not v.is_file():
+        v.write_text(VALIDATOR_OK_GD, encoding="utf-8")
+
+
+
 
 
 # ---------- §SPEC-1426-22 ----------
@@ -56,11 +73,15 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path) -> Path:
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text(FEATURE, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -77,12 +98,12 @@ def test_reanchor_tampered_manifest_rejected(project: Path, tmp_path: Path) -> N
     src_feature = _compile(project, tmp_path)
     # 攻击形态 A：删掉源 .feature，保住三件自洽产物
     src_feature.unlink()
-    with pytest.raises(AcceptRunError, match="source feature missing"):
+    with pytest.raises(GherkinRunError, match="source feature missing"):
         replay_check(project, "demo")
     # 攻击形态 B：源 .feature 被改（期望值漂移），旧产物三件哈希仍自洽
     src_feature.write_text(
         "Feature: F\n  Scenario: s\n    Given a CHANGED thing\n", encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="recompile hash mismatch"):
+    with pytest.raises(GherkinRunError, match="recompile hash mismatch"):
         replay_check(project, "demo")
 
 
@@ -92,6 +113,10 @@ def test_tests_executed_zero_guard(project: Path, tmp_path: Path,
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 0
             stdout = ""  # GUT 什么都没跑（Nothing was run）
@@ -110,6 +135,10 @@ def test_tests_executed_positive_in_summary(project: Path, tmp_path: Path,
     from godot_qa_toolkit.gherkin import run as run_mod
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 0
             stdout = "* test_probe_000_00\n  [Passed]\n- test_probe_000_00\n"
@@ -125,7 +154,9 @@ def test_tests_executed_positive_in_summary(project: Path, tmp_path: Path,
 
 def test_unchanged_violation_detail_in_reason(project: Path, tmp_path: Path,
                                               monkeypatch) -> None:
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text("Feature: F\n  Scenario: s\n    Given a thing\n", encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -133,6 +164,10 @@ def test_unchanged_violation_detail_in_reason(project: Path, tmp_path: Path,
     tn = suite.manifest["attribution"][0]["test_name"]
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 1
             stdout = (f"* {tn}\n    [Failed]:  unchanged slot violated: world.tick\n"
@@ -162,11 +197,15 @@ def test_arch_seed_rule(tmp_path: Path) -> None:
 
 def test_feature_key_conflict_is_error(project: Path, tmp_path: Path) -> None:
     """同 key 两个不同 .feature：第二次 compile 显式报错，不静默覆盖。"""
-    f1 = tmp_path / "my feature.feature"   # stem 归一化 → my_feature
+    f1 = ((project / "addons" / "gqt_gherkin" / "features") /
+         "my feature.feature")
+    _schema_ensure(project)
     f1.write_text("Feature: One\n  Scenario: s\n    Given a\n", encoding="utf-8")
     suite, error = compile_feature(f1, project, write=True)
     assert error is None
-    f2 = tmp_path / "my!feature.feature"   # 同 stem 归一化 → my_feature
+    f2 = ((project / "addons" / "gqt_gherkin" / "features") /
+         "my!feature.feature")
+    _schema_ensure(project)
     f2.write_text("Feature: Two\n  Scenario: s\n    Given b\n", encoding="utf-8")
     _, error = compile_feature(f2, project, write=True)
     assert error is not None and "feature_key conflict" in error["reason"]
@@ -176,11 +215,13 @@ def test_low1_corrupt_manifest_is_contract_error(project: Path,
                                                  tmp_path: Path) -> None:
     """Final Review LOW-1：同 key 已有 manifest 损坏 → compile 走统一
     JSON 契约错误面（reason 指示重编译），不裸抛 json.JSONDecodeError。"""
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text("Feature: One\n  Scenario: s\n    Given a\n", encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
-    man = project / "acceptance/generated/demo.manifest.json"
+    man = project / "gherkin/generated/demo.manifest.json"
     man.write_text("{corrupt json !!!", encoding="utf-8")
     _, error = compile_feature(f, project, write=True)
     assert error is not None

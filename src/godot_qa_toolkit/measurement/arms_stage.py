@@ -70,15 +70,15 @@ def _count_test_scripts(root: Path, dirs: list[str]) -> int:
     return n
 
 
-def _arm_plans(root: Path, recipe: dict, acceptance: dict | None,
+def _arm_plans(root: Path, recipe: dict, gherkin: dict | None,
                shard_width: int) -> list[dict]:
-    """分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs。"""
-    if acceptance is not None:
+    """分片计划：gherkin 组由调用方编译；gut_full 按 gutconfig dirs。"""
+    if gherkin is not None:
         return [
             {"args": ["-gdir=res://" + Path(g["suite_dir"]).relative_to(
                 root).as_posix() + "/generated"],
              "keys": g["keys"], "suite_dir": Path(g["suite_dir"])}
-            for g in acceptance["groups"]]
+            for g in gherkin["groups"]]
     groups = _shard_groups(
         root, list(recipe["gut_face"].get("dirs") or []),
         shard_width)
@@ -113,7 +113,7 @@ def _arm_inject_root(root: Path, instrumented_files: dict[str, str],
     探针静默零命中），fail-loud 拒绝跑假数据。"""
     for abs_path, inst in instrumented_files.items():
         Path(abs_path).write_text(inst, encoding="utf-8")
-    # 方向②③：attr 钩子只在归属臂注入；acceptance 臂用默认钩子
+    # 方向②③：attr 钩子只在归属臂注入；gherkin 臂用默认钩子
     if attribution_causal and name == "gut_full":
         from gdtoolkit.parser import parser as _ctx_parser
         from .probe_templates import _ATTR_CTX_GD

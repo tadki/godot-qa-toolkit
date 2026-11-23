@@ -9,7 +9,7 @@
   doctor 例外（stderr 诊断、stdout 空、exit 0/2）不变。
 - §SPEC-004：SEE-1581 最终能力在新路径下逐项保留——mutation `--select`
   （fn 默认）/ `--attribution-map` / `--no-attribution-auto`、measure run
-  `--test-attribution` / `--attribution-causal` / `--acceptance-adaptive` /
+  `--test-attribution` / `--attribution-causal` / `--gherkin-adaptive` /
   `--arms-parallel`、measure map-update `--calibration-every` 等参数语义不变。
 """
 
@@ -45,12 +45,12 @@ _MEASURE_RUN_FULL_ARGV = [
     "measure", "run", "res://src", "--project-root", "p",
     "--recipe", "r.json", "--out", "o.json",
     "--test-attribution", "--attribution-causal",
-    "--acceptance-adaptive", "--arms-parallel",
-    "--acceptance-probe-keys", "a,b",
+    "--gherkin-adaptive", "--arms-parallel",
+    "--gherkin-probe-keys", "a,b",
     "--baseline-failures", "bf.json", "--intolerant-tests", "it.json",
     "--stability-baseline", "sb.json", "--evidence-dir", "ev",
-    "--shard-width", "4", "--acceptance-shards", "2",
-    "--acceptance-repeats", "2", "--shard-log-dir", "logs",
+    "--shard-width", "4", "--gherkin-shards", "2",
+    "--gherkin-repeats", "2", "--shard-log-dir", "logs",
     "--timeout", "99", "--test-attribution-out", "attr.json"]
 
 
@@ -276,9 +276,9 @@ class TestSpec004See1581Flags:
         args = _parser().parse_args(_MEASURE_RUN_FULL_ARGV)
         assert args.test_attribution is True
         assert args.attribution_causal is True
-        assert args.acceptance_adaptive is True
+        assert args.gherkin_adaptive is True
         assert args.arms_parallel is True
-        assert args.acceptance_probe_keys == "a,b"
+        assert args.gherkin_probe_keys == "a,b"
         assert args.baseline_failures == "bf.json"
         assert args.intolerant_tests == "it.json"
         assert args.stability_baseline == "sb.json"
@@ -287,8 +287,8 @@ class TestSpec004See1581Flags:
         args = _parser().parse_args(_MEASURE_RUN_FULL_ARGV)
         assert args.evidence_dir == "ev"
         assert args.shard_width == 4
-        assert args.acceptance_shards == 2
-        assert args.acceptance_repeats == 2
+        assert args.gherkin_shards == 2
+        assert args.gherkin_repeats == 2
         assert args.shard_log_dir == "logs"
         assert args.timeout == 99
         assert args.test_attribution_out == "attr.json"
@@ -345,7 +345,7 @@ class TestSpec004See1581Flags:
     def test_gherkin_run_and_mutate_flags(self):
         args = _parser().parse_args(
             ["gherkin", "run", "--project-root", "p", "--key", "k",
-             "--suite-dir", "d", "--acceptance-probe-keys", "a",
+             "--suite-dir", "d", "--gherkin-probe-keys", "a",
              "--timeout", "60"])
         assert args.gherkin_command == "run"
         assert args.suite_dir == "d"

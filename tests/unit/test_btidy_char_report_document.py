@@ -11,7 +11,7 @@ from godot_qa_toolkit.risk.shadow import _report_document
 KEYS = [
     "report", "version", "evidence_level", "diagnostic_only",
     "dynamic_cache", "metric", "metric_version", "unknown", "ranking",
-    "core_full", "noise", "acceptance_cost", "routing", "confidence",
+    "core_full", "noise", "gherkin_cost", "routing", "confidence",
     "negatives", "files", "records",
 ]
 
@@ -57,7 +57,7 @@ def test_report_document_contract():
     assert doc["negatives"] == [{"file": "neg"}]
     assert doc["files"] == [{"file": "a"}]
     assert doc["records"] is ranking
-    assert doc["acceptance_cost"]["samples"] == []
+    assert doc["gherkin_cost"]["samples"] == []
 
 
 def test_report_document_empty_ranking():

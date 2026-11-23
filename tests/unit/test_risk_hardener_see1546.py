@@ -90,7 +90,7 @@ def test_report_document_key_order_is_frozen():
         "ranking",
         "core_full",
         "noise",
-        "acceptance_cost",
+        "gherkin_cost",
         "routing",
         "confidence",
         "negatives",
@@ -227,7 +227,7 @@ def test_cmd_risk_without_performance_file_uses_zero_baseline(tmp_path, capsys):
     assert rc == 0 and out["ok"] is True
     doc = json.loads(report_path.read_text(encoding="utf-8"))
     assert doc["performance"]["complexity"]["head_median_ratio"] == 0.0
-    assert doc["acceptance_cost"]["samples"] == []
+    assert doc["gherkin_cost"]["samples"] == []
 
 
 # --------------------------------------------------------------------------

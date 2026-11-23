@@ -27,7 +27,7 @@ from pathlib import Path
 STAGE_KEYS = ("test_scan", "prewarm", "baseline", "per_mutant",
               "worker_boot", "slot_sync", "prefilter", "farm_provision",
               "planning", "route_scan", "instrument_prepare",
-              "baseline_preflight", "gut_full_arm", "acceptance_arm",
+              "baseline_preflight", "gut_full_arm", "gherkin_arm",
               "total")
 
 # 分片执行阶段——分片 summary 携带、运行级并入的唯一键集（编排阶段父层

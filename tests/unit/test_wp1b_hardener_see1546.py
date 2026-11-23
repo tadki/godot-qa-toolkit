@@ -394,7 +394,7 @@ def test_parity_paths_end_to_end(tmp_path):
 
 
 def test_in_escape_dir_matches_default_dirs():
-    assert _in_escape_dir("acceptance/generated/x.gd::f", DEFAULT_ESCAPE_DIRS) is True
+    assert _in_escape_dir("gherkin/generated/x.gd::f", DEFAULT_ESCAPE_DIRS) is True
     assert _in_escape_dir("addons/x.gd::f", DEFAULT_ESCAPE_DIRS) is True
     assert _in_escape_dir(".godot/x.gd::f", DEFAULT_ESCAPE_DIRS) is True
     assert _in_escape_dir("systems/x.gd::f", DEFAULT_ESCAPE_DIRS) is False

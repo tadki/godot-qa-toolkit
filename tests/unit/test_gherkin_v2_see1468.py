@@ -20,7 +20,7 @@ from godot_qa_toolkit.gherkin import OPS_VERSION
 from godot_qa_toolkit.gherkin.compile import compile_feature
 from godot_qa_toolkit.gherkin.mutate import mutate_case, mutate_ir
 from godot_qa_toolkit.gherkin.mutate_runner import run_mutate
-from godot_qa_toolkit.gherkin.run import AcceptRunError, replay_check, run_suite
+from godot_qa_toolkit.gherkin.run import GherkinRunError, replay_check, run_suite
 from godot_qa_toolkit.gherkin.parser import GherkinSyntaxError, parse
 
 FEATURE = """Feature: F
@@ -52,17 +52,43 @@ def _restore_subprocess():
     mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
+@pytest.fixture(autouse=True)
+def _stub_preflight(monkeypatch):
+    """SEE-1624：worker 通道测试不涉预检——stub 掉 run_preflight
+    的 validator 拉起（真实 Godot 进程不进单元测试）。"""
+    import godot_qa_toolkit.gherkin.addon as _addon
+    monkeypatch.setattr(_addon, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    import godot_qa_toolkit.gherkin.mutate_runner as _mr
+    monkeypatch.setattr(_mr, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    yield
+
+
 @pytest.fixture()
 def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path, feature: str = FEATURE,
              name: str = "demo"):
-    f = tmp_path / f"{name}.feature"
+    f = (project / "addons" / "gqt_gherkin" / "features" /
+         f"{name}.feature")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    _schema = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not _schema.is_file():
+        _schema.parent.mkdir(parents=True, exist_ok=True)
+        _schema.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    _validator = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not _validator.is_file():
+        _validator.write_text(VALIDATOR_OK_GD, encoding="utf-8")
     f.write_text(feature, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -73,6 +99,10 @@ def _fake_gut(output: str, returncode: int = 0) -> None:
     import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             def __init__(self):
                 self.returncode = returncode
@@ -341,16 +371,16 @@ def test_old_major_manifest_run_side_rejected(project: Path,
     """schema 键集/调用约定变更 = major bump；旧 manifest 在 run 侧
     replay_check 严格相等校验下 run_error（既有 fail-fast 机制承载）。"""
     suite = _compile(project, tmp_path)
-    man_path = project / "acceptance/generated" / f"{suite.feature_key}.manifest.json"
+    man_path = project / "gherkin/generated" / f"{suite.feature_key}.manifest.json"
     manifest = json.loads(man_path.read_text(encoding="utf-8"))
     manifest["ops_version"] = "see1426-accept/1"
     man_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="ops_version"):
+    with pytest.raises(GherkinRunError, match="ops_version"):
         replay_check(project, suite.feature_key)
 
 
 def test_ops_version_is_major_2() -> None:
-    assert OPS_VERSION == "see1468-accept/2"
+    assert OPS_VERSION == "see1468-gherkin/2"
 
 
 # ---------- mutate_runner：豁免基线轮（exempt ≠ skip） ----------
@@ -390,7 +420,7 @@ MIXED_FEATURE = """Feature: mixed face
 
 
 def _manifest_test_names(project: Path, key: str) -> list[str]:
-    man = json.loads((project / "acceptance/generated"
+    man = json.loads((project / "gherkin/generated"
                       / f"{key}.manifest.json").read_text(encoding="utf-8"))
     return [a["test_name"] for a in man["attribution"]]
 
@@ -433,6 +463,10 @@ def test_exempt_baseline_green_then_mutant_rounds(project: Path,
     calls = {"n": 0}
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             pass
         calls["n"] += 1
@@ -464,6 +498,10 @@ def test_exempt_baseline_red_fails_fast(project: Path, tmp_path: Path) -> None:
     calls = {"n": 0}
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             pass
         calls["n"] += 1
@@ -509,7 +547,7 @@ def test_non_exempt_no_mutants_still_run_error(project: Path,
     """无豁免、零绑定面：no mutants run_error 语义不变。"""
     _compile(project, tmp_path,
              "Feature: E\n  Scenario: s\n    Given a\n", name="empty")
-    with pytest.raises(AcceptRunError, match="no mutants generated"):
+    with pytest.raises(GherkinRunError, match="no mutants generated"):
         run_mutate(project, "empty")
 
 
@@ -563,7 +601,7 @@ def test_worker_exempt_baseline_count_mismatch_raises(
     _arm_worker_baseline(monkeypatch, {
         "mutant_id": "exempt_baseline", "rc": 0, "executed": 0,
         "failing": [], "ops_version": OPS_VERSION})
-    with pytest.raises(AcceptRunError, match="execution chain untrusted"):
+    with pytest.raises(GherkinRunError, match="execution chain untrusted"):
         run_mutate(project, suite.feature_key, use_worker=True)
 
 
@@ -651,23 +689,23 @@ def test_signal_count_negative_cell_rejected() -> None:
 
 def test_exempt_baseline_empty_stream_is_run_error(project: Path,
                                                    tmp_path: Path) -> None:
-    """基线轮 rc=0 但无测试流 = 执行链不可信（哨兵同构）→ AcceptRunError。"""
+    """基线轮 rc=0 但无测试流 = 执行链不可信（哨兵同构）→ GherkinRunError。"""
     _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
     _fake_gut("Godot Engine v4.6.2.stable.official banner only\n",
               returncode=0)
-    with pytest.raises(AcceptRunError,
+    with pytest.raises(GherkinRunError,
                        match="no test stream in baseline"):
         run_mutate(project, "pure_exempt")
 
 
 def test_exempt_baseline_launch_failure_raises(project: Path,
                                                tmp_path: Path) -> None:
-    """基线轮 Godot 启动失败特征在场且无测试流 → AcceptRunError（不静默
+    """基线轮 Godot 启动失败特征在场且无测试流 → GherkinRunError（不静默
     落入 baseline_failed 契约面）。"""
     _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
     _fake_gut("ERROR: Attempt to open script 'res://x.gd' resulted in "
               "error 'File not found'.\n", returncode=1)
-    with pytest.raises(AcceptRunError,
+    with pytest.raises(GherkinRunError,
                        match="launch failed on baseline"):
         run_mutate(project, "pure_exempt")
 
@@ -705,19 +743,19 @@ def test_worker_exempt_baseline_skips_multi_noise_lines(
 
 def test_worker_exempt_baseline_ops_version_mismatch_raises(
         project: Path, tmp_path: Path, monkeypatch) -> None:
-    """基线 verdict ops_version ≠ 本侧 = 通道失真 → AcceptRunError（与
+    """基线 verdict ops_version ≠ 本侧 = 通道失真 → GherkinRunError（与
     mutant 轮同档哨兵）。"""
     suite = _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
     _arm_worker_baseline(monkeypatch, {
         "mutant_id": "exempt_baseline", "rc": 0, "executed": 1,
         "failing": [], "ops_version": "see1426-accept/1"})
-    with pytest.raises(AcceptRunError, match="ops_version mismatch"):
+    with pytest.raises(GherkinRunError, match="ops_version mismatch"):
         run_mutate(project, suite.feature_key, use_worker=True)
 
 
 def test_worker_exempt_baseline_run_error_raises(
         project: Path, tmp_path: Path, monkeypatch) -> None:
-    """基线 verdict 自带 run_error = 执行链失败 → AcceptRunError，不落
+    """基线 verdict 自带 run_error = 执行链失败 → GherkinRunError，不落
     exempt_verified。"""
     suite = _compile(project, tmp_path, EXEMPT_FEATURE, name="pure_exempt")
     _arm_worker_baseline(monkeypatch, {
@@ -725,7 +763,7 @@ def test_worker_exempt_baseline_run_error_raises(
         "failing": [],
         "run_error": "harness unavailable or smoke_check failed",
         "ops_version": OPS_VERSION})
-    with pytest.raises(AcceptRunError,
+    with pytest.raises(GherkinRunError,
                        match="exempt baseline worker run_error"):
         run_mutate(project, suite.feature_key, use_worker=True)
 
@@ -802,6 +840,10 @@ def test_run_failure_reason_carries_fail_test_message(
     (tn,) = _manifest_test_names(project, suite.feature_key)
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 1
             # 真机形态（Revy F3' 实证 repr）：明细行首 \x1b[31m、消息前 \x1b[0m。
@@ -812,7 +854,7 @@ def test_run_failure_reason_carries_fail_test_message(
     monkeypatch.setattr(run_mod.subprocess, "run", fake_run)
     result = run_suite(project, suite.feature_key)
     (f,) = result["failures"]
-    assert f["reason"] == ("generated acceptance test failed: expectation "
+    assert f["reason"] == ("generated gherkin test failed: expectation "
                            "check failed: left: expected 8, actual 7")
     assert f["detail"] == ("expectation check failed: left: expected 8, "
                            "actual 7")
@@ -845,9 +887,13 @@ def test_mutate_harness_missing_baseline_red_is_run_error(
     import godot_qa_toolkit.gherkin.mutate_runner as mr
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         class R:
             returncode = 1
-            stdout = (f"* {tn}\n  [Failed]: acceptance harness unavailable "
+            stdout = (f"* {tn}\n  [Failed]: gherkin harness unavailable "
                       "(res://addons/gqt_accept/harness.gd missing)\n")
             stderr = ""
         return R()
@@ -871,6 +917,10 @@ def test_mutate_baseline_green_runs_mutant_rounds_once(
     calls = {"n": 0}
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         calls["n"] += 1
 
         class R:
@@ -900,29 +950,27 @@ def test_ghost_types_declaration_is_parse_error() -> None:
 
 def test_ghost_types_declaration_compile_contract() -> None:
     """F-E 端到端：ghost 声明经 CLI compile → ok:false（JSON 契约面）。"""
-    project2 = None
+    project = _tmp_project()
     suite, error = compile_feature(
         _tmp_feature("Feature: F\n  Scenario Outline: s\n    Then hp is <hp>\n"
                      "    # types: <hp>:int, <ghost>:int\n"
-                     "    Examples:\n      | hp |\n      | 7 |\n"),
-        _tmp_project(), write=False)
+                     "    Examples:\n      | hp |\n      | 7 |\n",
+                     project),
+        project, write=False)
     assert suite is None and error is not None
     assert "no matching Examples column" in error["reason"]
 
 
-def _tmp_feature(text: str):
-    from pathlib import Path
-    import tempfile
-    d = Path(tempfile.mkdtemp())
-    f = d / "ghost.feature"
-    f.write_text(text, encoding="utf-8")
-    return f
+def _tmp_feature(text: str, project):
+    from gherkin_fixtures import write_feature
+    import uuid
+    stem = f"ghost_{uuid.uuid4().hex[:6]}"
+    return write_feature(project, stem, text)
 
 
 def _tmp_project():
+    from gherkin_fixtures import make_addon_project
     from pathlib import Path
     import tempfile
-    root = Path(tempfile.mkdtemp()) / "proj"
-    (root / "addons" / "gut").mkdir(parents=True)
-    (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
-    return root
+    return make_addon_project(Path(tempfile.mkdtemp()) / "proj",
+                              features={})

@@ -1,6 +1,6 @@
-"""SEE-1619 §SPEC-010 — acceptance 性能实测的纯函数面（分批前台模式的
+"""SEE-1619 §SPEC-010（SEE-1624 gherkin 命名收口）— gherkin 性能实测的纯函数面（分批前台模式的
 单轮合并与汇总）。真实 Godot 执行在 tests/integration/
-run_see1619_acceptance_perf.py 的驱动层；本模块不拉起 Godot。"""
+run_see1619_gherkin_perf.py 的驱动层；本模块不拉起 Godot。"""
 from __future__ import annotations
 
 import json
@@ -23,8 +23,8 @@ def _pair_rounds(rounds: list[dict]) -> tuple[list[dict], list[dict]]:
             pending.append(r)
         elif r.get("mode") == "shared" and pending:
             b = pending.pop(0)
-            wa = r.get("acceptance_wall_s")
-            wb = b.get("acceptance_wall_s")
+            wa = r.get("gherkin_wall_s")
+            wb = b.get("gherkin_wall_s")
             pairs.append({"b_round": b.get("round"),
                           "a_round": r.get("round"),
                           "b_wall_s": wb, "a_wall_s": wa,
@@ -48,8 +48,8 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
             break
         if r.get("mode") == "shared":
             n_leading_shared += 1
-            if r.get("acceptance_wall_s"):
-                baseline_walls.append(r["acceptance_wall_s"])
+            if r.get("gherkin_wall_s"):
+                baseline_walls.append(r["gherkin_wall_s"])
     n_shared_total = sum(1 for r in rounds if r.get("mode") == "shared")
     interleaved_shared_rounds = n_shared_total - n_leading_shared
     noise = {}
@@ -113,7 +113,7 @@ def merge_round_into_report(doc: dict, round_record: dict, shards_a: int,
     name = round_record.get("round")
     if any(r.get("round") == name for r in doc.get("rounds", [])):
         raise DuplicateRoundError(f"duplicate round: {name}")
-    doc.setdefault("doc", "see1619-acceptance-perf/1")
+    doc.setdefault("doc", "see1619-gherkin-perf/1")
     doc.setdefault("rounds", []).append(round_record)
     doc["summary"] = compute_perf_summary(doc["rounds"], shards_a, keys)
     if report_path is not None:

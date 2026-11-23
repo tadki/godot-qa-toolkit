@@ -1,7 +1,7 @@
-"""gqt measure run 双源批式编排（§SPEC-037，measurement-report/2）。
+"""gqt measure run 双源批式编排（§SPEC-037，measurement-report/3）。
 
 批式臂（measurement 的唯一可行形态，设计 §2.1）：目标全集一次插桩 → 每臂
-1 次 GUT（gut_full 走 .gutconfig 面 + acceptance 私有目录一次）→ 逐文件
+1 次 GUT（gut_full 走 .gutconfig 面 + gherkin 私有目录一次）→ 逐文件
 sink（`qa-coverage-hits-{run_uuid}-{file_key8}`）读回 → bundle →
 coverage-union/1 逐文件行集并集。两臂共用同一 registry/probe manifest
 （同源码、同 manifest），run UUID 每臂独立。
@@ -33,7 +33,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from ..gherkin.run import AcceptRunError, replay_check
+from ..gherkin.run import GherkinRunError, replay_check
 from ..gherkin.suite import (
     SuiteError,
     _cleanup_suite_dir,
@@ -113,7 +113,7 @@ from .attribution import (
     _attribution_section,
     _tests_face_map,
 )
-REPORT_VERSION = "measurement-report/2"
+REPORT_VERSION = "measurement-report/3"
 # SEE-1587：行级主真值 schema——行事实（per-test covered line sets）是唯一
 # 主数据，file/function 视图退为派生投影；旧 /5 产物 fail-loud 拒绝（无
 # 兼容别名，消费方 load 即报 schema 不符）。
@@ -459,7 +459,7 @@ def _assemble_report(root: Path, recipe_hash: str, arm_a: dict, arm_b: dict,
                      measurable_valid: int, cache_hits: int,
                      cache_misses: int, algo_used: str, prepared: dict,
                      unmeasured: list, recovered: int, perf: dict) -> dict:
-    """measurement-report/2 正文组装（块构建委托给 _report_*_block）。"""
+    """measurement-report/3 正文组装（块构建委托给 _report_*_block）。"""
     return {
         "report_version": REPORT_VERSION,
         "project_root": str(root),
@@ -647,25 +647,25 @@ def run_baseline_preflight(root, recipe, timeout_s):
 
 def _measure_arms(root, recipe, prepared, *, timeout_s, test_attribution,
                   attribution_causal, shard_width, shard_log_dir,
-                  acceptance_repeats, baseline_failures, baseline_pairs,
+                  gherkin_repeats, baseline_failures, baseline_pairs,
                   declared_scoped, declared_bare, arms_parallel, evidence_dir,
-                  acceptance_keys, acceptance_shards,
-                  acceptance_adaptive) -> tuple:
+                  gherkin_keys, gherkin_shards,
+                  gherkin_adaptive) -> tuple:
     """双臂执行（arm_kwargs 装配 + execute_arms）。"""
     arm_kwargs = dict(
         prepared=prepared, timeout_s=timeout_s,
         test_attribution=test_attribution,
         attribution_causal=attribution_causal, shard_width=shard_width,
         shard_log_dir=shard_log_dir,
-        acceptance_repeats=acceptance_repeats,
+        gherkin_repeats=gherkin_repeats,
         baseline_failures=baseline_failures,
         baseline_pairs=baseline_pairs, declared_scoped=declared_scoped,
         declared_bare=declared_bare, arms_parallel=arms_parallel,
         evidence_dir=evidence_dir)
     return execute_arms(
         root=root, recipe=recipe, arms_parallel=arms_parallel,
-        acceptance_keys=acceptance_keys, acceptance_shards=acceptance_shards,
-        acceptance_adaptive=acceptance_adaptive, arm_kwargs=arm_kwargs)
+        gherkin_keys=gherkin_keys, gherkin_shards=gherkin_shards,
+        gherkin_adaptive=gherkin_adaptive, arm_kwargs=arm_kwargs)
 
 
 def _measure_crap(unions, prepared, recipe_hash, stability_baseline,
@@ -739,21 +739,21 @@ def _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
 
 
 def run_measurement(project_root: str | Path, target_files: list[str],
-                  recipe: dict, *, acceptance_keys: list[str] | None = None,
+                  recipe: dict, *, gherkin_keys: list[str] | None = None,
                   probe_keys: list[str] | None = None, timeout_s: int = 180,
                   evidence_out: str | None = None, inject_toolchain: bool = True,
                   scope_roots: list[str] | None = None, block_compress: bool = True,
-                  shard_width: int = 6, acceptance_shards: int = 4,
+                  shard_width: int = 6, gherkin_shards: int = 4,
                   shard_log_dir: str | None = None,
                   stability_baseline: str | None = None,
                   baseline_failures: "set[tuple[str, str]] | None" = None,
                   intolerant_config: dict | None = None,
-                  acceptance_repeats: int = 3, test_attribution: bool = False,
+                  gherkin_repeats: int = 3, test_attribution: bool = False,
                   attribution_out: str | None = None,
                   attribution_causal: bool = False, arms_parallel: bool = False,
-                  acceptance_adaptive: bool = False,
+                  gherkin_adaptive: bool = False,
                   baseline_preflight: bool = False) -> dict:
-    """measurement 双源批式编排，产出 measurement-report/2（分解见
+    """measurement 双源批式编排，产出 measurement-report/3（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
     from ..mutation.stagetiming import StageClock
     clock = StageClock()
@@ -811,7 +811,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                 declared_bare=inp["declared_bare"],
                 arms_parallel=arms_parallel,
                 evidence_dir=st["evidence_dir"])
-            arm_b = {"arm": "acceptance", "state": "disabled",
+            arm_b = {"arm": "gherkin", "state": "disabled",
                      "invalid_reason": None, "invalid_evidence": None,
                      "wall_s": 0.0, "bundles": 0, "bundles_data": {},
                      "results": [], "repeats": 0, "convergence": None,
@@ -826,19 +826,19 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                 test_attribution=test_attribution,
                 attribution_causal=attribution_causal,
                 shard_width=shard_width, shard_log_dir=shard_log_dir,
-                acceptance_repeats=acceptance_repeats,
+                gherkin_repeats=gherkin_repeats,
                 baseline_failures=baseline_failures,
                 baseline_pairs=inp["baseline_pairs"],
                 declared_scoped=inp["declared_scoped"],
                 declared_bare=inp["declared_bare"],
                 arms_parallel=arms_parallel,
                 evidence_dir=st["evidence_dir"],
-                acceptance_keys=acceptance_keys,
-                acceptance_shards=acceptance_shards,
-                acceptance_adaptive=acceptance_adaptive)
+                gherkin_keys=gherkin_keys,
+                gherkin_shards=gherkin_shards,
+                gherkin_adaptive=gherkin_adaptive)
     # acceptance 臂耗时单独披露（暂停时 0.0；双臂时 gut_full_arm 段含
     # 双臂——acceptance 取其 wall_s）
-    clock.add("acceptance_arm", max(0.0, (arm_b.get("wall_s") or 0.0)))
+    clock.add("gherkin_arm", max(0.0, (arm_b.get("wall_s") or 0.0)))
     unions = _build_unions(arm_a, arm_b, inp["recipe_hash"])
     gated_arms, comparable_reason = _gate_comparable(
         unions, arm_a, arm_b, st["complete"])
@@ -859,7 +859,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     clock.add("total", time.monotonic() - t_total)
     report["stage_timings"] = clock.disclosure()
     if acceptance_disabled():
-        report["acceptance_arm"] = ("disabled_pending_atomization — "
+        report["gherkin_arm"] = ("disabled_pending_atomization — "
                                     "restored after SEE-1619 (shared-"
                                     "process shards); env override "
                                     "GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0")
@@ -871,7 +871,7 @@ def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
     """§SPEC-063c/064a：失败身份解析为 (script, test) 对。运行流按脚本
     分段（res://…gd 独占一行）；Run Summary 段起脚本身份不可知，失败以
     ("", test) 未归因对纳入解析（不得静默丢弃——混合形态必须门控，
-    §SPEC-064a）。acceptance 私有目录的 per-run uuid 归一为 `.gqt-run-*`
+    §SPEC-064a）。gherkin 私有目录的 per-run uuid 归一为 `.gqt-run-*`
     （目录名无测试身份语义，跨 run 基线可比）。"""
     pairs: set[tuple[str, str]] = set()
     current_script = ""
@@ -940,18 +940,18 @@ def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],
 
 def _performance(root: Path, probe_keys: list[str] | None,
                  timeout_s: int) -> dict:
-    """W4 acceptance 成本探针（缺省 aidomain_integration）——私有目录管线
-    实测「编译 + 执行」墙钟，写入 performance.acceptance_probe。"""
-    from ..gherkin.suite import run_acceptance_probe
+    """W4 gherkin 成本探针（缺省 aidomain_integration）——私有目录管线
+    实测「编译 + 执行」墙钟，写入 performance.gherkin_probe。"""
+    from ..gherkin.suite import run_gherkin_probe
     keys = probe_keys if probe_keys else ["aidomain_integration"]
     try:
-        probe = run_acceptance_probe(root, keys, timeout_s=timeout_s)
-    except (SuiteError, AcceptRunError) as e:
-        probe = {"probe_version": "acceptance-probe/1", "keys": keys,
+        probe = run_gherkin_probe(root, keys, timeout_s=timeout_s)
+    except (SuiteError, GherkinRunError) as e:
+        probe = {"probe_version": "gherkin-probe/1", "keys": keys,
                  "suite_ok": False, "error": str(e)}
-    return {"acceptance_probe": probe}
+    return {"gherkin_probe": probe}
 
-def _acceptance_convergence(root: Path, run_uuid: str, sink_by_rel: dict,
+def _gherkin_convergence(root: Path, run_uuid: str, sink_by_rel: dict,
                             manifest_by_rel: dict, results: list,
                             reps: int) -> dict:
     """§SPEC-062C：验收臂逐轮行集并集收敛——min k s.t. ∪(1..k) ==

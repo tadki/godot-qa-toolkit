@@ -62,7 +62,7 @@ def test_arm_stage_default_shape(tmp_path, iso_backup):
         "gut_full", root=proj, prepared=_prepared(proj),
         recipe={"gut_face": {"dirs": []}}, test_attribution=False,
         attribution_causal=False, shadow_instrument=False, shard_width=1,
-        acceptance=None, acceptance_repeats=3)
+        gherkin=None, gherkin_repeats=3)
     # 键集
     assert set(stage) == {
         "run_uuid", "backup_dir", "started", "sink_by_rel",
@@ -73,7 +73,7 @@ def test_arm_stage_default_shape(tmp_path, iso_backup):
     assert stage["started"]["created"] == [
         str(proj / _FLUSHER_RELPATH), str(proj / _PRE_HOOK_RELPATH)]
     assert stage["started"]["project_root"] == str(proj)
-    # gut_full 单轮：reps 恒 1（acceptance=None）
+    # gut_full 单轮：reps 恒 1（gherkin=None）
     assert stage["reps"] == 1
     # 私有备份目录 + started.json 在场
     bdir = stage["backup_dir"]
@@ -95,22 +95,22 @@ def test_arm_stage_causal_adds_ctx(tmp_path, iso_backup):
         "gut_full", root=proj, prepared=_prepared(proj),
         recipe={"gut_face": {"dirs": []}}, test_attribution=True,
         attribution_causal=True, shadow_instrument=False, shard_width=1,
-        acceptance=None, acceptance_repeats=1)
+        gherkin=None, gherkin_repeats=1)
     assert str(proj / _ATTR_CTX_RELPATH) in stage["started"]["created"]
     assert _ATTR_CTX_RELPATH in [p for p, _ in stage["shadow_hook_files"]]
 
 
 def test_arm_stage_acceptance_reps(tmp_path, iso_backup):
     proj = _make_project(tmp_path)
-    suite = proj / "acceptance" / "suite_x"
+    suite = proj / "gherkin" / "suite_x"
     (suite / "generated").mkdir(parents=True)
     stage = arms._arm_stage(
-        "acceptance", root=proj, prepared=_prepared(proj),
+        "gherkin", root=proj, prepared=_prepared(proj),
         recipe={"gut_face": {"dirs": []}}, test_attribution=False,
         attribution_causal=False, shadow_instrument=True, shard_width=1,
-        acceptance={"groups": [{"suite_dir": str(suite), "keys": ["k"]}],
+        gherkin={"groups": [{"suite_dir": str(suite), "keys": ["k"]}],
                     "snapshot": {}},
-        acceptance_repeats=3)
+        gherkin_repeats=3)
     # 验收臂 N 次重复（上限 reps）
     assert stage["reps"] == 3
     # shadow_instrument=True → 不写 started.json
@@ -121,15 +121,15 @@ def test_arm_stage_acceptance_reps(tmp_path, iso_backup):
 
 def test_arm_stage_acceptance_reps_floor_one(tmp_path, iso_backup):
     proj = _make_project(tmp_path)
-    suite = proj / "acceptance" / "suite_x"
+    suite = proj / "gherkin" / "suite_x"
     (suite / "generated").mkdir(parents=True)
     stage = arms._arm_stage(
-        "acceptance", root=proj, prepared=_prepared(proj),
+        "gherkin", root=proj, prepared=_prepared(proj),
         recipe={"gut_face": {"dirs": []}}, test_attribution=False,
         attribution_causal=False, shadow_instrument=True, shard_width=1,
-        acceptance={"groups": [{"suite_dir": str(suite), "keys": ["k"]}],
+        gherkin={"groups": [{"suite_dir": str(suite), "keys": ["k"]}],
                     "snapshot": {}},
-        acceptance_repeats=0)
+        gherkin_repeats=0)
     assert stage["reps"] == 1
 
 
@@ -141,4 +141,4 @@ def test_arm_stage_missing_project_godot_fails_loud(tmp_path, iso_backup):
             "gut_full", root=proj, prepared=_prepared(proj),
             recipe={"gut_face": {"dirs": []}}, test_attribution=False,
             attribution_causal=False, shadow_instrument=False, shard_width=1,
-            acceptance=None, acceptance_repeats=1)
+            gherkin=None, gherkin_repeats=1)

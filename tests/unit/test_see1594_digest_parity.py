@@ -55,12 +55,14 @@ def test_recipe_hash_equals_old_basis_formula(tmp_path):
     (tmp / "tests").mkdir()
     (tmp / "tests" / "test_a.gd").write_text(
         "extends GutTest\nfunc t():\n\tpass\n")
-    feats = tmp / "acceptance" / "features"
+    feats = tmp / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
         "    # types: <hp>:int, <left>:numeric\n    Examples:\n"
         "      | hp | left |\n      | 10 | 7    |\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(tmp)
     recipe, err = build_recipe(tmp)
     assert err is None, err
     basis = {k: v for k, v in recipe.items()

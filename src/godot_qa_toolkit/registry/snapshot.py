@@ -5,7 +5,7 @@ by fid; a removed∩added pair with an identical body_hash is an
 `identity_changed_candidate` — a *machine candidate* only, `human_final=true`
 so it can never auto-count as governance gain. Escape rules (L1 ruling):
 target kind=lambda, non-empty lex_scope (moved into an inner class), or a
-path inside the default escape dirs (`acceptance/generated/`, `.godot/`,
+path inside the default escape dirs (`gherkin/generated/`, `.godot/`,
 `addons/`). Escape rows are counted separately and never count toward the
 governance net.
 """
@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 
 DIFF_VERSION = "func-registry-diff/1"
-DEFAULT_ESCAPE_DIRS = ("acceptance/generated/", ".godot/", "addons/")
+DEFAULT_ESCAPE_DIRS = ("gherkin/generated/", ".godot/", "addons/")
 
 
 def _in_escape_dir(fid: str, escape_dirs: tuple[str, ...]) -> bool:

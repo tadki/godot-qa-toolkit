@@ -5,7 +5,7 @@ manifest 里的 ir_hash / generated_hash 必须与磁盘上 IR、生成 .gd 的�
 sha256 一致——手改任一生成物即拒绝执行（防手改作弊样本放行）。
 
 执行形态同构 mutation：一次性 godot --headless 子进程跑 GUT（-gdir 指向
-acceptance/generated），跑完即弃；输出经归因 manifest 回译为统一契约
+gherkin/generated），跑完即弃；输出经归因 manifest 回译为统一契约
 {tool, ok, summary, failures}。
 """
 
@@ -18,13 +18,14 @@ import subprocess
 from pathlib import Path
 
 from . import OPS_VERSION
-from .compile import GENERATED_DIR, sha256_of
+from .compile import GENERATED_DIR, WORKER_FILENAME, sha256_of
+from .addon import AddonError, run_preflight
 from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
 from ..mutation.inject import godot_command, spawn_godot
 from ..mutation.godot_gate import GlobalGodotGate
 
 
-class AcceptRunError(Exception):
+class GherkinRunError(Exception):
     """重放校验失败 / godot 启动失败——run_error，不产出 verdict。"""
 
 
@@ -34,11 +35,11 @@ def _project_gd_path(project_root: Path, res: str) -> Path:
 
 def replay_check(project_root: str | Path, feature_key: str,
                  *, suite_dir: str | Path | None = None) -> dict:
-    """三件哈希绑定重放校验。失配 raise AcceptRunError。返回 manifest。
+    """三件哈希绑定重放校验。失配 raise GherkinRunError。返回 manifest。
 
     suite_dir 给定时读私有目录（§SPEC-035）：manifest/生成 .gd/worker 都取
     `<suite_dir>/generated/`，IR 仍按 manifest.ir_path（项目相对 res://
-    路径）解析——私有目录在 acceptance/generated/.gqt-run-<uuid>/ 内，
+    路径）解析——私有目录在 gherkin/generated/.gqt-run-<uuid>/ 内，
     res:// 语义不变。
 
     §SPEC-1426-24 重锚防线：manifest 可被整体替换为攻击者自造的三件一致
@@ -52,38 +53,48 @@ def replay_check(project_root: str | Path, feature_key: str,
         else root / GENERATED_DIR
     man_path = gen_dir / f"{feature_key}.manifest.json"
     if not man_path.is_file():
-        raise AcceptRunError(f"manifest missing: {man_path}")
+        raise GherkinRunError(f"manifest missing: {man_path}")
     manifest = json.loads(man_path.read_text(encoding="utf-8"))
     if manifest.get("ops_version") != OPS_VERSION:
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"manifest ops_version {manifest.get('ops_version')!r} != {OPS_VERSION!r}")
     ir_path = _project_gd_path(root, manifest["ir_path"])
     if not ir_path.is_file():
-        raise AcceptRunError(f"IR file missing: {ir_path}")
+        raise GherkinRunError(f"IR file missing: {ir_path}")
     gd_path = gen_dir / f"test_{feature_key}.gd"
     if not gd_path.is_file():
-        raise AcceptRunError(f"generated test missing: {gd_path}")
+        raise GherkinRunError(f"generated test missing: {gd_path}")
     ir_hash = sha256_of(ir_path.read_text(encoding="utf-8"))
     gd_hash = sha256_of(gd_path.read_text(encoding="utf-8"))
     if ir_hash != manifest["ir_hash"]:
-        raise AcceptRunError(
-            f"IR hash mismatch — acceptance/ir was modified after compile "
+        raise GherkinRunError(
+            f"IR hash mismatch — gherkin/ir was modified after compile "
             f"(expected {manifest['ir_hash'][:12]}, got {ir_hash[:12]})")
     if gd_hash != manifest["generated_hash"]:
-        raise AcceptRunError(
-            f"generated test hash mismatch — acceptance/generated was modified "
+        raise GherkinRunError(
+            f"generated test hash mismatch — gherkin/generated was modified "
             f"after compile (expected {manifest['generated_hash'][:12]}, "
             f"got {gd_hash[:12]})")
-    worker_path = gen_dir / "accept_worker.gd"
-    if worker_path.is_file():
-        # worker 以生成产物形态随 compile 落盘并进哈希绑定——在场即核对
-        # （不存在 = 旧版产物，由 recompile 核对兜底）。
-        worker_hash = sha256_of(worker_path.read_text(encoding="utf-8"))
-        if worker_hash != manifest.get("worker_hash"):
-            raise AcceptRunError(
-                f"worker hash mismatch — acceptance/generated/accept_worker.gd "
-                f"was modified after compile (expected "
-                f"{str(manifest.get('worker_hash'))[:12]}, got {worker_hash[:12]})")
+    # SEE-1624 §SPEC-004：worker 生成物与 worker_hash 在 replay 中必需，
+    # 旧产物不得按兼容路径放行（缺文件/缺声明均具名拒绝）。
+    worker_path = gen_dir / WORKER_FILENAME
+    if not worker_path.is_file():
+        raise GherkinRunError(
+            f"worker artifact missing: {worker_path} — recompile with "
+            f"gqt gherkin compile --write (pre-migration artifacts are "
+            f"not accepted)")
+    declared_worker_hash = manifest.get("worker_hash")
+    if not isinstance(declared_worker_hash, str) or not declared_worker_hash:
+        raise GherkinRunError(
+            f"manifest is missing the required worker_hash binding for "
+            f"{WORKER_FILENAME} — recompile with gqt gherkin compile "
+            f"--write (pre-migration artifacts are not accepted)")
+    worker_hash = sha256_of(worker_path.read_text(encoding="utf-8"))
+    if worker_hash != declared_worker_hash:
+        raise GherkinRunError(
+            f"worker hash mismatch — gherkin/generated/{WORKER_FILENAME} "
+            f"was modified after compile (expected "
+            f"{declared_worker_hash[:12]}, got {worker_hash[:12]})")
     _reanchor_check(root, manifest, ir_hash)
     return manifest
 
@@ -93,31 +104,39 @@ def _reanchor_check(root: Path, manifest: dict, ir_hash: str) -> None:
     from .compile import build_ir
     src = Path(manifest.get("source_path", ""))
     if not src.is_file():
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"source feature missing: {src} — manifest cannot be re-anchored "
             f"to its source; generated artifacts are untrusted")
     try:
         ir = build_ir(src.read_text(encoding="utf-8"), str(src))
     except Exception as e:  # noqa: BLE001 — 解析失败也是重锚失败
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"source feature {src} no longer compiles ({e}) — "
             f"generated artifacts are untrusted") from e
     recompiled = sha256_of(json.dumps(ir, ensure_ascii=False, indent=2,
                                       sort_keys=True))
     if recompiled != ir_hash:
-        raise AcceptRunError(
-            f"source-feature recompile hash mismatch — acceptance/ir does not "
+        raise GherkinRunError(
+            f"source-feature recompile hash mismatch — gherkin/ir does not "
             f"correspond to {src} (manifest may have been re-anchored; "
             f"expected {ir_hash[:12]}, recomputed {recompiled[:12]})")
 
 
 def run_suite(project_root: str | Path, feature_key: str,
               timeout_s: int = 120) -> dict:
-    """重放校验 + headless GUT 执行 + 统一契约回译。"""
+    """schema/validator 预检 + 重放校验 + headless GUT 执行 + 统一契约回译。
+
+    SEE-1624 §SPEC-003：run 侧预检（拉起 addon validator 一次）先于一切
+    业务 Godot 进程——CLI 与 measure 核心路径共用，不在 cmd_gherkin 单点
+    守门。"""
     root = Path(project_root)
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
-        raise AcceptRunError(f"GUT runner not found: {gut}")
+        raise GherkinRunError(f"GUT runner not found: {gut}")
+    try:
+        run_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     manifest = replay_check(project_root, feature_key)
     env = dict(os.environ)
     try:
@@ -129,12 +148,12 @@ def run_suite(project_root: str | Path, feature_key: str,
                 capture_output=True, text=True, timeout=timeout_s,
                 cwd=str(root), env=env)
     except subprocess.TimeoutExpired as e:
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"GUT timed out after {timeout_s}s on generated suite") from e
     output = _strip_ansi((r.stdout or "") + "\n" + (r.stderr or ""))
     if _looks_like_godot_launch_failure(output):
         tail = "\n".join(output.splitlines()[-10:])
-        raise AcceptRunError(f"godot launch failed on generated suite: {tail}")
+        raise GherkinRunError(f"godot launch failed on generated suite: {tail}")
     tests_executed = _count_executed_tests(output)
     # §SPEC-1426-24 tests_executed 守卫：0 测试执行（如 GUT 目录扫描静默
     # 忽略生成文件、被测项目 .gutconfig 覆盖 dirs）= 判定失败，不是绿。
@@ -202,7 +221,7 @@ def _attribute_failures(output: str, manifest: dict, returncode: int) -> list[di
 
     §SPEC-1426-25（F3 修正）：GUT 输出里 unchanged slot / harness 冒烟
     失败自带明细文本（fail_test 的 message），**原样接进 reason**
-    （reason = 'generated acceptance test failed: <fail_test message>'），
+    （reason = 'generated gherkin test failed: <fail_test message>'），
     detail 字段并行保留——docstring 声称与行为自此一致，不再出现通用
     reason + 明细只在 detail 的分裂形态。
     """
@@ -214,7 +233,7 @@ def _attribute_failures(output: str, manifest: dict, returncode: int) -> list[di
         attr = by_test.get(t)
         detail = detail_by_test.get(t)
         if attr is not None:
-            reason = "generated acceptance test failed"
+            reason = "generated gherkin test failed"
             if detail:
                 reason = f"{reason}: {detail}"
             failures.append({

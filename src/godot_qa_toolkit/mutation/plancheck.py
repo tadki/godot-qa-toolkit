@@ -149,7 +149,7 @@ def _env_problems(root: Path) -> list[dict]:
 
 def _prepare_prereq_problems(root: Path) -> list[dict]:
     """SEE-1623 M2：prepare 前置一次性枚举——映射构建链（attribution
-    generate）按序要求 `.gutconfig.json` → `acceptance/features/` 目录 →
+    generate）按序要求 `.gutconfig.json` → `addons/gqt_gherkin/features/` 目录 →
     至少一个 `.feature`，此前逐个试错（每轮 0 秒失败一次只披露一个）。
     plan 一次列全（附修复动作），消灭打地鼠。auto-prepare 不创建用户
     工程内容（配置与 feature 是被测项目资产），auto_prepare_covered=False。"""
@@ -163,22 +163,22 @@ def _prepare_prereq_problems(root: Path) -> list[dict]:
             "\"include_subdirs\": true})",
             level="P1", source="project root convention",
             auto_prepare_covered=False))
-    feats_dir = root / "acceptance" / "features"
+    feats_dir = root / "addons" / "gqt_gherkin" / "features"
     feats = sorted(feats_dir.glob("*.feature")) if feats_dir.is_dir() else []
     if not feats_dir.is_dir():
         problems.append(_problem(
-            "warning", "acceptance_features_dir_missing",
+            "warning", "gherkin_features_dir_missing",
             {"path": str(feats_dir)},
-            "create acceptance/features/ and add at least one .feature "
-            "(the attribution map build runs the acceptance harness)",
-            level="P1", source="acceptance/features (conventional)",
+            "create addons/gqt_gherkin/features/ and add at least one .feature "
+            "(the attribution map build runs the gherkin harness)",
+            level="P1", source="addons/gqt_gherkin/features (single root)",
             auto_prepare_covered=False))
     elif not feats:
         problems.append(_problem(
-            "warning", "acceptance_features_empty",
+            "warning", "gherkin_features_empty",
             {"dir": str(feats_dir)},
-            "add at least one .feature file under acceptance/features/",
-            level="P1", source="acceptance/features (conventional)",
+            "add at least one .feature file under addons/gqt_gherkin/features/",
+            level="P1", source="addons/gqt_gherkin/features (single root)",
             auto_prepare_covered=False))
     return problems
 

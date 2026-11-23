@@ -3,7 +3,7 @@
 判据先行（TDD RED）：批式臂（gut_full 一次 + acceptance 私有目录一次）、
 逐文件 sink `qa-coverage-hits-{uuid}-{file_key8}`、在树插桩备份/恢复零残留、
 coverage-union/1 逐文件 union、canonical-report/1 形状（arms=2、run_uuid
-不同、union.valid、not_certified、exploratory、performance.acceptance_probe）、
+不同、union.valid、not_certified、exploratory、performance.gherkin_probe）、
 evidence recipe.arm 显式注入（缺省推断保留向后兼容）、失败臂 → union invalid。
 """
 
@@ -76,7 +76,7 @@ def project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -86,6 +86,8 @@ def project(tmp_path: Path) -> Path:
     game.mkdir()
     (game / "cell.gd").write_text(TARGET_SRC)
     (game / "node.gd").write_text(TARGET_SRC_2)
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
@@ -109,6 +111,10 @@ class FakeGodot:
         argv = a[0]
         self.calls.append(list(argv))
         cmd = " ".join(argv)
+        # SEE-1624：入口预检的 validator 拉起回正例 verdict（不真执行）
+        if "validator.gd" in cmd:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         # 非测试执行类子进程（compile 探针/cp 建 shadow 等）真实执行
         if "gut_cmdln.gd" not in cmd:
             return self.real_run(*a, **k)
@@ -220,14 +226,14 @@ def test_run_canonical_happy_shape(project: Path, tmp_path: Path):
     assert report["report_version"] == REPORT_VERSION
     assert len(report["arms"]) == 2
     arms = {a["arm"] for a in report["arms"]}
-    assert arms == {"gut_full", "acceptance"}
+    assert arms == {"gut_full", "gherkin"}
     uuids = {a["run_uuid"] for a in report["arms"]}
     assert len(uuids) == 2  # 两臂 run_uuid 必不同
     assert report["union"]["valid"] is True
     assert report["certification"]["status"] == "not_certified"
     assert report["evidence_level"] == "exploratory"
     assert report["diagnostic_only"] is True
-    assert "acceptance_probe" in report["performance"]
+    assert "gherkin_probe" in report["performance"]
     assert all(u["valid"] for u in report["unions"])
     assert report["unmeasured"] == []
 
@@ -296,7 +302,7 @@ def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
     gut_calls = [c for c in fake.calls if any(
         x == "-s" for x in c) and "gut_cmdln.gd" in " ".join(c)]
     assert len(gut_calls) == 4  # face 1 轮 + acceptance 1 共享组×3 重复
-    # （§SPEC-062C + SEE-1619 §SPEC-005：acceptance 按 acceptance_shards
+    # （§SPEC-062C + SEE-1619 §SPEC-005：acceptance 按 gherkin_shards
     # 共享分片，扇出=len(groups)×reps；单 key fixture 退化为 1 组）
     gdirs = [" ".join(x for x in c if str(x).startswith("-gdir="))
              for c in gut_calls]
@@ -372,8 +378,8 @@ def test_evidence_arm_injection_explicit_and_default():
         run_uuid="u", file_path="res://x.gd", gd_source=TARGET_SRC,
         tests_glob=None, hits_lines=[], probes_fired=0, gut_ok=True,
         run_error=False, timeout=False, zero_tests=False, vacuous=False,
-        arm="acceptance")
-    assert b["recipe"]["arm"] == "acceptance"  # 显式注入
+        arm="gherkin")
+    assert b["recipe"]["arm"] == "gherkin"  # 显式注入
     b2 = build_bundle(
         run_uuid="u", file_path="res://x.gd", gd_source=TARGET_SRC,
         tests_glob="res://tests/unit/x.gd", hits_lines=[], probes_fired=0,
@@ -417,7 +423,7 @@ def test_cli_canonical_end_to_end(project: Path, tmp_path: Path,
     assert doc["report_version"] == REPORT_VERSION
     assert len(doc["arms"]) == 2
     assert doc["certification"]["status"] == "not_certified"
-    assert "acceptance_probe" in doc["performance"]
+    assert "gherkin_probe" in doc["performance"]
     assert doc["ok"] is True
 
 
@@ -1199,7 +1205,7 @@ def test_coverage_limitation_reason_named_on_unstable(project, tmp_path):
     assert rec["provenance"]["stability_reason"].startswith("tool limitation")
 
 
-def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path,
+def test_gherkin_repeats_union_convergence_disclosed(project, tmp_path,
                                                         monkeypatch):
     """§SPEC-062C：验收臂 N 次重复取行集并集，报告披露收敛轮数；
     确定性 fixture 每轮并集相同 → 第 1 轮即收敛（rounds_used=1 < N）。
@@ -1208,8 +1214,8 @@ def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path,
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     report = run_measurement(project, _targets(project), recipe,
-                           acceptance_repeats=3)
-    arm_b = next(a for a in report["arms"] if a["arm"] == "acceptance")
+                           gherkin_repeats=3)
+    arm_b = next(a for a in report["arms"] if a["arm"] == "gherkin")
     assert arm_b["repeats"] == 3
     conv = arm_b["convergence"]
     assert conv["bound"] == 3
@@ -1222,7 +1228,7 @@ def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path,
     assert all(u["valid"] for u in report["unions"])
 
 
-def test_acceptance_repeats_nonconvergence_reported_with_bound(
+def test_gherkin_repeats_nonconvergence_reported_with_bound(
         project, tmp_path, monkeypatch):
     """§SPEC-062C 反例：逐轮新增命中 → rounds_used == bound 且
     converged=false（未收敛如实披露，不伪造确定性）。"""
@@ -1252,8 +1258,8 @@ def test_acceptance_repeats_nonconvergence_reported_with_bound(
 
     monkeypatch.setattr(orch, "_read_hits_merged", growing_merged)
     report = run_measurement(project, _targets(project), recipe,
-                           acceptance_repeats=3)
-    arm_b = next(a for a in report["arms"] if a["arm"] == "acceptance")
+                           gherkin_repeats=3)
+    arm_b = next(a for a in report["arms"] if a["arm"] == "gherkin")
     conv = arm_b["convergence"]
     assert conv["bound"] == 3
     assert conv["rounds_used"] == 3
@@ -1337,7 +1343,7 @@ def test_reconciliation_failure_invalidates_union_and_scores(
     recipe, _ = _recipe(project, tmp_path)
     sp.run = ReconcileBreakerGodot(project)
     report = run_measurement(project, _targets(project), recipe)
-    acc = next(a for a in report["arms"] if a["arm"] == "acceptance")
+    acc = next(a for a in report["arms"] if a["arm"] == "gherkin")
     assert acc["state"] == "invalid"
     assert acc["invalid_reason"] == "reconciliation_failed"
     assert acc["reconciliation"]["ok"] is False
@@ -1525,7 +1531,7 @@ def test_parse_failing_pairs_summary_and_gqt_run_normalization():
     per-run uuid 归一为 `.gqt-run-*`（跨 run 基线可比）。"""
     from godot_qa_toolkit.measurement.orchestrator import _parse_failing_pairs
     out = (
-        "res://acceptance/generated/.gqt-run-ab12cd34/generated/test_x.gd\n"
+        "res://gherkin/generated/.gqt-run-ab12cd34/generated/test_x.gd\n"
         "* test_known\n"
         "  [Failed] a\n"
         "Run Summary\n"
@@ -1533,7 +1539,7 @@ def test_parse_failing_pairs_summary_and_gqt_run_normalization():
         "  [Failed] b\n")
     pairs = _parse_failing_pairs(out)
     assert pairs == {
-        ("res://acceptance/generated/.gqt-run-*/generated/test_x.gd",
+        ("res://gherkin/generated/.gqt-run-*/generated/test_x.gd",
          "test_known"),
         ("", "test_secret"),
     }

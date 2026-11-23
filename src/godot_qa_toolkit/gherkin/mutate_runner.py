@@ -17,7 +17,7 @@ summary 机器导出：`exempt_cases` == 源 .feature 内 `# mutation: exempt`
 - batch（缺省）：逐 mutant 写临时变异 IR（磁盘 IR 每轮恢复）→ 一次性
   headless GUT 子进程，跑完即弃。
 - --worker：真常驻通道——compile 产出的 worker 生成物
-  （acceptance/generated/accept_worker.gd，受先清空再生成管辖）以
+  （gherkin/generated/gherkin_worker.gd，受先清空再生成管辖）以
   stdin NDJSON 循环消费变异 IR（IR 走文件通道传递，磁盘零改写），
   每 mutant 结束硬纪律：释放全部 testing_api 实例 + 重建（reload）+
   自检探针断言复位，不符即 run_error。
@@ -47,9 +47,10 @@ import subprocess
 from pathlib import Path
 
 from . import OPS_VERSION
-from .compile import GENERATED_DIR
+from .addon import AddonError, run_preflight
+from .compile import GENERATED_DIR, WORKER_FILENAME
 from .mutate import Mutant, mutate_ir
-from .run import AcceptRunError, replay_check
+from .run import GherkinRunError, replay_check
 from ..mutation.gutrun import (_looks_like_godot_launch_failure,
                                _parse_failing_tests)
 from ..mutation.inject import godot_command, register_temp, spawn_godot
@@ -91,7 +92,7 @@ def _run_gut(root: Path, timeout_s: int) -> tuple[int, str]:
                 capture_output=True, text=True, timeout=timeout_s,
                 cwd=str(root))
     except subprocess.TimeoutExpired as e:
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"GUT timed out after {timeout_s}s on mutant round") from e
     return r.returncode, (r.stdout or "") + "\n" + (r.stderr or "")
 
@@ -131,7 +132,11 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
     root = Path(project_root)
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
-        raise AcceptRunError(f"GUT runner not found: {gut}")
+        raise GherkinRunError(f"GUT runner not found: {gut}")
+    try:
+        run_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     manifest = replay_check(project_root, feature_key)
     ir_path = root / manifest["ir_path"].removeprefix("res://")
     ir = json.loads(ir_path.read_text(encoding="utf-8"))
@@ -152,7 +157,7 @@ def run_mutate(project_root: str | Path, feature_key: str, *, timeout_s: int = 1
             return _exempt_only_contract(manifest, exempt_count,
                                          exempt_results, baseline_failed,
                                          use_worker)
-        raise AcceptRunError(
+        raise GherkinRunError(
             "no mutants generated — IR has no typed Then bindings and no "
             "unchanged slots; mutation gate cannot run (nothing to verify)")
     if baseline_failed:
@@ -196,12 +201,12 @@ def _batch_exempt_baseline(root: Path,
     """batch 通道未变异基线轮：直接跑一次 GUT。返回 (failing, executed)。"""
     rc, output = _run_gut(root, timeout_s)
     if _looks_like_godot_launch_failure(output):
-        raise AcceptRunError(
+        raise GherkinRunError(
             "godot launch failed on baseline round: "
             f"{' / '.join(output.splitlines()[-3:])}")
     executed = set(_TEST_STREAM_RE.findall(output))
     if not executed:
-        raise AcceptRunError(
+        raise GherkinRunError(
             "sentinel check failed — no test stream in baseline "
             "round; execution chain untrusted")
     return set(_parse_failing_tests(output)), executed
@@ -211,12 +216,12 @@ def _spawn_worker(root: Path) -> tuple[subprocess.Popen, Path]:
     """常驻 worker 进程生成前奏（豁免基线轮与 mutant 轮共用）：生成物
     在位校验 + scratch 目录准备 + Popen（OSError = caller 错误面，
     不产 verdict 契约）。返回 (proc, scratch_dir)。"""
-    worker_res = f"res://{GENERATED_DIR}/accept_worker.gd"
-    if not (root / GENERATED_DIR / "accept_worker.gd").is_file():
-        raise AcceptRunError(
+    worker_res = f"res://{GENERATED_DIR}/{WORKER_FILENAME}"
+    if not (root / GENERATED_DIR / WORKER_FILENAME).is_file():
+        raise GherkinRunError(
             f"worker artifact missing: {worker_res} — recompile with "
             f"gqt gherkin compile --write")
-    scratch = Path(root) / ".qa-cache" / "gqt-accept-worker"
+    scratch = Path(root) / ".qa-cache" / "gqt-gherkin-worker"
     scratch.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.Popen(
@@ -225,7 +230,7 @@ def _spawn_worker(root: Path) -> tuple[subprocess.Popen, Path]:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, cwd=str(root))
     except OSError as e:
-        raise AcceptRunError(f"worker process spawn failed: {e}") from e
+        raise GherkinRunError(f"worker process spawn failed: {e}") from e
     return proc, scratch
 
 
@@ -234,7 +239,7 @@ def _exchange_verdict_line(proc, request: str,  # noqa: ANN001 — Popen/fake �
     """写一行请求并读回首个 "{" 开头的 verdict 行（Godot 启动横幅/引擎
     告警与 verdict 同走 stdout——噪声行跳过，EOF 返回空串）。IO 异常由
     调用方按各自通道语义转译（mutant 轮 → _WorkerDead，豁免基线轮 →
-    AcceptRunError）。"""
+    GherkinRunError）。"""
     proc.stdin.write(request + "\n")
     proc.stdin.flush()
     line = _readline_with_timeout(proc, timeout_s)
@@ -264,7 +269,7 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
     except (_WorkerDead, OSError, ValueError) as e:
         # 通道级失败 = 执行链不可信，与 batch 哨兵同档：raise（caller
         # 错误面，不产 verdict 契约）。
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"exempt baseline worker channel failed: {e}") from e
     finally:
         _shutdown_worker(proc)
@@ -274,14 +279,14 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
     executed_n = int(verdict.get("executed", 0))
     failing = {str(x) for x in verdict.get("failing", [])}
     if err is not None:
-        raise AcceptRunError(f"exempt baseline worker run_error: {err}")
+        raise GherkinRunError(f"exempt baseline worker run_error: {err}")
     if verdict.get("ops_version") != OPS_VERSION:
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"exempt baseline worker ops_version mismatch: "
             f"{verdict.get('ops_version')!r} != {OPS_VERSION!r}")
     if executed_n != total:
         # executed 计数与 case 总数失配 = 执行链失真（哨兵②同构）。
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"exempt baseline executed {executed_n} of {total} cases; "
             "execution chain untrusted")
     # executed 集合形态仅 batch 需要（逐 case 在场校验）；worker 侧已由
@@ -471,7 +476,7 @@ def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
     QA-1 传输协议：`OS.read_string_from_stdin()` 有 1024 字节行缓冲上限
     （Revy 实机二分实证：1024B OK / 1025B FAIL），真实 IR 带内传递必挂
     死——请求行只带 {mutant_id, ir_file} 小载荷，变异 IR 本体写
-    `<root>/.qa-cache/gqt-accept-worker/` 下的轮转临时文件（contract §6
+    `<root>/.qa-cache/gqt-gherkin-worker/` 下的轮转临时文件（contract §6
     白名单目录，注册进进程清理表，用后即删），worker 经 FileAccess 读
     （零行缓冲限制）。
 

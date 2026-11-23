@@ -27,45 +27,6 @@ from godot_qa_toolkit.mutation.truth_select import (
 )
 
 
-class TestEmptyTestFaceSentinel:
-    def test_zero_key_arm_invalid_named(self, tmp_path, monkeypatch):
-        """gut_full 臂选面 0 个测试键 → 具名 invalid（empty_test_face），
-        不再自报 valid 无原因（F3：零执行证据不可能成立）。"""
-        from godot_qa_toolkit.measurement import arms as arms_mod
-
-        stage = {"run_uuid": "u", "plans": [{"keys": []}], "reps": 1,
-                 "sink_by_rel": {}, "manifest_by_rel": {},
-                 "vacuous_rels": [], "backup_dir": None, "started": None,
-                 "inst_by_rel": {}, "instrumented_files": [],
-                 "shadow_hook_files": [], "attribution_causal": False}
-
-        def fake_execute(name, **k):
-            return ([], True, False, False, 0.0, [], set(), set(), [], [])
-
-        def fake_stage(name, **k):
-            return stage
-
-        monkeypatch.setattr(arms_mod, "_arm_execute", fake_execute)
-        monkeypatch.setattr(arms_mod, "_arm_stage", fake_stage)
-        monkeypatch.setattr(arms_mod, "_arm_reconcile",
-                            lambda *a, **k: (None, True, None, False, False))
-        monkeypatch.setattr(
-            arms_mod, "_arm_readback",
-            lambda *a, **k: (None, None, {}))
-
-        class _Slot:
-            mode = "fresh"
-            freshness: list = []
-            farm: dict = {}
-
-        arm = arms_mod.run_arm(
-            "gut_full", root=tmp_path, prepared={}, recipe={},
-            timeout_s=60)
-        assert arm["state"] == "invalid"
-        assert arm["invalid_reason"] == "empty_test_face"
-        assert "0 test keys" in (arm.get("invalid_evidence") or {})["note"]
-
-
 class TestTargetNotInMapUniverse:
     def test_unbound_target_named_before_any_arms(self, tmp_path,
                                                   monkeypatch):

@@ -23,7 +23,7 @@ def test_shard_timeout_excluded_by_name_not_run_error():
                       [_rep(timed_out=True)]),
                _shard(["res://tests/c.gd"], [_rep(0, "Run Summary\n")])]
     (gut_ok, run_error, timed_out, _f, _p,
-     excluded, all_keys) = _arm_fail_scan(results)
+     excluded, all_keys, _c, _s) = _arm_fail_scan(results)
     assert gut_ok is True and run_error is False
     assert timed_out is True
     assert excluded[0]["reason"] == "shard_timeout"
@@ -37,7 +37,7 @@ def test_all_shards_timeout_rejects_run():
     results = [_shard(["res://tests/a.gd"], [_rep(timed_out=True)]),
                _shard(["res://tests/b.gd"], [_rep(timed_out=True)])]
     (gut_ok, run_error, timed_out, _f, _p,
-     excluded, _all) = _arm_fail_scan(results)
+     excluded, _all, _c, _s) = _arm_fail_scan(results)
     assert timed_out is True
     assert len(excluded) == 2
     assert gut_ok is False and run_error is True

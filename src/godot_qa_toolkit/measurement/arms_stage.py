@@ -55,6 +55,21 @@ def _stage_arm_files(name: str, prepared: dict, run_uuid: str,
     return (started, sink_by_rel, manifest_by_rel, instrumented_files,
             inst_by_rel, vacuous_rels)
 
+def _count_test_scripts(root: Path, dirs: list[str]) -> int:
+    """SEE-1623 M10：分片目录组内真实收集的 `test_*.gd` 脚本数。
+
+    与 `shadowio._shard_groups` 的加权发现同源（同一 rglob 口径）——
+    该计数作为 gut_full 臂的"收集执行面"证据随分片计划落盘，
+    支撑 `empty_test_face` / `no_execution_evidence` 具名门。"""
+    n = 0
+    for d in dirs:
+        rel = d[len("res://"):] if str(d).startswith("res://") else str(d)
+        p = root / rel
+        if p.is_dir():
+            n += len(list(p.rglob("test_*.gd")))
+    return n
+
+
 def _arm_plans(root: Path, recipe: dict, acceptance: dict | None,
                shard_width: int) -> list[dict]:
     """分片计划：acceptance 组由调用方编译；gut_full 按 gutconfig dirs。"""
@@ -68,7 +83,8 @@ def _arm_plans(root: Path, recipe: dict, acceptance: dict | None,
         root, list(recipe["gut_face"].get("dirs") or []),
         shard_width)
     return [{"args": ([("-gdir=" + ",".join(g))] if g else []),
-             "keys": None, "suite_dir": None} for g in groups]
+             "keys": None, "suite_dir": None,
+             "collected": _count_test_scripts(root, g)} for g in groups]
 
 def _arm_stage_created(root: Path, started: dict, name: str,
                        attribution_causal: bool, shadow_instrument: bool,

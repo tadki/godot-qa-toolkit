@@ -35,7 +35,8 @@ def _wire(monkeypatch, *, leg_raises=False):
 
     def fake_scan(results):
         calls["scan"] += 1
-        return (True, False, False, set(), set(), [], [])
+        # SEE-1623 M10：追加 (collected_total, executed_stream)
+        return (True, False, False, set(), set(), [], [], 0, False)
 
     def fake_leg(ip, **kw):
         calls["leg"] += 1
@@ -55,7 +56,8 @@ def test_arm_execute_default(tmp_path, monkeypatch):
                             shard_log_dir=None, stage=_stage(tmp_path))
     assert calls["inject"] == 1 and calls["restore"] == 1
     assert calls["leg"] == 2 and calls["scan"] == 1
-    results, gut_ok, run_error, timed_out, wall, xdg, af, ap, exc, ak = out
+    (results, gut_ok, run_error, timed_out, wall, xdg, af, ap, exc, ak,
+     collected_total, executed_stream) = out
     assert gut_ok is True and run_error is False and timed_out is False
     assert len(results) == 2 and isinstance(wall, float)
 

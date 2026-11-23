@@ -150,6 +150,23 @@ def test_improvement_within_noise_not_measured() -> None:
     assert s["speed_gate"]["ok"] is False
 
 
+def test_speed_gate_equality_is_not_pass() -> None:
+    """§SPEC-026 边界：median B/A 恰等于阈值（覆盖 threshold rounding）
+    必须非 PASS——门为严格大于，改善恰等于噪声带不算改善。"""
+    rounds = [_round("A1", "shared", 38.0), _round("A2", "shared", 40.0),
+              _round("A3", "shared", 42.0)]
+    for i in (1, 2, 3):
+        rounds.append(_round(f"B{i}", "per_feature", 44.0))
+        rounds.append(_round(f"A10{i}", "shared", 40.0))
+    s = compute_perf_summary(rounds, 4, 44)
+    assert s["speed_gate"]["threshold_b_over_a"] == 1.1, \
+        "噪声带 10% 时阈值=1.1（rounding 边界）"
+    assert s["speed_gate"]["median_ratio_b_over_a"] == 1.1, \
+        "median 倍率恰等于阈值"
+    assert s["speed_gate"]["ok"] is False, "等值必须非 PASS"
+    assert s["verdict"] == "INCONCLUSIVE"
+
+
 def test_speed_gate_passes_for_existing_4x_shape() -> None:
     """既有 4.064×（噪声 ~3.75%）形态必须仍判 MEASURED。"""
     s = compute_perf_summary(_full_rounds(), 4, 44)

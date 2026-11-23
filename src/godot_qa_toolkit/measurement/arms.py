@@ -286,6 +286,23 @@ def _gate_ctx(baseline_failures, baseline_pairs: set,
     exempt_pairs = {p for p in arm_fail_pairs if _exempt(p)}
     return effective_baseline, baseline_meta, new_pairs, exempt_pairs
 
+_SUSPECT_INTOL_REASON = ("suspected_instrumentation_intolerance: passes "
+                         "uninstrumented baseline, fails instrumented run "
+                         "— confirm to exempt or investigate instrumentation")
+
+
+def _suspected_draft(pairs: set) -> list:
+    """SEE-1623 H5：疑似插桩不耐受 → --intolerant-tests 声明草稿
+    （与声明配置同构：script 缺省 = bare-name 形态，仅豁免未归因失败）。"""
+    out: list = []
+    for s, t in sorted(pairs):
+        entry = {"name": t, "reason": _SUSPECT_INTOL_REASON}
+        if s:
+            entry = {"script": s, **entry}
+        out.append(entry)
+    return out
+
+
 def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
                          timeout_s: int, arm_fail_pairs: set,
                          declared_scoped: set, effective_baseline: set,
@@ -295,15 +312,21 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
     """§SPEC-064a 懒获取（成本裁定）：绿臂零额外 GUT；观测到失败且未
     显式提供基线时才跑一次同面无插桩 GUT 取基线并复核。获取失败 → 具名
     stderr + 臂保持 invalid（fail-loud，不按空基线静默转绿）。
-    acceptance 臂不得继承 gut_full 的懒基线（其失败保持可见）。"""
+    acceptance 臂不得继承 gut_full 的懒基线（其失败保持可见）。
+
+    SEE-1623 H5：懒基线实测后仍新增的失败 = 实测证明「未插桩通过、插桩
+    失败」——按 suspected_instrumentation_intolerance 迁出 new_failures
+    门禁，入具名不耐受车道并附 --intolerant-tests 声明草稿（gut_full
+    限定；获取失败无实测证明不分类，fail-loud 语义不弱化）。"""
     from .orchestrator import (
         _acquire_lazy_baseline,
         _gutconfig_face_args,
     )
 
+    suspected: set = set()
     if not (name == "gut_full" and new_pairs
             and baseline_failures is None):
-        return effective_baseline, baseline_meta, new_pairs
+        return effective_baseline, baseline_meta, new_pairs, suspected
     try:
         lazy_pairs, baseline_meta = _acquire_lazy_baseline(
             root, _gutconfig_face_args(recipe), timeout_s)
@@ -328,7 +351,22 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
               f"failing pairs acquired uninstrumented "
               f"({baseline_meta['wall_s']}s) — only NEW failures "
               f"gate the arm", file=sys.stderr)
-    return effective_baseline, baseline_meta, new_pairs
+        if new_pairs:
+            # SEE-1623 H5（身份规范化）：同一失败的未归因回显 ("", t) 与
+            # 归因形态 (s, t) 并存时只保留归因形态——车道计数不翻倍。
+            scripted = {p for p in new_pairs if p[0]}
+            scripted_names = {t for _, t in scripted}
+            suspected = scripted | {p for p in new_pairs
+                                    if not p[0] and p[1] not in scripted_names}
+            new_pairs = set()
+            draft = _suspected_draft(suspected)
+            print(f"measure: {len(suspected)} failing pair(s) classified "
+                  f"suspected_instrumentation_intolerance (pass "
+                  f"uninstrumented baseline, fail instrumented) — routed "
+                  f"out of new_failures; declaration draft for "
+                  f"--intolerant-tests: {json.dumps(draft, ensure_ascii=False)}",
+                  file=sys.stderr)
+    return effective_baseline, baseline_meta, new_pairs, suspected
 
 def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
                    run_error: bool) -> tuple:
@@ -646,10 +684,16 @@ def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
     (effective_baseline, baseline_meta, new_pairs, exempt_pairs) = \
         _gate_ctx(baseline_failures, baseline_pairs, arm_fail_pairs,
                   declared_scoped, declared_bare)
-    (effective_baseline, baseline_meta, new_pairs) = _lazy_baseline_merge(
-        name, root, recipe, timeout_s, arm_fail_pairs, declared_scoped,
-        effective_baseline, new_pairs, baseline_failures,
-        baseline_meta)
+    (effective_baseline, baseline_meta, new_pairs, suspected_pairs) = \
+        _lazy_baseline_merge(
+            name, root, recipe, timeout_s, arm_fail_pairs, declared_scoped,
+            effective_baseline, new_pairs, baseline_failures,
+            baseline_meta)
+    # SEE-1623 H5：疑似不耐受对入具名车道（observed 非空），不进
+    # new_failures 门禁；草稿随臂文档出报告块。
+    exempt_pairs = set(exempt_pairs) | suspected_pairs
+    suspected_draft = _suspected_draft(suspected_pairs) if suspected_pairs \
+        else None
     excluded: list[dict] = []
     # §SPEC-TIMEOUT-ADAPT：超时分片按名排除（partial），非 run_error——
     # 仅排除后无可用测试才整体拒绝（判定在 _arm_fail_scan）
@@ -691,7 +735,7 @@ def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
                                    == "reconciliation_failed"))
     return (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
             reconciliation, arm_valid, invalid_reason, invalid_evidence,
-            excluded)
+            excluded, suspected_draft)
 
 def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
             acceptance: dict | None = None, shadow_instrument: bool = False,
@@ -726,7 +770,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         concurrency=concurrency)
     (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
      reconciliation, arm_valid, invalid_reason, invalid_evidence,
-     timeout_excluded) = _arm_gate(
+     timeout_excluded, suspected_draft) = _arm_gate(
         name, root=root, recipe=recipe, timeout_s=timeout_s,
         baseline_failures=baseline_failures, baseline_pairs=baseline_pairs,
         declared_scoped=declared_scoped, declared_bare=declared_bare,
@@ -748,7 +792,8 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         arm_valid=arm_valid, invalid_reason=invalid_reason, reps=reps,
         plans=plans, sink_by_rel=sink_by_rel,
         manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
-        vacuous_rels=vacuous_rels)
+        vacuous_rels=vacuous_rels,
+        suspected_draft=suspected_draft)
 def _arm_readback(name: str, *, root: Path, prepared: dict, acceptance,
                   test_attribution: bool, results, run_uuid: str, reps: int,
                   sink_by_rel: dict, manifest_by_rel: dict,
@@ -861,7 +906,8 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
                 plans: list, sink_by_rel: dict, manifest_by_rel: dict,
                 xdg_homes: list[str], vacuous_rels: list,
                 invalid_evidence: "dict | None" = None,
-                timeout_excluded: "list[dict] | None" = None) -> dict:
+                timeout_excluded: "list[dict] | None" = None,
+                suspected_draft: "list | None" = None) -> dict:
     """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
     vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
     convergence, attribution, bundles = _arm_readback(
@@ -876,13 +922,17 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
           f"wall_s={round(wall_s, 1)}", file=sys.stderr)
     adaptive_rounds_used = max(
         (len(r["reps"]) for r in results), default=0) if adaptive_reps else None
-    return _arm_doc(
+    doc = _arm_doc(
         name, run_uuid, wall_s, gut_ok, timed_out, arm_valid, invalid_reason,
         run_error, baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
         exempt_pairs, reps, convergence, adaptive_rounds_used, arms_parallel,
         attribution, bundles, reconciliation, plans, results,
         invalid_evidence=invalid_evidence,
         timeout_excluded=timeout_excluded)
+    if suspected_draft:
+        # SEE-1623 H5：声明草稿随臂文档出报告块（空 = 键缺席，零契约噪音）
+        doc["suspected_intolerance_draft"] = suspected_draft
+    return doc
 
 
 def _ensure_acceptance_harness(root: Path) -> Path | None:

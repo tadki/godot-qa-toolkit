@@ -135,7 +135,7 @@ class TestS63LazyMergeEchoAbsorption:
                  "face": "res://tests/", "pairs": [["res://t/g.gd",
                                                     "test_x"]],
                  "count": 1, "sha256": "0" * 64, "wall_s": 0.0}))
-        _eff, meta, new_pairs = arms_mod._lazy_baseline_merge(
+        _eff, meta, new_pairs, suspected = arms_mod._lazy_baseline_merge(
             "gut_full", Path("/proj"), {"gut_face": {"dirs": []}}, 60,
             # 臂失败含归因对 + 同失败裸名回显两种披露形态
             {("res://t/g.gd", "test_x"), ("", "test_x")},
@@ -144,6 +144,7 @@ class TestS63LazyMergeEchoAbsorption:
             {("res://t/g.gd", "test_x"), ("", "test_x")},
             None, None)
         assert new_pairs == set(), "裸名回显随归因实例吸收（不判新增）"
+        assert suspected == set(), "基线吸收对不入不耐受车道"
         assert meta and meta["lazy"] is True
 
 

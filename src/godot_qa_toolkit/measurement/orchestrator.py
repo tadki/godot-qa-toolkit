@@ -328,7 +328,10 @@ def _report_intolerant_block(intolerant_tests: list, arm_a: dict,
                              arm_b: dict) -> dict:
     """§SPEC-061b/063c：instrumentation-intolerant 具名排除披露——按
     (script, test) 身份匹配旁路门控，逐名给理由，并作为覆盖率盲点
-    声明（非静默跳过；同名跨脚本不合并豁免）。"""
+    声明（非静默跳过；同名跨脚本不合并豁免）。
+
+    SEE-1623 H5：suspected_draft = 懒基线实测证明「未插桩通过、插桩失败」
+    的疑似不耐受声明草稿（可直接保存为 --intolerant-tests 输入）。"""
     return {
         "declared": [{"name": t["name"],
                       "reason": str(t.get("reason") or ""),
@@ -340,6 +343,9 @@ def _report_intolerant_block(intolerant_tests: list, arm_a: dict,
                 .get("instrumentation_intolerant") or [])
             | set((arm_b.get("test_failures") or {})
                   .get("instrumentation_intolerant") or [])),
+        "suspected_draft": ((arm_a.get("suspected_intolerance_draft") or [])
+                            + (arm_b.get("suspected_intolerance_draft")
+                               or [])),
         "coverage_blind_spots": [t["name"] for t in intolerant_tests],
         "note": ("declared tests bypass the failure-gating comparison "
                  "only by (script, test) identity — a declaration "

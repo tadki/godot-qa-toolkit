@@ -210,7 +210,9 @@ class TestS63LazyBaselineRunMeasurement:
         assert len(meta["sha256"]) == 64 and meta["wall_s"] >= 0
 
     def test_new_failure_invalid_named(self, project, tmp_path):
-        """懒基线之外的新增失败（模拟插桩诱发）→ 臂 invalid、具名披露。"""
+        """SEE-1623 H5 改约：懒基线实测外的插桩失败 = 实测证明「未插桩
+        通过、插桩失败」→ suspected_instrumentation_intolerance 车道
+        （不污染 new_failures 门禁；基线内既有失败照常吸收）。"""
         fake = LazyScenarioGodot(project, scenario="new_failure")
         sp.run = fake
         report = run_measurement(project, _targets(project),
@@ -218,9 +220,11 @@ class TestS63LazyBaselineRunMeasurement:
                                  test_attribution=True,
                                  attribution_out=str(tmp_path / "map.json"))
         gut = report["arms"][0]
-        assert gut["state"] == "invalid"
-        assert gut["test_failures"]["new"] == ["test_font_row"]
-        assert report["ok"] is False
+        assert gut["state"] == "valid", gut["invalid_reason"]
+        assert gut["test_failures"]["new"] == []
+        assert "res://tests/unit/test_game.gd::test_font_row" \
+            in gut["test_failures"]["instrumentation_intolerant"]
+        assert report["ok"] is False  # union 空（暂停契约），非臂门禁
 
     def test_acquisition_fail_fail_loud(self, project, tmp_path, capsys):
         """基线获取失败（无运行流）→ 具名 stderr、臂保持 invalid，
@@ -329,17 +333,24 @@ class TestS63LazyBaselineMergeGuard:
     def test_acceptance_arm_never_lazy_acquires(self, monkeypatch):
         """acceptance 臂不取懒基线——其失败保持可见（债归独立 issue）；
         门控守卫按臂名拒绝，而非依赖观测面巧合为空。"""
-        calls, (eff, meta, new_pairs) = self._drive(
+        calls, (eff, meta, new_pairs, suspected) = self._drive(
             monkeypatch, name="acceptance")
         assert calls == [], "acceptance 臂不得触发懒获取"
         assert meta is None
         assert new_pairs, "acceptance 臂失败保持未吸收"
+        assert suspected == set(), "acceptance 臂失败不入不耐受车道"
 
     def test_gut_full_arm_lazy_acquires_on_failure(self, monkeypatch):
-        """对照：同参数下 gut_full 臂懒获取触发（守卫差异仅在臂名）。"""
-        calls, (_eff, meta, _np) = self._drive(monkeypatch, name="gut_full")
+        """对照：同参数下 gut_full 臂懒获取触发（守卫差异仅在臂名）。
+        SEE-1623 H5：懒基线实测（0 失败对）后仍新增的失败迁出
+        new_failures、入疑似不耐受车道（身份规范化为归因形态）。"""
+        calls, (_eff, meta, np, suspected) = self._drive(
+            monkeypatch, name="gut_full")
         assert len(calls) == 1, "gut_full 臂观测到失败时懒获取恰一次"
         assert meta and meta["lazy"] is True
+        assert np == set(), "疑似不耐受不污染 new_failures 门禁"
+        assert suspected == {("res://t/g.gd", "test_x")}, \
+            "双身份形态只保留归因形态"
 
 
 class TestS63EnsureMapEntry:

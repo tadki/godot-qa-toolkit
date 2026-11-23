@@ -36,12 +36,14 @@ def kol_like(tmp_path: Path) -> Path:
     (root / _gutconfig_name()).write_text(
         json.dumps(GUTCONFIG, indent=1), encoding="utf-8"
     )
-    features = root / "acceptance" / "features"
+    features = root / "addons" / "gqt_gherkin" / "features"
     features.mkdir(parents=True)
     for i in range(3):
         (features / f"feature_{i}.feature").write_text(
             f"Feature: f{i}\n  Scenario: s{i}\n    Given a\n", encoding="utf-8"
     )
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
@@ -58,7 +60,7 @@ def test_recipe_shape_and_hash_format(kol_like: Path):
 
     assert re.fullmatch(r"[0-9a-f]{64}", recipe["recipe_hash"])
     assert recipe["gut_face"]["dirs"] == GUTCONFIG["dirs"]
-    assert recipe["acceptance_face"]["count"] == 3
+    assert recipe["gherkin_face"]["count"] == 3
 
 
 def test_recipe_hash_stable_same_input(kol_like: Path):
@@ -70,7 +72,7 @@ def test_recipe_hash_stable_same_input(kol_like: Path):
 def test_recipe_hash_sensitive_to_any_byte_change(kol_like: Path):
     r1, _ = build_recipe(kol_like, gqt_version="1.0")
     # one byte in a feature file → different hash
-    (kol_like / "acceptance" / "features" / "feature_0.feature").write_text(
+    (kol_like / "addons" / "gqt_gherkin" / "features" / "feature_0.feature").write_text(
         "Feature: f0 CHANGED\n", encoding="utf-8"
     )
     r2, error = build_recipe(kol_like, gqt_version="1.0")
@@ -153,12 +155,12 @@ def test_empty_dirs_face_is_illegal(tmp_path: Path):
     assert "no dirs" in error
 
 
-def test_missing_acceptance_features_is_illegal(tmp_path: Path):
+def test_missing_gherkin_features_is_illegal(tmp_path: Path):
     (tmp_path / _gutconfig_name()).write_text(
         json.dumps(GUTCONFIG), encoding="utf-8")
     recipe, error = build_recipe(tmp_path)
     assert recipe is None
-    assert "acceptance/features" in error
+    assert "addons/gqt_gherkin/features" in error
 
 
 def test_exclude_res_scheme_entry_parses_colons_correctly():
@@ -183,9 +185,11 @@ def test_exclude_res_scheme_entry_parses_colons_correctly():
     root = Path(tempfile.mkdtemp())
     (root / ".gutconfig.json").write_text(
         json.dumps({"dirs": ["res://tests/unit/"]}), encoding="utf-8")
-    (root / "acceptance" / "features").mkdir(parents=True)
-    (root / "acceptance" / "features" / "a.feature").write_text(
+    (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
+    (root / "addons" / "gqt_gherkin" / "features" / "a.feature").write_text(
         "Feature: a\n", encoding="utf-8")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     recipe, error = build_recipe(
         root, exclusions=[{"scope": args.exclude[0].split(":", 1)[0]
                            if False else "gut_dir",
@@ -205,13 +209,13 @@ def test_recipe_hash_is_sensitive_to_harness_bytes(kol_like: Path):
 
     from godot_qa_toolkit.measurement.recipe import build_recipe
 
-    harness = kol_like / "acceptance" / "harness" / "harness.gd"
+    harness = kol_like / "addons" / "gqt_gherkin" / "harness.gd"
     harness.parent.mkdir(parents=True, exist_ok=True)
     harness.write_text("# harness v1\n", encoding="utf-8")
 
     before, error = build_recipe(kol_like, exclusions=[])
     assert error is None
-    assert before["acceptance_face"]["harness"]["wiring_sha256"] == (
+    assert before["gherkin_face"]["harness"]["wiring_sha256"] == (
         hashlib.sha256(b"# harness v1\n").hexdigest()
     )
 
@@ -229,7 +233,7 @@ def test_wiring_sha256_is_the_harness_file_digest(kol_like: Path):
     from godot_qa_toolkit.measurement.recipe import build_recipe
 
     root = kol_like
-    harness = root / "acceptance" / "harness" / "harness.gd"
+    harness = root / "addons" / "gqt_gherkin" / "harness.gd"
     harness.parent.mkdir(parents=True, exist_ok=True)
     harness.write_text("# harness\n", encoding="utf-8")
 
@@ -239,7 +243,7 @@ def test_wiring_sha256_is_the_harness_file_digest(kol_like: Path):
     assert expected != hashlib.sha256(
         (root / _gutconfig_name()).read_bytes()
     ).hexdigest()  # guard: the two files really differ here
-    assert recipe["acceptance_face"]["harness"]["wiring_sha256"] == expected
+    assert recipe["gherkin_face"]["harness"]["wiring_sha256"] == expected
 
 
 # --------------------------------------------------------------------------
@@ -259,11 +263,14 @@ def test_recipe_hash_path_independent_same_content_two_paths(tmp_path: Path):
         root.mkdir(parents=True)
         (root / ".gutconfig.json").write_text(
             json.dumps(GUTCONFIG, indent=1), encoding="utf-8")
-        features = root / "acceptance" / "features"
+        features = root / "addons" / "gqt_gherkin" / "features"
         features.mkdir(parents=True)
         (features / "feature_0.feature").write_text(
             "Feature: f0\n", encoding="utf-8")
 
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(src_a)
+    ensure_addon_metadata(src_b)
     r_a, err_a = build_recipe(src_a)
     r_b, err_b = build_recipe(src_b)
     assert err_a is None and err_b is None
@@ -281,7 +288,7 @@ def test_recipe_hash_path_independent_same_content_two_paths(tmp_path: Path):
 
 
 def test_recipe_illegal_scope_fails_loud(kol_like: Path):
-    for bad_scope in ("gut_dirs", "acceptance_features", "unknown_lane"):
+    for bad_scope in ("gut_dirs", "gherkin_features", "unknown_lane"):
         exclusions = [{"scope": bad_scope, "entry": "res://tests/x/**",
                        "reason": "stated"}]
         recipe, error = build_recipe(kol_like, exclusions=exclusions)
@@ -292,7 +299,7 @@ def test_recipe_illegal_scope_fails_loud(kol_like: Path):
 def test_recipe_legal_scopes_accepted(kol_like: Path):
     exclusions = [
         {"scope": "gut_dir", "entry": "res://tests/unit/x/**", "reason": "r1"},
-        {"scope": "acceptance_feature", "entry": "feature_0", "reason": "r2"},
+        {"scope": "gherkin_feature", "entry": "feature_0", "reason": "r2"},
     ]
     recipe, error = build_recipe(kol_like, exclusions=exclusions)
     assert error is None

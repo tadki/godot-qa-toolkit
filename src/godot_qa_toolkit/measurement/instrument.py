@@ -112,7 +112,7 @@ def _load_cached_templates(root: Path, rel: str, src_sha: str,
 
 def _plain_instrument(src: str, tpl_sink: str,
                       block_compress: bool) -> tuple[str, list, dict]:
-    """plain 臂（acceptance）插桩：hit 级块压缩或 flag 形态。"""
+    """plain 臂（gherkin）插桩：hit 级块压缩或 flag 形态。"""
     if block_compress:
         inst_plain, probe_lines, block_map = _instrument_blocks(
             src, tpl_sink, runtime_sink=True)
@@ -161,7 +161,7 @@ def _parse_check(gd_parser, template: str | None,
 def _instrument_pair(rel: str, src: str, registry: dict,
                      block_compress: bool, test_attribution: bool,
                      attribution_causal: bool) -> dict:
-    """生成 plain（acceptance 臂）与 attr（gut 臂）插桩模板，并做生成期
+    """生成 plain（gherkin 臂）与 attr（gut 臂）插桩模板，并做生成期
     re-parse 预检（插桩器 bug 必须 fail-loud，不落盘跑假数据）。
 
     返回 {"template","template_attr","probe_lines","block_map"}，或
@@ -268,7 +268,7 @@ def _prepare_target_file(root: Path, rel: str, src: str, abs_path: str,
     """单目标文件准备：静态准备缓存 → registry/manifest → 两臂插桩模板。
 
     §SPEC-030 单次 parse 纪律（模块级只 parse 一次）+ §SPEC-054（缓存命中
-    侧跳过全部 parse）+ 方向②③（plain 模板给 acceptance 臂、attr 模板给
+    侧跳过全部 parse）+ 方向②③（plain 模板给 gherkin 臂、attr 模板给
     gut 臂，各自独立缓存键）。
 
     返回 {"prepared", "unmeasured", "cache_hits", "cache_misses",

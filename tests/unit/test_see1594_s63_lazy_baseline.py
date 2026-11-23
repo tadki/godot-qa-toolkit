@@ -72,7 +72,7 @@ def project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -81,11 +81,15 @@ def project(tmp_path: Path) -> Path:
     game = root / "src_game"
     game.mkdir()
     (game / "cell.gd").write_text(TARGET_SRC)
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _recipe(project: Path, tmp_path: Path) -> dict:
     from godot_qa_toolkit.measurement.recipe import build_recipe
+    from attribution_fixtures import install_recipe
+    install_recipe(project)
     recipe, error = build_recipe(project)
     assert error is None, error
     return recipe
@@ -330,7 +334,7 @@ class TestS63LazyBaselineMergeGuard:
         """acceptance 臂不取懒基线——其失败保持可见（债归独立 issue）；
         门控守卫按臂名拒绝，而非依赖观测面巧合为空。"""
         calls, (eff, meta, new_pairs) = self._drive(
-            monkeypatch, name="acceptance")
+            monkeypatch, name="gherkin")
         assert calls == [], "acceptance 臂不得触发懒获取"
         assert meta is None
         assert new_pairs, "acceptance 臂失败保持未吸收"
@@ -374,4 +378,4 @@ class TestS63EnsureMapEntry:
 
 
 def test_report_version_pinned():
-    assert REPORT_VERSION == "measurement-report/2"
+    assert REPORT_VERSION == "measurement-report/3"

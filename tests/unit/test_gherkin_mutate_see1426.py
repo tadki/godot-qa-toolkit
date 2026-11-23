@@ -18,7 +18,24 @@ import pytest
 from godot_qa_toolkit.gherkin import OPS_VERSION
 from godot_qa_toolkit.gherkin.compile import compile_feature, sha256_of
 from godot_qa_toolkit.gherkin.mutate import mutate_case, mutate_ir
-from godot_qa_toolkit.gherkin.mutate_runner import AcceptRunError, run_mutate
+from godot_qa_toolkit.gherkin.mutate_runner import GherkinRunError, run_mutate
+
+
+def _schema_ensure(project: Path) -> None:
+    """SEE-1624：compile 前置 schema 握手 + run/mutate 预检 validator——
+    夹具补最小合法 schema.json 与可通过 V 检查的 validator.gd stub。"""
+    from gherkin_fixtures import VALID_SCHEMA, VALIDATOR_OK_GD
+    import json as _json
+    s = project / "addons" / "gqt_gherkin" / "schema.json"
+    if not s.is_file():
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(_json.dumps(VALID_SCHEMA), encoding="utf-8")
+    v = project / "addons" / "gqt_gherkin" / "validator.gd"
+    if not v.is_file():
+        v.write_text(VALIDATOR_OK_GD, encoding="utf-8")
+
+
+
 
 _CASE_KILL_OUTPUT = "* test_s_000_00\n  [Failed]\n* test_s_000_01\n  [Failed]\n"
 _CASE_PASS_OUTPUT = "* test_s_000_00\n  [Passed]\n"
@@ -35,6 +52,19 @@ def _restore_subprocess():
     mr.subprocess.run, mr.subprocess.Popen = orig_run, orig_popen
 
 
+@pytest.fixture(autouse=True)
+def _stub_preflight(monkeypatch):
+    """SEE-1624：worker 通道测试不涉预检——stub 掉 run_preflight
+    的 validator 拉起（真实 Godot 进程不进单元测试）。"""
+    import godot_qa_toolkit.gherkin.addon as _addon
+    monkeypatch.setattr(_addon, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    import godot_qa_toolkit.gherkin.mutate_runner as _mr
+    monkeypatch.setattr(_mr, "run_preflight",
+                        lambda root, **k: {"ok": True})
+    yield
+
+
 def _fake_gut(monkeypatch, *, returncode: int, output: str,
               baseline: tuple[int, str] | None = None) -> None:
     """F-C：baseline=(rc, output) 时首调用（未变异基线轮）单独供给，
@@ -44,6 +74,10 @@ def _fake_gut(monkeypatch, *, returncode: int, output: str,
     calls = {"n": 0}
 
     def fake_run(*a, **k):
+        argv_s = " ".join(str(x) for x in (a[0] if a else []))
+        if "validator.gd" in argv_s:
+            from gherkin_fixtures import fake_validator_process
+            return fake_validator_process()
         calls["n"] += 1
         if baseline is not None and calls["n"] == 1:
             rc, out = baseline
@@ -159,11 +193,15 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     return root
 
 
 def _compile(project: Path, tmp_path: Path) -> Path:
-    f = tmp_path / "demo.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "demo.feature")
+    _schema_ensure(project)
     f.write_text(FEATURE, encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
@@ -176,7 +214,7 @@ def test_mutant_ir_is_temporary_copy(project: Path, tmp_path: Path) -> None:
     _fake_gut(None, returncode=1, output=_CASE_KILL_OUTPUT,
               baseline=(0, _CASE_PASS_OUTPUT))
     result = run_mutate(project, "demo")
-    ir_disk = (project / "acceptance/ir/demo.json").read_text(encoding="utf-8")
+    ir_disk = (project / "gherkin/ir/demo.json").read_text(encoding="utf-8")
     ir = json.loads(ir_disk)
     assert ir["cases"][0]["values"]["left"] == "7", "变异 IR 必须是临时副本"
     assert result["ok"] is True and result["summary"]["killed"] >= 1
@@ -207,17 +245,19 @@ def test_sentinel_no_test_stream_is_run_error(project: Path, tmp_path: Path) -> 
     _compile(project, tmp_path)
     _fake_gut(None, returncode=0, output="Godot Engine v4.6\n")  # 无任何测试流
     # F-C：基线轮先跑，无测试流在基线哨兵处即 raise（caller 错误面）。
-    with pytest.raises(AcceptRunError, match="no test stream in baseline"):
+    with pytest.raises(GherkinRunError, match="no test stream in baseline"):
         run_mutate(project, "demo")
 
 
 def test_no_mutants_is_run_error(project: Path, tmp_path: Path) -> None:
     """零 Then 绑定且零 unchanged 的 IR：无变异面 = run_error（无门禁面）。"""
-    f = tmp_path / "empty.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "empty.feature")
+    _schema_ensure(project)
     f.write_text("Feature: E\n  Scenario: s\n    Given a\n", encoding="utf-8")
     suite, error = compile_feature(f, project, write=True)
     assert error is None
-    with pytest.raises(AcceptRunError, match="no mutants generated"):
+    with pytest.raises(GherkinRunError, match="no mutants generated"):
         run_mutate(project, "empty")
 
 
@@ -228,10 +268,10 @@ def test_adversarial_tautology_assertion_still_caught(project: Path, tmp_path: P
     （变异门禁不信任测试内容，只信任'变异后必挂'这一判据）。"""
     _compile(project, tmp_path)
     # 攻击者把 generated 换成恒真（但哈希自洽——重算 manifest）
-    gd_path = project / "acceptance/generated/test_demo.gd"
+    gd_path = project / "gherkin/generated/test_demo.gd"
     tautology = "# tampered\nextends GutTest\nfunc test_tautology() -> void:\n\tassert_true(true)\n"
     gd_path.write_text(tautology, encoding="utf-8")
-    man_path = project / "acceptance/generated/demo.manifest.json"
+    man_path = project / "gherkin/generated/demo.manifest.json"
     manifest = json.loads(man_path.read_text(encoding="utf-8"))
     manifest["generated_hash"] = sha256_of(tautology)
     man_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -245,7 +285,9 @@ def test_adversarial_missing_unchanged_slot_caught(project: Path, tmp_path: Path
     """缺反向断言：源 .feature 删掉 # unchanged 行 → 重编译哈希失配 → 打回。"""
     _compile(project, tmp_path)
     # 编一个带 unchanged 的 feature，然后删行
-    f = tmp_path / "u.feature"
+    f = ((project / "addons" / "gqt_gherkin" / "features") /
+         "u.feature")
+    _schema_ensure(project)
     f.write_text("Feature: U\n  Scenario Outline: s <x>\n"
                  "    # unchanged: world.tick\n    Then a is <x>\n"
                  "    # types: <x>:int\n"
@@ -256,7 +298,7 @@ def test_adversarial_missing_unchanged_slot_caught(project: Path, tmp_path: Path
     f.write_text("Feature: U\n  Scenario Outline: s <x>\n    Then a is <x>\n"
                  "    # types: <x>:int\n"
                  "    Examples:\n      | x |\n      | 1 |\n", encoding="utf-8")
-    with pytest.raises(AcceptRunError, match="recompile hash mismatch"):
+    with pytest.raises(GherkinRunError, match="recompile hash mismatch"):
         run_mutate(project, "u")
 
 

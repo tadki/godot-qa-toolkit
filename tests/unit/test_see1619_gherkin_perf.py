@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from godot_qa_toolkit.measurement.acceptance_perf import (
+from godot_qa_toolkit.measurement.gherkin_perf import (
     compute_perf_summary,
     merge_round_into_report,
 )
@@ -19,14 +19,14 @@ from godot_qa_toolkit.measurement.acceptance_perf import (
 def _round(name: str, mode: str, wall: float, valid: bool = True,
            repeats: int = 3) -> dict:
     return {"round": name, "mode": mode,
-            "acceptance_wall_s": wall, "valid": valid,
+            "gherkin_wall_s": wall, "valid": valid,
             "repeats": repeats, "shards": (4 if mode == "shared" else 44)}
 
 
 # ---------- 单轮合并（resume） ----------
 
 def test_merge_round_appends_and_recomputes() -> None:
-    doc = {"doc": "see1619-acceptance-perf/1",
+    doc = {"doc": "see1619-gherkin-perf/1",
            "rounds": [_round("A1", "shared", 29.0)],
            "summary": compute_perf_summary(
                [_round("A1", "shared", 29.0)], 4, 44)}

@@ -288,13 +288,16 @@ def _increment_project(tmp_path: Path) -> tuple[Path, dict, list[str], Path]:
     (root / ".gutconfig.json").write_text(json.dumps(
         {"dirs": ["res://tests/"], "include_subdirs": True,
          "prefix": "test_"}))
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
         "    # types: <hp>:int, <left>:numeric\n    Examples:\n"
         "      | hp | left |\n      | 10 | 7    |\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     from godot_qa_toolkit.measurement.recipe import build_recipe
+
     recipe, error = build_recipe(root)
     assert error is None, error
     baseline = {
@@ -403,7 +406,7 @@ def _gd_project(tmp_path: Path) -> tuple[Path, list[str]]:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tpass\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -413,7 +416,10 @@ def _gd_project(tmp_path: Path) -> tuple[Path, list[str]]:
     game.mkdir()
     (game / "cell.gd").write_text(
         "extends Node\n\n\nfunc later() -> void:\n\tcall_deferred(\"_noop\")\n")
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(root)
     from godot_qa_toolkit.measurement.recipe import build_recipe
+
     recipe, error = build_recipe(root)
     assert error is None, error
     return root, sorted(str(p) for p in (root / "src_game").glob("*.gd"))

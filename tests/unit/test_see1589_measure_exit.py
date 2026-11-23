@@ -43,7 +43,7 @@ def _run(tmp_path, monkeypatch, *, ok: bool, pairs: int):
     out = tmp_path / "report.json"
     amap = tmp_path / "map.json"
     amap.write_text(json.dumps(_map_doc(pairs)), encoding="utf-8")
-    report = {"report_version": "measurement-report/2", "ok": ok,
+    report = {"report_version": "measurement-report/3", "ok": ok,
               "project_root": str(proj), "arms": []}
     monkeypatch.setattr(cli_mod, "_apply_godot_bin_or_contract",
                         lambda *a, **k: None)

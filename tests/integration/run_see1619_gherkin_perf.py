@@ -2,12 +2,12 @@
 """SEE-1619 §SPEC-010 — acceptance 共享分片 vs per-feature 进程性能实测。
 
 A/A ≥3 定噪声带（同配共享分片重复实跑）→ 交错 A/B ≥3（B=per-feature
-进程形态，经 acceptance_shards=keys 退化）对比。每轮为一次真实
+进程形态，经 gherkin_shards=keys 退化）对比。每轮为一次真实
 `gqt measure run`（acceptance 臂 valid 才计入），取该臂 wall_s 绝对
 秒数——禁止以进程数推算墙钟。报告含绝对秒数、倍率、噪声带、
 进程/分片账与逐轮原始记录；任一轮臂 invalid → INCONCLUSIVE（exit 1）。
 
-  PYTHONPATH=src python3 -I tests/integration/run_see1619_acceptance_perf.py \
+  PYTHONPATH=src python3 -I tests/integration/run_see1619_gherkin_perf.py \
     --project-root /tmp/<kol-copy> --godot "$GODOT" \
     --aa 3 --rounds 3 --report <work>/acceptance-perf.json
 """
@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from godot_qa_toolkit.measurement.acceptance_perf import (
+from godot_qa_toolkit.measurement.gherkin_perf import (
     compute_perf_summary,
     merge_round_into_report,
 )
@@ -57,7 +57,7 @@ def _acceptance_wall(project_root: Path, gqt: str, godot: str,
     rc, out, err = _run([gqt, "measure", "run", "--recipe", str(recipe),
                          "--out", str(report), "--project-root",
                          str(project_root), "--godot-bin", godot,
-                         "--acceptance-shards", str(shards),
+                         "--gherkin-shards", str(shards),
                          *roots], timeout=timeout)
     wall_total = round(time.monotonic() - t0, 1)
     doc: dict = {}
@@ -71,7 +71,7 @@ def _acceptance_wall(project_root: Path, gqt: str, godot: str,
     rec = {"valid": arm.get("state") == "valid",
            "gut_ok": arm.get("gut_ok"),
            "rc": rc, "wall_total_s": wall_total,
-           "acceptance_wall_s": arm.get("wall_s"),
+           "gherkin_wall_s": arm.get("wall_s"),
            "shards": arm.get("shards"), "repeats": arm.get("repeats"),
            "process_fallbacks": arm.get("process_fallbacks"),
            "run_error": arm.get("invalid_reason")}
@@ -94,14 +94,14 @@ def run_single_round(args, round_type: str, round_index: int,
                          else "per_feature"),
                 "keys": keys,
                 "fanout": rec.get("shards", 0) * rec.get("repeats", 0)})
-    doc: dict = {"doc": "see1619-acceptance-perf/1", "rounds": []}
+    doc: dict = {"doc": "see1619-gherkin-perf/1", "rounds": []}
     if report_path.is_file():
         doc = json.loads(report_path.read_text(encoding="utf-8"))
     merge_round_into_report(doc, rec, args.shards_a, keys,
                             report_path=report_path)
     s = doc["summary"]
     print(f"[{rec['round']}] valid={rec['valid']} "
-          f"wall={rec.get('acceptance_wall_s')}s "
+          f"wall={rec.get('gherkin_wall_s')}s "
           f"fanout={rec['fanout']} "
           f"verdict={s['verdict']} "
           f"rounds={len(doc['rounds'])}", flush=True)
@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     project_root = Path(args.project_root).resolve()
-    feats = project_root / "acceptance" / "features"
+    feats = project_root / "addons" / "gqt_gherkin" / "features"
     keys = sorted(p.stem for p in feats.glob("*.feature"))
     if not keys:
         print("REFUSAL: no acceptance features discovered", file=sys.stderr)
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                     "fanout": rec.get("shards", 0) * rec.get("repeats", 0)})
         rounds.append(rec)
         print(f"[A{i}] valid={rec['valid']} "
-              f"wall={rec.get('acceptance_wall_s')}s "
+              f"wall={rec.get('gherkin_wall_s')}s "
               f"fanout={rec['fanout']}", flush=True)
     for i in range(1, args.rounds + 1):
         rec_b = _acceptance_wall(project_root, args.gqt, args.godot,
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                       * rec_b.get("repeats", 0)})
         rounds.append(rec_b)
         print(f"[B{i}] valid={rec_b['valid']} "
-              f"wall={rec_b.get('acceptance_wall_s')}s "
+              f"wall={rec_b.get('gherkin_wall_s')}s "
               f"fanout={rec_b['fanout']}", flush=True)
         rec_a = _acceptance_wall(project_root, args.gqt, args.godot,
                                  recipe, report_path.parent
@@ -200,10 +200,10 @@ def main(argv: list[str] | None = None) -> int:
                       * rec_a.get("repeats", 0)})
         rounds.append(rec_a)
         print(f"[A{i+100}] valid={rec_a['valid']} "
-              f"wall={rec_a.get('acceptance_wall_s')}s", flush=True)
+              f"wall={rec_a.get('gherkin_wall_s')}s", flush=True)
 
     summary = compute_perf_summary(rounds, args.shards_a, len(keys))
-    report = {"doc": "see1619-acceptance-perf/1", "rounds": rounds,
+    report = {"doc": "see1619-gherkin-perf/1", "rounds": rounds,
               "summary": summary}
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1),
                            encoding="utf-8")

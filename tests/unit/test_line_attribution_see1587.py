@@ -226,7 +226,7 @@ def _project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -307,7 +307,10 @@ class _FakeGodot:
 def test_run_emits_line_primary_artifact(tmp_path, monkeypatch):
     import subprocess as sp
     project = _project(tmp_path)
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(project)
     from godot_qa_toolkit.measurement.recipe import build_recipe
+
     recipe, error = build_recipe(project)
     assert error is None, error
     targets = sorted(str(p) for p in (project / "src_game").glob("*.gd"))

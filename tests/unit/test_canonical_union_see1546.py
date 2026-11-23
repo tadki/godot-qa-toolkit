@@ -51,7 +51,7 @@ def _bundle(*, run_uuid: str, arm: str, hits: list[int],
 
 
 def _arms(hits_a: list[int], hits_b: list[int],
-          *, arm_b: str = "acceptance", source_b: str = GD_SRC,
+          *, arm_b: str = "gherkin", source_b: str = GD_SRC,
           recipe_hash: str = "c" * 64) -> tuple[dict, dict]:
     a = arm_record_from_bundle(
         _bundle(run_uuid="uuid-a", arm="gut_full", hits=hits_a),
@@ -70,7 +70,7 @@ def test_union_version_and_happy_shape():
     assert rec["valid"] is True
     assert rec["invalid_reason"] is None
     assert rec["union"]["method"] == "line_union"
-    assert [arm["arm"] for arm in rec["arms"]] == ["gut_full", "acceptance"]
+    assert [arm["arm"] for arm in rec["arms"]] == ["gut_full", "gherkin"]
     assert rec["arms"][0]["run_uuid"] == "uuid-a"
     assert rec["arms"][1]["run_uuid"] == "uuid-b"
 
@@ -124,13 +124,13 @@ def test_run_uuid_reuse_invalid():
 
 
 def test_arm_invalid_state_blocks_union():
-    bad = _bundle(run_uuid="uuid-b", arm="acceptance", hits=[])
+    bad = _bundle(run_uuid="uuid-b", arm="gherkin", hits=[])
     bad["sentinels"]["run_error"] = True
     b = arm_record_from_bundle(bad, recipe_hash="c" * 64)
     a, _ = _arms([0], [0])
     rec = union_file(a, b, canonical_recipe_hash="c" * 64)
     assert rec["valid"] is False
-    assert "acceptance" in rec["invalid_reason"]
+    assert "gherkin" in rec["invalid_reason"]
 
 
 def test_duplicate_arm_names_invalid():
@@ -141,7 +141,7 @@ def test_duplicate_arm_names_invalid():
 
 
 def test_no_probe_fired_is_invalid_lane():
-    zero = _bundle(run_uuid="uuid-b", arm="acceptance", hits=[])
+    zero = _bundle(run_uuid="uuid-b", arm="gherkin", hits=[])
     zero["sentinels"]["probes_fired"] = 0
     b = arm_record_from_bundle(zero, recipe_hash="c" * 64)
     assert b["state"] == "invalid"

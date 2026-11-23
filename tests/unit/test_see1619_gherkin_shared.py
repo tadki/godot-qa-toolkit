@@ -18,14 +18,14 @@ def _proj(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "addons" / "gut").mkdir(parents=True)
     (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# gut\n")
-    (root / "acceptance" / "harness").mkdir(parents=True)
-    (root / "acceptance" / "harness" / "harness.gd").write_text(
+    (root / "addons" / "gqt_gherkin").mkdir(parents=True)
+    (root / "addons" / "gqt_gherkin" / "harness.gd").write_text(
         "extends RefCounted\n")
     return root
 
 
 def _script(key: str) -> str:
-    return (f"res://acceptance/generated/.gqt-run-x/generated/"
+    return (f"res://gherkin/generated/.gqt-run-x/generated/"
             f"test_{key}.gd")
 
 
@@ -35,15 +35,15 @@ def _make_fake_run_arm(shared_red: set[str], isolated_red: set[str],
     """按轮次与分组构造 run_arm 桩结果：第一轮=共享，第二轮=隔离。"""
     calls: list[dict] = []
 
-    def fake(name: str, *, acceptance=None, **kw):
-        calls.append({"groups": acceptance["groups"],
+    def fake(name: str, *, gherkin=None, **kw):
+        calls.append({"groups": gherkin["groups"],
                       "concurrency": kw.get("concurrency")})
         rnd = 0 if len(calls) == 1 else 1
         reds = shared_red if rnd == 0 else isolated_red
         rec_fail = shared_rec_fail if rnd == 0 else isolated_rec_fail
         pairs: list[tuple[str, str]] = []
         rec_shards = []
-        for gi, g in enumerate(acceptance["groups"]):
+        for gi, g in enumerate(gherkin["groups"]):
             for k in g["keys"]:
                 if k in reds:
                     pairs.append((_script(k), "test_bad"))
@@ -89,18 +89,20 @@ def _wire(monkeypatch, tmp_path: Path, fake_run_arm) -> None:
     monkeypatch.setattr(arms, "run_arm", fake_run_arm)
     monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    # SEE-1624：flow 入口预检不在本组测试语义内（stub 跳过，不拉 Godot）
+    monkeypatch.setattr(arms, "run_preflight", lambda root, **k: {"ok": True})
 
 
 KEYS = ["k1", "k2", "k3", "k4"]
 
 
 def _flow(root: Path, shards: int = 2) -> dict:
-    return arms.run_acceptance_flow(
+    return arms.run_gherkin_flow(
         root=root,
-        recipe={"acceptance_face": {"features": [
+        recipe={"gherkin_face": {"features": [
             {"key": k} for k in KEYS]}},
-        acceptance_keys=None, acceptance_shards=shards,
-        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+        gherkin_keys=None, gherkin_shards=shards,
+        arms_parallel=False, gherkin_adaptive=False, arm_kwargs={})
 
 
 # ---------- 反例 1：全原子 ----------
@@ -193,13 +195,16 @@ def test_double_red_not_wrapped_as_fallback(tmp_path, monkeypatch):
         "共享红保持可见"
 
 
-# ---------- 反例 4：清理失败 ----------
+# ---------- 反例 4：harness 契约位零触退役钉（SEE-1624 单根裁决）----------
 
-def test_cleanup_failure_still_invalid_under_shared_round(
+def test_flow_never_touches_harness_contract_position(
         tmp_path, monkeypatch):
+    """cp 接线退役：flow 全程不得创建/删除 harness 契约位——任何对契约位
+    的 unlink 即旧接线回潮，本钉变红。"""
     root = _proj(tmp_path)
     fake, _calls = _make_fake_run_arm(set(), set())
-    dest = root / "addons" / "gqt_accept" / "harness.gd"
+    dest = root / "addons" / "gqt_gherkin" / "harness.gd"
+    before = dest.read_bytes()
 
     counter = {"n": 0}
 
@@ -220,18 +225,19 @@ def test_cleanup_failure_still_invalid_under_shared_round(
     monkeypatch.setattr(arms, "run_arm", fake)
     monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    monkeypatch.setattr(arms, "run_preflight", lambda root, **k: {"ok": True})
     real_unlink = Path.unlink
+    unlink_targets: list[Path] = []
 
-    def flaky_unlink(self, *a, **k):
-        if self == dest:
-            raise OSError("injected unlink failure")
+    def spy_unlink(self, *a, **k):
+        unlink_targets.append(self)
         return real_unlink(self, *a, **k)
 
-    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    monkeypatch.setattr(Path, "unlink", spy_unlink)
     out = _flow(root, shards=2)
-    assert out["state"] == "invalid"
-    assert "harness_residue" in (out.get("invalid_reason") or "")
-    # 残留降级不得伪饰降级披露
+    assert out["state"] == "valid"
+    assert dest.read_bytes() == before
+    assert dest not in unlink_targets
     assert out.get("process_fallbacks") == []
 
 
@@ -245,7 +251,7 @@ def test_fallback_concurrency_capped_by_shards(tmp_path, monkeypatch):
     out = _flow(root, shards=2)
     assert len(calls) == 2
     assert len(calls[1]["groups"]) == 4, "4 key 全部进降级轮"
-    assert calls[1]["concurrency"] == 2, "降级轮并发 ≤ acceptance_shards"
+    assert calls[1]["concurrency"] == 2, "降级轮并发 ≤ gherkin_shards"
     assert calls[0]["concurrency"] == 2
     assert sorted(f["key"] for f in out["process_fallbacks"]) == [
         "k1", "k2", "k3", "k4"]
@@ -316,12 +322,12 @@ def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
     monkeypatch.setattr(arms, "replay_check", fake_replay)
     monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
-    out = arms.run_acceptance_flow(
+    out = arms.run_gherkin_flow(
         root=root,
-        recipe={"acceptance_face": {"features": [
+        recipe={"gherkin_face": {"features": [
             {"key": k} for k in KEYS]}},
-        acceptance_keys=None, acceptance_shards=2,
-        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+        gherkin_keys=None, gherkin_shards=2,
+        arms_parallel=False, gherkin_adaptive=False, arm_kwargs={})
     assert out["state"] == "invalid"
     assert "process_fallbacks" in out, "早失败路径必须带该键"
     assert out["process_fallbacks"] == []
@@ -353,12 +359,12 @@ def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
     monkeypatch.setattr(arms, "replay_check", fake_replay)
     monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
-    out = arms.run_acceptance_flow(
+    out = arms.run_gherkin_flow(
         root=root,
-        recipe={"acceptance_face": {"features": [
+        recipe={"gherkin_face": {"features": [
             {"key": k} for k in KEYS]}},
-        acceptance_keys=None, acceptance_shards=2,
-        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+        gherkin_keys=None, gherkin_shards=2,
+        arms_parallel=False, gherkin_adaptive=False, arm_kwargs={})
     assert out["state"] == "invalid"
     assert "suite_error" in (out.get("invalid_reason") or "")
     assert all(not d.exists() for d in made), "共享轮已建组全部回收"

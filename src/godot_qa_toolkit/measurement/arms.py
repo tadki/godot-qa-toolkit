@@ -1,6 +1,6 @@
 """SEE-1594 BTIDY（零行为拆分）：批式臂执行——单臂（§SPEC-052 并行分片、
-XDG 隔离、shadow 插桩、门控/对账/bundle）与 acceptance 臂编排。自
-orchestrator.py 的 run_measurement 内嵌闭包 `_arm` / `_acceptance_flow`
+XDG 隔离、shadow 插桩、门控/对账/bundle）与 gherkin 臂编排。自
+orchestrator.py 的 run_measurement 内嵌闭包 `_arm` / `_gherkin_flow`
 提升为模块级并按阶段分解为 ≤50 行函数；闭包变量显式参数化，逻辑逐语句
 等价。"""
 
@@ -27,7 +27,8 @@ from ..coverage.evidence import (
 )
 from ..coverage.runner import _looks_like_godot_launch_failure
 from ..coverage.union import arm_record_from_bundle
-from ..gherkin.run import AcceptRunError, replay_check
+from ..gherkin.run import GherkinRunError, replay_check
+from ..gherkin.addon import AddonError, run_preflight
 from ..gherkin.suite import (
     SuiteError,
     _cleanup_suite_dir,
@@ -242,7 +243,7 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
     """§SPEC-064a 懒获取（成本裁定）：绿臂零额外 GUT；观测到失败且未
     显式提供基线时才跑一次同面无插桩 GUT 取基线并复核。获取失败 → 具名
     stderr + 臂保持 invalid（fail-loud，不按空基线静默转绿）。
-    acceptance 臂不得继承 gut_full 的懒基线（其失败保持可见）。"""
+    gherkin 臂不得继承 gut_full 的懒基线（其失败保持可见）。"""
     from .orchestrator import (
         _acquire_lazy_baseline,
         _gutconfig_face_args,
@@ -277,7 +278,7 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
               f"gate the arm", file=sys.stderr)
     return effective_baseline, baseline_meta, new_pairs
 
-def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
+def _arm_reconcile(root: Path, gherkin: dict | None, results: list[dict],
                    run_error: bool) -> tuple:
     """§SPEC-035 对账：分片组逐 rep 对账（rep 间独立进程独立输出），
     任一 false → 臂 invalid；§SPEC-063b：结构对账失败必须传入 union
@@ -286,7 +287,7 @@ def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
     arm_valid = not run_error
     invalid_reason = None
     gut_ok_delta = False
-    if acceptance is not None and not run_error:
+    if gherkin is not None and not run_error:
         recs = []
         ok_all = True
         for r in results:
@@ -294,7 +295,7 @@ def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
                 rec = reconcile(
                     root, r["plan"]["suite_dir"], r["plan"]["keys"],
                     rep["out"], replay_ok=True,
-                    main_snapshot=acceptance["snapshot"])
+                    main_snapshot=gherkin["snapshot"])
                 recs.append(rec)
                 ok_all = ok_all and bool(rec.get("ok"))
         reconciliation = {"ok": ok_all, "shards": recs}
@@ -303,7 +304,7 @@ def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],
             invalid_reason = "reconciliation_failed"
             gut_ok_delta = True
             run_error = True
-    if acceptance is not None:
+    if gherkin is not None:
         for r in results:
             if r["plan"].get("suite_dir") is not None:
                 _cleanup_suite_dir(Path(r["plan"]["suite_dir"]))
@@ -386,7 +387,7 @@ def _arm_vacuous_bundles(name: str, prepared: dict, vacuous_rels: list[str],
 def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
                test_attribution: bool, attribution_causal: bool,
                shadow_instrument: bool, shard_width: int,
-               acceptance, acceptance_repeats: int) -> tuple:
+               gherkin, gherkin_repeats: int) -> tuple:
     """臂前置：uuid/备份/装载/pg 检查/created 清单/分片计划/钩子文本。"""
     from .instrument import _hook_templates
     from .probe_templates import (
@@ -405,10 +406,10 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
     started["project_root"] = str(root)
     _arm_stage_created(root, started, name, attribution_causal,
                        shadow_instrument, backup_dir)
-    plans = _arm_plans(root, recipe, acceptance, shard_width)
+    plans = _arm_plans(root, recipe, gherkin, shard_width)
     # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
-    reps = max(1, int(acceptance_repeats)) if acceptance is not None else 1
-    # P2（双臂并行）：acceptance 臂在 shadow 内插桩——钩子文本按本臂
+    reps = max(1, int(gherkin_repeats)) if gherkin is not None else 1
+    # P2（双臂并行）：gherkin 臂在 shadow 内插桩——钩子文本按本臂
     # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）
     flusher_gd, pre_hook_gd = _hook_templates(
         test_attribution and name == "gut_full", run_uuid)
@@ -436,7 +437,7 @@ def _arm_fanout(name: str, *, root: Path, run_uuid: str, plans: list,
     已完整。"""
     results: list[dict] = []
     try:
-        # concurrency（acceptance per-feature 进程上限）；缺省全并行
+        # concurrency（gherkin per-feature 进程上限）；缺省全并行
         workers = (max(1, min(int(concurrency), len(plans)))
                    if concurrency else max(1, len(plans)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -500,7 +501,7 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
             arm_failures, arm_fail_pairs)
 def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
               baseline_failures, baseline_pairs, declared_scoped,
-              declared_bare, arm_fail_pairs, gut_ok, acceptance,
+              declared_bare, arm_fail_pairs, gut_ok, gherkin,
               results, run_error) -> tuple:
     """§SPEC-060a/061b/063c 门控（树已还原=无插桩；懒基线获取在此执行）：
     新增失败门控 + 具名排除按 (script, test) 身份吸收 + reconcile。
@@ -520,17 +521,17 @@ def _arm_gate(name: str, *, root: Path, recipe: dict, timeout_s: int,
         gut_ok = False
         run_error = True
     (reconciliation, arm_valid, invalid_reason, gut_ok_delta,
-     run_error) = _arm_reconcile(root, acceptance, results, run_error)
+     run_error) = _arm_reconcile(root, gherkin, results, run_error)
     gut_ok = gut_ok and not gut_ok_delta
     return (gut_ok, run_error, baseline_meta, new_pairs, exempt_pairs,
             reconciliation, arm_valid, invalid_reason)
 
 def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
-            acceptance: dict | None = None, shadow_instrument: bool = False,
+            gherkin: dict | None = None, shadow_instrument: bool = False,
             adaptive_reps: bool = False, test_attribution: bool = False,
             attribution_causal: bool = False, shard_width: int = 6,
             shard_log_dir: str | None = None, timeout_s: int = 180,
-            acceptance_repeats: int = 3,
+            gherkin_repeats: int = 3,
             baseline_failures: "set[tuple[str, str]] | None" = None,
             baseline_pairs: "set[tuple[str, str]] | None" = None,
             declared_scoped: "set[tuple[str, str]] | None" = None,
@@ -544,7 +545,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         test_attribution=test_attribution,
         attribution_causal=attribution_causal,
         shadow_instrument=shadow_instrument, shard_width=shard_width,
-        acceptance=acceptance, acceptance_repeats=acceptance_repeats)
+        gherkin=gherkin, gherkin_repeats=gherkin_repeats)
     run_uuid, plans, reps = stage["run_uuid"], stage["plans"], stage["reps"]
     sink_by_rel, manifest_by_rel = stage["sink_by_rel"], stage["manifest_by_rel"]
     vacuous_rels = stage["vacuous_rels"]
@@ -560,12 +561,12 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         baseline_failures=baseline_failures, baseline_pairs=baseline_pairs,
         declared_scoped=declared_scoped, declared_bare=declared_bare,
         arm_fail_pairs=arm_fail_pairs, gut_ok=gut_ok,
-        acceptance=acceptance, results=results, run_error=run_error)
+        gherkin=gherkin, results=results, run_error=run_error)
     return _arm_result(
-        name, root=root, prepared=prepared, acceptance=acceptance,
+        name, root=root, prepared=prepared, gherkin=gherkin,
         arms_parallel=arms_parallel, evidence_dir=evidence_dir,
         shard_log_dir=shard_log_dir, timeout_s=timeout_s,
-        adaptive_reps=adaptive_reps and acceptance is not None,
+        adaptive_reps=adaptive_reps and gherkin is not None,
         test_attribution=test_attribution, results=results,
         run_uuid=run_uuid, wall_s=wall_s, gut_ok=gut_ok,
         run_error=run_error, timed_out=timed_out,
@@ -576,7 +577,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         plans=plans, sink_by_rel=sink_by_rel,
         manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
         vacuous_rels=vacuous_rels)
-def _arm_readback(name: str, *, root: Path, prepared: dict, acceptance,
+def _arm_readback(name: str, *, root: Path, prepared: dict, gherkin,
                   test_attribution: bool, results, run_uuid: str, reps: int,
                   sink_by_rel: dict, manifest_by_rel: dict,
                   xdg_homes: list[str], gut_ok: bool, run_error: bool,
@@ -588,11 +589,11 @@ def _arm_readback(name: str, *, root: Path, prepared: dict, acceptance,
     attribution = None
     bundles: dict[str, dict] = {}
     try:
-        if acceptance is not None and reps > 1:
+        if gherkin is not None and reps > 1:
             # §SPEC-062C：逐轮行集并集收敛轮数（rep 间独立进程，
             # 并集对轮序不敏感）
-            from .orchestrator import _acceptance_convergence
-            convergence = _acceptance_convergence(
+            from .orchestrator import _gherkin_convergence
+            convergence = _gherkin_convergence(
                 root, run_uuid, sink_by_rel, manifest_by_rel,
                 results, reps)
         bundles = _arm_hit_bundles(
@@ -656,7 +657,7 @@ def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
         },
     }
 
-def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
+def _arm_result(name: str, *, root: Path, prepared: dict, gherkin,
                 arms_parallel: bool, evidence_dir, shard_log_dir: str | None,
                 timeout_s: int, adaptive_reps: bool, test_attribution: bool,
                 results, run_uuid: str, wall_s: float, gut_ok: bool,
@@ -668,7 +669,7 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
     """读回段：convergence/bundles/attribution（xdg 清理前读回归属）→
     vacuous 车道 → 结果文档组装（键序 = 结果 JSON 契约）。"""
     convergence, attribution, bundles = _arm_readback(
-        name, root=root, prepared=prepared, acceptance=acceptance,
+        name, root=root, prepared=prepared, gherkin=gherkin,
         test_attribution=test_attribution, results=results,
         run_uuid=run_uuid, reps=reps, sink_by_rel=sink_by_rel,
         manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes, gut_ok=gut_ok,
@@ -684,52 +685,21 @@ def _arm_result(name: str, *, root: Path, prepared: dict, acceptance,
         run_error, baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
         exempt_pairs, reps, convergence, adaptive_rounds_used, arms_parallel,
         attribution, bundles, reconciliation, plans, results)
-def _ensure_acceptance_harness(root: Path) -> Path | None:
-    """§SPEC-011/D20：CI 同款 harness 幂等接线。
+def _ensure_gherkin_harness(root: Path) -> None:
+    """SEE-1624 §SPEC-002：契约位在场断言（单根裁决下的连带简化）。
 
-    项目侧契约位 `res://addons/gqt_accept/harness.gd` 通常被
-    .gitignore 忽略（CI acceptance 流水线每次 cp 接线）。measure 的
-    acceptance 臂此前跳过该前置 → 生成测试 `_make_harness()` 全部
-    fail_test("acceptance harness unavailable")，全量面 177 红。
-    契约位缺失且项目提供源时临时复制；返回本次新建路径供 finally 移除
-    （生产树零残留契约）。已存在则保持不动（幂等）。
-    """
-    dest = root / "addons" / "gqt_accept" / "harness.gd"
-    if dest.exists():
-        return None
-    src = root / "acceptance" / "harness" / "harness.gd"
-    if not src.is_file():
-        return None
-    # D21：接线失败不得裸抛/留半成品——本次新建的部分产物就地回收后
-    # fail-loud，由调用方把该臂降级为 invalid
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dest)
-    except OSError as e:
-        err = _cleanup_acceptance_harness(dest)
+    生成测试加载位 `res://addons/gqt_gherkin/harness.gd` 是 addon 单根
+    的受控源文件（KOL M1 后随 addon 入库）；缺失即布局错误 fail-loud，
+    不再从旧路径复制（cp 接线退役，无双根/回退/自动复制）。"""
+    dest = root / "addons" / "gqt_gherkin" / "harness.gd"
+    if not dest.is_file():
         raise MeasurementError(
-            f"acceptance harness wiring failed: {e}"
-            + (f" | {err}" if err else "")) from e
-    return dest
+            f"gherkin harness contract position missing: "
+            f"res://addons/gqt_gherkin/harness.gd — addon single-root "
+            f"layout required (no cp wiring, no legacy fallback)")
 
 
-def _cleanup_acceptance_harness(dest: Path | None) -> str | None:
-    """移除本次新建的契约位；返回错误描述（None = 干净）。
-
-    D21：清理失败不得静默——调用方必须把该臂降级为 invalid 并披露
-    残留路径，禁止带残留报 valid（违背生产树零残留契约）。"""
-    if dest is None:
-        return None
-    try:
-        dest.unlink(missing_ok=True)
-        if dest.parent.is_dir() and not any(dest.parent.iterdir()):
-            dest.parent.rmdir()
-    except OSError as e:
-        return f"harness cleanup failed: {e} (residue: {dest})"
-    return None
-
-
-def _acceptance_groups(keys: list[str], shards: int) -> list[list[str]]:
+def _gherkin_groups(keys: list[str], shards: int) -> list[list[str]]:
     """§SPEC-005 共享分片：排序去重后均衡切分为 shards 组（组数=分片数，
     组内多 key 共享 suite/进程）。keys <= shards 时退化为单 key 组。"""
     ks = sorted(set(keys))
@@ -897,30 +867,21 @@ def _compile_into(sd: Path, root: Path, chunk: list[str]) -> None:
         replay_check(root, k, suite_dir=sd)
 
 
-def _finish_acceptance_result(result: dict, harness_dest: Path | None,
-                              fb_groups: list[dict]) -> dict:
-    """D21 成功路径显式回收：清理失败 = 残留 = 不得报 valid。"""
-    cleanup_err = _cleanup_acceptance_harness(harness_dest)
-    if cleanup_err:
-        return {**result, "process_fallbacks": [],
-                "state": "invalid", "gut_ok": False,
-                "invalid_reason": f"harness_residue: {cleanup_err}"}
+def _finish_gherkin_result(result: dict, fb_groups: list[dict]) -> dict:
+    """成功路径收口：process_fallbacks 具名披露（harness 契约位是受控
+    源文件，SEE-1624 后无临时接线面，故不再有 residue 车道）。"""
     result["process_fallbacks"] = _fallback_disclosure(result, fb_groups)
     return result
 
 
-def _acceptance_error_result(e: Exception, groups: list[dict],
-                             harness_dest: Path | None) -> dict:
-    """异常路径：回收已建 suite 与 harness 契约位并组装 invalid 结果。"""
+def _gherkin_error_result(e: Exception, groups: list[dict]) -> dict:
+    """异常路径：回收已建 suite 并组装 invalid 结果（预检失败/编译失败/
+    重放失败统一具名，无 fallback、无残留）。"""
     for g in groups:
         _cleanup_suite_dir(Path(g["suite_dir"]))
-    reason = f"suite_error:{e}"
-    cleanup_err = _cleanup_acceptance_harness(harness_dest)
-    if cleanup_err:
-        reason += f" | {cleanup_err}"
-    return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
+    return {"arm": "gherkin", "run_uuid": None, "wall_s": 0.0,
             "gut_ok": False, "timed_out": False, "state": "invalid",
-            "invalid_reason": reason, "process_fallbacks": [],
+            "invalid_reason": f"suite_error:{e}", "process_fallbacks": [],
             "bundles": 0,
             "bundles_data": {}, "reconciliation": None,
             "test_failures": {"observed": [], "observed_pairs": [],
@@ -929,35 +890,41 @@ def _acceptance_error_result(e: Exception, groups: list[dict],
             "repeats": 0, "convergence": None}
 
 
-def run_acceptance_flow(*, root: Path, recipe: dict,
-                        acceptance_keys: list[str] | None,
-                        acceptance_shards: int,
-                        arms_parallel: bool, acceptance_adaptive: bool,
-                        arm_kwargs: dict) -> dict:
-    """臂 acceptance：私有 suite 按分片分组编译/重放 → 并行扇出 GUT。"""
-    keys = list(acceptance_keys) if acceptance_keys else [
-        f["key"] for f in recipe["acceptance_face"]["features"]]
+def run_gherkin_flow(*, root: Path, recipe: dict,
+                     gherkin_keys: list[str] | None,
+                     gherkin_shards: int,
+                     arms_parallel: bool, gherkin_adaptive: bool,
+                     arm_kwargs: dict) -> dict:
+    """臂 gherkin：预检（addon validator 一次，§SPEC-003）→ 私有 suite
+    按分片分组编译/重放 → 并行扇出 GUT。"""
+    keys = list(gherkin_keys) if gherkin_keys else [
+        f["key"] for f in recipe["gherkin_face"]["features"]]
     snapshot = _snapshot_main(root)
     groups: list[dict] = []
-    harness_dest: Path | None = None
     cleanup_done = False
     try:
-        harness_dest = _ensure_acceptance_harness(root)
-        # §SPEC-005：恢复 acceptance_shards 共享分片——44 feature 已过
-        # acceptance-feature-state-isolation 原子化门（SEE-1619 C1），
+        try:
+            run_preflight(root)
+        except AddonError as e:
+            # measure 绕过 CLI 的核心路径同样被预检守门：失败具名 invalid
+            # 且无 suite 残留（由 except 分支统一回收）。
+            raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+        _ensure_gherkin_harness(root)
+        # §SPEC-005：恢复 gherkin_shards 共享分片——44 feature 已过
+        # gherkin-feature-state-isolation 原子化门（SEE-1619 C1），
         # 同进程共享 suite 不再有跨 feature 残留（R1 槽位缝 + 零写入判据
         # 闭环）。shards = 共享组数，并发上限同步收敛到组数；扇出 =
         # len(groups) × reps（非 keys × reps）。
-        for chunk in _acceptance_groups(keys, acceptance_shards):
+        for chunk in _gherkin_groups(keys, gherkin_shards):
             sd = create_suite_dir(root)
             groups.append({"suite_dir": sd, "keys": list(chunk)})
             _compile_into(sd, root, chunk)
 
-        result = run_arm("acceptance", root=root, recipe=recipe,
-                         acceptance={"groups": groups, "snapshot": snapshot},
+        result = run_arm("gherkin", root=root, recipe=recipe,
+                         gherkin={"groups": groups, "snapshot": snapshot},
                          shadow_instrument=arms_parallel,
-                         adaptive_reps=acceptance_adaptive,
-                         concurrency=max(1, int(acceptance_shards or 1)),
+                         adaptive_reps=gherkin_adaptive,
+                         concurrency=max(1, int(gherkin_shards or 1)),
                          **arm_kwargs)
 
         # §SPEC-006：临时具名降级——仅当某 feature 当次未通过共享校验时
@@ -973,64 +940,58 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
             # §SPEC-005/006（C2-R1）：降级轮与共享轮共用同一并发上限——
             # 多 key 失败时不得按失败数重新放开扇出（OOM 风险回潮）。
             fb_result = run_arm(
-                "acceptance", root=root, recipe=recipe,
-                acceptance={"groups": fb_groups, "snapshot": snapshot},
+                "gherkin", root=root, recipe=recipe,
+                gherkin={"groups": fb_groups, "snapshot": snapshot},
                 shadow_instrument=arms_parallel,
-                adaptive_reps=acceptance_adaptive,
-                concurrency=max(1, int(acceptance_shards or 1)), **arm_kwargs)
+                adaptive_reps=gherkin_adaptive,
+                concurrency=max(1, int(gherkin_shards or 1)), **arm_kwargs)
             result = _merge_fallback_round(result, fb_result, fb_groups)
 
-        # D21：成功路径显式回收并核对——清理失败 = 残留 = 不得报 valid
         cleanup_done = True
-        return _finish_acceptance_result(result, harness_dest, fb_groups)
-    except (SuiteError, AcceptRunError, MeasurementError) as e:
-        result = _acceptance_error_result(e, groups, harness_dest)
+        return _finish_gherkin_result(result, fb_groups)
+    except (SuiteError, GherkinRunError, MeasurementError) as e:
+        result = _gherkin_error_result(e, groups)
         cleanup_done = True
         return result
     finally:
         # D22/D23：兜底清理覆盖**所有退出路径**——run_arm 等未列名异常
-        # 冒泡时，本次新建的 **suite 目录与 harness 契约位**一并回收
-        # （异常照常传播，不吞；清理自身失败逐项写 stderr，不静默）。
-        # 已显式清理的路径由 cleanup_done 跳过（成功路径 suites 由
-        # run_arm 读回段清理）。
+        # 冒泡时，本次新建的 **suite 目录**一并回收（异常照常传播，不吞；
+        # 清理自身失败逐项写 stderr，不静默）。已显式清理的路径由
+        # cleanup_done 跳过（成功路径 suites 由 run_arm 读回段清理）。
         if not cleanup_done:
             for g in groups + (fb_groups if "fb_groups" in locals() else []):
                 try:
                     _cleanup_suite_dir(Path(g["suite_dir"]))
                 except OSError as e:
-                    print(f"measure: acceptance suite cleanup failed "
+                    print(f"measure: gherkin suite cleanup failed "
                           f"({g['suite_dir']}): {e}", file=sys.stderr)
-            residue_err = _cleanup_acceptance_harness(harness_dest)
-            if residue_err:
-                print(f"measure: acceptance {residue_err}",
-                      file=sys.stderr)
 
 def execute_arms(*, root: Path, recipe: dict, arms_parallel: bool,
-                 acceptance_keys: list[str] | None,
-                 acceptance_shards: int, acceptance_adaptive: bool,
+                 gherkin_keys: list[str] | None,
+                 gherkin_shards: int, gherkin_adaptive: bool,
                  arm_kwargs: dict) -> tuple[dict, dict]:
-    """双臂执行：arms_parallel 时 acceptance 在 shadow 内插桩（根树只被
+    """双臂执行：arms_parallel 时 gherkin 臂在 shadow 内插桩（根树只被
     gut 臂触碰），否则串行。"""
     if arms_parallel:
         with ThreadPoolExecutor(max_workers=2) as pex:
             fut_a = pex.submit(run_arm, "gut_full", root=root,
                                recipe=recipe, **arm_kwargs)
-            fut_b = pex.submit(run_acceptance_flow, root=root,
+            fut_b = pex.submit(run_gherkin_flow, root=root,
                                recipe=recipe,
-                               acceptance_keys=acceptance_keys,
-                               acceptance_shards=acceptance_shards,
+                               gherkin_keys=gherkin_keys,
+                               gherkin_shards=gherkin_shards,
                                arms_parallel=arms_parallel,
-                               acceptance_adaptive=acceptance_adaptive,
+                               gherkin_adaptive=gherkin_adaptive,
                                arm_kwargs=arm_kwargs)
             arm_a = fut_a.result()
             arm_b = fut_b.result()
     else:
         # 臂 gut_full：.gutconfig 面（无 -gdir——GUT 缺省读配置，lab 实测锚定）
         arm_a = run_arm("gut_full", root=root, recipe=recipe, **arm_kwargs)
-        arm_b = run_acceptance_flow(
-            root=root, recipe=recipe, acceptance_keys=acceptance_keys,
-            acceptance_shards=acceptance_shards,
+        arm_b = run_gherkin_flow(
+            root=root, recipe=recipe, gherkin_keys=gherkin_keys,
+            gherkin_shards=gherkin_shards,
             arms_parallel=arms_parallel,
-            acceptance_adaptive=acceptance_adaptive,
+            gherkin_adaptive=gherkin_adaptive,
             arm_kwargs=arm_kwargs)
     return arm_a, arm_b

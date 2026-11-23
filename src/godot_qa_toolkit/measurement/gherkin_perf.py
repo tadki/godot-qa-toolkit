@@ -1,6 +1,7 @@
-"""SEE-1619 §SPEC-010 — acceptance 性能实测的纯函数面（分批前台模式的
-单轮合并与汇总）。真实 Godot 执行在 tests/integration/
-run_see1619_acceptance_perf.py 的驱动层；本模块不拉起 Godot。"""
+"""SEE-1619 §SPEC-010（SEE-1624 gherkin 命名收口）— gherkin 性能实测的
+纯函数面（分批前台模式的单轮合并与汇总）。真实 Godot 执行在
+tests/integration/run_see1619_gherkin_perf.py 的驱动层；本模块不拉起
+Godot。"""
 from __future__ import annotations
 
 import json
@@ -16,8 +17,8 @@ def _pair_rounds(rounds: list[dict]) -> list[dict]:
         if r.get("mode") == "per_feature":
             pending_b = r
         elif r.get("mode") == "shared" and pending_b is not None:
-            wa = r.get("acceptance_wall_s")
-            wb = pending_b.get("acceptance_wall_s")
+            wa = r.get("gherkin_wall_s")
+            wb = pending_b.get("gherkin_wall_s")
             pairs.append({"b_round": pending_b.get("round"),
                           "a_round": r.get("round"),
                           "b_wall_s": wb, "a_wall_s": wa,
@@ -33,8 +34,8 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
                          keys: int) -> dict:
     """纯函数：由逐轮记录汇总噪声带/倍率/进程账/判据。分批前台模式下
     每轮追加后重算，测量口径与单次全量模式一致。"""
-    a_walls = [r.get("acceptance_wall_s") for r in rounds
-               if r.get("mode") == "shared" and r.get("acceptance_wall_s")]
+    a_walls = [r.get("gherkin_wall_s") for r in rounds
+               if r.get("mode") == "shared" and r.get("gherkin_wall_s")]
     noise = {}
     if a_walls:
         med = statistics.median(a_walls)
@@ -76,7 +77,7 @@ def merge_round_into_report(doc: dict, round_record: dict, shards_a: int,
     name = round_record.get("round")
     if any(r.get("round") == name for r in doc.get("rounds", [])):
         raise ValueError(f"duplicate round: {name}")
-    doc.setdefault("doc", "see1619-acceptance-perf/1")
+    doc.setdefault("doc", "see1619-gherkin-perf/1")
     doc.setdefault("rounds", []).append(round_record)
     doc["summary"] = compute_perf_summary(doc["rounds"], shards_a, keys)
     if report_path is not None:

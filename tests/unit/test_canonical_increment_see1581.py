@@ -243,7 +243,7 @@ def _project(tmp_path: Path) -> Path:
     (root / "tests" / "unit").mkdir(parents=True)
     (root / "tests" / "unit" / "test_game.gd").write_text(
         "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n")
-    feats = root / "acceptance" / "features"
+    feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "demo.feature").write_text(
         "Feature: F\n  Scenario Outline: s\n    Then hp is <left>\n"
@@ -323,7 +323,10 @@ class BareNameFakeGodot:
 
 
 def _recipe_and_targets(project: Path, tmp_path: Path):
+    from gherkin_fixtures import ensure_addon_metadata
+    ensure_addon_metadata(project)
     from godot_qa_toolkit.measurement.recipe import build_recipe
+
     recipe, error = build_recipe(project)
     assert error is None, error
     path = tmp_path / "recipe.json"

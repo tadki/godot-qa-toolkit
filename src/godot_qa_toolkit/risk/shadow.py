@@ -4,7 +4,7 @@ Diagnostic-only by construction: no CI wiring, no thresholds, no average
 score, no dynamic cache. The measurement layer is injected so unit/BDD tests
 stay Godot-free while the real run (§SPEC-009) uses the coverage runner on
 the real KOL tree. Extra GUT rounds are limited to what §SPEC-009 prescribes
-(core, full, one same-recipe re-run) plus one acceptance cost probe.
+(core, full, one same-recipe re-run) plus one gherkin cost probe.
 """
 
 from __future__ import annotations
@@ -292,8 +292,9 @@ def _report_ranking_block(scored: list[dict]) -> dict:
         "note": "2-3 files only; never extrapolate to the whole repo",
     }
 
-def _report_acceptance_cost() -> dict:
-    """acceptance_cost 块（诊断面固定占位 + 外推警告）。"""
+def _report_gherkin_cost() -> dict:
+    """gherkin_cost 块（诊断面固定占位 + 外推警告）。SEE-1624 D-n4：JSON
+    旧 acceptance 计费键改 gherkin_cost。"""
     return {
         "samples": [],
         "extrapolation_assumption": (
@@ -354,7 +355,7 @@ def _report_document(
         "ranking": _report_ranking_block(scored),
         "core_full": core_full,
         "noise": noise,
-        "acceptance_cost": _report_acceptance_cost(),
+        "gherkin_cost": _report_gherkin_cost(),
         "routing": _report_routing(scored, negatives, unknown_count),
         "confidence": _report_confidence(sample_files, negative_files),
         "negatives": negatives,
@@ -520,8 +521,8 @@ def run_shadow_from_paths(
         risk_static=_risk_static_block(report),
         extra_gut_rounds=0,
     )
-    if perf_in.get("acceptance_cost"):
-        report["acceptance_cost"].update(perf_in["acceptance_cost"])
+    if perf_in.get("gherkin_cost"):
+        report["gherkin_cost"].update(perf_in["gherkin_cost"])
     return report
 
 def _measure_once(label: str, source: str, tests_glob: "str | None",

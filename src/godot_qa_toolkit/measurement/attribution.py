@@ -547,7 +547,7 @@ _ATTRIBUTION_NOTES = (
     "(test_to_lines / script_to_lines / line_to_tests), and file/"
     "function views are derived projections from line facts plus the "
     "source registry; lane event counts are all-probe events (not "
-    "comparable to the old fn-entry counts), and the acceptance arm "
+    "comparable to the old fn-entry counts), and the gherkin arm "
     "runs the plain template (attribution off by design)",
     "every hit event is counted in exactly one lane/phase; rates use the "
     "three-lane sum as denominator — no hit is silently assigned",

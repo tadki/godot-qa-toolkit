@@ -5,7 +5,7 @@
 - handler / argparse dest：无 cmd_gherkin/cmd_canonical 等旧 handler，新 handler
   齐备；gherkin_command / measure_command dest 生效；
 - machine 面：src 内所有 stdout `tool` 字面值 ∈ 新命名集合；三个版本化标识
-  `measurement-suite/2` / `measurement-report/2` / `test-attribution/5` 生效，
+  `measurement-suite/3` / `measurement-report/3` / `test-attribution/5` 生效，
   旧 schema 串零残留（无双读）；
 - 旧语义文案：SEE-1581 定稿后，mutation 侧不得再写「自动回退全脸」类
   help/docstring（fail-loud + 文件级有界回退是现行语义）；
@@ -158,8 +158,8 @@ class TestMachineContract:
         from godot_qa_toolkit.measurement.recipe import RECIPE_VERSION
         from godot_qa_toolkit.mutation.truth_select import SCHEMA_VERSION
 
-        assert RECIPE_VERSION == "measurement-suite/2"
-        assert REPORT_VERSION == "measurement-report/2"
+        assert RECIPE_VERSION == "measurement-suite/3"
+        assert REPORT_VERSION == "measurement-report/3"
         assert ATTRIBUTION_SCHEMA == "test-attribution/6"
         assert SCHEMA_VERSION == "test-attribution/6"
 
@@ -254,7 +254,7 @@ OLD_CLI_WORD = re.compile(r"\b(accept|canonical)\b")
 OLD_CLI_WORD_ALLOW_PARTS = (
     r"formerly `accept`",             # cli.py 变更说明（保留清单）
     r"原 accept",                     # 同左（中文注释）
-    r"see1468-accept/2",              # IR ops 版本串
+    r"see1468-gherkin/2",              # IR ops 版本串
     r"gqt-accept-worker",             # 缓存目录（保留清单）
     r"gqt-canonical-prep",            # 缓存目录（保留清单）
     r"canonical-prep/2",              # 缓存 schema 版本串（保留清单）

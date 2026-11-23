@@ -4,12 +4,11 @@ Every subcommand emits the unified JSON contract:
     {"tool": ..., "ok": bool, "summary": {...}, "failures": [...]}
 
 Exit code is 0 on ok, 1 on any failure — the machine verdict consumers rely on.
-SEE-1583 groups the surface into four top-level entries — `gherkin`
-(acceptance pipeline, formerly `accept`), `mutation`, `measure` (all
-measurement/scoring/diagnostics faces) and `doctor`. Old top-level entries
-are gone without aliases or deprecation shims: unknown names exit 2 via
-argparse. Acceptance-domain terms (`acceptance/`, acceptance-suite/1)
-describe the tested project's acceptance face and are not CLI names."""
+SEE-1583 groups the surface into four top-level entries — `gherkin`,
+`mutation`, `measure` (all measurement/scoring/diagnostics faces) and
+`doctor`. Old top-level entries are gone without aliases or deprecation
+shims: unknown names exit 2 via argparse. SEE-1624 D-n3：旧 acceptance
+前缀 flags 全量改 `--gherkin-*`，旧 CLI 别名不恢复，旧 flag exit 2。"""
 
 from __future__ import annotations
 
@@ -285,15 +284,15 @@ def _gherkin_compile(args: argparse.Namespace) -> int:
             wrote = [
                 f"{base}/ir/{suite.feature_key}.json",
                 f"{base}/generated/test_{suite.feature_key}.gd",
-                f"{base}/generated/accept_worker.gd",
+                f"{base}/generated/gherkin_worker.gd",
                 f"{base}/generated/{suite.feature_key}.manifest.json",
             ]
         else:
             wrote = [
-                f"acceptance/ir/{suite.feature_key}.json",
-                f"acceptance/generated/test_{suite.feature_key}.gd",
-                "acceptance/generated/accept_worker.gd",
-                f"acceptance/generated/{suite.feature_key}.manifest.json",
+                f"gherkin/ir/{suite.feature_key}.json",
+                f"gherkin/generated/test_{suite.feature_key}.gd",
+                "gherkin/generated/gherkin_worker.gd",
+                f"gherkin/generated/{suite.feature_key}.manifest.json",
             ]
     return _emit({
         "tool": "gherkin", "ok": True,
@@ -309,8 +308,8 @@ def _gherkin_compile(args: argparse.Namespace) -> int:
 
 
 def cmd_gherkin(args: argparse.Namespace) -> int:
-    from .gherkin.run import AcceptRunError, run_suite
-    from .gherkin.suite import SuiteError, run_acceptance_probe, run_suite_dir
+    from .gherkin.run import GherkinRunError, run_suite
+    from .gherkin.suite import SuiteError, run_gherkin_probe, run_suite_dir
 
     if args.gherkin_command == "compile":
         return _gherkin_compile(args)
@@ -322,13 +321,13 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
     # 用例不得在 mock 生效前被打回），真实拉起点的 spawn_godot 统一把
     # 内核级启动失败转 BinaryConfigError，由下方领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
-    probe_keys = getattr(args, "acceptance_probe_keys", None)
+    probe_keys = getattr(args, "gherkin_probe_keys", None)
     suite_dir_arg = getattr(args, "suite_dir", None)
     if args.gherkin_command == "run" and (probe_keys or suite_dir_arg):
         if probe_keys and suite_dir_arg:
             return _emit({
                 "tool": "gherkin", "ok": False,
-                "summary": {"error": "--acceptance-probe-keys compiles its "
+                "summary": {"error": "--gherkin-probe-keys compiles its "
                                      "own private suite dir; --suite-dir "
                                      "is mutually exclusive"},
                 "failures": [{"reason": "mutually exclusive flags"}],
@@ -343,8 +342,8 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
                         "summary": {"error": "no keys parsed"},
                         "failures": [{"reason": "no keys parsed"}],
                     })
-                probe = run_acceptance_probe(args.project_root, keys,
-                                             timeout_s=args.timeout)
+                probe = run_gherkin_probe(args.project_root, keys,
+                                          timeout_s=args.timeout)
                 return _emit({"tool": "gherkin", "ok": probe["suite_ok"],
                               "summary": probe, "failures": []})
             record = run_suite_dir(args.project_root, suite_dir_arg,
@@ -357,7 +356,7 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
                 "summary": {"error": str(e)},
                 "failures": [{"reason": str(e)}],
             })
-        except AcceptRunError as e:
+        except GherkinRunError as e:
             return _emit({
                 "tool": "gherkin", "ok": False,
                 "summary": {"error": str(e), "run_error": True},
@@ -373,7 +372,7 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
         return _emit({
             "tool": "gherkin", "ok": False,
             "summary": {"error": "--key is required without "
-                                 "--suite-dir/--acceptance-probe-keys"},
+                                 "--suite-dir/--gherkin-probe-keys"},
             "failures": [{"reason": "--key is required"}],
         })
     try:
@@ -391,7 +390,7 @@ def cmd_gherkin(args: argparse.Namespace) -> int:
             "summary": {"error": str(e)},
             "failures": [{"reason": str(e)}],
         })
-    except AcceptRunError as e:
+    except GherkinRunError as e:
         return _emit({
             "tool": "gherkin", "ok": False,
             "summary": {"error": str(e), "run_error": True},
@@ -871,7 +870,7 @@ def cmd_measure_suite(args: argparse.Namespace) -> int:
             "recipe_hash": recipe["recipe_hash"],
             "out": str(out_path),
             "gut_dirs": len(recipe["gut_face"]["dirs"]),
-            "acceptance_features": recipe["acceptance_face"]["count"],
+            "gherkin_features": recipe["gherkin_face"]["count"],
             "exclusions": len(recipe["exclusions"]),
         },
         "failures": [],
@@ -1093,7 +1092,7 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
         return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": "no .gd targets under roots"},
                       "failures": [{"reason": "no .gd targets"}]})
-    probe_keys = (args.acceptance_probe_keys or None)
+    probe_keys = (args.gherkin_probe_keys or None)
     if probe_keys:
         probe_keys = [k.strip() for k in probe_keys.split(",") if k.strip()]
     baseline_failures = None
@@ -1160,17 +1159,17 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
             scope_roots=[str(r) for r in roots],
             stability_baseline=getattr(args, "stability_baseline", None),
             shard_width=getattr(args, "shard_width", 6),
-            acceptance_shards=getattr(args, "acceptance_shards", 4),
+            gherkin_shards=getattr(args, "gherkin_shards", 4),
             shard_log_dir=getattr(args, "shard_log_dir", None),
             baseline_failures=baseline_failures,
             intolerant_config=intolerant_config,
-            acceptance_repeats=getattr(args, "acceptance_repeats", 3),
+            gherkin_repeats=getattr(args, "gherkin_repeats", 3),
             test_attribution=test_attribution,
             attribution_out=attribution_out,
             attribution_causal=attribution_causal,
             arms_parallel=bool(getattr(args, "arms_parallel", False)),
-            acceptance_adaptive=bool(
-                getattr(args, "acceptance_adaptive", False)))
+            gherkin_adaptive=bool(
+                getattr(args, "gherkin_adaptive", False)))
     except MeasurementError as e:
         return _emit({"tool": "measure.run", "ok": False,
                       "summary": {"error": str(e), "measurement_error": True},
@@ -1220,7 +1219,7 @@ def _diagnose_gate(report: dict) -> tuple[bool, list[dict]]:
 
 
 def cmd_measure_diagnose(args: argparse.Namespace) -> int:
-    """§SPEC-048 diagnostic-only acceptance 计时模式。"""
+    """§SPEC-048 diagnostic-only gherkin 计时模式。"""
     import json as _json
 
     from pathlib import Path as _P
@@ -1283,7 +1282,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --- gherkin（原 accept；SEE-1583 名称回归领域标准，管线不变）---
-    gh = sub.add_parser("gherkin", help="Gherkin acceptance pipeline (SEE-1426 P2)")
+    gh = sub.add_parser("gherkin", help="Gherkin pipeline (SEE-1426 P2)")
     ghsub = gh.add_subparsers(dest="gherkin_command", required=True)
 
     acc = ghsub.add_parser("compile", help=".feature -> versioned IR + generated GUT tests")
@@ -1291,7 +1290,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="path to the .feature file (omit when --keys "
                           "selects the private-suite set, §SPEC-035)")
     acc.add_argument("--project-root", required=True,
-                     help="target Godot project root (writes acceptance/ir + acceptance/generated)")
+                     help="target Godot project root (writes gherkin/ir + gherkin/generated)")
     acc.add_argument("--write", action="store_true",
                      help="opt-in: write ir/generated into the project (contract §6 "
                           "whitelist dirs; omitted = dry compile, summary only)")
@@ -1304,7 +1303,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "or creates a fresh .gqt-run-<uuid> dir")
     acc.add_argument("--out-dir", default=None,
                      help="private suite dir to write into instead of "
-                          "acceptance/ir + acceptance/generated")
+                          "gherkin/ir + gherkin/generated")
     acc.set_defaults(func=cmd_gherkin)
 
     acr = ghsub.add_parser("run", help="replay-check + headless-run the generated suite")
@@ -1314,16 +1313,16 @@ def build_parser() -> argparse.ArgumentParser:
                      help="target Godot project root containing addons/gut/")
     acr.add_argument("--key", default=None,
                      help="feature key the suite was compiled under "
-                          "(required without --suite-dir/--acceptance-probe-keys)")
+                          "(required without --suite-dir/--gherkin-probe-keys)")
     acr.add_argument("--suite-dir", default=None,
                      help="§SPEC-035 private suite dir — run the whole dir "
-                          "(dir = selection set) with acceptance-suite/1 "
+                          "(dir = selection set) with gherkin-suite/1 "
                           "reconciliation")
-    acr.add_argument("--acceptance-probe-keys", nargs="?",
+    acr.add_argument("--gherkin-probe-keys", nargs="?",
                      const="aidomain_integration", default=None,
                      help="W4 cost probe: compile+run these comma-separated "
                           "keys via the private-dir pipeline and emit a "
-                          "performance.acceptance_probe record (default: "
+                          "performance.gherkin_probe record (default: "
                           "aidomain_integration)")
     acr.add_argument("--timeout", type=int, default=120,
                      help="GUT timeout seconds (default 120)")
@@ -1341,7 +1340,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="GUT timeout seconds per mutant round (default 120)")
     acm.add_argument("--worker", action="store_true",
                      help="opt-in true resident-worker channel: the generated "
-                          "accept_worker.gd artifact serves one godot process "
+                          "gherkin_worker.gd artifact serves one godot process "
                           "for the whole matrix via stdin NDJSON + ir_file "
                           "transfer, with per-mutant hard discipline "
                           "(release+rebuild+smoke probe, failure = run_error) "
@@ -1479,7 +1478,7 @@ def build_parser() -> argparse.ArgumentParser:
     can = mssub.add_parser("run", help="dual-arm batch coverage orchestration (SEE-1546 WP3 PR-C)")
     can.add_argument("roots", nargs="+",
                      help="target .gd roots (recursive glob); arms run the "
-                          "full gutconfig face + acceptance suite over them")
+                          "full gutconfig face + gherkin suite over them")
     can.add_argument("--project-root", default=None,
                      help="Godot project root (addons/gut + .gutconfig.json); "
                           "omitted = discover from roots/CWD")
@@ -1501,7 +1500,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "are disclosed as coverage blind spots; limitation "
                           "files name why unstable lanes cannot be "
                           "deterministic (§SPEC-061b/c)")
-    can.add_argument("--acceptance-probe-keys", nargs="?",
+    can.add_argument("--gherkin-probe-keys", nargs="?",
                      const="aidomain_integration", default=None,
                      help="W4 cost probe keys (default: aidomain_integration)")
     can.add_argument("--timeout", type=int, default=180,
@@ -1513,12 +1512,12 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--shard-width", type=int, default=6,
                      help="gut_full parallel shard count (1 = sequential, "
                           "§SPEC-052)")
-    can.add_argument("--acceptance-repeats", type=int, default=3,
-                     help="acceptance arm runs each shard group N times and "
+    can.add_argument("--gherkin-repeats", type=int, default=3,
+                     help="gherkin arm runs each shard group N times and "
                           "takes the line-set union; convergence round is "
                           "disclosed in the report (§SPEC-062C)")
-    can.add_argument("--acceptance-shards", type=int, default=4,
-                     help="acceptance parallel shard count")
+    can.add_argument("--gherkin-shards", type=int, default=4,
+                     help="gherkin parallel shard count")
     can.add_argument("--shard-log-dir", default=None,
                      help="retain per-shard full logs and raw sink copies "
                           "(§SPEC-056)")
@@ -1539,14 +1538,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "instrumented files so their callbacks are "
                           "attributed to the test that created them; "
                           "requires --test-attribution")
-    can.add_argument("--acceptance-adaptive", action="store_true",
-                     help="EXPERIMENTAL (SEE-1581 P1): run acceptance reps "
+    can.add_argument("--gherkin-adaptive", action="store_true",
+                     help="EXPERIMENTAL (SEE-1581 P1): run gherkin reps "
                           "round-by-round and stop early once the line-set "
-                          "union stabilises (bound stays --acceptance-"
+                          "union stabilises (bound stays --gherkin-"
                           "repeats); default off")
     can.add_argument("--arms-parallel", action="store_true",
                      help="EXPERIMENTAL (SEE-1581 P2): run gut_full and "
-                          "acceptance arms concurrently (acceptance is "
+                          "gherkin arms concurrently (gherkin is "
                           "instrumented inside its shard shadows); default "
                           "off — timing baseline must be redefined when "
                           "enabled")
@@ -1555,7 +1554,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cd = mssub.add_parser(
         "diagnose",
-        help="diagnostic-only per-feature acceptance timing under flags "
+        help="diagnostic-only per-feature gherkin timing under flags "
              "instrumentation (§SPEC-048)",
     )
     cd.add_argument("roots", nargs="+",
@@ -1565,7 +1564,7 @@ def build_parser() -> argparse.ArgumentParser:
     cd.add_argument("--recipe", required=True,
                     help="measurement suite json (verify + feature lookup)")
     cd.add_argument("--features", required=True,
-                    help="comma-separated acceptance feature keys")
+                    help="comma-separated gherkin feature keys")
     cd.add_argument("--out", required=True,
                     help="diagnostic report json path (progress written "
                          "after each feature)")

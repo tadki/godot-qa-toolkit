@@ -62,7 +62,7 @@ def test_arm_execute_default(tmp_path, monkeypatch):
 
 def test_arm_execute_shadow_skips_inject(tmp_path, monkeypatch):
     calls = _wire(monkeypatch)
-    arms._arm_execute("acceptance", root=tmp_path, shadow_instrument=True,
+    arms._arm_execute("gherkin", root=tmp_path, shadow_instrument=True,
                       timeout_s=10, adaptive_reps=True, shard_log_dir=None,
                       stage=_stage(tmp_path))
     assert calls["inject"] == 0 and calls["restore"] == 1

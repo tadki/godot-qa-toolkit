@@ -51,7 +51,7 @@ def test_progress_lines_shape(tmp_path, capsys):
     assert re.search(
         r"measure: arm=gut_full done state=(valid|invalid) "
         r"wall_s=[0-9.]+", err), err
-    assert "measure: arm=acceptance start shards=" in err
+    assert "measure: arm=gherkin start shards=" in err
     assert re.search(
-        r"measure: arm=acceptance done state=(valid|invalid) "
+        r"measure: arm=gherkin done state=(valid|invalid) "
         r"wall_s=[0-9.]+", err), err

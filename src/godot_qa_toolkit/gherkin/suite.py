@@ -1,7 +1,7 @@
-"""gherkin 私有目录管线（§SPEC-035，acceptance-suite/1）。
+"""gherkin 私有目录管线（§SPEC-035，gherkin-suite/1）。
 
 选择在编译期完成：compile 把选中 keys 写进一次性私有目录
-`acceptance/generated/.gqt-run-<uuid>/`（事先为空，非空即拒），run 对该
+`gherkin/generated/.gqt-run-<uuid>/`（事先为空，非空即拒），run 对该
 目录整目录执行——目录即选择集，绕开 GUT -gselect 子串碰撞（选 {a} 不会
 误吸 test_ab.gd）。执行前后做对账五项：
 
@@ -13,9 +13,13 @@
 
 五项全过 → 清理零残留（私有目录移除；父目录为本管线创建且已空才一并
 移除，KOL 主 generated 有既有产物则原样保留）；任一不过 → 私有目录保留
-现场、ok=false。主 acceptance/ir|generated 全程只读不碰。W4 成本探针
-（run_acceptance_probe）实测「编译 + 执行」墙钟，产出
-performance.acceptance_probe 记录。
+现场、ok=false。主 gherkin/ir|generated 全程只读不碰。W4 成本探针
+（run_gherkin_probe）实测「编译 + 执行」墙钟，产出
+performance.gherkin_probe 记录。
+
+SEE-1624：features 只从 `addons/gqt_gherkin/features` 单根解析（缺根/
+空集 fail-loud）；run_suite_dir 预检（addon validator 拉起一次）先于
+业务执行。
 """
 
 from __future__ import annotations
@@ -30,14 +34,15 @@ import time
 import uuid
 from pathlib import Path
 
+from .addon import AddonError, features_root, resolve_feature, run_preflight
 from .compile import compile_feature
-from .run import AcceptRunError, _strip_ansi, replay_check
+from .run import GherkinRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.gutrun import _looks_like_godot_launch_failure
 from ..mutation.inject import godot_command, spawn_godot
 
-SUITES_VERSION = "acceptance-suite/1"
-PROBE_VERSION = "acceptance-probe/1"
+SUITES_VERSION = "gherkin-suite/1"
+PROBE_VERSION = "gherkin-probe/1"
 EXTRAPOLATION_ASSUMPTION = "linear-in-feature-count"
 
 
@@ -47,14 +52,14 @@ class SuiteError(Exception):
 
 def create_suite_dir(project_root: str | Path, *,
                      run_uuid: str | None = None) -> Path:
-    """创建一次性私有目录 `<root>/acceptance/generated/.gqt-run-<uuid>/`。
+    """创建一次性私有目录 `<root>/gherkin/generated/.gqt-run-<uuid>/`。
 
     事先为空是硬约束：同路径已存在 = SuiteError（绝不复用旧目录，防旧
     generated 混入选择集）。
     """
     root = Path(project_root)
     token = run_uuid or uuid.uuid4().hex[:12]
-    d = root / "acceptance" / "generated" / f".gqt-run-{token}"
+    d = root / "gherkin" / "generated" / f".gqt-run-{token}"
     if d.exists():
         raise SuiteError(
             f"private suite dir already exists (must be created empty): {d}")
@@ -62,15 +67,8 @@ def create_suite_dir(project_root: str | Path, *,
     return d
 
 
-def _resolve_feature(project_root: Path, key: str) -> Path | None:
-    feats = project_root / "acceptance" / "features"
-    if not feats.is_dir():
-        return None
-    for p in sorted(feats.rglob("*.feature")):
-        if p.stem == key:
-            return p
-    return None
-
+# SEE-1624：features 解析收口到 addon 单根（缺根/空集/未知 key 均具名
+# fail-loud），此处不再持有旧布局常量。
 
 def compile_keys_to_suite(project_root: str | Path, keys: list[str],
                           suite_dir: str | Path) -> dict:
@@ -83,11 +81,7 @@ def compile_keys_to_suite(project_root: str | Path, keys: list[str],
     selected = sorted(set(keys))
     manifests: dict[str, dict] = {}
     for key in selected:
-        f = _resolve_feature(root, key)
-        if f is None:
-            raise SuiteError(
-                f"unknown key: {key} — no acceptance/features entry "
-                f"with that stem")
+        f = resolve_feature(root, key)
         suite, error = compile_feature(f, root, write=True,
                                        out_dir=suite_dir)
         if error is not None:
@@ -137,10 +131,10 @@ def _executed_scripts(gut_output: str) -> dict[str, list[str]]:
 
 
 def _snapshot_main(root: Path) -> dict[str, str]:
-    """主 acceptance/ir|generated 字节级快照（.gqt-run-* 私有目录除外）。"""
+    """主 gherkin/ir|generated 字节级快照（.gqt-run-* 私有目录除外）。"""
     snap: dict[str, str] = {}
-    for d in (root / "acceptance" / "ir",
-              root / "acceptance" / "generated"):
+    for d in (root / "gherkin" / "ir",
+              root / "gherkin" / "generated"):
         if not d.is_dir():
             continue
         for p in sorted(d.rglob("*")):
@@ -157,7 +151,7 @@ def reconcile(project_root: str | Path, suite_dir: str | Path,
               keys: list[str], gut_output: str, *,
               replay_ok: bool = False,
               main_snapshot: dict[str, str] | None = None) -> dict:
-    """acceptance-suite/1 对账五项。纯检查无副作用（清理归 run_suite_dir）。"""
+    """gherkin-suite/1 对账五项。纯检查无副作用（清理归 run_suite_dir）。"""
     root = Path(project_root)
     suite_dir = Path(suite_dir)
     keys = sorted(set(keys))
@@ -225,8 +219,10 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
                   timeout_s: int = 120) -> dict:
     """私有目录全生命周期：重放(R5) → 整目录 GUT 执行 → 对账五项 → 清理。
 
-    任一重放失配 = AcceptRunError（先于 GUT，不执行不可信产物）；对账
+    任一重放失配 = GherkinRunError（先于 GUT，不执行不可信产物）；对账
     不过 = ok=false 且私有目录保留现场；全过 = 清理零残留。
+    SEE-1624 §SPEC-003：入口预检（addon validator 拉起一次）先于重放与
+    业务执行。
     """
     root = Path(project_root).resolve()
     suite_dir = Path(suite_dir).resolve()
@@ -237,7 +233,11 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
         raise SuiteError(f"private suite dir has no compiled manifests: {gen}")
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
-        raise AcceptRunError(f"GUT runner not found: {gut}")
+        raise GherkinRunError(f"GUT runner not found: {gut}")
+    try:
+        run_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     snapshot = _snapshot_main(root)
     for k in keys:
         replay_check(root, k, suite_dir=suite_dir)
@@ -251,12 +251,12 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
                 capture_output=True, text=True, timeout=timeout_s,
                 cwd=str(root))
     except subprocess.TimeoutExpired as e:
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"GUT timed out after {timeout_s}s on private suite dir") from e
     output = _strip_ansi((r.stdout or "") + "\n" + (r.stderr or ""))
     if _looks_like_godot_launch_failure(output):
         tail = "\n".join(output.splitlines()[-10:])
-        raise AcceptRunError(
+        raise GherkinRunError(
             f"godot launch failed on private suite dir: {tail}")
     record = reconcile(root, suite_dir, keys, output,
                        replay_ok=True, main_snapshot=snapshot)
@@ -267,14 +267,20 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     return record
 
 
-def run_acceptance_probe(project_root: str | Path, keys: list[str],
+def run_gherkin_probe(project_root: str | Path, keys: list[str],
                          timeout_s: int = 120) -> dict:
-    """W4 acceptance 成本探针：私有目录管线实测「编译 + 执行」墙钟。"""
+    """W4 gherkin 成本探针：私有目录管线实测「编译 + 执行」墙钟。"""
     root = Path(project_root)
     selected = sorted(set(keys))
     t0 = time.monotonic()
     suite_dir = create_suite_dir(root)
-    compile_keys_to_suite(root, selected, suite_dir)
+    try:
+        compile_keys_to_suite(root, selected, suite_dir)
+    except AddonError as e:
+        # 诊断面具名降级（reason 落 error 键）：发现面违例（缺根/空集/
+        # 未知 key）不冒充测量成功，也不向 CLI 裸抛。
+        return {"probe_version": PROBE_VERSION, "keys": selected,
+                "suite_ok": False, "error": str(e)}
     compile_s = time.monotonic() - t0
     t1 = time.monotonic()
     record = run_suite_dir(root, suite_dir, timeout_s)

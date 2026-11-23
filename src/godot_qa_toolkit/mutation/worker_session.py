@@ -313,6 +313,12 @@ def _dict_or_none(resp: dict, key: str) -> dict | None:
     return resp.get(key) or None
 
 
+def _int_or_none(v) -> int | None:
+    """SEE-1623 H1：可选整数字段原语（tests_ran 缺席 = 旧 worker 协议
+    → None；在值 → int）——与 _dict_or_none 同族拆分先例。"""
+    return int(v) if v is not None else None
+
+
 def _bail_info_of(resp: dict) -> dict | None:
     """SEE-1606 P3（§SPEC-P3-T1 零行为拆分）：早停披露原样透传，缺席
     （None/空）归一为 None——取值语义与拆分前逐位一致。"""
@@ -579,8 +585,7 @@ class WorkerSession:
             gut_ran=bool(resp.get("gut_ran")),
             pass_count=int(resp.get("pass", 0)),
             fail_count=int(resp.get("fail", 0)),
-            tests_ran=(int(resp["tests_ran"])
-                       if resp.get("tests_ran") is not None else None),
+            tests_ran=_int_or_none(resp.get("tests_ran")),
             user_files=list(resp.get("user_files") or []),
             connections=list(resp.get("connections") or []),
             timings=dict(resp.get("timings") or {}),

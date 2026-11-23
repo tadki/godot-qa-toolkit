@@ -306,6 +306,58 @@ def _suspected_draft(pairs: set) -> list:
     return out
 
 
+def _lazy_absorption_meta(lazy_pairs: set, baseline_meta: dict) -> dict:
+    """SEE-1623 M11：懒吸收与预检路径（status=partial + EXCLUDED by name）
+    披露对齐（自 _lazy_baseline_merge 原样搬移）——被基线吸收的红测试具名
+    在场，不再只有「only NEW failures gate」一句话而无名单。"""
+    meta = {**baseline_meta, "status": "partial",
+            "excluded_tests": sorted(
+                f"{s}::{t}" for (s, t) in lazy_pairs)}
+    named = ", ".join(sorted(
+        f"{s}::{t}" for (s, t) in lazy_pairs)[:_BASELINE_TOP_N]
+        or [""])
+    print(f"measure: lazy baseline ABSORBED {len(lazy_pairs)} "
+          f"pre-existing failing pair(s) EXCLUDED by name "
+          f"(top-{min(len(lazy_pairs), _BASELINE_TOP_N)}: {named}); "
+          f"baseline marked partial", file=sys.stderr)
+    return meta
+
+
+def _new_pairs_after_absorption(arm_fail_pairs: set, declared_scoped: set,
+                                effective_baseline: set) -> set:
+    """§SPEC-064a：懒基线吸收后的新增失败重算（自 _lazy_baseline_merge
+    原样搬移）——归因实例被基线/声明覆盖时，其未归因回显随之吸收。"""
+    covered_attributed_names = {
+        t for (s, t) in arm_fail_pairs
+        if s and ((s, t) in effective_baseline
+                  or (s, t) in declared_scoped)}
+
+    def _covered(p: tuple[str, str]) -> bool:
+        if p in declared_scoped or p in effective_baseline:
+            return True
+        return p[0] == "" and p[1] in covered_attributed_names
+
+    return {p for p in arm_fail_pairs if not _covered(p)}
+
+
+def _classify_suspected_intolerance(new_pairs: set) -> set:
+    """SEE-1623 H5：懒基线实测证明「未插桩通过、插桩失败」的失败 → 疑似
+    插桩不耐受车道（自 _lazy_baseline_merge 原样搬移）。身份规范化复用
+    M8 单一出处 canonical_failure_pairs（同一失败的双形态只保留归因形态，
+    车道计数不翻倍），并随 stderr 披露 --intolerant-tests 声明草稿。"""
+    from .orchestrator import canonical_failure_pairs
+
+    suspected = canonical_failure_pairs(new_pairs)
+    draft = _suspected_draft(suspected)
+    print(f"measure: {len(suspected)} failing pair(s) classified "
+          f"suspected_instrumentation_intolerance (pass "
+          f"uninstrumented baseline, fail instrumented) — routed "
+          f"out of new_failures; declaration draft for "
+          f"--intolerant-tests: {json.dumps(draft, ensure_ascii=False)}",
+          file=sys.stderr)
+    return suspected
+
+
 def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
                          timeout_s: int, arm_fail_pairs: set,
                          declared_scoped: set, effective_baseline: set,
@@ -340,49 +392,16 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
     else:
         effective_baseline = effective_baseline | set(lazy_pairs)
         if lazy_pairs:
-            # SEE-1623 M11：懒吸收与预检路径（status=partial + EXCLUDED
-            # by name）披露对齐——被基线吸收的红测试具名在场，不再只有
-            # 「only NEW failures gate」一句话而无名单。
-            baseline_meta = {**baseline_meta, "status": "partial",
-                             "excluded_tests": sorted(
-                                 f"{s}::{t}" for (s, t) in lazy_pairs)}
-            named = ", ".join(sorted(
-                f"{s}::{t}" for (s, t) in lazy_pairs)[:_BASELINE_TOP_N]
-                or [""])
-            print(f"measure: lazy baseline ABSORBED {len(lazy_pairs)} "
-                  f"pre-existing failing pair(s) EXCLUDED by name "
-                  f"(top-{min(len(lazy_pairs), _BASELINE_TOP_N)}: {named}); "
-                  f"baseline marked partial", file=sys.stderr)
-        covered_attributed_names = {
-            t for (s, t) in arm_fail_pairs
-            if s and ((s, t) in effective_baseline
-                      or (s, t) in declared_scoped)}
-
-        def _covered(p: tuple[str, str]) -> bool:
-            if p in declared_scoped or p in effective_baseline:
-                return True
-            return p[0] == "" and p[1] in covered_attributed_names
-
-        new_pairs = {p for p in arm_fail_pairs if not _covered(p)}
+            baseline_meta = _lazy_absorption_meta(lazy_pairs, baseline_meta)
+        new_pairs = _new_pairs_after_absorption(
+            arm_fail_pairs, declared_scoped, effective_baseline)
         print(f"measure: lazy baseline {baseline_meta['count']} "
               f"failing pairs acquired uninstrumented "
               f"({baseline_meta['wall_s']}s) — only NEW failures "
               f"gate the arm", file=sys.stderr)
         if new_pairs:
-            # SEE-1623 H5（身份规范化）：同一失败的未归因回显 ("", t) 与
-            # 归因形态 (s, t) 并存时只保留归因形态——车道计数不翻倍。
-            scripted = {p for p in new_pairs if p[0]}
-            scripted_names = {t for _, t in scripted}
-            suspected = scripted | {p for p in new_pairs
-                                    if not p[0] and p[1] not in scripted_names}
+            suspected = _classify_suspected_intolerance(new_pairs)
             new_pairs = set()
-            draft = _suspected_draft(suspected)
-            print(f"measure: {len(suspected)} failing pair(s) classified "
-                  f"suspected_instrumentation_intolerance (pass "
-                  f"uninstrumented baseline, fail instrumented) — routed "
-                  f"out of new_failures; declaration draft for "
-                  f"--intolerant-tests: {json.dumps(draft, ensure_ascii=False)}",
-                  file=sys.stderr)
     return effective_baseline, baseline_meta, new_pairs, suspected
 
 def _arm_reconcile(root: Path, acceptance: dict | None, results: list[dict],

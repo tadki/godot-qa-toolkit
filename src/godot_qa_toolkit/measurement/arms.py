@@ -774,8 +774,13 @@ def _green_script(pair_script: str, ok_keys: set[str]) -> bool:
 
 def _isolated_green_keys(fb_result: dict, fb_groups: list[dict]
                          ) -> tuple[set[str], bool]:
-    """单例隔离轮：返回 (隔离绿 key 集, 对账 ok)。隔离红 key 不列入。"""
-    fb_rec_ok = bool((fb_result.get("reconciliation") or {}).get("ok", True))
+    """单例隔离轮：返回 (隔离绿 key 集, 对账 ok)。隔离红 key 不列入。
+    §SPEC-025：隔离绿必须以 fallback state=valid 且存在
+    reconciliation.ok is True 为前提——缺证据（None）、invalid、timeout
+    一律不算绿（旧实现缺 reconciliation 默认 ok=True 是假绿通道）。"""
+    fb_rec = fb_result.get("reconciliation")
+    fb_rec_ok = isinstance(fb_rec, dict) and fb_rec.get("ok") is True
+    fb_valid = fb_result.get("state") == "valid"
     ok_keys: set[str] = set()
     for g in fb_groups:
         k = g["keys"][0]
@@ -783,7 +788,7 @@ def _isolated_green_keys(fb_result: dict, fb_groups: list[dict]
         red = [pr for pr in (fb_result.get("test_failures") or {}).get(
             "observed_pairs", [])
             if pr.split("::", 1)[0].endswith(script)]
-        if not red and fb_rec_ok:
+        if not red and fb_rec_ok and fb_valid:
             ok_keys.add(k)
     return ok_keys, fb_rec_ok
 
@@ -838,8 +843,9 @@ def _merge_reconciliation(result: dict, fb_result: dict, fb_rec_ok: bool,
                           ok_keys: set[str]) -> None:
     """两轮 reconciliation 分项并列；gut_ok/state 按合并后残集重算。"""
     shared_rec = result.get("reconciliation") or {}
+    rec_ok = (isinstance(shared_rec, dict)
+              and shared_rec.get("ok") is True) and fb_rec_ok
     fb_rec = fb_result.get("reconciliation") or {}
-    rec_ok = bool(shared_rec.get("ok", True)) and fb_rec_ok
     merged_shards = list(shared_rec.get("shards") or []) + [
         {**sh, "round": "fallback_singleton"}
         for sh in (fb_rec.get("shards") or [])]
@@ -881,7 +887,7 @@ def _fallback_disclosure(result: dict, fb_groups: list[dict]) -> list[dict]:
         return []
     rec = result.get("reconciliation") or {}
     fb_round = rec.get("fallback_round") or {}
-    if not bool(fb_round.get("ok", True)):
+    if fb_round.get("ok") is not True:
         return []
     fb_keys = {g["keys"][0] for g in fb_groups}
     return sorted(
@@ -911,13 +917,20 @@ def _finish_acceptance_result(result: dict, harness_dest: Path | None,
 
 def _acceptance_error_result(e: Exception, groups: list[dict],
                              harness_dest: Path | None) -> dict:
-    """异常路径：回收已建 suite 与 harness 契约位并组装 invalid 结果。"""
+    """异常路径：回收已建 suite 与 harness 契约位并组装 invalid 结果。
+    §SPEC-025：清理失败 = 残留 = 具名 suite_residue，不得静默。"""
+    residue: list[str] = []
     for g in groups:
-        _cleanup_suite_dir(Path(g["suite_dir"]))
+        try:
+            _cleanup_suite_dir(Path(g["suite_dir"]))
+        except OSError as ce:
+            residue.append(f"{g['suite_dir']}: {ce}")
     reason = f"suite_error:{e}"
     cleanup_err = _cleanup_acceptance_harness(harness_dest)
     if cleanup_err:
         reason += f" | {cleanup_err}"
+    if residue:
+        reason += f" | suite_residue: {'; '.join(residue)}"
     return {"arm": "acceptance", "run_uuid": None, "wall_s": 0.0,
             "gut_ok": False, "timed_out": False, "state": "invalid",
             "invalid_reason": reason, "process_fallbacks": [],
@@ -939,6 +952,7 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         f["key"] for f in recipe["acceptance_face"]["features"]]
     snapshot = _snapshot_main(root)
     groups: list[dict] = []
+    fb_groups: list[dict] = []
     harness_dest: Path | None = None
     cleanup_done = False
     try:
@@ -964,7 +978,6 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         # singleton 隔离复跑；隔离绿 = process_fallbacks 具名披露，隔离
         # 红 = 保持红（不得包装为有效降级）。全原子时为空数组。
         failed = _failed_keys(result, groups)
-        fb_groups: list[dict] = []
         if failed:
             for k in failed:
                 sd = create_suite_dir(root)
@@ -984,7 +997,11 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         cleanup_done = True
         return _finish_acceptance_result(result, harness_dest, fb_groups)
     except (SuiteError, AcceptRunError, MeasurementError) as e:
-        result = _acceptance_error_result(e, groups, harness_dest)
+        # §SPEC-025：异常路径必须连 fallback singleton suite 一并回收
+        # （旧实现只清 shared groups，cleanup_done=True 跳过 finally，
+        # 第二个 singleton 编译失败时前一个 singleton 目录泄漏）。
+        result = _acceptance_error_result(e, groups + fb_groups,
+                                          harness_dest)
         cleanup_done = True
         return result
     finally:
@@ -994,7 +1011,7 @@ def run_acceptance_flow(*, root: Path, recipe: dict,
         # 已显式清理的路径由 cleanup_done 跳过（成功路径 suites 由
         # run_arm 读回段清理）。
         if not cleanup_done:
-            for g in groups + (fb_groups if "fb_groups" in locals() else []):
+            for g in groups + fb_groups:
                 try:
                     _cleanup_suite_dir(Path(g["suite_dir"]))
                 except OSError as e:

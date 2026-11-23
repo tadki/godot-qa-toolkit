@@ -98,6 +98,31 @@ class TestCheckBaselinePlanOnly:
         assert h["status"] == "not_checked"
         assert h["reason"] == "check_baseline_not_requested"
 
+    def test_plan_only_health_delegates_to_real_precondition(self, tmp_path,
+                                                             monkeypatch):
+        """M3 判别补强：plan-only 早退形态的基线健康必须委派真实前置检查
+        （此前早退形态零发生，恒返 not_checked 也算通过）。用哨兵值证明
+        `_plan_only_baseline_health` 确实调用 `_baseline_health_precondition`
+        并把结果原样透出，而非硬编码 not_checked。"""
+        from godot_qa_toolkit.mutation import runner as runner_mod
+        from godot_qa_toolkit.cli import _plan_only_baseline_health
+        sentinel = {"status": "red", "count": 2,
+                    "top": ["res://t/x.gd::test_a", "res://t/x.gd::test_b"],
+                    "face": "tests_face", "wall_s": 0.1}
+        seen: dict = {}
+
+        def spy(project_root, timeout_s):
+            seen["project_root"] = project_root
+            seen["timeout_s"] = timeout_s
+            return dict(sentinel)
+
+        monkeypatch.setattr(runner_mod, "_baseline_health_precondition", spy)
+        args = type("A", (), {"project_root": str(tmp_path),
+                              "timeout": 7})()
+        assert _plan_only_baseline_health(args) == sentinel
+        assert seen["project_root"] == str(tmp_path)
+        assert seen["timeout_s"] == 7
+
 
 class TestFailOnRedWiring:
     def test_fail_on_red_or_break_on_passed(self, tmp_path, monkeypatch):

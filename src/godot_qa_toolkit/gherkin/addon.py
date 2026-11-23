@@ -205,4 +205,3 @@ def run_validator_preflight(project_root: str | Path,
             f"this GQT's supported set {expected!r} — supported-set drift "
             f"is rejected")
     return verdict
-

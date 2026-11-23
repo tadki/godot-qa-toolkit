@@ -45,7 +45,7 @@ def _stub_flow(monkeypatch, tmp_path: Path) -> None:
     def fake_suite_dir(r):
         n = counter["n"]
         counter["n"] += 1
-        d = (Path(tmp_path) / "gherkin" / "generated" / f".gqt-run-{n}")
+        d = (Path(r) / "gherkin" / "generated" / f".gqt-run-{n}")
         d.mkdir(parents=True, exist_ok=True)
         # 所有权标记内容 = 目录名（绑定身份契约）
         (d / ".gqt-owner").write_text(d.name + "\n", encoding="utf-8")

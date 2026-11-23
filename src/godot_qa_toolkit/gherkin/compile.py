@@ -507,7 +507,7 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
         if out.exists():
             if not out.is_dir():
                 return None, {"reason": f"out_dir is not a directory: {out}"}
-            if any(out.iterdir()) and not is_owned_suite_dir(out):
+            if any(out.iterdir()) and not is_owned_suite_dir(out, root):
                 return None, {"reason": (
                     f"out_dir must be empty: {out} — caller-owned dirs are "
                     f"never cleared or deleted by gqt")}

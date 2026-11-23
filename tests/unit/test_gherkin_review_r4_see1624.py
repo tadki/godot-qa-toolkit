@@ -130,11 +130,11 @@ def test_cleanup_suite_dir_only_removes_owned_shape(
     caller = project / "not-owned"
     caller.mkdir()
     (caller / "data.txt").write_text("x", encoding="utf-8")
-    result = _cleanup_suite_dir(caller)
+    result = _cleanup_suite_dir(caller, project)
     assert result == "kept-caller-owned"
     assert caller.is_dir() and (caller / "data.txt").is_file()
     owned = create_suite_dir(project)
-    assert _cleanup_suite_dir(owned) == "removed"
+    assert _cleanup_suite_dir(owned, project) == "removed"
     assert not owned.exists()
 
 

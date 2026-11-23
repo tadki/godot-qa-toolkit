@@ -339,9 +339,20 @@ def _gherkin_domain_precheck(args: argparse.Namespace) -> int | None:
 
     from .gherkin.addon import AddonError, compile_preflight, resolve_feature
     from .gherkin.run import GherkinRunError, replay_check
-    from .gherkin.suite import SuiteError
+    from .gherkin.suite import SuiteError, ensure_suite_dir_in_project
     root = getattr(args, "directory", None) or args.project_root
     root_p = _P(root)
+    if getattr(args, "suite_dir", None):
+        # §SPEC-019 DEF-2：containment 必须先于一切读取（含重放）——项目外
+        # suite-dir 具名失败，不 glob、不 replay。
+        try:
+            ensure_suite_dir_in_project(root_p, args.suite_dir)
+        except SuiteError as e:
+            return _emit({
+                "tool": "gherkin", "ok": False,
+                "summary": {"error": str(e), "suite_error": True},
+                "failures": [{"reason": f"suite_error: {e}"}],
+            })
     schema_exists = (root_p / "addons" / "gqt_gherkin" /
                       "schema.json").is_file()
     manifests = []

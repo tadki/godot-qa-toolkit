@@ -235,3 +235,110 @@ def test_driver_refuses_duplicate_round_with_exit_2(
                                  tmp_path / "recipe.json", report)
     assert rc == 2, "重复轮必须具名拒绝 exit 2"
     assert "duplicate round" in capsys.readouterr().err
+
+
+# ---------- §SPEC-028：batch 出口必须服从合并后的 summary 门 ----------
+
+def _load_driver():
+    import importlib.util
+    script = Path(__file__).resolve().parents[1] / "integration" / \
+        "run_see1619_acceptance_perf.py"
+    spec = importlib.util.spec_from_file_location("perf_driver_s", script)
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    return driver
+
+
+def _batch_args(tmp_path, report):
+    return argparse.Namespace(gqt="unused", godot="unused", timeout=60,
+                              shards_a=4, roots=None, mode="A",
+                              round_index=1, report=report)
+
+
+def _seed_report(report: Path, rounds: list[dict]) -> None:
+    report.write_text(json.dumps(
+        {"doc": "see1619-acceptance-perf/1", "rounds": rounds}),
+        encoding="utf-8")
+
+
+def _eight_round_prefix(b_wall: float) -> list[dict]:
+    """追加一轮 shared 即凑满 9 轮（3 A/A + 3 对）的前缀。"""
+    return [_round("A1", "shared", 30.0), _round("A2", "shared", 30.0),
+            _round("A3", "shared", 30.0),
+            _round("B1", "per_feature", b_wall),
+            _round("A101", "shared", 30.0),
+            _round("B2", "per_feature", b_wall),
+            _round("A102", "shared", 30.0),
+            _round("B3", "per_feature", b_wall)]
+
+
+def _append_round(driver, monkeypatch, tmp_path, report, wall, rtype="A",
+                  ridx=103):
+    monkeypatch.setattr(driver, "_acceptance_wall",
+                        lambda *a, **k: {"valid": True, "rc": 0,
+                                         "acceptance_wall_s": wall,
+                                         "shards": 4, "repeats": 3})
+    return driver.run_single_round(
+        _batch_args(tmp_path, report), rtype, ridx, tmp_path, 44,
+        tmp_path / "recipe.json", report)
+
+
+def test_batch_complete_regressed_report_exits_nonzero(
+        tmp_path, monkeypatch, capsys):
+    """§SPEC-028 HIGH：9 轮全 valid 但 B/A=0.333（speed_gate 失败）的
+    完整报告，batch 必须 exit≠0——round valid 不等于报告合格。"""
+    driver = _load_driver()
+    report = tmp_path / "perf.json"
+    _seed_report(report, _eight_round_prefix(b_wall=10.0))
+    rc = _append_round(driver, monkeypatch, tmp_path, report, wall=30.0)
+    doc = json.loads(report.read_text(encoding="utf-8"))
+    assert doc["summary"]["rounds_complete"] is True
+    assert doc["summary"]["verdict"] == "INCONCLUSIVE"
+    assert rc == 1, "完整但不合格的报告不得 exit 0"
+    assert "INCONCLUSIVE report" in capsys.readouterr().err
+
+
+def test_batch_complete_improved_report_exits_zero(tmp_path, monkeypatch):
+    """改善超噪声的完整报告 batch 必须 exit 0（不回归）。"""
+    driver = _load_driver()
+    report = tmp_path / "perf.json"
+    _seed_report(report, _eight_round_prefix(b_wall=200.0))
+    rc = _append_round(driver, monkeypatch, tmp_path, report, wall=30.0)
+    doc = json.loads(report.read_text(encoding="utf-8"))
+    assert doc["summary"]["verdict"] == "MEASURED"
+    assert rc == 0
+
+
+def test_batch_intermediate_round_resumable_with_explicit_note(
+        tmp_path, monkeypatch, capsys):
+    """合法中间轮：报告不完整时 exit 0 且必须显式提示可 resume——收尾
+    语义（最终以全量模式重读 verdict）写明，不得假绿。"""
+    driver = _load_driver()
+    report = tmp_path / "perf.json"
+    _seed_report(report, [])
+    rc = _append_round(driver, monkeypatch, tmp_path, report, wall=30.0,
+                       rtype="A", ridx=1)
+    err = capsys.readouterr().err
+    assert rc == 0, "中间轮必须可 resume"
+    assert "report incomplete" in err and "resume" in err, \
+        "不完整报告必须显式提示 resume 语义"
+
+
+def test_batch_orphan_b_disclosed_and_resumable(tmp_path, monkeypatch,
+                                                capsys):
+    """孤立 B：显式披露待配对，仍可 resume（后继 shared A 可配对），
+    但不得静默——提示必须点名。"""
+    driver = _load_driver()
+    report = tmp_path / "perf.json"
+    _seed_report(report, [_round("A1", "shared", 30.0),
+                          _round("A2", "shared", 30.0),
+                          _round("A3", "shared", 30.0),
+                          _round("B1", "per_feature", 200.0),
+                          _round("A101", "shared", 30.0)])
+    rc = _append_round(driver, monkeypatch, tmp_path, report, wall=200.0,
+                       rtype="B", ridx=2)
+    err = capsys.readouterr().err
+    doc = json.loads(report.read_text(encoding="utf-8"))
+    assert doc["summary"]["orphan_b_rounds"] == ["B2"]
+    assert rc == 0, "孤立 B 可被后继 A 修复，中间态可 resume"
+    assert "unpaired B" in err and "B2" in err, "孤立 B 必须显式披露"

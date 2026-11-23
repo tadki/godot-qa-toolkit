@@ -347,6 +347,24 @@ def _bail_info_of(resp: dict) -> dict | None:
     return _dict_or_none(resp, "bail")
 
 
+def _project_include_subdirs(project_root: str) -> bool:
+    """项目 `.gutconfig.json#include_subdirs`（GUT 缺省配置面
+    `res://.gutconfig.json`，见 gut_config.gd:20/36）。
+
+    SEE-1627 §SPEC-007：冷通道经 `gut_cmdln` 读该项目配置——显式 `--tests
+    <dir>` 面 recursion 由此决定；worker 直驱不读配置，须在 Python 侧复刻，
+    使显式目录面的子目录递归与冷通道对齐。缺失/不可读/非法一律回落 false
+    （GUT 缺省），零副作用。"""
+    try:
+        raw = (Path(project_root) / ".gutconfig.json").read_text(
+            encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return False
+    return bool(data.get("include_subdirs", False)) if isinstance(data, dict) \
+        else False
+
+
 @dataclass
 class WorkerLegResult:
     """单腿结果（引擎回报 + Python 侧解析）。"""
@@ -514,6 +532,25 @@ class WorkerSession:
 
     # -- 单腿执行 -------------------------------------------------------
 
+    def _tests_recurse(self, tests_glob: str | None) -> bool:
+        """SEE-1627：worker 腿目录收集递归决策（与冷通道逐面对齐）。
+
+        - full 审计面（tests_glob=None）恒递归——冷通道恒附加
+          `-ginclude_subdirs`，CLI 旗标覆盖项目配置。
+        - `.gd` 形态恒单脚本精确（宿主走 add_script，无需目录扫描）。
+        - 显式目录面复刻冷通道 gut_cmdln 读取的项目
+          `.gutconfig.json#include_subdirs`（含空串＝显式根目录面）；
+          会话内缓存（项目根固定），缺失/false 即非递归。"""
+        if tests_glob is None:
+            return True
+        if tests_glob.endswith(".gd"):
+            return False
+        cached = getattr(self, "_dir_recurse_cache", None)
+        if cached is None:
+            cached = _project_include_subdirs(self.project_root)
+            self._dir_recurse_cache = cached
+        return cached
+
     def run_leg(self, leg: int, target_res: str, mutant_sha256: str,
                 closure: list[str], tests_glob: str | None,
                 tests_scripts: list[str] | None = None,
@@ -539,10 +576,10 @@ class WorkerSession:
             "mutant_sha256": mutant_sha256,
             "closure": list(closure),
             "tests_glob": tests_glob or "res://tests/",
-            # SEE-1627 §SPEC-002：full 审计面（tests_glob=None）必须递归收集，
-            # 与冷通道 `-ginclude_subdirs` 逐字对齐；显式目录 `--tests` 与
-            # `.gd` 形态不递归（`.gd` 走 add_script，无需目录扫描）。
-            "tests_recurse": tests_glob is None,
+            # SEE-1627 §SPEC-002/§SPEC-007：递归决策对齐冷通道——full 面
+            # 恒递归（`-ginclude_subdirs`）；`.gd` 单脚本精确；显式目录面
+            # 复刻项目 `.gutconfig.json#include_subdirs`（见 `_tests_recurse`）。
+            "tests_recurse": self._tests_recurse(tests_glob),
         }
         if tests_scripts:
             req["tests_scripts"] = [str(s) for s in tests_scripts]

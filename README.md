@@ -101,7 +101,7 @@ Typical calls:
 
 ```bash
 # Gherkin acceptance: compile, run, contract-mutate
-gqt gherkin compile acceptance/foo.feature --project-root . --write
+gqt gherkin compile addons/gqt_gherkin/features/foo.feature --project-root . --write
 gqt gherkin run    --project-root . --key foo
 gqt gherkin mutate --project-root . --key foo
 

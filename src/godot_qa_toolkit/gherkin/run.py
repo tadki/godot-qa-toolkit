@@ -19,7 +19,8 @@ from pathlib import Path
 
 from . import OPS_VERSION
 from .compile import GENERATED_DIR, WORKER_FILENAME, sha256_of
-from .addon import AddonError, compile_preflight, run_validator_preflight
+from .addon import (AddonError, compile_preflight, features_root,
+                    normalize_feature_key, run_validator_preflight)
 from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
 from ..mutation.inject import godot_command, spawn_godot
 from ..mutation.godot_gate import GlobalGodotGate
@@ -31,6 +32,27 @@ class GherkinRunError(Exception):
 
 def _project_gd_path(project_root: Path, res: str) -> Path:
     return project_root / res.removeprefix("res://")
+
+
+def _contained_path(project_root: Path, value: str, what: str) -> Path:
+    """manifest 内路径必须留在项目根内（Final Review #2：路径逃逸）。
+
+    绝对路径、`..` 逃逸、symlink 指向项目外一律具名拒绝——replay 不得
+    信任 manifest 自述的 ir_path/source_path。"""
+    raw = str(value or "")
+    rel = raw.removeprefix("res://")
+    root = project_root.resolve()
+    candidate = Path(rel)
+    resolved = (candidate if candidate.is_absolute()
+                else (root / rel)).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise GherkinRunError(
+            f"{what} outside the project root: {raw} — paths outside the "
+            f"project root are rejected (absolute and '..' escapes both "
+            f"refused)") from None
+    return resolved
 
 
 def replay_check(project_root: str | Path, feature_key: str,
@@ -58,16 +80,36 @@ def replay_check(project_root: str | Path, feature_key: str,
         compile_preflight(root)
     except AddonError as e:
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    # 键规范化全链一致（Final Review #11）：请求键与产物键同源。
+    feature_key = normalize_feature_key(feature_key)
     gen_dir = (Path(suite_dir) / "generated") if suite_dir is not None \
         else root / GENERATED_DIR
     man_path = gen_dir / f"{feature_key}.manifest.json"
     if not man_path.is_file():
         raise GherkinRunError(f"manifest missing: {man_path}")
-    manifest = json.loads(man_path.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(man_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise GherkinRunError(
+            f"manifest unreadable or corrupt: {man_path} "
+            f"({type(e).__name__}: {e}) — recompile with "
+            f"gqt gherkin compile --write") from e
+    if not isinstance(manifest, dict):
+        raise GherkinRunError(
+            f"manifest unreadable or corrupt: {man_path} (not a JSON "
+            f"object) — recompile with gqt gherkin compile --write")
     if manifest.get("ops_version") != OPS_VERSION:
         raise GherkinRunError(
             f"manifest ops_version {manifest.get('ops_version')!r} != {OPS_VERSION!r}")
-    ir_path = _project_gd_path(root, manifest["ir_path"])
+    # 键绑定（Final Review #2）：manifest 自述的 feature_key 必须与请求键
+    # 一致——伪造 manifest 不得换绑到别的产物。
+    bound_key = manifest.get("feature_key")
+    if bound_key != feature_key:
+        raise GherkinRunError(
+            f"manifest feature_key {bound_key!r} does not match requested "
+            f"key {feature_key!r} — artifact key binding mismatch")
+    ir_path = _contained_path(root, manifest.get("ir_path", ""),
+                              "manifest ir_path")
     if not ir_path.is_file():
         raise GherkinRunError(f"IR file missing: {ir_path}")
     gd_path = gen_dir / f"test_{feature_key}.gd"
@@ -111,7 +153,18 @@ def replay_check(project_root: str | Path, feature_key: str,
 def _reanchor_check(root: Path, manifest: dict, ir_hash: str) -> None:
     """重锚对抗：源 .feature 重编译哈希必须与磁盘 IR 一致。"""
     from .compile import build_ir
-    src = Path(manifest.get("source_path", ""))
+    try:
+        src = _contained_path(root, manifest.get("source_path", ""),
+                              "manifest source_path")
+    except GherkinRunError as e:
+        raise GherkinRunError(
+            f"manifest source outside the strict single root: {e}") from e
+    allowed = features_root(root).resolve()
+    if src.parent != allowed:
+        raise GherkinRunError(
+            f"manifest source outside the strict single root: {src} — "
+            f"re-anchoring is only allowed for sources under "
+            f"addons/gqt_gherkin/features/")
     if not src.is_file():
         raise GherkinRunError(
             f"source feature missing: {src} — manifest cannot be re-anchored "

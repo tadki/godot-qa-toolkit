@@ -52,7 +52,7 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 - run report: each `crap.records[]` entry carries `function_id`, `cc`,
   `covered`, `total`, `coverage`, `score_status`, `coverage_semantics`,
   `crap_line{score, …}`; `crap.summary` carries `functions`, `scored`, `lanes`.
-- risk report: `shadow/1` + `crap-line/1`, a score-descending ranking signal.
+- risk report: `shadow/2` + `crap-line/1`, a score-descending ranking signal.
 - `coverage_semantics`: `statement_start_line` = exact per-statement start
   lines; `block_entry_approximation` = block-entry hits expanded to in-block
   statements — never treat the approximation as exact per-statement data.

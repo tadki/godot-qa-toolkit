@@ -98,7 +98,7 @@ def test_report_document_key_order_is_frozen():
         "records",
     ]
     assert doc["report"] == "shadow-report"
-    assert doc["version"] == "shadow/1"
+    assert doc["version"] == "shadow/2"
     assert doc["metric"] == "crap_line"
     assert doc["metric_version"] == "crap-line/1"
     assert doc["evidence_level"] == "exploratory"

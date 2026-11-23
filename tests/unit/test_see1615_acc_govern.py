@@ -2,7 +2,7 @@
 
 九类 failure_class 分派、四象限红分类（同上下文无插桩 replay：
 签名不同/红转绿归 non_deterministic_replay 不得豁免）、
-acceptance_scenarios 不耐受声明与草稿闭环、证据块四态与 union 降级、
+gherkin_scenarios 不耐受声明与草稿闭环、证据块四态与 union 降级、
 空证据不误判收敛。
 """
 
@@ -14,7 +14,7 @@ from godot_qa_toolkit.measurement import acc_govern as ag
 from godot_qa_toolkit.measurement.acc_govern import (
     acceptance_evidence_block, acceptance_identity,
     classify_acceptance_failure, classify_red_quadrant, intolerant_draft,
-    parse_acceptance_scenarios)
+    parse_gherkin_scenarios)
 from godot_qa_toolkit.measurement.backup import MeasurementError
 from godot_qa_toolkit.measurement.orchestrator import _parse_intolerant_config
 
@@ -85,13 +85,13 @@ def test_quadrant_green_without_baseline_is_green():
 
 # ------------------------------------ acceptance_scenarios 声明与草稿闭环
 
-def test_acceptance_scenarios_parse_and_identity():
-    cfg = {"acceptance_scenarios": [
+def test_gherkin_scenarios_parse_and_identity():
+    cfg = {"gherkin_scenarios": [
         {"feature": "infi.feature", "scenario": "share flow",
          "scenario_line": 12, "example_row_line": 18,
          "reason": "source-contract assertion"},
     ]}
-    out = parse_acceptance_scenarios(cfg)
+    out = parse_gherkin_scenarios(cfg)
     assert out[0]["feature"] == "infi.feature"
     assert out[0]["scenario_line"] == 12
     assert out[0]["example_row_line"] == 18
@@ -99,29 +99,29 @@ def test_acceptance_scenarios_parse_and_identity():
     assert ident == "infi.feature::share flow@12#18"
 
 
-def test_acceptance_scenarios_validation_rejects_silent_exemption():
+def test_gherkin_scenarios_validation_rejects_silent_exemption():
     with pytest.raises(ValueError):
-        parse_acceptance_scenarios({"acceptance_scenarios": "nope"})
+        parse_gherkin_scenarios({"gherkin_scenarios": "nope"})
     with pytest.raises(ValueError):
-        parse_acceptance_scenarios({"acceptance_scenarios": [
+        parse_gherkin_scenarios({"gherkin_scenarios": [
             {"feature": "f", "scenario": "s"}]})  # 缺 reason
     with pytest.raises(ValueError):
-        parse_acceptance_scenarios({"acceptance_scenarios": [
+        parse_gherkin_scenarios({"gherkin_scenarios": [
             {"feature": "", "scenario": "s", "reason": "r"}]})
 
 
-def test_intolerant_config_merges_acceptance_scenarios():
+def test_intolerant_config_merges_gherkin_scenarios():
     cfg = {"tests": [{"name": "t1", "reason": "r1"}],
-           "acceptance_scenarios": [
+           "gherkin_scenarios": [
                {"feature": "f", "scenario": "s", "reason": "r"}]}
     tests, scoped, bare, _limits = _parse_intolerant_config(cfg)
     names = {t["name"] for t in tests}
     assert "t1" in names and "f::s" in names
-    acc = [t for t in tests if t.get("acceptance")]
-    assert acc and acc[0]["acceptance"]["feature"] == "f"
+    acc = [t for t in tests if t.get("gherkin")]
+    assert acc and acc[0]["gherkin"]["feature"] == "f"
     # 声明校验失败 → MeasurementError（不得静默吸收）
     with pytest.raises(MeasurementError):
-        _parse_intolerant_config({"acceptance_scenarios": [
+        _parse_intolerant_config({"gherkin_scenarios": [
             {"feature": "f", "scenario": "s"}]})
 
 
@@ -129,9 +129,9 @@ def test_intolerant_draft_roundtrip():
     entries = [{"feature": "f", "scenario": "s", "scenario_line": 3,
                 "example_row_line": 5}]
     draft = intolerant_draft(entries)
-    assert draft["acceptance_scenarios"][0]["scenario_line"] == 3
+    assert draft["gherkin_scenarios"][0]["scenario_line"] == 3
     # 草稿可直接被声明解析器接受（闭环）
-    assert parse_acceptance_scenarios(draft)[0]["scenario"] == "s"
+    assert parse_gherkin_scenarios(draft)[0]["scenario"] == "s"
 
 
 # ------------------------------------------ 证据块四态与空证据防假收敛
@@ -167,3 +167,12 @@ def test_empty_evidence_never_converged():
                                             rounds=0, attempted=0)):
         assert block["state"] != "valid"
         assert block["converged"] is None
+
+
+def test_retired_acceptance_scenarios_key_rejected():
+    """SEE-1624 D-n4：旧键 `acceptance_scenarios` 退役——仍存在即具名拒绝
+    （禁止静默忽略导致新键被读成空集）。"""
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="retired"):
+        parse_gherkin_scenarios({"acceptance_scenarios": [
+            {"feature": "f", "scenario": "s", "reason": "r"}]})

@@ -75,7 +75,7 @@ def project(tmp_path: Path) -> Path:
 
 def test_compile_preflight_passes_on_valid_schema(project: Path) -> None:
     verdict = compile_preflight(project)
-    assert verdict["schema_version"] == SCHEMA_VERSION
+    assert verdict["schema"] == "gqt-gherkin-addon/1.0"
 
 
 def test_compile_spawns_zero_godot_processes(project: Path,
@@ -107,9 +107,9 @@ def test_missing_schema_is_named_failure(project: Path) -> None:
 def test_unsupported_schema_major_fails(project: Path,
                                         bad_version: str) -> None:
     src = write_feature(project, "demo")
-    doc = {"schema_version": bad_version,
-           "requires": {"gqt": "v0.4.0",
-                        "testing_api": "see1468-gherkin/2"}}
+    doc = {"schema": bad_version,
+           "requires_gqt": "v0.4.0",
+           "testing_api": "see1468-gherkin/2"}
     (project / "addons" / "gqt_gherkin" /
      "schema.json").write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(AddonError, match="major"):
@@ -120,32 +120,32 @@ def test_unsupported_schema_major_fails(project: Path,
 
 
 def test_requires_too_high_fails(project: Path) -> None:
-    doc = {"schema_version": SCHEMA_VERSION,
-           "requires": {"gqt": "v9.9.9",
-                        "testing_api": "see1468-gherkin/2"}}
+    doc = {"schema": "gqt-gherkin-addon/1.0",
+           "requires_gqt": "v9.9.9",
+           "testing_api": "see1468-gherkin/2"}
     (project / "addons" / "gqt_gherkin" /
      "schema.json").write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(AddonError, match="requires"):
         compile_preflight(project)
 
 
-@pytest.mark.parametrize("missing", ["gqt", "testing_api"])
+@pytest.mark.parametrize("missing", ["requires_gqt", "testing_api"])
 def test_missing_required_declaration_fails(project: Path,
                                             missing: str) -> None:
-    doc = {"schema_version": SCHEMA_VERSION,
-           "requires": {"gqt": "v0.4.0",
-                        "testing_api": "see1468-gherkin/2"}}
-    del doc["requires"][missing]
+    doc = {"schema": "gqt-gherkin-addon/1.0",
+           "requires_gqt": "v0.4.0",
+           "testing_api": "see1468-gherkin/2"}
+    doc.pop(missing)
     (project / "addons" / "gqt_gherkin" /
      "schema.json").write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(AddonError, match="requires"):
+    with pytest.raises(AddonError, match=missing):
         compile_preflight(project)
 
 
 def test_testing_api_token_drift_fails(project: Path) -> None:
-    doc = {"schema_version": SCHEMA_VERSION,
-           "requires": {"gqt": "v0.4.0",
-                        "testing_api": "see1468-accept/2"}}
+    doc = {"schema": "gqt-gherkin-addon/1.0",
+           "requires_gqt": "v0.4.0",
+           "testing_api": "see1468-accept/2"}
     (project / "addons" / "gqt_gherkin" /
      "schema.json").write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(AddonError, match="testing_api"):

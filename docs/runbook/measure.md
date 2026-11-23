@@ -51,7 +51,7 @@ path is skipped when preflight has already produced the failing-pair set).
 `--test-attribution` runs. The acceptance arm has `state=disabled`,
 `stage_timings.gherkin_arm` is `0.0`, and the report field
 `report.gherkin_arm = "disabled_pending_atomization — gherkin arm
-paused by default; restore via GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0 once
+paused by default; restore via GQT_MEASUREMENT_GHERKIN_DISABLED=0 once
 SEE-1619 atomization lands"` discloses the pause.
 
 While paused, an ordinary run without `--test-attribution` uses single-arm
@@ -61,7 +61,7 @@ with `certification=uncertified` and
 arm returns `ok=false` / exit `1`. Attribution runs retain their
 `attribution_usable` semantics, and an explicitly restored dual-arm run keeps
 the union semantics. To restore acceptance measurement, set
-`GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0` after SEE-1619 has landed; the default
+`GQT_MEASUREMENT_GHERKIN_DISABLED=0` after SEE-1619 has landed; the default
 (unset or `1`) keeps the arm paused.
 
 **Target universe anchoring**: positional roots are anchored to the
@@ -81,7 +81,7 @@ whole project root (<root>)`. The fallback is named, not silent.
 ## Typical examples
 
 ```bash
-# 1) Build the suite definition (read-only, measurement-suite/2;
+# 1) Build the suite definition (read-only, measurement-suite/3;
 #    default output ./recipe.json)
 gqt measure suite --project-root . --out recipe.json
 # Exclusions require a reason (an empty reason is an invalid recipe)
@@ -118,10 +118,10 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 - `tool` is `measure.suite` / `measure.run` / `measure.diagnose` /
   `measure.map-update` respectively.
-- suite: `measurement-suite/2`, with `gut_face`, `gherkin_face`,
+- suite: `measurement-suite/3`, with `gut_face`, `gherkin_face`,
   `toolchain`, `exclusions`, `recipe_hash` (identical content hashes
   identically across paths).
-- run: `measurement-report/2`, with `crap` records (see crap.md) and
+- run: `measurement-report/3`, with `crap` records (see crap.md) and
   active-arm coverage data; a restored dual-arm run carries the two-arm
   coverage union. Every report remains
   `certification.status="not_certified"`, `evidence_level="exploratory"`,
@@ -262,13 +262,13 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 ## Acceptance performance harness (SEE-1619)
 
-`tests/integration/run_see1619_acceptance_perf.py` compares the **shared-shard
+`tests/integration/run_see1619_gherkin_perf.py` compares the **shared-shard
 and per-feature process shapes within the same gqt branch** (not a cross-version
 master comparison) on the same KOL input, reps, concurrency and an isolated
 store, never extrapolating wall clock from process counts:
 
 ```bash
-PYTHONPATH=src python3 -I tests/integration/run_see1619_acceptance_perf.py \
+PYTHONPATH=src python3 -I tests/integration/run_see1619_gherkin_perf.py \
   --project-root <kol-copy> --godot "$GODOT" --aa 3 --rounds 3 \
   --report <work>/acceptance-perf.json
 ```
@@ -311,8 +311,8 @@ acceptance arm is explicitly restored; while paused, that arm stays disabled.
 |---|---|---|
 | `<roots...>` (positional) | required | Target `.gd` roots (recursive glob); `gut_full` runs the full gutconfig face, while acceptance runs only when explicitly restored from its default pause |
 | `--project-root <root>` | discover from roots/CWD | Project root containing `addons/gut` + `.gutconfig.json`; explicit value wins |
-| `--recipe <path>` | required | `measurement-suite/2` JSON from `gqt measure suite` |
-| `--out <path>` | required | `measurement-report/2` output JSON path |
+| `--recipe <path>` | required | `measurement-suite/3` JSON from `gqt measure suite` |
+| `--out <path>` | required | `measurement-report/3` output JSON path |
 | `--baseline-failures <path>` | omitted | JSON of pre-existing un-instrumented failing `(script, test)` pairs; new failing pairs gate the arm; bare names are rejected as ambiguous |
 |  |  | Without it, the gut_full arm **lazily** acquires the baseline only when the instrumented arm observed failures (one same-face uninstrumented GUT run; green arms pay zero extra GUT); acquisition failure is fail-loud and the arm stays invalid. With `--test-attribution`, the emitted attribution map records a `baseline_failures_meta` disclosure key (`method` / `face` / `count` / `sha256` / `wall_s`) describing how that baseline was acquired; the key is carried across `measure map-update` increments and is disclosure-only (consumers do not read it). The acceptance arm is never baselined — its failures stay visible |
 | `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; declared tests bypass failure gating by name and are disclosed as coverage blind spots |
@@ -371,7 +371,7 @@ For per-shard raw GUT logs, pass `--shard-log-dir <dir>` and follow the files:
 |---|---|---|
 | `<roots...>` (positional) | required | Target `.gd` roots — must be the same universe as the baseline artifact |
 | `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
-| `--recipe <path>` | required | `measurement-suite/2` JSON (same content as the baseline run) |
+| `--recipe <path>` | required | `measurement-suite/3` JSON (same content as the baseline run) |
 | `--baseline <path>` | required | Prior line-primary attribution artifact (`test-attribution/6`) |
 | `--changed <path>` | omitted, repeatable | Changed/new/removed file path |
 | `--out <path>` | required | Incremented attribution artifact output path |

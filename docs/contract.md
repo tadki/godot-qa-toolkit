@@ -39,7 +39,7 @@ gqt
 └─ doctor
 ```
 
-改名映射（无兼容）：`accept` → `gherkin`；`canonical` → `measure run`；`canonical-diagnose` → `measure diagnose`；`recipe` → `measure suite`；`attr-update` → `measure map-update`；`registry diff`（子命令组）→ `measure registry-diff`（扁平化，清理后除 `gherkin` 三叶子外无三级命令）；`mutation` / `doctor` 保留原名；`complexity` / `coverage` / `arch` / `parity` / `risk` 归入 `measure`。**旧一级入口全部删除，调用即 exit 2（argparse invalid choice，stdout 无 JSON）；不保留别名、argv 重写、隐藏 parser 或弃用警告。** stdout `tool` 值同步为 `gherkin` / `mutation` / `measure.<leaf>`；版本化标识同步为 `measurement-suite/2` 与 `measurement-report/2`。SEE-1587 起 attribution 当前 schema 为 `test-attribution/6`（行级主真值）；旧 schema 产物一次性失效，无迁移无脏合并。
+改名映射（无兼容）：`accept` → `gherkin`；`canonical` → `measure run`；`canonical-diagnose` → `measure diagnose`；`recipe` → `measure suite`；`attr-update` → `measure map-update`；`registry diff`（子命令组）→ `measure registry-diff`（扁平化，清理后除 `gherkin` 三叶子外无三级命令）；`mutation` / `doctor` 保留原名；`complexity` / `coverage` / `arch` / `parity` / `risk` 归入 `measure`。**旧一级入口全部删除，调用即 exit 2（argparse invalid choice，stdout 无 JSON）；不保留别名、argv 重写、隐藏 parser 或弃用警告。** stdout `tool` 值同步为 `gherkin` / `mutation` / `measure.<leaf>`；版本化标识同步为 `measurement-suite/3` 与 `measurement-report/3`。SEE-1587 起 attribution 当前 schema 为 `test-attribution/6`（行级主真值）；旧 schema 产物一次性失效，无迁移无脏合并。
 
 ## 3. 统一输出 JSON 契约
 
@@ -201,7 +201,7 @@ gqt
 - **`_roots_of` 项目根锚定与 targets_root_fallback 披露（SEE-1615 §SPEC-PLANFIRST）**：变更文件相对路径先经 `anchor_to_project_root` 锚到 `--project-root`（与 runner 同源口径），再求首层目录并集；进程 CWD≠项目根时不再抛 ValueError 导致目标被静默跳过。工程外路径（其它检出/临时目录）与工程顶层文件（无首层目录可纳）触发到工程根的 fallback 时，stderr 必须具名披露 `measure: targets_root_fallback (<reason>) — target face widened to the whole project root (<root>); pass paths in project subdirectories to narrow it`；`<reason>` 为 `"<N> file(s) outside project root"` 或 `"top-level file(s) (no parent directory to scope)"`。fallback 不再静默。
 - **不耐受中断 + `--intolerant-tests` 声明草稿（SEE-1615 §SPEC-PLANFIRST）**：插桩臂观测到未插桩基线通过的 `(script, test)` 对失败时，以 `classification=suspected_instrumentation_intolerance` 中断 attribution map 构建路径。中断消息含：具名失败对、未插桩基线 face 与 wall_s、`instrumented run` 证据、可直接保存的声明草稿 `{"tests":[{"name","reason","script"}...], "coverage_limitations":[]}`、两条选项文案。落盘草稿后通过 `--intolerant-tests <path>` 或 `GQT_MEASUREMENT_INTOLERANT_TESTS=<path>`（测量链 auto-build 路径专用 env 单点）生效。测量侧 arm 在观测到 intolerance 时同步写入 `instrumentation_intolerant=[(script, test), ...]`，仅作披露不替代 `--intolerant-tests` 声明。声明按 `(script, test)` 身份精确旁路失败门控，并披露为 coverage 盲点。
 - **臂 `invalid_reason` 五类（SEE-1615 §SPEC-PLANFIRST）**：臂 invalid 按优先级 `launch_failure > shard_timeout > unattributed_failures > new_failures > reconciliation_failed` 给出单类归因 + 对应 `invalid_evidence` 块。`launch_failure` 证据 `launch_failures=[shard ids]`；`shard_timeout` 证据 `shard_timeouts=[shard ids]`；`unattributed_failures` 证据 `unattributed=[(script, test), ...]`（top-N of total）；`new_failures` 证据 `new_failures=[(script, test), ...]`；`reconciliation_failed` 证据 `reconciliation_failed=true`。证据块仅供披露，不覆盖优先级排序。invalid 臂不进入 union、不出分。
-- **measure gherkin 臂默认暂停（SEE-1615 §SPEC-PLANFIRST，Owner 决定；SEE-1623 H4 全路径契约遵守；H4-A 单臂可用语义）**：`gqt measure run` 默认不执行 gherkin 套件——普通路径（无 `--test-attribution`）与归属路径同权（此前普通路径落入双臂执行、显式 env=1 亦被无视）；占位臂 `state=disabled`、`stage_timings.gherkin_arm = 0.0`、`gherkin_arm = "disabled_pending_atomization — …"` 具名披露在两路径同样在场，exit 不被 gherkin 失败劫持。**暂停期间的退出语义（Owner 2026-11-23 裁决 A）**：普通 run 仅 `gut_full` 单臂执行且不产出归属映射，按单臂可用语义——`gut_full` 臂有效且通过 → `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=single_arm_usable_gherkin_paused`（§13.1 退出语义族，见下条）；`gut_full` 无效或失败 → `ok=false` / exit 1（`failures[0].reason=union invalid or arms invalid`）；`--test-attribution` 路径与显式 env=0 恢复双臂的路径该语义零变化（归属路径沿用 `attribution_usable` 判定）。`GQT_MEASUREMENT_ACCEPTANCE_DISABLED` 缺省视为 `1`（暂停）；显式设为 `0` / `false` / 空串才恢复 gherkin 执行（恢复对普通路径同权生效；SEE-1619 原子化改造完成后恢复双臂 → union 认证语义回归，单臂分支自动失效）。
+- **measure gherkin 臂默认暂停（SEE-1615 §SPEC-PLANFIRST，Owner 决定；SEE-1623 H4 全路径契约遵守；H4-A 单臂可用语义）**：`gqt measure run` 默认不执行 gherkin 套件——普通路径（无 `--test-attribution`）与归属路径同权（此前普通路径落入双臂执行、显式 env=1 亦被无视）；占位臂 `state=disabled`、`stage_timings.gherkin_arm = 0.0`、`gherkin_arm = "disabled_pending_atomization — …"` 具名披露在两路径同样在场，exit 不被 gherkin 失败劫持。**暂停期间的退出语义（Owner 2026-11-23 裁决 A）**：普通 run 仅 `gut_full` 单臂执行且不产出归属映射，按单臂可用语义——`gut_full` 臂有效且通过 → `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=single_arm_usable_gherkin_paused`（§13.1 退出语义族，见下条）；`gut_full` 无效或失败 → `ok=false` / exit 1（`failures[0].reason=union invalid or arms invalid`）；`--test-attribution` 路径与显式 env=0 恢复双臂的路径该语义零变化（归属路径沿用 `attribution_usable` 判定）。`GQT_MEASUREMENT_GHERKIN_DISABLED` 缺省视为 `1`（暂停）；旧名 `GQT_MEASUREMENT_ACCEPTANCE_DISABLED` 已退役——仍被设置即具名 fail-loud（不静默忽略）；显式设为 `0` / `false` / 空串才恢复 gherkin 执行（恢复对普通路径同权生效；SEE-1619 原子化改造完成后恢复双臂 → union 认证语义回归，单臂分支自动失效）。
 - **measure 基线预检与红测解耦（SEE-1615 §SPEC-PREFLIGHT×PLANFIRST）**：映射构建路径在插桩臂前跑一次同面无插桩 GUT 作为基线预检。预检到红测默认按名排除：map 标 `status=partial` + `excluded_tests=[[script, test], ...]` 披露，stderr 打 `measure: baseline_preflight RED — N failing pair(s) ... EXCLUDED by name ... mapping marked partial, run continues`，run 继续。显式开关 `GQT_MEASUREMENT_FAIL_ON_RED_BASELINE=1`（非空 / 非 `0` / 非 `false`）改为短停：抛 `MeasurementError("baseline_preflight_red: ... top-N of M failing tests")`，插桩臂不执行。预检产生的 failing-pair 集复用给双臂，跳过懒获取路径（绿臂零额外 GUT）。
 - **test 级筛选披露（SEE-1610 §SPEC-JSON，只加不改）**：`summary.test_filter = {enabled, disabled_by, applied, allow_identities, script_lane_fallback, scope}`。`enabled`/`disabled_by` 描述开关及关断来源；`applied` 表示是否实际下发非空 allow；`allow_identities` 是 `[script,test]` 对数，`script_lane_fallback` 是 `[script,"*"]` 整脚本保留数；`scope` 实际下发时恒为 `line`（SEE-1615 D1 闭包回退已移除），未下发时为 `null`。逐 mutant `verdict.test_face` 含 `requested`（allow 对数）、`kept`（保留测试数）、`removed`（物理移除测试数）、`whole_script_fallback`（整脚本保留的脚本数）；cold marker v2 另含 `matched_pairs`（命中 collector 的 allow 对数）与 `overlap_red`（其中已被 skip_red 先删的重叠对数），worker 腿披露 `overlap_red`、不保证 `matched_pairs`。过滤已启用但宿主未及打点（如 timeout/run_error）时以 `marker_missing=true` 兜底，各计数为 `null`。五档 `killed`/`survived`/`timeout`/`run_error`/`suspect` 均可携带该键；killed 记录另落 `summary.killed_by_certificates[].test_face` 与 resume store 条目（store 为**最后写者**披露，后续关断轮或 worker 覆写可替换，消费方不得当作不可变历史证书）。`summary.test_face = {applied_legs, kept, removed, whole_script_fallback, marker_missing_legs, overlap_red, by_verdict}` 聚合实际有披露的腿；`kept`/`removed` 只累加 marker 在场腿，`marker_missing_legs` 单列，`by_verdict` 给各 verdict 档腿数。
 - **validity 契约**（SEE-1312 + SEE-1420）：`invalid_mutant` = 语法预检失败（不跑 GUT）；`suspect` = baseline 脏 ∧ 差集空；`timeout_pinned` = 跨 run 连续 timeout ≥2 的降级独立档；`uncovered` = reused coverage 判定该行未被测试覆盖（quality 信号，非工具失败）。
@@ -338,7 +338,7 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 
 ### 11.1 `gqt measure suite --project-root <root> [--out recipe.json] [--exclude scope:entry:reason ...]`（原 `gqt recipe`）
 
-只读构建 measurement suite 定义（`measurement-suite/2`；SEE-1583 前为 `canonical-recipe/1`，旧产物一次性失效），**不跑 GUT、不插桩、不宣称 certified**（单轮 exploratory；WP5 拥有双轮认证）：
+只读构建 measurement suite 定义（`measurement-suite/3`；SEE-1583 前为 `canonical-recipe/1`，旧产物一次性失效），**不跑 GUT、不插桩、不宣称 certified**（单轮 exploratory；WP5 拥有双轮认证）：
 
 - **gut_face**：`.gutconfig.json` 现役非 quarantine GUT 面解析（dirs/include_subdirs/prefix 等扫描键原文进 hash）+ config sha256；
 - **gherkin_face**：`addons/gqt_gherkin/features/*.feature` 全量扫描，逐 feature `{key, source, sha256}`（KOL 定版 36）；harness 接线 sha256；
@@ -348,7 +348,7 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 
 ### 11.2 契约增量分类
 
-`gqt measure suite` 命令（原 `gqt recipe`）+ measurement-suite/2 快照 = **capability**（能力面；SEE-1583 命令更名无兼容）；`coverage/runner.py` 插桩判定面、`mutation/`、`risk/` 域本 PR 零触碰。
+`gqt measure suite` 命令（原 `gqt recipe`）+ measurement-suite/3 快照 = **capability**（能力面；SEE-1583 命令更名无兼容）；`coverage/runner.py` 插桩判定面、`mutation/`、`risk/` 域本 PR 零触碰。
 
 ## 12. gherkin 私有目录管线契约（SEE-1546 WP3 PR-B，gherkin-suite/1）
 
@@ -396,7 +396,7 @@ gherkin-suite/1 记录 = **capability**（新能力面，全加法，缺省行�
 仅 `replay_check` 新增 `suite_dir` keyword（缺省路径不变）；`mutation/`、
 `risk/`、`coverage/` 域本 PR 零触碰。
 
-## 13. measure 双源编排契约（SEE-1546 WP3 PR-C，measurement-report/2 + coverage-union/1；原 canonical 编排）
+## 13. measure 双源编排契约（SEE-1546 WP3 PR-C，measurement-report/3 + coverage-union/1；原 canonical 编排）
 
 ### 13.1 `gqt measure run <roots...> --project-root R --recipe recipe.json --out report.json [--gherkin-probe-keys [k1,k2]] [--timeout N] [--evidence-dir D]`（原 `gqt canonical`）
 
@@ -423,7 +423,7 @@ gherkin-suite/1 记录 = **capability**（新能力面，全加法，缺省行�
 
 端到端墙钟（插桩 + 两臂 GUT + union，recipe 构建与 W4 探针不计）对「现有 GUT + acceptance 序贯基线」3+3 交错中位数 ≤1.0×（§SPEC-052 现行最终性能门；旧 §SPEC-039 时代的 1.5× 中间门已作废）；**不达标=停下汇报、不得合并**；loadavg+CPU 双记录（§SPEC-022 协议）随交付。
 
-### 13.3a acceptance 共享分片性能验收（SEE-1619 §SPEC-010，`tests/integration/run_see1619_acceptance_perf.py`）
+### 13.3a acceptance 共享分片性能验收（SEE-1619 §SPEC-010，`tests/integration/run_see1619_gherkin_perf.py`）
 
 - **对比对象**：**同一 gqt 分支内**「共享分片（shared）」与「逐 feature 独立进程（per-feature）」两种进程形态，同 KOL 输入、同 reps、同并发、独立 store；**不是跨 gqt 版本的 master 对比**，不得以进程数推算墙钟。
 - **A/A 独立基线（§SPEC-029）**：噪声样本只取首个 B 之前的独立 shared A 块，`baseline_samples ≥ 3`；交错 A/B 对数 `interleaved_pairs ≥ 3` 且必须位于基线块之后。交错已开始而基线不足时 batch 具名 exit 1；纯 A/A 中间轮可合法不完整。
@@ -433,7 +433,7 @@ gherkin-suite/1 记录 = **capability**（新能力面，全加法，缺省行�
 
 ### 13.4 契约增量分类
 
-`gqt measure run` 命令（原 `gqt canonical`）+ coverage-union/1 + measurement-report/2（原 canonical-report/1）= **capability**（能力面；SEE-1583 命令更名无兼容）；`evidence.py` 仅新增 `arm` keyword（缺省推断不变——零漂移）；`shadow/1` 与 `gqt measure risk` stdout 契约零触碰；`mutation/` 域零触碰。
+`gqt measure run` 命令（原 `gqt canonical`）+ coverage-union/1 + measurement-report/3（原 canonical-report/1）= **capability**（能力面；SEE-1583 命令更名无兼容）；`evidence.py` 仅新增 `arm` keyword（缺省推断不变——零漂移）；`shadow/2` 与 `gqt measure risk` stdout 契约零触碰；`mutation/` 域零触碰。
 
 ### 13.5 SEE-1587 line-primary attribution 与增量契约
 

@@ -43,7 +43,10 @@ import json
 import re
 import select
 import shutil
+import os
 import subprocess
+import tempfile
+import uuid
 from pathlib import Path
 
 from . import OPS_VERSION
@@ -223,17 +226,26 @@ def _spawn_worker(root: Path) -> tuple[subprocess.Popen, Path]:
         raise GherkinRunError(
             f"worker artifact missing: {worker_res} — recompile with "
             f"gqt gherkin compile --write")
-    scratch = Path(root) / ".qa-cache" / "gqt-gherkin-worker"
+    # Final Review #6：并发 worker 互写/互删——scratch 必须每次运行独立，
+    # 并配独立 XDG/TMPDIR 隔离（不复用共享 .qa-cache 目录）。
+    scratch = (Path(root) / ".qa-cache" /
+               f"gqt-gherkin-worker-{uuid.uuid4().hex[:12]}")
     scratch.mkdir(parents=True, exist_ok=True)
+    xdg = Path(tempfile.mkdtemp(prefix="gqt-gherkin-worker-xdg-"))
+    tmpd = Path(tempfile.mkdtemp(prefix="gqt-gherkin-worker-tmp-"))
+    env = dict(os.environ, XDG_DATA_HOME=str(xdg), TMPDIR=str(tmpd))
     try:
         proc = subprocess.Popen(
             [godot_command(), "--headless", "--path", str(root),
              "-s", worker_res],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, cwd=str(root))
+            text=True, cwd=str(root), env=env)
     except OSError as e:
+        shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(xdg, ignore_errors=True)
+        shutil.rmtree(tmpd, ignore_errors=True)
         raise GherkinRunError(f"worker process spawn failed: {e}") from e
-    return proc, scratch
+    return proc, scratch, (xdg, tmpd)
 
 
 def _exchange_verdict_line(proc, request: str,  # noqa: ANN001 — Popen/fake 双形态
@@ -255,7 +267,7 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
     """worker 通道未变异基线轮：短命常驻进程送一请求（mutant_id=
     exempt_baseline，IR 为未变异原文），判完即弃——与 mutant 轮长驻通道
     分离，保持差分对照路径互不干扰。返回 (failing, executed)。"""
-    proc, scratch = _spawn_worker(root)
+    proc, scratch, env_dirs = _spawn_worker(root)
     try:
         ir_file = scratch / "exempt_baseline.json"
         ir_file.write_text(json.dumps(ir, ensure_ascii=False),
@@ -276,6 +288,8 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
     finally:
         _shutdown_worker(proc)
         shutil.rmtree(scratch, ignore_errors=True)
+        for d in env_dirs:
+            shutil.rmtree(d, ignore_errors=True)
     total = len(ir.get("cases", []))
     err = verdict.get("run_error")
     executed_n = int(verdict.get("executed", 0))
@@ -491,7 +505,7 @@ def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
     `--timeout` 语义：每轮 verdict 等待上限 = timeout_s，超时即
     _WorkerDead → 剩余 mutant 记 run_error。
     """
-    proc, scratch = _spawn_worker(root)
+    proc, scratch, env_dirs = _spawn_worker(root)
     verdicts: list[tuple[Mutant, str, str]] = []
     try:
         for idx, mutant in enumerate(mutants):
@@ -514,6 +528,8 @@ def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
     finally:
         _shutdown_worker(proc)
         shutil.rmtree(scratch, ignore_errors=True)
+        for d in env_dirs:
+            shutil.rmtree(d, ignore_errors=True)
     return verdicts
 
 

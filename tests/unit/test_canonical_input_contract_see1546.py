@@ -78,7 +78,18 @@ def _legal_recipe(**overrides) -> dict:
     recipe = {
         "recipe_version": RECIPE_VERSION,
         "gut_face": {"dirs": ["res://tests/"]},
-        "gherkin_face": {"features": [{"key": "demo"}]},
+        # SEE-1624 D-n4/Final Review #9：gherkin_face 必需键封闭集合，
+        # adapter 指纹（64-hex）与 harness 绑定为强制项。
+        "gherkin_face": {
+            "features": [{"key": "demo"}],
+            "count": 1,
+            "excluded": [],
+            "harness": {"worker": "generated/gherkin_worker.gd",
+                        "ops_version": "see1468-gherkin/2",
+                        "wiring_sha256": "0" * 64},
+            "adapter_source_sha256": "a" * 64,
+            "adapter_source_files": 3,
+        },
         "toolchain": {},
         "exclusions": [],
     }

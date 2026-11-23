@@ -340,7 +340,7 @@ def _report_document(
     scored, total_records, unknown_count = _report_ranking_blocks(ranking)
     return {
         "report": "shadow-report",
-        "version": "shadow/1",
+        "version": "shadow/2",
         "evidence_level": "exploratory",
         "diagnostic_only": True,
         "dynamic_cache": False,
@@ -514,6 +514,13 @@ def run_shadow_from_paths(
         full_tests=full_tests,
     )
     perf_in = performance_input or {}
+    if "acceptance_cost" in perf_in:
+        # SEE-1624 D-n4：shadow/2 消费 gherkin_cost——旧键不得被静默丢弃
+        # （旧性能文件会返回空样本而不报错 = 假绿）。
+        raise ValueError(
+            "performance input key 'acceptance_cost' is retired — "
+            "shadow/2 consumes 'gherkin_cost' (fail-loud: the retired key "
+            "is never dropped silently)")
     report["performance"] = build_performance_block(
         complexity_runs=perf_in.get(
             "complexity", {"baseline_median_s": 0.0, "head_median_s": 0.0}),

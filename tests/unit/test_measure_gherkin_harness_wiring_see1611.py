@@ -46,6 +46,8 @@ def _stub_flow(monkeypatch, tmp_path: Path) -> None:
         d = Path(tmp_path) / f"suite-{counter['n']}"
         counter["n"] += 1
         d.mkdir(parents=True, exist_ok=True)
+        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
+                                  encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)

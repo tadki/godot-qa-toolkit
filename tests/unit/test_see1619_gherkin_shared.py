@@ -89,6 +89,8 @@ def _wire(monkeypatch, tmp_path: Path, fake_run_arm) -> None:
         counter["n"] += 1
         d = Path(tmp_path) / f"suite-{counter['n']}"
         d.mkdir(parents=True, exist_ok=True)
+        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
+                                  encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
@@ -231,6 +233,8 @@ def test_flow_never_touches_harness_contract_position(
         counter["n"] += 1
         d = Path(tmp_path) / f"suite-{counter['n']}"
         d.mkdir(parents=True, exist_ok=True)
+        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
+                                  encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
@@ -332,6 +336,8 @@ def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
         counter["n"] += 1
         d = Path(tmp_path) / f"suite-{counter['n']}"
         d.mkdir(parents=True, exist_ok=True)
+        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
+                                  encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", boom)
@@ -387,6 +393,8 @@ def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
         d = Path(tmp_path) / f"suite-{counter['n']}"
         d.mkdir(parents=True, exist_ok=True)
         made.append(d)
+        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
+                                  encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
@@ -449,6 +457,8 @@ def _fb_compile_setup(monkeypatch, tmp_path):
         d = Path(tmp_path) / f"suite-{counter['n']}"
         d.mkdir(parents=True, exist_ok=True)
         made.append(d)
+        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
+                                  encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "replay_check", fake_replay)

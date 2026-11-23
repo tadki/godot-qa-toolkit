@@ -49,7 +49,7 @@ def _report(tmp_path: Path, fake_cls="FakeGodot"):
     sp.run = getattr(t, fake_cls)(project)
     # SEE-1623 H4：双臂 union 机制测试显式走恢复路径（acceptance 默认
     # 暂停契约下占位臂无 bundles_data，union 交集恒空）。
-    env_key = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
+    env_key = "GQT_MEASUREMENT_GHERKIN_DISABLED"
     old = os.environ.get(env_key)
     os.environ[env_key] = "0"
     try:

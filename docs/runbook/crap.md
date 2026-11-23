@@ -34,8 +34,8 @@ Thresholds follow Uncle Bob's crap4java defaults; do not invent others.
 ## Typical examples
 
 ```bash
-# Function-level CRAP from a dual-arm measurement report (preferred:
-# coverage comes from the union of both arms)
+# Function-level CRAP from a measurement report (acceptance is paused by
+# default; restored dual-arm reports union coverage from both arms)
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json
 jq '.crap.summary' report.json
 jq '.crap.records[] | {function_id, cc, coverage, score: .crap_line.score, score_status}' report.json
@@ -56,9 +56,9 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 - `coverage_semantics`: `statement_start_line` = exact per-statement start
   lines; `block_entry_approximation` = block-entry hits expanded to in-block
   statements — never treat the approximation as exact per-statement data.
-- exit `0` = command completed; `1` = argument/execution error. On diagnostic
-  lanes `ok` does not mean "risk-free"; conclusions come from scores and
-  ranking only.
+- exit `0` = command completed; `1` = verdict/execution failure; `2` = CLI
+  usage error. On diagnostic lanes `ok` does not mean "risk-free"; conclusions
+  come from scores and ranking only.
 
 ## Failure semantics
 
@@ -67,6 +67,18 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 - Unmeasurable files (lambda / inner-class / var-def shapes) route to
   measurement-gap lanes, disclosed as such, with no fabricated scores.
 - Illegal coverage (out of range / NaN) → explicit error, no fabricated score.
+- An explicit coverage `--tests` glob that selects zero scripts fails with
+  `empty selection face` and exit `1`; it never emits an authoritative-looking
+  `0.0%`. A glob that matches scripts whose covered-line set is empty remains
+  a genuine zero-coverage result.
+- A target outside the pre-existing map's universe fails before any GUT leg
+  with `target_not_in_map_universe` and rebuild guidance; it does not burn an
+  instrumented arm before reporting the mismatch.
+- A non-`.gd` or malformed GDScript coverage target and an unparseable risk
+  `--performance-file` return `ok=false` with exit `1`. The flat JSON envelope
+  keeps `failures[]` present and names `error` / `reason` / `reason_detail` /
+  `suggested_action` in `summary`; no Python traceback leaks to stdout or
+  stderr.
 
 ## Boundaries and input faces
 
@@ -74,7 +86,11 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
   - `gqt measure coverage <file>` supplies the line-coverage facts behind `c`,
     with sentinel semantics preserved — `probes_fired: 0` (probes never fired)
     and `vacuous` (zero executable lines) are **not** "true 0% coverage"; treat
-    them as run_error / vacuous, not as a coverage conclusion.
+    them as run_error / vacuous, not as a coverage conclusion. `elif`
+    condition lines belong to the coverage and attribution surface: executing
+    the branch body records the condition as covered (the true path), while a
+    false-path evaluation alone does not count it. `else` header lines remain
+    excluded because they have no condition-evaluation semantics.
   - `gqt measure complexity <paths>` supplies function-level `cc` (its
     `--warn`/`--max` flags are that command's own threshold surface); for CRAP,
     consume the measured `cc` directly instead of setting a separate verdict.
@@ -108,7 +124,7 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 | `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins |
 | `--min-percent <p>` | 80 | Minimum line coverage percent |
 | `--timeout <s>` | 120 | Timeout for map build / incremental refresh; a fresh projection starts no process |
-| `--tests <res://dir-or-.gd>` | omitted = full mapped test face | Restrict mapped test scripts by directory boundary or exact file |
+| `--tests <res://dir-or-.gd>` | omitted = full mapped test face | Restrict mapped test scripts by directory boundary or exact file; zero matching scripts fail as `empty selection face`, never as a silent `0.0%` |
 | `--evidence-out <dir>` | omitted | Write a `coverage-evidence/2` bundle from the line map; no second GUT run |
 | `--prune-sinks` | off | Delete `qa-coverage-hits-*` sinks older than `--retain-days` under `user://` and project root |
 | `--retain-days <n>` | 7 | Retention period for `--prune-sinks` |

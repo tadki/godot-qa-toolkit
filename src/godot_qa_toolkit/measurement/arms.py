@@ -254,6 +254,9 @@ def _finalize_shard_scan(gut_ok: bool, run_error: bool, timed_out: bool,
     return (gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs,
             timeout_excluded, all_keys)
 
+_BASELINE_TOP_N = 10  # 具名披露 top-N（与预检路径同口径）
+
+
 def _gate_ctx(baseline_failures, baseline_pairs: set,
               arm_fail_pairs: set, declared_scoped: set,
               declared_bare: set) -> tuple:
@@ -336,6 +339,20 @@ def _lazy_baseline_merge(name: str, root: Path, recipe: dict,
         baseline_meta = None  # 懒获取失败：基线披露缺席（fail-loud 已声明）
     else:
         effective_baseline = effective_baseline | set(lazy_pairs)
+        if lazy_pairs:
+            # SEE-1623 M11：懒吸收与预检路径（status=partial + EXCLUDED
+            # by name）披露对齐——被基线吸收的红测试具名在场，不再只有
+            # 「only NEW failures gate」一句话而无名单。
+            baseline_meta = {**baseline_meta, "status": "partial",
+                             "excluded_tests": sorted(
+                                 f"{s}::{t}" for (s, t) in lazy_pairs)}
+            named = ", ".join(sorted(
+                f"{s}::{t}" for (s, t) in lazy_pairs)[:_BASELINE_TOP_N]
+                or [""])
+            print(f"measure: lazy baseline ABSORBED {len(lazy_pairs)} "
+                  f"pre-existing failing pair(s) EXCLUDED by name "
+                  f"(top-{min(len(lazy_pairs), _BASELINE_TOP_N)}: {named}); "
+                  f"baseline marked partial", file=sys.stderr)
         covered_attributed_names = {
             t for (s, t) in arm_fail_pairs
             if s and ((s, t) in effective_baseline

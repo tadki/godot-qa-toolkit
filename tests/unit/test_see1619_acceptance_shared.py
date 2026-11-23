@@ -263,6 +263,34 @@ def test_fallback_concurrency_capped_when_shards_exceed_groups(
     assert calls[1]["concurrency"] == 4, "降级组数=2 ≤ shards，上限=组数"
 
 
+def test_merged_result_is_json_serializable(tmp_path, monkeypatch):
+    """C3-R2 回归：fallback 合并后的臂文档必须 JSON 可序列化——合并轮
+    曾把顶层 arm_fail_pairs/arm_failures/new_pairs 存成 set，使 cli.py
+    写报告时 TypeError 崩溃（A/A 三轮 rc=1 的根因）。"""
+    import json as _json
+    root = _proj(tmp_path)
+    fake, _calls = _make_fake_run_arm({"k2"}, set())
+    _wire(monkeypatch, tmp_path, fake)
+    out = _flow(root, shards=2)
+    assert out["process_fallbacks"] == [{"key": "k2",
+                                         "reason": "shared_red_isolated_green"}]
+    dumped = _json.dumps(out, ensure_ascii=False, indent=1)
+    assert "shared_red_isolated_green" in dumped
+    for key in ("arm_fail_pairs", "arm_failures", "new_pairs"):
+        assert not isinstance(out.get(key), (set, frozenset)), key
+
+
+def test_merged_result_remaining_fail_semantics(tmp_path, monkeypatch):
+    """隔离红 key 的红对以字符串列表保持，合并后 remaining 判定不弱化。"""
+    root = _proj(tmp_path)
+    fake, _calls = _make_fake_run_arm({"k2"}, {"k2"})
+    _wire(monkeypatch, tmp_path, fake)
+    out = _flow(root, shards=2)
+    assert isinstance(out["arm_fail_pairs"], list)
+    assert any("test_k2.gd" in p for p in out["arm_fail_pairs"])
+    assert out["state"] == "invalid"
+
+
 def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
     """§SPEC-006（C2-R1）：早失败路径（suite_error）返回字典同样带
     process_fallbacks 键（空数组）——成功与 invalid 形状一致，消费方

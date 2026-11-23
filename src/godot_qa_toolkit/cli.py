@@ -621,6 +621,21 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         # 不触发 ensure_map（prepare_required/映射构建都不该拦显式面）。
         full_face = getattr(args, "select_mode", "line") == "full"
         if not full_face and not getattr(args, "tests", None):
+            # SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
+            # （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig
+            # 错误）。多文件收集失败契约（SEE-1321 LOW-6：缺失文件以
+            # per-file error 进 results）不在此拦——处理仍在 dispatch 层。
+            from .source_io import anchor_to_project_root as _anchor_t
+            _files = getattr(args, "files", None) or []
+            _t = _files[0] if len(_files) == 1 else None
+            if _t is not None and \
+                    not Path(_anchor_t(_t, args.project_root)).is_file():
+                _msg = (f"mutation target not found: {_t} (anchored: "
+                        f"{Path(_anchor_t(_t, args.project_root))})")
+                return _emit({"tool": "mutation", "ok": False,
+                              "summary": {"files": args.files,
+                                          "error": _msg},
+                              "failures": [{"reason": _msg}]})
             # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
             rc = _bootstrap_import_or_contract("mutation", args)
             if rc is not None:

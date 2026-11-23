@@ -15,7 +15,7 @@ from contextlib import redirect_stdout
 
 import godot_qa_toolkit.cli as cli
 
-_PAUSE_DISCLOSURE = ("disabled_pending_atomization — acceptance arm paused "
+_PAUSE_DISCLOSURE = ("disabled_pending_atomization — gherkin arm paused "
                      "by default; restore via "
                      "GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0 once SEE-1619 "
                      "atomization lands")
@@ -47,7 +47,7 @@ class TestSingleArmDecision:
         assert ok is True
         assert summary["certification"] == "uncertified"
         assert summary["exit_semantics"] == \
-            "single_arm_usable_acceptance_paused"
+            "single_arm_usable_gherkin_paused"
         assert summary["union_certified"] is False
         assert summary["gherkin_arm"] == _PAUSE_DISCLOSURE
 
@@ -134,7 +134,7 @@ class TestMeasureRunCliExit:
         assert payload["ok"] is True
         assert payload["failures"] == []
         s = payload["summary"]
-        assert s["exit_semantics"] == "single_arm_usable_acceptance_paused"
+        assert s["exit_semantics"] == "single_arm_usable_gherkin_paused"
         assert s["certification"] == "uncertified"
         assert "gherkin_arm" in s
 

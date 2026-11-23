@@ -9,7 +9,7 @@ contract mutation over the IR to prove the assertions actually bite.
 ## Prerequisites
 
 - The target project root contains `addons/gut/gut_cmdln.gd` (`run` / `mutate`).
-- One-time wiring: `res://addons/gqt_accept/harness.gd` must exist and
+- One-time wiring: `res://addons/gqt_gherkin/harness.gd` must exist and
   implement the interface in `docs/templates/testing_api.gd.md` (the four-step
   combo `smoke_check` / `init_case` / `run_step` / `query_state` plus
   `check_expectations`). gqt never discovers or infers the adapter; when it is
@@ -35,14 +35,14 @@ gqt gherkin compile --project-root . --keys save,load --out-dir /tmp/gqt-suite
 gqt gherkin run --project-root . --suite-dir /tmp/gqt-suite
 
 # W4 acceptance cost probe (compile+run wall clock)
-gqt gherkin run --project-root . --acceptance-probe-keys save
+gqt gherkin run --project-root . --gherkin-probe-keys save
 ```
 
 ## Output & exit codes
 
 - `tool` is always `gherkin`; `ok` means this round passed.
 - `compile`: `summary.wrote` per file; artifacts are
-  `acceptance/ir/<key>.json`, `acceptance/generated/test_<key>.gd`,
+  `gherkin/ir/<key>.json`, `gherkin/generated/test_<key>.gd`,
   `<key>.manifest.json`.
 - `run`: `summary.{replay_checked, ir_hash, exit_code, tests_executed, wrote}`;
   failing test names are attributed back to scenario/line through the
@@ -72,7 +72,7 @@ gqt gherkin run --project-root . --acceptance-probe-keys save
   failure, red assertions, early return, and for subsequent scenarios.
   Crash/timeout cleanup stays with the outer arm and is never reported as a
   successful reset.
-- `--write` only writes the two `acceptance/ir|generated` directories
+- `--write` only writes the two `gherkin/ir|generated` directories
   (clean-then-generate); nothing else is written.
 - Mutation here is **contract-level** (IR cell semantics), not source-level;
   source-level mutation uses `gqt mutation`.
@@ -86,23 +86,23 @@ gqt gherkin run --project-root . --acceptance-probe-keys save
 | Argument | Default | Meaning |
 |---|---|---|
 | `feature` (positional, optional) | — | Path to the `.feature` file; omit when `--keys` selects the private suite set |
-| `--project-root <root>` | required | Target Godot project root (writes `acceptance/ir` + `acceptance/generated`) |
+| `--project-root <root>` | required | Target Godot project root (writes `gherkin/ir` + `gherkin/generated`) |
 | `--write` | off | Opt-in artifact write; omitted = dry compile, summary only |
 | `--no-clean` | off | Keep existing generated artifacts instead of clean-then-generate |
 | `--keys <k1,k2>` | omitted | Comma-separated feature keys compiled into a private suite dir (dir = selection set); pairs with `--out-dir` or creates a fresh `.gqt-run-<uuid>` dir |
-| `--out-dir <dir>` | omitted | Private suite dir to write into instead of `acceptance/ir|generated` |
+| `--out-dir <dir>` | omitted | Private suite dir to write into instead of `gherkin/ir|generated` |
 
 ### gherkin run
 
-`gqt gherkin run [directory] --project-root <root> [--key K] [--suite-dir D] [--acceptance-probe-keys [k1,k2]] [--timeout 120] [--godot-bin <path>]`
+`gqt gherkin run [directory] --project-root <root> [--key K] [--suite-dir D] [--gherkin-probe-keys [k1,k2]] [--timeout 120] [--godot-bin <path>]`
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `directory` (positional, optional) | `--project-root` | Alternative project root (another checkout containing `addons/gut/`) |
 | `--project-root <root>` | required | Project root containing `addons/gut/` |
-| `--key <feature-key>` | see note | Feature key the suite was compiled under; required without `--suite-dir` / `--acceptance-probe-keys` |
-| `--suite-dir <dir>` | omitted | Run the whole private suite dir (acceptance-suite/1 reconciliation) |
-| `--acceptance-probe-keys [k1,k2]` | `aidomain_integration` | W4 cost probe: compile+run these keys via the private-dir pipeline and emit a `performance.acceptance_probe` record |
+| `--key <feature-key>` | see note | Feature key the suite was compiled under; required without `--suite-dir` / `--gherkin-probe-keys` |
+| `--suite-dir <dir>` | omitted | Run the whole private suite dir (gherkin-suite/1 reconciliation) |
+| `--gherkin-probe-keys [k1,k2]` | `aidomain_integration` | W4 cost probe: compile+run these keys via the private-dir pipeline and emit a `performance.gherkin_probe` record |
 | `--timeout <s>` | 120 | GUT timeout seconds |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override; priority flag > env > PATH |
 

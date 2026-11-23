@@ -1,10 +1,10 @@
 # testing_api.gd 接口模板（SEE-1426 P4，决策 rev1 §3.4；SEE-1468 /2 扩展）
 
-> 复制到被测项目 `res://addons/gqt_accept/harness.gd`。这是 `gqt gherkin
+> 复制到被测项目 `res://addons/gqt_gherkin/harness.gd`。这是 `gqt gherkin
 > compile` 生成测试消费的**唯一约定接口**——gqt 不嗅探、不发现、不推断
 > 接口实现；轨道映射由人按本模板接线。
 >
-> **/2（ops_version `see1468-accept/2`）**：核心五/六方法语义不动；
+> **/2（ops_version `see1468-gherkin/2`）**：核心五/六方法语义不动；
 > 新增**可选方法族**（场景生命周期 / 输入注入 / 信号观测 / 探针通道）
 > 与**查询路径扩展**——未实现方法被步骤触达时 run_step 必须返回
 > `"no harness binding for ..."` 显式失败（禁止静默忽略）。

@@ -221,6 +221,15 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 - `measure run` temporarily instruments the target tree and restores it
   atomically in `finally`; no residue on production trees.
+- The acceptance arm runs **shared shards** (SEE-1619): features are grouped
+  into private suites so several keys share one GUT process, with real fan-out
+  `len(groups) × reps` instead of one process per feature per rep. A feature
+  only falls back to a singleton process when it fails shared validation this
+  run; such downgrades are disclosed by name in `process_fallbacks:[{key,reason}]`
+  (sorted by key, present on every return path, empty when fully atomic), never
+  packaged as valid when both shared and isolated runs are red, and their
+  concurrency is still capped by `--acceptance-shards`. Cleanup failure marks
+  the arm invalid and discloses the residue path.
 - The W4 probe (default `aidomain_integration`) records measured wall clock
   into `performance.acceptance_probe`; `measure risk --performance-file`
   accepts externally fed measurements.
@@ -250,6 +259,34 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   the union of the baseline list and this round's changed/new production files.
   This is measurement-completeness disclosure only: mutation's strict per-test
   filter does not consume the list or widen selection to function/file faces.
+
+## Acceptance performance harness (SEE-1619)
+
+`tests/integration/run_see1619_acceptance_perf.py` compares shared sharding
+against master per-feature processes on the same KOL input, reps, concurrency
+and an isolated store (never across gqt versions, never extrapolating wall
+clock from process counts):
+
+```bash
+PYTHONPATH=src python3 -I tests/integration/run_see1619_acceptance_perf.py \
+  --project-root <kol-copy> --godot "$GODOT" --aa 3 --rounds 3 \
+  --report <work>/acceptance-perf.json
+```
+
+- A/A noise samples come only from the independent shared-A block before the
+  first B (`baseline_samples ≥ 3`); interleaved A/B pairs (`interleaved_pairs
+  ≥ 3`) must follow that block, and starting interleaving with an insufficient
+  baseline is a named batch failure.
+- `speed_gate.ok` requires `median_ratio > threshold` **strictly** — equality
+  is not a pass; reports carry absolute seconds, ratios and per-round
+  process/shard accounts, and INCONCLUSIVE is never written as PASS.
+- Batch rounds (`--mode A/B --round-index`) cannot bypass the merged summary:
+  once `rounds_complete=true`, the exit code follows that summary (MEASURED →
+  0, otherwise 1); incomplete reports resume under the same semantics.
+- Disclosure limit (LOW D-A): the summary does not carry the underlying
+  `rc/exit_semantics` or gut-arm health; a single round's `rc=1/ok=false` is
+  uncertified-by-design, and MEASURED only proves acceptance-arm validity plus
+  round completeness plus the speed gate.
 
 ## Command reference (aligned with v0.3.0 `--help`)
 

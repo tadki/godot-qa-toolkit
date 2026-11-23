@@ -602,8 +602,9 @@ def gherkin_arm_disabled() -> bool:
     旧 env 名（GQT_MEASUREMENT_ACCEPTANCE_DISABLED）已退役：若仍被设置
     → 具名 fail-loud（MeasurementError），不静默忽略也不继续按新名判定。"""
     import os as _os
-    retired = _os.environ.get(ENV_ACCEPTANCE_DISABLED_RETIRED, "").strip()
-    if retired:
+    # §SPEC-019 MEDIUM-6：只要旧变量**存在**（含空串/空白）即具名拒绝——
+    # 按 strip 后 truthiness 判空会让空值静默绕过 fail-loud。
+    if ENV_ACCEPTANCE_DISABLED_RETIRED in _os.environ:
         raise MeasurementError(
             f"{ENV_ACCEPTANCE_DISABLED_RETIRED} is retired — use "
             f"{ENV_GHERKIN_DISABLED}=0 to restore the gherkin arm "

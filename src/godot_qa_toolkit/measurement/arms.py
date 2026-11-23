@@ -33,6 +33,7 @@ from ..coverage.runner import (
 from ..coverage.union import arm_record_from_bundle
 from ..gherkin.run import GherkinRunError, replay_check
 from ..gherkin.addon import (AddonError, compile_preflight,
+                             normalize_feature_key,
                              run_validator_preflight)
 from ..gherkin.suite import (
     SuiteError,
@@ -1079,8 +1080,11 @@ def _ensure_gherkin_harness(root: Path) -> None:
 
 def _gherkin_groups(keys: list[str], shards: int) -> list[list[str]]:
     """§SPEC-005 共享分片：排序去重后均衡切分为 shards 组（组数=分片数，
-    组内多 key 共享 suite/进程）。keys <= shards 时退化为单 key 组。"""
-    ks = sorted(set(keys))
+    组内多 key 共享 suite/进程）。keys <= shards 时退化为单 key 组。
+
+    §SPEC-019 HIGH-4：key 一律归一（与编译产物/manifest 同口径）——
+    连字符 stem 分组后仍与生成物键一致，对账不崩。"""
+    ks = sorted({normalize_feature_key(k) for k in keys})
     n = max(1, int(shards or 1))
     n = min(n, len(ks)) if ks else 1
     groups: list[list[str]] = [[] for _ in range(n)]

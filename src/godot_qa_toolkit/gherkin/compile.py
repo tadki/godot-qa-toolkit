@@ -32,6 +32,7 @@ from .addon import (
     FEATURES_DIR_RELPATH,
     HARNESS_RES,
     AddonError,
+    addon_file,
     compile_preflight,
     features_root,
     is_owned_suite_dir,
@@ -474,6 +475,9 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
             f"compiles sources under {FEATURES_DIR_RELPATH}/")}
     try:
         compile_preflight(root)
+        # §SPEC-019 HIGH-2：harness 加载位不得经 symlink 逃逸单根。
+        addon_file(root, "addons/gqt_gherkin/harness.gd",
+                   "addon harness.gd")
     except AddonError as e:
         return None, {"reason": str(e)}
     try:

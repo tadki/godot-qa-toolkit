@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 
 from ..digest import canonical_sha256, sha256_file, sha256_text
+from ..gherkin.addon import normalize_feature_key
 
 RECIPE_VERSION = "measurement-suite/3"
 _GUTCONFIG = ".gutconfig.json"
@@ -53,7 +54,9 @@ def scan_gherkin_features(project_root: Path) -> tuple[list[dict], int, str | No
                        "root — strict single root required")
     rows: list[dict] = []
     for path in sorted(features_dir.glob("*.feature")):
-        key = path.stem
+        # key 与编译产物同口径归一（my-demo → my_demo）：分组/对账按原 key
+        # 读 manifest 会崩（§SPEC-019 HIGH-4）。
+        key = normalize_feature_key(path.stem)
         rel = path.relative_to(project_root).as_posix()
         rows.append(
             {

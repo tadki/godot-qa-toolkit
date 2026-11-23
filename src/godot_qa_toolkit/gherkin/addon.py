@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 
 from ..mutation.godot_gate import GlobalGodotGate
+from .isolation import isolated_godot_env
 from ..mutation.inject import godot_command, spawn_godot
 
 SCHEMA_VERSION = "gqt-gherkin-addon/1"
@@ -46,17 +47,57 @@ _KEY_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
 
 
 SUITE_OWNER_MARKER = ".gqt-owner"
-SUITE_OWNER_TOKEN = "gqt-gherkin-private-suite/1"
+_PRIVATE_SUITE_RE = re.compile(r"^\.gqt-run-[A-Za-z0-9_.-]{1,64}$")
 
 
 def is_owned_suite_dir(suite_dir: str | Path) -> bool:
-    """私有套件目录的工具所有权标记：目录内存在 `.gqt-owner` 标记文件。
+    """私有套件目录的**工具所有权绑定**（§SPEC-019 CRITICAL-1）。
 
-    清理**只**允许命中标记的目录——调用方持有的任意目录（`--suite-dir`/
-    `--out-dir`）一律不删，即便同名同形（Final Review #1：调用方文件与
-    目录永不被递归删除）。compile 侧据此区分"工具自有增量写入"与
-    "调用方目录必须为空"。"""
-    return (Path(suite_dir) / SUITE_OWNER_MARKER).is_file()
+    三重条件全中才算工具自有：
+    1. `.gqt-owner` 是普通文件（非 symlink），且**内容 == 本目录名**——
+       复制来的合法 marker 内容指向原目录，与调用方目录名不符 → 永不删；
+    2. 目录名形如 `.gqt-run-<token>`；
+    3. 位置在受管暂存根内：`<project>/gherkin/generated/`。
+
+    任一不中即视为调用方持有（`--suite-dir`/`--out-dir`/备份目录），
+    清理一律跳过——调用方文件与目录永不被递归删除。"""
+    sd = Path(suite_dir)
+    marker = sd / SUITE_OWNER_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        return False
+    try:
+        token = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if token != sd.name:
+        return False
+    if not _PRIVATE_SUITE_RE.match(sd.name):
+        return False
+    if sd.parent.name != "generated" or sd.parent.parent.name != "gherkin":
+        return False
+    return True
+
+
+def addon_file(project_root: str | Path, relpath: str, what: str) -> Path:
+    """addon 内文件的物理位置校验：不得是 symlink，且解析后仍在 addon 根内。
+
+    §SPEC-019 HIGH-2：schema / validator / harness 经 symlink 逃逸严格单根
+    一律 fail-loud（标准 addon 内的正常文件不受影响）。"""
+    root = Path(project_root).resolve()
+    path = root / relpath
+    if path.is_symlink():
+        raise AddonError(
+            f"{what} must not be a symlink: {path} — the strict single root "
+            f"rejects files that escape {ADDON_DIR_RELPATH}/")
+    resolved = path.resolve()
+    addon_root = (root / ADDON_DIR_RELPATH).resolve()
+    try:
+        resolved.relative_to(addon_root)
+    except ValueError:
+        raise AddonError(
+            f"{what} escapes the addon root: {path} — the strict single root "
+            f"rejects files that resolve outside {ADDON_DIR_RELPATH}/") from None
+    return path
 
 
 def normalize_feature_key(stem: str) -> str:
@@ -111,7 +152,7 @@ def resolve_feature(project_root: str | Path, key: str) -> Path:
 
 def read_schema(project_root: str | Path) -> dict:
     """读 addon schema.json：缺声明/损坏/非对象具名拒绝（纯解析，零 Godot）。"""
-    path = Path(project_root) / SCHEMA_RELPATH
+    path = addon_file(project_root, SCHEMA_RELPATH, "addon schema.json")
     if not path.is_file():
         raise AddonError(
             f"addon schema declaration missing: {path} — every "
@@ -190,19 +231,23 @@ def run_validator_preflight(project_root: str | Path,
     与 `compile_preflight`（纯解析）分离：调用方按 纯解析握手 → 纯域
     校验（replay）→ 本阶段 → 业务执行 的次序装配——replay 等不需要
     Godot 的领域检查不得被缺少二进制的环境错误抢占（§SPEC-016）。"""
-    validator_path = Path(project_root) / VALIDATOR_RELPATH
+    validator_path = addon_file(project_root, VALIDATOR_RELPATH,
+                                "addon validator.gd")
     if not validator_path.is_file():
         raise AddonError(
             f"addon validator missing: {validator_path} — run/mutate "
             f"must execute the addon's own validator.gd before any "
             f"business Godot process")
     try:
-        with GlobalGodotGate(str(project_root)):
-            r = spawn_godot(
-                [godot_command(), "--headless", "--path",
-                 str(project_root), "-s", VALIDATOR_RES],
-                capture_output=True, text=True, timeout=timeout_s,
-                cwd=str(project_root))
+        # 一次性隔离环境（§SPEC-019 HIGH-3）：validator 不得触碰真实用户
+        # 目录——隔离由产品构造保证，不依赖调用方外部设置 HOME。
+        with isolated_godot_env() as iso_env:
+            with GlobalGodotGate(str(project_root)):
+                r = spawn_godot(
+                    [godot_command(), "--headless", "--path",
+                     str(project_root), "-s", VALIDATOR_RES],
+                    capture_output=True, text=True, timeout=timeout_s,
+                    cwd=str(project_root), env=iso_env)
     except Exception as e:  # noqa: BLE001 — 拉起失败统一具名（含超时/BinaryConfigError）
         raise AddonError(
             f"addon validator launch failed ({type(e).__name__}): {e}") from e

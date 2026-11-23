@@ -120,3 +120,101 @@ def test_summary_process_accounting() -> None:
     s = compute_perf_summary(_full_rounds(), 4, 44)
     assert s["fanout_shared"] == 12, "4 组 ×3 reps"
     assert s["fanout_per_feature"] == 132, "44 单例 ×3 reps"
+
+
+# ---------- §SPEC-026：速度门 / 孤立 B / 具名重复轮 ----------
+
+def test_regression_b_faster_must_not_pass() -> None:
+    """§SPEC-026：B/A=0.333、噪声 0 的反例必须非 PASS——速度门方向为
+    median B/A ≥ 1 + 噪声带。"""
+    rounds = [_round(f"A{i}", "shared", 30.0) for i in (1, 2, 3)]
+    for i in (1, 2, 3):
+        rounds.append(_round(f"B{i}", "per_feature", 10.0))
+        rounds.append(_round(f"A10{i}", "shared", 30.0))
+    s = compute_perf_summary(rounds, 4, 44)
+    assert s["verdict"] == "INCONCLUSIVE", "回归方向不得判 MEASURED"
+    assert s["speed_gate"]["ok"] is False
+    assert s["speed_gate"]["threshold_b_over_a"] == 1.0, "噪声 0 时阈值=1"
+    assert round(s["speed_gate"]["median_ratio_b_over_a"], 3) == 0.333
+
+
+def test_improvement_within_noise_not_measured() -> None:
+    """改善低于/等于 A/A 噪声带必须非 PASS。"""
+    rounds = [_round("A1", "shared", 30.0), _round("A2", "shared", 30.5),
+              _round("A3", "shared", 31.0)]
+    for i in (1, 2, 3):
+        rounds.append(_round(f"B{i}", "per_feature", 31.0))
+        rounds.append(_round(f"A10{i}", "shared", 30.5))
+    s = compute_perf_summary(rounds, 4, 44)
+    assert s["verdict"] == "INCONCLUSIVE", "噪声内改善不得判 MEASURED"
+    assert s["speed_gate"]["ok"] is False
+
+
+def test_speed_gate_passes_for_existing_4x_shape() -> None:
+    """既有 4.064×（噪声 ~3.75%）形态必须仍判 MEASURED。"""
+    s = compute_perf_summary(_full_rounds(), 4, 44)
+    assert s["speed_gate"]["ok"] is True
+    assert s["verdict"] == "MEASURED"
+
+
+def test_orphan_b_breaks_completeness_and_is_disclosed() -> None:
+    """孤立 B（无后继 shared A）不得静默丢弃：rounds_complete=False 且
+    证据具名可见。"""
+    rounds = _full_rounds()
+    rounds.append(_round("B9", "per_feature", 200.0))
+    s = compute_perf_summary(rounds, 4, 44)
+    assert s["rounds_complete"] is False
+    assert s["verdict"] == "INCONCLUSIVE"
+    assert s["orphan_b_rounds"] == ["B9"], "孤立 B 必须具名披露"
+
+
+def test_consecutive_bs_each_pair_own_next_a() -> None:
+    """连续两个 B：各与其后第一个 shared A 配对（FIFO 不覆盖——旧实现
+    B2 静默顶掉 B1），无尾部孤立时 orphan 面为空。"""
+    rounds = [_round(f"A{i}", "shared", 30.0 + i) for i in (1, 2, 3)]
+    rounds += [_round("B1", "per_feature", 180.0),
+               _round("B2", "per_feature", 190.0),
+               _round("A101", "shared", 31.0),
+               _round("A102", "shared", 31.5),
+               _round("A103", "shared", 32.0)]
+    s = compute_perf_summary(rounds, 4, 44)
+    assert [(p["b_round"], p["a_round"]) for p in s["ab_pairs"]] == [
+        ("B1", "A101"), ("B2", "A102")], "各 B 与其后第一个 A 配对，不覆盖"
+    assert s["orphan_b_rounds"] == [], "连续 B 均有后继 A，无孤立"
+    assert s["verdict"] == "INCONCLUSIVE", "仅 2 对不构成完备对比"
+
+
+def test_duplicate_round_raises_named_error(tmp_path) -> None:
+    """重复 batch round 具名拒绝：专用异常类型（仍为 ValueError 子类）。"""
+    from godot_qa_toolkit.measurement.acceptance_perf import (
+        DuplicateRoundError,
+    )
+    doc = {"rounds": [_round("A1", "shared", 29.0)]}
+    with pytest.raises(DuplicateRoundError, match="duplicate round"):
+        merge_round_into_report(doc, _round("A1", "shared", 30.0), 4, 44)
+
+
+def test_driver_refuses_duplicate_round_with_exit_2(
+        tmp_path, monkeypatch, capsys):
+    """分批驱动器：重复轮必须具名拒绝 exit 2，不得裸 ValueError 崩溃。"""
+    import importlib.util
+    script = Path(__file__).resolve().parents[1] / "integration" / \
+        "run_see1619_acceptance_perf.py"
+    spec = importlib.util.spec_from_file_location("perf_driver", script)
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    report = tmp_path / "perf.json"
+    report.write_text(json.dumps(
+        {"doc": "see1619-acceptance-perf/1",
+         "rounds": [_round("A1", "shared", 29.0)]}), encoding="utf-8")
+    args = argparse.Namespace(gqt="unused", godot="unused", timeout=60,
+                              shards_a=4, roots=None, mode="A",
+                              round_index=1, report=report)
+    monkeypatch.setattr(driver, "_acceptance_wall",
+                        lambda *a, **k: {"valid": True, "rc": 0,
+                                         "acceptance_wall_s": 30.0,
+                                         "shards": 4, "repeats": 3})
+    rc = driver.run_single_round(args, "A", 1, tmp_path, 44,
+                                 tmp_path / "recipe.json", report)
+    assert rc == 2, "重复轮必须具名拒绝 exit 2"
+    assert "duplicate round" in capsys.readouterr().err

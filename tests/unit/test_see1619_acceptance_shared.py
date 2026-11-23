@@ -387,3 +387,118 @@ def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
     assert out["state"] == "invalid"
     assert "suite_error" in (out.get("invalid_reason") or "")
     assert all(not d.exists() for d in made), "共享轮已建组全部回收"
+
+
+# ---------- §SPEC-025：隔离绿必须以 valid + 对账 ok 证据为前提 ----------
+
+def _fb_evidence_flow(root, monkeypatch, tmp_path, fake):
+    _wire(monkeypatch, tmp_path, fake)
+    return _flow(root, shards=2)
+
+
+def test_fallback_invalid_state_stays_red(tmp_path, monkeypatch):
+    """§SPEC-025：fallback state=invalid（timeout/invalid）时即使无观测红，
+    也不得包装为隔离绿——共享红保持、结果 invalid、无降级披露。"""
+    root = _proj(tmp_path)
+    fake, _calls = _make_fake_run_arm({"k2"}, set(), fb_state="invalid")
+    out = _fb_evidence_flow(root, monkeypatch, tmp_path, fake)
+    assert out["state"] != "valid" and out["gut_ok"] is False
+    assert out["process_fallbacks"] == [], "invalid 证据不得进降级披露"
+    assert any("test_k2.gd" in p
+               for p in out["test_failures"]["observed_pairs"]), \
+        "共享红必须保持可见"
+
+
+def test_fallback_missing_reconciliation_stays_red(tmp_path, monkeypatch):
+    """§SPEC-025：缺 reconciliation 证据（None）时默认 ok=True 是假绿
+    通道——缺证据一律保持红。"""
+    root = _proj(tmp_path)
+    fake, _calls = _make_fake_run_arm({"k2"}, set(), fb_rec_present=False)
+    out = _fb_evidence_flow(root, monkeypatch, tmp_path, fake)
+    assert out["state"] != "valid" and out["gut_ok"] is False
+    assert out["process_fallbacks"] == []
+    assert any("test_k2.gd" in p
+               for p in out["test_failures"]["observed_pairs"])
+
+
+def _fb_compile_setup(monkeypatch, tmp_path):
+    """公共接线：记录每个 create_suite_dir 产物；compile 可按 chunk 注炸。"""
+    made: list[Path] = []
+    counter = {"n": 0}
+
+    def fake_replay(project_root, key, *, suite_dir=None):
+        return {}
+
+    def fake_suite_dir(r):
+        counter["n"] += 1
+        d = Path(tmp_path) / f"suite-{counter['n']}"
+        d.mkdir(parents=True, exist_ok=True)
+        made.append(d)
+        return d
+
+    monkeypatch.setattr(arms, "replay_check", fake_replay)
+    monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
+    monkeypatch.setattr(arms, "create_suite_dir", fake_suite_dir)
+    return made
+
+
+def test_second_fallback_compile_failure_cleans_fb_suites(
+        tmp_path, monkeypatch):
+    """§SPEC-025 HIGH：第二个 singleton 编译失败时，已建的 fb suite 目录
+    （含前一个 singleton）必须全部回收，返回后零残留。"""
+    from godot_qa_toolkit.gherkin.suite import SuiteError
+    root = _proj(tmp_path)
+    made = _fb_compile_setup(monkeypatch, tmp_path)
+
+    def fake_compile(project_root, keys, suite_dir):
+        if list(keys) == ["k2"]:
+            raise SuiteError("injected second fb compile failure")
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
+    fake, _calls = _make_fake_run_arm({"k1", "k2"}, set())
+    monkeypatch.setattr(arms, "run_arm", fake)
+    out = arms.run_acceptance_flow(
+        root=root,
+        recipe={"acceptance_face": {"features": [
+            {"key": k} for k in KEYS]}},
+        acceptance_keys=None, acceptance_shards=2,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "invalid"
+    assert "suite_error" in (out.get("invalid_reason") or "")
+    assert all(not d.exists() for d in made), \
+        f"suite 残留: {[str(d) for d in made if d.exists()]}"
+
+
+def test_error_path_suite_cleanup_failure_not_valid(tmp_path, monkeypatch):
+    """§SPEC-025：异常路径 suite 清理失败 = 残留 = invalid_reason 必须具名
+    suite_residue，不得静默吞掉。"""
+    from godot_qa_toolkit.gherkin.suite import SuiteError
+    root = _proj(tmp_path)
+    made = _fb_compile_setup(monkeypatch, tmp_path)
+    fb_dir_seen: list[Path] = []
+
+    def fake_compile(project_root, keys, suite_dir):
+        if list(keys) == ["k2"]:
+            raise SuiteError("injected second fb compile failure")
+
+    monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
+    real_cleanup = arms._cleanup_suite_dir
+
+    def flaky_cleanup(sd):
+        fb_dir_seen.append(Path(sd))
+        if len(fb_dir_seen) >= 2:
+            raise OSError("injected cleanup failure")
+        return real_cleanup(sd)
+
+    monkeypatch.setattr(arms, "_cleanup_suite_dir", flaky_cleanup)
+    fake, _calls = _make_fake_run_arm({"k1", "k2"}, set())
+    monkeypatch.setattr(arms, "run_arm", fake)
+    out = arms.run_acceptance_flow(
+        root=root,
+        recipe={"acceptance_face": {"features": [
+            {"key": k} for k in KEYS]}},
+        acceptance_keys=None, acceptance_shards=2,
+        arms_parallel=False, acceptance_adaptive=False, arm_kwargs={})
+    assert out["state"] == "invalid"
+    assert "suite_residue" in (out.get("invalid_reason") or ""), \
+        "清理失败必须具名，不得静默"

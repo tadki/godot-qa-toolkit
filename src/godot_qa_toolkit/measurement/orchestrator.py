@@ -122,9 +122,25 @@ CERTIFICATION = {
     "reason": "single round; WP5 owns two-round certification",
 }
 
+def canonical_failure_pairs(pairs) -> "set[tuple[str, str]]":
+    """SEE-1623 M8：失败对身份规范化——同一失败的未归因回显 ("", t) 与
+    归因形态 (s, t) 并存时只保留归因形态。
+
+    §SPEC-063c/064a 的双形态采集是门控判定面（裸名回显随归因实例吸收），
+    但身份计数（baseline_count / meta.pairs / excluded_tests）必须按
+    失败身份唯一——否则 1 个失败测试计 2 对，证据可信度受损。仅存裸名
+    形态（Run Summary 截断）的对原样保留。"""
+    pairs = set(pairs or ())
+    scripted = {p for p in pairs if p[0]}
+    scripted_names = {t for _, t in scripted}
+    return scripted | {p for p in pairs
+                       if not p[0] and p[1] not in scripted_names}
+
+
 def _parse_baseline_failures(baseline_failures) -> "set[tuple[str, str]]":
     """§SPEC-064b：基线失败集升级为 (script, test) 身份对——同名跨脚本不
-    互相吸收、未归因仅匹配未归因；裸名字符串身份歧义 → fail-closed 拒绝。"""
+    互相吸收、未归因仅匹配未归因；裸名字符串身份歧义 → fail-closed 拒绝。
+    SEE-1623 M8：双形态并存按失败身份规范化（计数不翻倍）。"""
     baseline_pairs: set[tuple[str, str]] = set()
     for entry in (baseline_failures or ()):
         if (isinstance(entry, tuple) and len(entry) == 2
@@ -135,7 +151,7 @@ def _parse_baseline_failures(baseline_failures) -> "set[tuple[str, str]]":
                 f"baseline failure entry must be a (script, test) pair, "
                 f"got {entry!r} — bare names are identity-ambiguous and "
                 f"rejected (§SPEC-064b)")
-    return baseline_pairs
+    return canonical_failure_pairs(baseline_pairs)
 
 def _req_str(obj: dict, key: str, kind: str) -> str:
     """§SPEC-065：配置字段统一类型校验——非 str 或空白即 MeasurementError
@@ -910,6 +926,9 @@ def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],
             f"has no run stream (rc={r.returncode}) — refusing empty "
             f"baseline (§SPEC-060a fail-loud); gut output tail: {tail!r}")
     pairs = _parse_failing_pairs(out)
+    # SEE-1623 M8：身份规范化——1 个失败测试 = 1 对（双形态并存时保留
+    # 归因形态）；基线计数与 pairs 披露不翻倍。
+    pairs = canonical_failure_pairs(pairs)
     face = "gutconfig_default"
     if gut_args and gut_args[0].startswith("-gdir="):
         face = gut_args[0].split("=", 1)[1]

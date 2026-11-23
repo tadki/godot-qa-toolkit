@@ -216,6 +216,25 @@ def _estimated_costs() -> list[dict]:
     return _expensive_operations()
 
 
+def _tests_glob_problems(root: Path, tests_glob: str | None) -> list[dict]:
+    """SEE-1623 M6：显式 `--tests` glob 存在性前置校验——此前不在
+    plan/prepare 拒绝，烧完全部 run_error 腿才结束（每腿 ~0.5s × N）。
+    error 级（plan_blocked），阻断先于任何 GUT。"""
+    if not tests_glob or not str(tests_glob).startswith("res://"):
+        return []
+    rel = str(tests_glob).split("res://", 1)[1].rstrip("/")
+    target = root / rel if rel else root
+    if target.exists():
+        return []
+    return [_problem(
+        "error", "tests_glob_target_missing",
+        {"tests_glob": str(tests_glob), "anchored": str(target)},
+        "fix the --tests glob (res:// path under the project root) or "
+        "omit it to use the mapped face",
+        level="P0", source="explicit --tests argument",
+        auto_prepare_covered=False)]
+
+
 def static_plan(project_root: str | Path, target_file: str | None = None,
                 tests_glob: str | None = None, *,
                 budget_s: float = PLAN_BUDGET_S) -> dict:
@@ -226,6 +245,7 @@ def static_plan(project_root: str | Path, target_file: str | None = None,
     deadline = t0 + budget_s
     problems = _env_problems(root)
     problems += _autoload_problems(root)
+    problems += _tests_glob_problems(root, tests_glob)
     tprobs, exhaustive = _test_interpreter_problems(root, tests_glob, deadline)
     problems += tprobs
     problems += _prepare_prereq_problems(root)

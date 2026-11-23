@@ -481,14 +481,22 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
     files = list(getattr(args, "files", []) or [])
     if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
         return None
+    # SEE-1623 M6：显式 --attribution-map 只读、绝不重建——修复提示不得
+    # 与该契约相反（此前一律建议 --auto-prepare，Harti 障碍4）。
+    _map_arg = getattr(args, "attribution_map", None)
+    if _map_arg and str(_map_arg) not in ("auto", "off"):
+        _notice = ("preconditions missing — the explicit attribution map "
+                   f"{_map_arg} is read-only and will never be rebuilt: "
+                   "fix or replace the map file, or omit --attribution-map "
+                   "to use the auto-managed map")
+    else:
+        _notice = ("preconditions missing — fix the listed items or rerun "
+                   "with --auto-prepare to build them automatically")
     return _emit({"tool": "mutation", "ok": False,
                   "error": "prepare_required", "plan": plan,
                   "summary": {"error": "prepare_required", "plan": plan,
                               "problems": p1,
-                              "notice": "preconditions missing — fix the "
-                                        "listed items or rerun with "
-                                        "--auto-prepare to build them "
-                                        "automatically"}})
+                              "notice": _notice}})
 
 
 def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":

@@ -163,14 +163,16 @@ def test_map_missing_is_p1_with_cost_and_fix_command(tmp_path, monkeypatch):
 
 
 def test_cli_p1_stops_by_default_auto_prepare_continues(tmp_path, monkeypatch):
-    """P1 默认停（prepare_required + 修复命令/成本）；--auto-prepare 继续。"""
+    """P1 默认停（prepare_required + 修复命令/成本）；--auto-prepare 继续。
+    SEE-1623 M1 改约：本钉为默认面形态——显式 --tests 不再被 P1 门拦
+    （用户接管测试面，映射前置不适用）。"""
     import argparse
     from godot_qa_toolkit import cli as cli_mod
 
     root = _healthy_project(tmp_path, monkeypatch)
     target = _write(root, "utils/calc.gd", "extends RefCounted\n")
     base = dict(project_root=str(root), files=[str(target)],
-                tests="res://tests/unit/", select_mode="line",
+                tests=None, select_mode="line",
                 dry_run=False, attribution_map=None)
 
     import io
@@ -184,7 +186,8 @@ def test_cli_p1_stops_by_default_auto_prepare_continues(tmp_path, monkeypatch):
     stopped = _json.loads(buf.getvalue())
     assert stopped["error"] == "prepare_required"
     p1 = stopped["summary"]["problems"]
-    assert p1 and p1[0]["level"] == "P1" and "map-update" in p1[0]["fix"]
+    assert p1 and all(p["level"] == "P1" for p in p1)
+    assert any("map-update" in p["fix"] for p in p1)
 
     cont = cli_mod._plan_gate_mutation(argparse.Namespace(
         auto_prepare=True, **base))

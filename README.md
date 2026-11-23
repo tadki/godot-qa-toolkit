@@ -41,12 +41,15 @@ the target path or CWD, and fail loudly if none exists.
   full`. Mutants execute in disk shadow slots (your real repo is never written),
   differential resume re-runs only unproven verdicts, and kills are judged as
   newly-failing test sets, never by exit codes.
-- **Dual-arm measurement, one instrumentation pass.** `measure suite` builds
-  the hashed suite definition; `measure run` executes the full GUT and
-  acceptance arms whose line sets are **unioned, never averaged**. With
-  attribution enabled, the same run records per-test/per-script covered lines,
-  derives file/function views, and lets mutation project the matching Coverage
-  Store without a second instrumentation or GUT pass.
+- **Measurement, one instrumentation pass.** `measure suite` builds
+  the hashed suite definition; `measure run` executes the full GUT arm, with
+  acceptance paused by default. When acceptance is explicitly restored, the
+  active arms' line sets are **unioned, never averaged**. While acceptance is
+  paused, a valid ordinary GUT-only run exits `0` with
+  `certification=uncertified`. With attribution enabled, the same run records
+  per-test/per-script covered lines, derives file/function views, and lets
+  mutation project the matching Coverage Store without a second
+  instrumentation or GUT pass.
 - **Guards and self-checks.** A Pure Core architecture guard, CC parity,
   registry snapshot diffs, and `gqt doctor` for editable-install consistency.
 
@@ -127,7 +130,7 @@ gqt measure arch src/systems
 # CRAP risk ranking for candidate files
 gqt measure risk src/save/save_manager.gd --project-root . --report shadow-report.json
 
-# Dual-arm measurement → CRAP records + attribution map
+# Measurement (acceptance paused by default) → CRAP records
 gqt measure suite --project-root . --out recipe.json
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json
 ```
@@ -142,6 +145,14 @@ its self-check JSON goes to stderr):
 | `0` | verdict pass (`ok=true`) | JSON |
 | `1` | verdict fail (`ok=false`): target failed, unmeasured, or aborted run | JSON |
 | `2` | **caller error**: bad arguments (argparse) / `doctor` install mismatch | none (stderr only) |
+
+Non-positive mutation `--budget` / `--jobs` / `--timeout` values, a
+non-positive `measure run --timeout`, and a malformed `--lines` specification
+are caller errors: exit `2`, readable stderr, no stdout JSON. Runtime input
+failures such as malformed GDScript or an unparseable performance JSON file
+instead return exit `1` with the same flat JSON envelope; `summary` names
+`error` / `reason` / `reason_detail` / `suggested_action` without leaking a
+traceback.
 
 Branch only on `0` vs `!= 0`, then parse stdout to distinguish failure shapes.
 Missing JSON means the tool itself crashed — treat it as untrustworthy, not

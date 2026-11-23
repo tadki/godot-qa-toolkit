@@ -15,11 +15,14 @@ default non-dry-run path):
 1. **plan** — a static, read-only sweep bounded by `PLAN_BUDGET_S=10s`. It
    inspects `project.godot` autoload targets, every `preload`/`load` call in
    the test surface, the Godot binary and the GUT addon, and the state of the
-   attribution map. Each finding is recorded as a problem entry
-   `{severity, code, evidence, fix}` in `plan.problems[]`. Errors block the
-   run; warnings disclose work the next stage will pay for. A read-only
-   `estimated_costs` list previews expensive operations without executing
-   them.
+   attribution map. It enumerates missing `.gutconfig.json`,
+   `acceptance/features/`, and `.feature` prerequisites in one pass, and
+   validates an explicit `--tests` glob before any GUT leg. A missing
+   single-file target fails before map build/prepare. Each finding is recorded
+   as a problem entry `{severity, code, evidence, fix}` in `plan.problems[]`.
+   Errors block the run; warnings disclose work the next stage will pay for.
+   A read-only `estimated_costs` list previews expensive operations without
+   executing them.
 2. **prepare** — performs the work plan disclosed: import cache warm-up,
    attribution-map build / incremental refresh, baseline preflight, warm pool
    provisioning. Anything that fails here is named (`route_drift`,
@@ -34,9 +37,12 @@ map exists, the response is `ok=true`, `selection_mode=plan_only`, and the
 plan's `problems[]` contains an `attribution_map_missing_or_stale` warning
 describing the work a real run will pay for; nothing is renewed, imported, or
 censused. Pass `--select full` or an explicit `--tests` to preview sites
-without a map. If the plan finds an error-class problem the run aborts as
-`plan_blocked` with `summary.error="plan_blocked"`, `summary.plan` echoing
-the static plan, and one `failures[]` entry per error problem.
+without a map. Dry-run is read-only and is not poisoned by an earlier run's
+route state; a spurious `route_drift` does not block it, while a genuine
+authoritative route mismatch still fails loud. If the plan finds an
+error-class problem the run aborts as `plan_blocked` with
+`summary.error="plan_blocked"`, `summary.plan` echoing the static plan, and
+one `failures[]` entry per error problem.
 
 When the target file paths are not all under the project root (or are bare
 top-level files), target derivation falls back to the project root and
@@ -120,7 +126,12 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   new failure keeps the build fail-loud.
 - Explicit `--tests`: the caller takes over test selection; the report uses
   `test_selection.source=explicit_tests` to disclose that line-level selection
-  was not used.
+  was not used. This face does not require an attribution map and bypasses the
+  map-ensure/P1 prepare gate. A missing explicit glob is a plan error
+  (`tests_glob_target_missing`) before any GUT leg.
+- An explicit `--attribution-map` stays read-only. Its preparation guidance
+  names repairing or replacing the map; it never suggests `--auto-prepare`,
+  which would contradict that read-only contract.
 - `summary.selection_mode` is the **effective** face, one of `line` / `fn` /
   `file` / `full` / `lines` / `mutation` / `explicit_tests` (caliper beats
   explicit `--tests`, which beats `--select`). When line/fn slicing is capped
@@ -132,7 +143,10 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   path (zero tests and zero mutation sites) carries the same key plus
   `summary.short_circuit_reason=no_mutation_sites`.
 - `full`: the only explicit audit face (`tests_glob=None`); use only when you
-  deliberately want the whole suite.
+  deliberately want the whole suite. GUT collection includes test
+  subdirectories recursively (`-ginclude_subdirs`). A worker leg that actually
+  ran zero tests is a named `run_error`, not a survivor; the L4 evidence gate
+  remains fail-closed.
 - `--jobs 1`: the explicit serial path still uses a file-level union glob. It is
   a correct superset, but less converged than line-signature grouping.
 
@@ -149,7 +163,13 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   `jobs_limit_reason`, `test_selection`, `attribution`,
   `zero_ref_short_circuit`, `short_circuit_reason`.
 - Kill-bail keys (SEE-1606 P3): `kill_bail`, `kill_bail_face`, `kill_bail_disabled_by`, `kill_bail_scripts` — always present on the normal path; killed details carry `kill_bail_info` (scripts_run / scripts_total / new_failure). No new `exec_scheme` token: early bail is internal behaviour of the existing schemes, cache identity unchanged.
-- Baseline-skip keys (SEE-1606 P2-R1): `baseline_skip {applied, face, requested}` on the normal path when the baseline is dirty; mutant details carry `skip_red {marked, requested, names}`. Suspect is suppressed on skip-enabled batches (empty diff = genuine survive).
+- Baseline-skip keys (SEE-1606 P2-R1): `baseline_skip {applied, face, requested}`
+  on the normal path when the baseline is dirty; `face` is the effective
+  execution face. A worker-to-cold downgrade also discloses `planned_face`,
+  `degraded`, and `degrade_reason`; `applied=true` only when that effective
+  face actually skipped red tests. Mutant details carry
+  `skip_red {marked, requested, names}`. Suspect is suppressed on skip-enabled
+  batches (empty diff = genuine survive).
 - Baseline-failure keys (SEE-1606 P2): `baseline_dirty`, `baseline_failures`,
   `baseline_failure_names`, `break_on_baseline_failure` — always present on the
   normal path; a dirty baseline adds its failing tests to this registry and
@@ -177,7 +197,10 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   report zero pruned items rather than a fabricated speedup.
 - Single-file runs always use the flat `{tool, ok, summary, failures}`
   envelope, including `--jobs 1`; `{tool, ok, jobs, results[]}` exists only for
-  multi-file runs.
+  multi-file runs. Planning outcomes (`plan_only` / `prepare_required` /
+  `plan_blocked`) keep `plan` inside `summary` and always include `failures[]`,
+  including multi-file planning failures (which may also retain `results[]`);
+  the old top-level `plan` / `error` keys are not emitted.
   `coverage_prefilter.source` distinguishes `projection_store` (persisted
   `see1420-coverage/2` derived cache bound to the current map's content and
   execution evidence) and `projection_live` (fresh line facts projected on
@@ -241,6 +264,10 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   schema, binary or identity drift invalidates the affected layer and is
   disclosed. If all layers are unusable, execution continues unfiltered rather
   than producing false coverage.
+- `elif` condition lines participate in those coverage facts, so they are not
+  falsely classified `uncovered` and skipped. Coverage means the condition was
+  true and its branch body executed; a false-path evaluation alone is not
+  counted. `else` header lines remain outside the instrumentable set.
 - Differential resume is on by default: unchanged scopes with
   killed/suspect/invalid verdicts are reused; survived/timeout/run_error sites
   always re-run (red line); `--mutate-all` forces full execution. The
@@ -280,11 +307,15 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 |---|---|---|
 | `<files...>` (positional) | git diff HEAD when omitted | `.gd` files, or one compact `<file>.gd#<lines>` address; omitted = tracked changes plus untracked `.gd` files, excluding hidden/tool/vendor paths |
 | `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins and invalid values fail loud |
-| `--budget <n>` | 50 | Max mutants; with diff reuse present, counted on the post-diff retry set (order-preserving truncation) |
-| `--timeout <s>` | 600 | Single GUT wall-clock limit; default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade |
-| `--dry-run` | off | Run the static plan only; zero GUT, map renewal, import or census. The plan response carries `problems[]` (severity/code/evidence/fix per finding) and `estimated_costs`, plus the diff-estimate, `execution_plan` / `execution_plan_meta` views. A missing or stale attribution map does not block the dry-run: the response is `ok=true` with `selection_mode=plan_only` and the plan's `problems[]` records `attribution_map_missing_or_stale` as a warning. Error-class problems abort as `plan_blocked`. Existing selection fail-loud semantics still apply when a usable map is present and `--dry-run` is asked to enumerate sites |
-| `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping and discloses `explicit_tests` |
-| `--jobs <n>` | `max(2, cpu//2)` | Worker pool size for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value |
+| `--budget <n>` | 50 | Max mutants (must be ≥1); with diff reuse present, counted on the post-diff retry set (order-preserving truncation). Zero or negative values are usage errors: exit `2`, readable stderr, no stdout JSON |
+| `--timeout <s>` | 600 | Single GUT wall-clock limit (must be ≥1); default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade. Zero or negative values are usage errors: exit `2`, no stdout JSON |
+| `--dry-run` | off | Run the static plan only; zero GUT, map renewal, import or census unless `--check-baseline` explicitly requests the one read-only baseline leg. The plan response carries `problems[]` (severity/code/evidence/fix per finding) and `estimated_costs`, plus the diff-estimate, `execution_plan` / `execution_plan_meta` views. A missing or stale attribution map does not block the dry-run: the response is `ok=true` with `selection_mode=plan_only` and the plan's `problems[]` records `attribution_map_missing_or_stale` as a warning. Error-class problems abort as `plan_blocked`. Existing selection fail-loud semantics still apply when a usable map is present and `--dry-run` is asked to enumerate sites. Caliper addressing is applied before estimation, so `mutants` / `executed_estimate` equal the selected site count; an entirely site-less `--lines` request or stale `--mutation` id fails with the same named error as a real run |
+| `--check-baseline` | off (`not_checked`) | In dry-run/plan-only form, run one uninstrumented baseline GUT and disclose `summary.static_preconditions.baseline_health`; without this flag no baseline leg runs |
+| `--auto-prepare` | off | Automatically prepare P1 blockers disclosed by the plan; explicit read-only attribution-map guidance never recommends this flag |
+| `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; auto-build interruption reports provide a ready-to-save draft |
+| `--fail-on-red-baseline` | off | Fail fast on a red uninstrumented baseline; shares the same abort channel as `--break-on-baseline-failure` |
+| `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping, discloses `explicit_tests`, and does not require map ensure/P1 preparation. A missing glob is rejected during plan as `tests_glob_target_missing`, before any GUT leg |
+| `--jobs <n>` | `max(2, cpu//2)` | Worker pool size (must be ≥1) for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value. Zero or negative values are usage errors: exit `2`, no stdout JSON |
 | `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |
 | `--select {line,fn,file,full}` | `line` | line = test-set signature groups; fn/file = explicit calibration/fallback views; full = explicit full-face audit. The reported `selection_mode` also uses `lines` / `mutation` for calipers and `explicit_tests` when `--tests` takes over |
 | `--attribution-map <path>` | auto-managed `.qa-cache/attribution-map.json` | Explicit `test-attribution/6` line-primary artifact; read-only pass-through, schema mismatch fails loud without rebuild |
@@ -295,7 +326,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--break-on-baseline-failure` | off | SEE-1606 P2 + P2-R1: when off (default) baseline-red tests are **physically skipped** from every mutant execution face at test granularity (removed from the GUT collector inside controlled hosts, matched by script identity + test name (same-named green tests in other scripts keep running and keep killing — no false survivors); marker `GQT_SKIP_RED marked=k requested=n names=…`, `summary.baseline_skip`, per-verdict `skip_red`; red names absent from the run stream = machine evidence of not-called). With skip active an empty diff is a genuine survive (suspect suppressed). Cold-legacy faces (explicit `--tests` dir / `--select full` / missing real `gut.gd`) cannot per-test filter: a dirty baseline aborts fail-loud (`baseline_skip_unsupported` + suggested action). When on, a dirty baseline aborts before any mutant GUT |
 | `--mutate-all` | off | Force full execution (the only escape from diff reuse) |
 | `--mutation <file>#<scope_id>#<n>` | omitted | Single-site caliper (single file): fresh execution using that site's line-level tests; bypasses diff reuse and prefilter |
-| `--lines <spec>` | omitted | Single line `42`, range `10-20`, or multi-segment `10-20,30,35-40`; intersects actual sites, discloses no-site lines, and uses the selected lines' test union |
+| `--lines <spec>` | omitted | Single line `42`, range `10-20`, or multi-segment `10-20,30,35-40`; intersects actual sites, discloses no-site lines, and uses the selected lines' test union. A malformed spec is a usage error (exit `2`, no stdout JSON); a valid spec with zero sites fails with exit `1`, including dry-run |
 | `--reuse-coverage` | **retired** (SEE-1594 A13) | Removed: prefilter is on by default; use `--no-reuse-coverage` to disable |
 | `--no-reuse-coverage` | off | Explicitly disable the coverage prefilter, including store and live-projection layers |
 | `--worker-channel` | on by routing | Force the resident worker; static routing sends autoload/GUT-domain/scene-held targets cold and the refusal is disclosed as `worker_channel.override_refused=true` with named route reasons; `GQT_MUTATION_WORKER=0` opts out everywhere |

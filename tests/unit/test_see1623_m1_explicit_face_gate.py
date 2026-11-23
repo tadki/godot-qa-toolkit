@@ -66,6 +66,18 @@ class TestExplicitFaceGate:
         missing = _Args(files=["/proj/src/nope.gd"])
         assert _p1_prepare_gate(missing, _plan_with_map_warning()) is None
 
+    def test_explicit_tests_bypasses_gate_with_existing_target(self, tmp_path):
+        """显式 --tests 在目标文件真实存在时仍绕过 prepare 门。
+
+        M1 判别补强：既有用例的 target 不存在，会被「文件存在性守卫」
+        短路返回 None，未真正钉住 tests 分支——目标存在时若 tests 接管
+        分支缺失，门会返回 prepare_required（非 None）。"""
+        target = tmp_path / "calc.gd"
+        target.write_text("extends RefCounted\n")
+        args = _Args(project_root=str(tmp_path), files=[str(target)],
+                     tests="res://tests/gut")
+        assert _p1_prepare_gate(args, _plan_with_map_warning()) is None
+
 
 class TestExplicitTestsSkipEnsureMap:
     def test_ensure_map_not_called_for_explicit_tests(self, tmp_path,

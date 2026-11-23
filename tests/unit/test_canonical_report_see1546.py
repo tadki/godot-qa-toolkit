@@ -55,6 +55,14 @@ def _restore_subprocess():
     sp.run = orig_run
 
 
+@pytest.fixture(autouse=True)
+def _dual_arm_restored(monkeypatch):
+    """SEE-1623 H4：本文件为双臂编排机制套件（union/crap/收敛/对账）——
+    acceptance 默认暂停契约下占位臂无 bundles_data，union 交集恒空；
+    机制测试统一走显式恢复路径（暂停行为本身由 SEE-1623 H4 套件钉）。"""
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
+
+
 @pytest.fixture()
 def project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
@@ -1141,9 +1149,12 @@ def test_coverage_limitation_reason_named_on_unstable(project, tmp_path):
     assert rec["provenance"]["stability_reason"].startswith("tool limitation")
 
 
-def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path):
+def test_acceptance_repeats_union_convergence_disclosed(project, tmp_path,
+                                                        monkeypatch):
     """§SPEC-062C：验收臂 N 次重复取行集并集，报告披露收敛轮数；
-    确定性 fixture 每轮并集相同 → 第 1 轮即收敛（rounds_used=1 < N）。"""
+    确定性 fixture 每轮并集相同 → 第 1 轮即收敛（rounds_used=1 < N）。
+    SEE-1623 H4：双臂机制测试显式走恢复路径（acceptance 默认暂停）。"""
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     report = run_measurement(project, _targets(project), recipe,
@@ -1167,6 +1178,7 @@ def test_acceptance_repeats_nonconvergence_reported_with_bound(
     converged=false（未收敛如实披露，不伪造确定性）。"""
     import godot_qa_toolkit.measurement.orchestrator as orch
 
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
 
@@ -1268,9 +1280,10 @@ class ReconcileBreakerGodot(FakeGodot):
 
 
 def test_reconciliation_failure_invalidates_union_and_scores(
-        project, tmp_path):
+        project, tmp_path, monkeypatch):
     """§SPEC-063b 反例（Revy 新 H-2）：acceptance 对账失败必须臂无效 +
-    union 无效 + 零出分（不得静默 scored）。"""
+    union 无效 + 零出分（不得静默 scored）。SEE-1623 H4：显式恢复路径。"""
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = ReconcileBreakerGodot(project)
     report = run_measurement(project, _targets(project), recipe)
@@ -1498,9 +1511,11 @@ def test_config_fields_must_be_non_empty_strings(project, tmp_path):
                           intolerant_config=cfg)
 
 
-def test_valid_config_passes_type_validation(project, tmp_path):
+def test_valid_config_passes_type_validation(project, tmp_path, monkeypatch):
     """§SPEC-065 正向：合法声明（含 script 作用域 + coverage limitation）
-    通过类型校验，报告 declared/limitations 逐字段保持非空 str。"""
+    通过类型校验，报告 declared/limitations 逐字段保持非空 str。
+    SEE-1623 H4：union ok 断言走显式恢复路径。"""
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     recipe, _ = _recipe(project, tmp_path)
     sp.run = FakeGodot(project)
     report = run_measurement(

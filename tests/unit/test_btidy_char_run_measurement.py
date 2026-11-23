@@ -18,6 +18,9 @@ from godot_qa_toolkit.measurement.backup import MeasurementError
 
 def _wire(monkeypatch, tmp_path):
     seen = {}
+    # SEE-1623 H4：本文件 fake 的是双臂 execute_arms 装配——acceptance
+    # 默认暂停契约下编排走单臂 run_arm，须显式恢复路径才触达该 fake。
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     monkeypatch.setattr(orch, "verify_recipe", lambda r: (True, None))
 
     def fake_inject(root, recipe):

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess as sp
 import sys
 from pathlib import Path
@@ -46,7 +47,18 @@ def _report(tmp_path: Path, fake_cls="FakeGodot"):
     project = t.project.__wrapped__(tmp_path)
     recipe, _ = t._recipe(project, tmp_path)
     sp.run = getattr(t, fake_cls)(project)
-    report = run_measurement(project, t._targets(project), recipe)
+    # SEE-1623 H4：双臂 union 机制测试显式走恢复路径（acceptance 默认
+    # 暂停契约下占位臂无 bundles_data，union 交集恒空）。
+    env_key = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
+    old = os.environ.get(env_key)
+    os.environ[env_key] = "0"
+    try:
+        report = run_measurement(project, t._targets(project), recipe)
+    finally:
+        if old is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = old
     return report
 
 

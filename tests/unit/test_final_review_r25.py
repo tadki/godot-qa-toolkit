@@ -1447,6 +1447,8 @@ def test_entry_relative_godot_bin_project_only_accepted(
     wrapper.write_text("#!/bin/sh\nexit 0\n")
     wrapper.chmod(0o755)
     monkeypatch.setenv("GQT_GODOT_BIN", "./quiet-godot")
+    # SEE-1623 H4：CLI ok 断言经 union——acceptance 恢复路径显式启用
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
     args = build_parser().parse_args(["measure", "run", str(project / "src_game"),
@@ -1478,6 +1480,8 @@ def test_flag_relative_godot_bin_project_only_accepted(
     wrapper.write_text("#!/bin/sh\nexit 0\n")
     wrapper.chmod(0o755)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    # SEE-1623 H4：CLI ok 断言经 union——acceptance 恢复路径显式启用
+    monkeypatch.setenv("GQT_MEASUREMENT_ACCEPTANCE_DISABLED", "0")
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(_recipe(project)), encoding="utf-8")
     args = build_parser().parse_args(["measure", "run", str(project / "src_game"),

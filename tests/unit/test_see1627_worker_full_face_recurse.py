@@ -1,17 +1,20 @@
-"""SEE-1627 §SPEC-002：worker 腿选面递归语义与冷通道逐字对齐。
+"""SEE-1627 §SPEC-002 / §SPEC-007：worker 腿选面递归语义与冷通道逐字对齐。
 
 根因：`WorkerSession.run_leg` 曾以 `tests_glob or "res://tests/"` 把 full
 审计面（`tests_glob=None`）折叠成显式目录，宿主 `add_directory` 不递归
 子目录（GUT 9.6）→ 标准布局（`tests/unit/` 等）收集 0 测试。修复后请求
 必须携带递归意图：full 面（None）递归收集（= 冷通道 `-ginclude_subdirs`），
-显式目录 `--tests` 保持非递归，`.gd` 形态走单脚本精确执行。
+`.gd` 形态走单脚本精确执行；显式目录面复刻冷通道 gut_cmdln 读取的项目
+`.gutconfig.json#include_subdirs`（§SPEC-007：true 递归、false/缺失非递归）。
 
 行为契约：
 1. full 面请求递归标记为真，且与「显式 `res://tests/`」目录形态可区分
    （`or "res://tests/"` 折叠 bug 的直接回归钉）。
-2. 显式目录请求递归标记为假（非递归语义不回归）。
-3. `.gd` 形态请求递归标记为假、携带精确脚本路径（单脚本执行不回归）。
-4. 目录类选面的 worker 递归标记 == 冷通道是否附加 `-ginclude_subdirs`。
+2. 显式目录递归标记跟随项目 `.gutconfig include_subdirs`（§SPEC-007）；
+   无配置/false 时非递归（§SPEC-002 语义保持）。
+3. `.gd` 形态请求递归标记恒为假、携带精确脚本路径（单脚本执行不回归）。
+4. 目录类选面的 worker 递归标记 == 冷通道有效递归（full 恒真；显式目录面
+   == `.gutconfig include_subdirs`）。
 """
 
 import json
@@ -21,10 +24,10 @@ from godot_qa_toolkit.mutation import worker_session as ws
 from godot_qa_toolkit.mutation.runner import _gut_extra_args
 
 
-def _captured_request(tmp_path, monkeypatch, tests_glob):
+def _captured_request(tmp_path, monkeypatch, tests_glob, project_root=None):
     slot = tmp_path / f"slot-{uuid.uuid4().hex}"
     (slot / ws.WORKER_DIRNAME).mkdir(parents=True)
-    sess = ws.WorkerSession(str(slot), str(tmp_path), "linux")
+    sess = ws.WorkerSession(str(slot), str(project_root or tmp_path), "linux")
     monkeypatch.setattr(sess, "start", lambda: None)
     sess._log_path = tmp_path / "worker-log.txt"
     captured = {}
@@ -39,6 +42,24 @@ def _captured_request(tmp_path, monkeypatch, tests_glob):
     monkeypatch.setattr(sess, "_await_resp", fake_await)
     sess.run_leg(0, "res://x.gd", "sha", [], tests_glob)
     return captured["req"]
+
+
+def _project_with_gutconfig(tmp_path, data):
+    """建项目根并按需写 `.gutconfig.json`；data=None 表示缺失。"""
+    proj = tmp_path / f"proj-{uuid.uuid4().hex}"
+    proj.mkdir(parents=True)
+    if data is not None:
+        (proj / ".gutconfig.json").write_text(
+            json.dumps(data), encoding="utf-8")
+    return proj
+
+
+def _cold_effective_dir_recurse(tests_glob, project_root):
+    """冷通道在目录类选面的有效递归：full 面 CLI 旗标恒递归；显式目录面
+    由项目 `.gutconfig include_subdirs` 决定（worker 须逐面复刻）。"""
+    if "-ginclude_subdirs" in _gut_extra_args(tests_glob):
+        return True
+    return ws._project_include_subdirs(str(project_root))
 
 
 class TestWorkerRecursionFlag:
@@ -88,9 +109,71 @@ class TestWorkerRecursionFlag:
 class TestWorkerColdAlignment:
     def test_directory_faces_match_cold_recursion_condition(
             self, tmp_path, monkeypatch):
-        """目录类选面：worker 递归标记 == 冷通道附加 `-ginclude_subdirs`。"""
+        """目录类选面：worker 递归标记 == 冷通道附加 `-ginclude_subdirs`
+        （无项目配置时，显式目录面两边均非递归）。"""
         for glob in (None, "", "res://tests/", "res://tests/unit",
                      "res://tests/unit/"):
             req = _captured_request(tmp_path, monkeypatch, glob)
-            cold_recurses = "-ginclude_subdirs" in _gut_extra_args(glob)
-            assert req["tests_recurse"] == cold_recurses, glob
+            expected = _cold_effective_dir_recurse(glob, tmp_path)
+            assert req["tests_recurse"] == expected, glob
+
+
+class TestGutconfigRecursionAlignment:
+    """§SPEC-007：显式目录面递归跟随项目 `.gutconfig include_subdirs`。"""
+
+    def test_explicit_dir_recurses_when_project_config_true(
+            self, tmp_path, monkeypatch):
+        proj = _project_with_gutconfig(tmp_path, {"include_subdirs": True})
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit",
+                                project_root=proj)
+        assert req["tests_recurse"] is True
+
+    def test_explicit_dir_non_recursive_when_config_false(
+            self, tmp_path, monkeypatch):
+        proj = _project_with_gutconfig(tmp_path, {"include_subdirs": False})
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit",
+                                project_root=proj)
+        assert req["tests_recurse"] is False
+
+    def test_explicit_dir_non_recursive_when_config_missing(
+            self, tmp_path, monkeypatch):
+        proj = _project_with_gutconfig(tmp_path, None)
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit",
+                                project_root=proj)
+        assert req["tests_recurse"] is False
+
+    def test_full_face_recursive_even_when_config_false(
+            self, tmp_path, monkeypatch):
+        """full 面 CLI 旗标 `-ginclude_subdirs` 覆盖项目配置，恒递归。"""
+        proj = _project_with_gutconfig(tmp_path, {"include_subdirs": False})
+        req = _captured_request(tmp_path, monkeypatch, None, project_root=proj)
+        assert req["tests_recurse"] is True
+
+    def test_gd_form_exact_single_script_regardless_of_config(
+            self, tmp_path, monkeypatch):
+        proj = _project_with_gutconfig(tmp_path, {"include_subdirs": True})
+        req = _captured_request(tmp_path, monkeypatch,
+                                "res://tests/unit/test_calc.gd",
+                                project_root=proj)
+        assert req["tests_recurse"] is False
+        assert req["tests_glob"] == "res://tests/unit/test_calc.gd"
+
+    def test_malformed_config_falls_back_to_non_recursive(
+            self, tmp_path, monkeypatch):
+        proj = _project_with_gutconfig(tmp_path, None)
+        (proj / ".gutconfig.json").write_text("{not json", encoding="utf-8")
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit",
+                                project_root=proj)
+        assert req["tests_recurse"] is False
+
+    def test_worker_matches_cold_effective_recurse_across_config_states(
+            self, tmp_path, monkeypatch):
+        """三态（true/false/缺失）× 目录类选面：worker == 冷通道有效递归。"""
+        for cfg in (True, False, None):
+            proj = _project_with_gutconfig(
+                tmp_path, None if cfg is None else {"include_subdirs": cfg})
+            for glob in (None, "", "res://tests/", "res://tests/unit"):
+                req = _captured_request(tmp_path, monkeypatch, glob,
+                                        project_root=proj)
+                expected = _cold_effective_dir_recurse(glob, proj)
+                assert req["tests_recurse"] == expected, (cfg, glob)

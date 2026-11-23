@@ -45,6 +45,49 @@ class TestBaselineSkipDisclosureConsistency:
         assert out["applied"] is True and out["face"] == "tests_face"
 
 
+class TestM3DegradedDisclosure:
+    """worker 直驱降级冷通道后的披露自洽（QA 观察 2）：不得出现
+    face=worker_direct_drive 且 applied=true 而实际执行面为 cold。"""
+
+    def test_degraded_to_cold_reports_effective_face(self):
+        from godot_qa_toolkit.mutation.runner import \
+            _baseline_skip_disclosure as d
+        out = d(dirty=True, skip_applied=True, worker_host=True,
+                bail_face="unsupported_explicit_or_full", requested=1,
+                effective_face="unsupported_explicit_or_full",
+                degrade_reason="parity_mismatch", cold_can_skip=False)
+        assert out["face"] == "unsupported_explicit_or_full"
+        assert out["planned_face"] == "worker_direct_drive"
+        assert out["degraded"] is True
+        assert out["degrade_reason"] == "parity_mismatch"
+        assert out["applied"] is False
+
+    def test_degraded_with_skip_capable_cold_reports_applied(self):
+        from godot_qa_toolkit.mutation.runner import \
+            _baseline_skip_disclosure as d
+        out = d(dirty=True, skip_applied=True, worker_host=True,
+                bail_face="tests_face", requested=2,
+                effective_face="tests_face", degrade_reason="session_fatal",
+                cold_can_skip=True)
+        assert out["face"] == "tests_face"
+        assert out["planned_face"] == "worker_direct_drive"
+        assert out["degraded"] is True
+        assert out["applied"] is True
+
+    def test_degraded_state_detection(self):
+        from godot_qa_toolkit.mutation.runner import \
+            _worker_degraded_state as st
+        assert st({}) == (False, None)
+        assert st({"worker_channel": {"decision": "worker",
+                                      "reason": "worker_reset_session"}}) \
+            == (False, None)
+        degraded, reason = st({"worker_channel": {
+            "decision": "worker_degraded_cold", "reason": "parity_mismatch"}})
+        assert degraded is True and reason == "parity_mismatch"
+        degraded, reason = st({"worker_fatal_events": ["parity leg unavailable"]})
+        assert degraded is True and "parity" in reason
+
+
 class TestCheckBaselinePlanOnly:
     def test_not_requested_reports_not_checked(self, tmp_path, monkeypatch):
         monkeypatch.delenv("GQT_MUTATION_CHECK_BASELINE", raising=False)

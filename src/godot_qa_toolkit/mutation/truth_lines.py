@@ -10,8 +10,11 @@ import re
 import subprocess
 from pathlib import Path
 
-from .truth_select import SELECT_ROOT  # noqa: F401 — 引用面保持
-
+# SELECT_ROOT 真源迁至本模块（低层）：truth_select 反向导入本模块，形成
+# 单向依赖——truth_lines ↔ truth_select 的顶层互导在任一模块作为「首个
+# 加载入口」时爆环（SEE-1623 QA FAIL：CLI 启动先加载 truth_lines →
+# truth_select → truth_lines 部分初始化 → ImportError）。
+SELECT_ROOT = ".gqt-attr-select"   # 根级点目录：影子树会携带（.qa-cache 被排除）
 
 def _ts():
     """运行时经 truth_select 模块属性解析（避免循环导入）。"""

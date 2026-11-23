@@ -37,7 +37,6 @@ from pathlib import Path
 SCHEMA_VERSION = "test-attribution/6"
 ENV_MAP = "GQT_ATTRIBUTION_MAP"
 ENV_MODE = "GQT_ATTRIBUTION_MAP_MODE"   # "auto"（默认）| "off"
-SELECT_ROOT = ".gqt-attr-select"   # 根级点目录：影子树会携带（.qa-cache 被排除）
 DEFAULT_MAP_REL = ".qa-cache/attribution-map.json"
 
 _LEDGER: list[dict] = []
@@ -75,6 +74,7 @@ def _record(event: dict) -> None:
 
 
 from .truth_lines import (  # noqa: F401 — 迁移绑定保持引用面
+    SELECT_ROOT,
     RuntimeOwnership,
     _line_script_sets,
     _resolve_script_paths,

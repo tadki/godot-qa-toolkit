@@ -1060,9 +1060,10 @@ def _run_mutant_loop(
         # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
         slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
         if dirty:
-            slot_info["baseline_skip"] = _baseline_skip_disclosure(
-                dirty=dirty, skip_applied=skip_applied,
+            slot_info["baseline_skip"] = _baseline_skip_slot_info(
+                slot_info, dirty=dirty, skip_applied=skip_applied,
                 worker_host=worker_host, bail_face=bail_face,
+                bail_scripts=bail_scripts,
                 requested=len(baseline_failures))
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
             slot_info["suspected_orphan"] = _orphan_disclosure(
@@ -1079,19 +1080,58 @@ def _ordered_bail_scripts(project_root, path, bail_scripts):
 
 def _baseline_skip_disclosure(*, dirty: bool, skip_applied: bool,
                               worker_host: bool, bail_face: str,
-                              requested: int) -> dict:
+                              requested: int,
+                              effective_face: str | None = None,
+                              degrade_reason: str | None = None,
+                              cold_can_skip: bool = True) -> dict:
     """SEE-1623 M3：baseline_skip 披露自洽（单一出处）。
 
-    worker 直驱宿主物理跳红测试时 face 如实标注通道（此前
-    face=unsupported_explicit_or_full 与 applied=true 同块并存，自相
-    矛盾——face 字段描述的是冷通道 bail 支持面，不是实际跳过通道）；
-    冷通道不支持物理跳时 applied=false（不支持面不得宣称已跳过）。"""
-    return {
-        "applied": bool(skip_applied),
-        "face": ("worker_direct_drive" if (dirty and worker_host)
-                 else bail_face),
-        "requested": int(requested),
-    }
+    计划面 = worker 直驱（宿主可物理跳红测）或冷通道 bail 面；有效执行面
+    = 实际跑腿的面（worker 直驱因 parity 失配等降级冷通道后为冷面）。
+    `applied` 只在有效执行面确实能物理跳过红测时为真；降级时显式给出
+    planned_face / degrade_reason——不得出现「face=worker_direct_drive
+    且 applied=true 而实际执行面为 cold」的矛盾（QA 观察 2）。"""
+    planned = ("worker_direct_drive" if (dirty and worker_host)
+               else bail_face)
+    effective = effective_face or planned
+    applied = (bool(skip_applied) if effective == planned
+               else bool(skip_applied) and bool(cold_can_skip))
+    out = {"applied": applied, "face": effective,
+           "requested": int(requested)}
+    if effective != planned:
+        out["planned_face"] = planned
+        out["degraded"] = True
+        out["degrade_reason"] = degrade_reason or "worker_degraded_cold"
+    return out
+
+
+def _worker_degraded_state(slot_info: dict) -> tuple[bool, str | None]:
+    """worker 直驱是否已降级冷通道（parity 失配 / 会话致命 / canary 否证）
+    → (degraded, reason)；未降级 → (False, None)。"""
+    wc = slot_info.get("worker_channel") or {}
+    decision = str(wc.get("decision") or "")
+    events = slot_info.get("worker_fatal_events") or []
+    if events or decision.startswith("worker_degraded"):
+        reason = wc.get("reason") or (events[0] if events else None)
+        return True, str(reason or "worker_degraded_cold")
+    return False, None
+
+
+def _baseline_skip_slot_info(slot_info: dict, *, dirty: bool,
+                              skip_applied: bool, worker_host: bool,
+                              bail_face: str, bail_scripts,
+                              requested: int) -> dict:
+    """SEE-1623 M3：baseline_skip 披露构建（抽函数保复杂度棘轮）。
+
+    worker 直驱降级冷通道后，披露反映**有效执行面**（冷面 + degraded +
+    原因），计划面另存 planned_face。"""
+    degraded, degrade_reason = _worker_degraded_state(slot_info)
+    return _baseline_skip_disclosure(
+        dirty=dirty, skip_applied=skip_applied, worker_host=worker_host,
+        bail_face=bail_face, requested=requested,
+        effective_face=(bail_face if degraded else None),
+        degrade_reason=degrade_reason,
+        cold_can_skip=bail_scripts is not None)
 
 
 def _preflight_route_check(identity, project_root, path, worker_channel):

@@ -27,7 +27,7 @@
 gqt measure suite --project-root . --out recipe.json
 # Exclusions require a reason (an empty reason is an invalid recipe)
 gqt measure suite --project-root . --out recipe.json \
-  --exclude 'acceptance_feature:some_feature:reason here'
+  --exclude 'gherkin_feature:some_feature:reason here'
 
 # 2) Dual-arm batch measurement (measurement-report/2)
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json

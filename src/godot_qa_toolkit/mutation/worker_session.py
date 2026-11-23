@@ -16,8 +16,24 @@ from pathlib import Path
 
 from . import shadow
 from .killbail import SCRIPTS_FAIL_MARKER
-from . import worker_channel as _wc
 from .directdrive import SEQUENTIAL_RUNNER_GD
+
+
+class _LazyWorkerChannel:
+    """`_wc` 惰性代理（worker_channel 命名空间）。
+
+    worker_channel 顶层反向导入本模块（HOST_SCRIPT_NAME 等），本模块顶层
+    再导入 worker_channel → 任一模块作为「首个加载入口」时爆环（SEE-1623
+    QA 导入审计）。代理把属性访问推迟到首次使用时才导入 worker_channel：
+    模块级 `_wc` 名保持可用（函数体按全局名解析），补丁点（worker_channel
+    上的 time/subprocess/GlobalGodotGate）语义不变。"""
+
+    def __getattr__(self, name):
+        from . import worker_channel as _module
+        return getattr(_module, name)
+
+
+_wc = _LazyWorkerChannel()
 
 WORKER_DIRNAME = ".gqt-worker"
 HOST_SCRIPT_NAME = ".gqt_worker_host.gd"

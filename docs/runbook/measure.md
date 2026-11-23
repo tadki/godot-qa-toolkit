@@ -14,7 +14,7 @@
 
 ## Prerequisites
 
-- `.gutconfig.json` and `acceptance/features/**/*.feature` exist (suite); GUT
+- `.gutconfig.json` and `addons/gqt_gherkin/features/*.feature` exist (suite); GUT
   plus a Godot binary for `run` / `diagnose` / `map-update`.
 - Measurement artifacts are exploratory / diagnostic-only (`not_certified`),
   not a certification gate or CI KPI.
@@ -35,7 +35,7 @@ gqt measure run autoload systems --project-root . --recipe recipe.json --out rep
 # Common increments: parallel shards / acceptance repeat-union /
 # stability baseline / evidence bundles
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json \
-  --shard-width 6 --acceptance-repeats 3 \
+  --shard-width 6 --gherkin-repeats 3 \
   --stability-baseline previous-report.json --evidence-dir coverage-evidence
 
 # Produce the line-primary attribution map (the truth source behind mutation).
@@ -61,7 +61,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 - `tool` is `measure.suite` / `measure.run` / `measure.diagnose` /
   `measure.map-update` respectively.
-- suite: `measurement-suite/2`, with `gut_face`, `acceptance_face`,
+- suite: `measurement-suite/2`, with `gut_face`, `gherkin_face`,
   `toolchain`, `exclusions`, `recipe_hash` (identical content hashes
   identically across paths).
 - run: `measurement-report/2`, with `crap` records (see crap.md) and the
@@ -113,7 +113,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - `measure run` temporarily instruments the target tree and restores it
   atomically in `finally`; no residue on production trees.
 - The W4 probe (default `aidomain_integration`) records measured wall clock
-  into `performance.acceptance_probe`; `measure risk --performance-file`
+  into `performance.gherkin_probe`; `measure risk --performance-file`
   accepts externally fed measurements.
 - The `/6` attribution map stores `test_to_lines`, `script_to_lines`,
   `line_to_tests`, and the instrumentable line surface. File/function views are
@@ -167,18 +167,18 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 | `--baseline-failures <path>` | omitted | JSON of pre-existing un-instrumented failing `(script, test)` pairs; new failing pairs gate the arm; bare names are rejected as ambiguous |
 |  |  | Without it, the gut_full arm **lazily** acquires the baseline only when the instrumented arm observed failures (one same-face uninstrumented GUT run; green arms pay zero extra GUT); acquisition failure is fail-loud and the arm stays invalid. With `--test-attribution`, the emitted attribution map records a `baseline_failures_meta` disclosure key (`method` / `face` / `count` / `sha256` / `wall_s`) describing how that baseline was acquired; the key is carried across `measure map-update` increments and is disclosure-only (consumers do not read it). The acceptance arm is never baselined — its failures stay visible |
 | `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; declared tests bypass failure gating by name and are disclosed as coverage blind spots |
-| `--acceptance-probe-keys [keys]` | `aidomain_integration` | W4 acceptance cost-probe keys |
+| `--gherkin-probe-keys [keys]` | `aidomain_integration` | W4 acceptance cost-probe keys |
 | `--timeout <s>` | 180 | GUT timeout seconds per arm |
 | `--stability-baseline <path>` | omitted | Prior measurement report; fids whose covered lines differ route to the unstable lane (no score) |
 | `--shard-width <n>` | 6 | gut_full parallel shard count (1 = sequential) |
-| `--acceptance-repeats <n>` | 3 | Acceptance arm runs each shard group N times and unions the line sets; convergence round disclosed |
-| `--acceptance-shards <n>` | 4 | Acceptance parallel shard count |
+| `--gherkin-repeats <n>` | 3 | Acceptance arm runs each shard group N times and unions the line sets; convergence round disclosed |
+| `--gherkin-shards <n>` | 4 | Acceptance parallel shard count |
 | `--shard-log-dir <dir>` | omitted | Retain per-shard full logs and raw sink copies |
 | `--evidence-dir <dir>` | omitted | Per-arm `coverage-evidence/2` bundle + run record output dir |
 | `--test-attribution` | off | Emit a line-primary `test-attribution/6` artifact with per-test/per-script covered lines, reverse lookup, derived file/function views and execution evidence; with it off, the default path is byte-identical |
 | `--test-attribution-out <path>` | `<--out>.attribution.json` | Attribution artifact path |
 | `--attribution-causal` | off | Also wrap `call_deferred/create_timer` creation sites so their callbacks are attributed to the creating test; requires `--test-attribution` |
-| `--acceptance-adaptive` | off | Run acceptance reps round-by-round and stop early once the line-set union stabilises (bound stays `--acceptance-repeats`) |
+| `--gherkin-adaptive` | off | Run acceptance reps round-by-round and stop early once the line-set union stabilises (bound stays `--gherkin-repeats`) |
 | `--arms-parallel` | off | Run gut_full and acceptance arms concurrently; the timing baseline must be redefined when enabled |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override |
 

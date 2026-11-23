@@ -90,7 +90,7 @@ sight is skipped gracefully, not reported as an error).
 - A resolvable Godot binary: per-command `--godot-bin` wins, then
   `GQT_GODOT_BIN`, then the first `godot` on `PATH`.
 - For the Gherkin pipeline: the thin adapter at
-  `res://addons/gqt_accept/harness.gd` implementing
+  `res://addons/gqt_gherkin/harness.gd` implementing
   [`docs/templates/testing_api.gd.md`](docs/templates/testing_api.gd.md)
   (one-time wiring, no auto-discovery).
 

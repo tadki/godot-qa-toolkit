@@ -230,25 +230,39 @@ def _add_godot_bin_arg(parser: argparse.ArgumentParser) -> None:
 def _gherkin_compile(args: argparse.Namespace) -> int:
     from pathlib import Path as _P
 
+    from .gherkin.addon import AddonError, compile_preflight, resolve_feature
     from .gherkin.compile import compile_feature
-    from .gherkin.suite import (SuiteError, compile_keys_to_suite,
-                               create_suite_dir)
+    from .gherkin.suite import (SuiteError, compile_keys_auto_suite,
+                               compile_keys_to_suite)
 
     keys = getattr(args, "keys", None)
     out_dir = getattr(args, "out_dir", None)
     if not args.feature and keys:
-        # §SPEC-035 keys 模式：目录即选择集——私有目录缺省自动创建
+        # §SPEC-035 keys 模式：目录即选择集。§SPEC-016 / C1-R2 纪律：
+        # 自动创建的私有目录在任一失败路径回收（零残留）；显式 out-dir
+        # 由调用方持有——校验（schema 握手 + key 解析）先于任何写入，
+        # 不建也不删调用方目录。AddonError 收口进统一 JSON 契约。
+        key_list = [k.strip() for k in keys.split(",") if k.strip()]
         try:
-            suite_dir = (_P(out_dir).resolve() if out_dir
-                         else create_suite_dir(args.project_root))
-            rec = compile_keys_to_suite(args.project_root,
-                                        [k.strip() for k in keys.split(",")
-                                         if k.strip()], suite_dir)
+            if out_dir:
+                compile_preflight(args.project_root)
+                for k in key_list:
+                    resolve_feature(args.project_root, k)
+                rec = compile_keys_to_suite(args.project_root, key_list,
+                                            _P(out_dir).resolve())
+            else:
+                rec = compile_keys_auto_suite(args.project_root, key_list)
         except SuiteError as e:
             return _emit({
                 "tool": "gherkin", "ok": False,
                 "summary": {"error": str(e), "suite_error": True},
                 "failures": [{"reason": f"suite_error: {e}"}],
+            })
+        except AddonError as e:
+            return _emit({
+                "tool": "gherkin", "ok": False,
+                "summary": {"error": str(e), "addon_error": True},
+                "failures": [{"reason": f"addon_error: {e}"}],
             })
         return _emit({
             "tool": "gherkin", "ok": True,

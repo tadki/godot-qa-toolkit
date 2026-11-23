@@ -803,10 +803,17 @@ def _drop_green_failures(result: dict, ok_keys: set[str]) -> None:
     def keep(pair: str) -> bool:
         return not _green_script(pair.split("::", 1)[0], ok_keys)
 
-    result["arm_fail_pairs"] = _keep_pairs(
+    # SEE-1619 C3-R2：合并后键面必须 JSON 可序列化——set 形态会使
+    # cli.py 写报告时 TypeError 崩溃（A/A 三轮 rc=1 的根因）。以
+    # sorted "s::t" 字符串列表承载（与 test_failures 块同形）。
+    kept_pairs = _keep_pairs(
         result.get("arm_fail_pairs") or set(), keep)
-    result["arm_failures"] = {t for (_s, t) in result["arm_fail_pairs"]}
-    result["new_pairs"] = _keep_pairs(result.get("new_pairs") or set(), keep)
+    result["arm_fail_pairs"] = sorted(
+        f"{s}::{t}" for (s, t) in kept_pairs)
+    result["arm_failures"] = sorted({t for (_s, t) in kept_pairs})
+    result["new_pairs"] = sorted(
+        f"{s}::{t}" for (s, t) in _keep_pairs(
+            result.get("new_pairs") or set(), keep))
     tf = result.get("test_failures") or {}
     tf["observed_pairs"] = _keep_pair_strings(
         tf.get("observed_pairs", []), keep)

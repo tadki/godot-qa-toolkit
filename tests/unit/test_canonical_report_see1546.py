@@ -240,6 +240,32 @@ def test_tree_restored_and_no_residue(project: Path, tmp_path: Path):
     assert g.glob(str(_backup_base() / "*")) == []  # 备份目录已清
 
 
+def _find_sets(obj, path="$"):
+    hits = []
+    if isinstance(obj, (set, frozenset)):
+        hits.append(path)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            hits += _find_sets(v, f"{path}.{k}")
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            hits += _find_sets(v, f"{path}[{i}]")
+    return hits
+
+
+def test_report_json_serializable_no_set_leak(project: Path, tmp_path: Path):
+    """SEE-1619 C3-R2：report 含 set → measure run 写盘 TypeError
+    （A/A 三轮全 rc=1 的根因）。回归判据：报告树零 set。"""
+    import json as _json
+    recipe, _ = _recipe(project, tmp_path)
+    fake = FakeGodot(project)
+    sp.run = fake
+    report = run_measurement(project, _targets(project), recipe)
+    hits = _find_sets(report)
+    assert hits == [], f"set 泄漏: {hits[:6]}"
+    _json.dumps(report, ensure_ascii=False, indent=2)
+
+
 def test_gut_arm_uses_config_face_acceptance_uses_private_dir(
         project: Path, tmp_path: Path):
     recipe, _ = _recipe(project, tmp_path)

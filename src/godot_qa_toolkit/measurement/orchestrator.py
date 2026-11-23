@@ -767,10 +767,14 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             root, target_files, inp["recipe_hash"], block_compress,
             test_attribution, attribution_causal, evidence_out, scope_roots)
     with clock.stage("gut_full_arm"):
-        if acceptance_disabled() and test_attribution:
+        if acceptance_disabled():
             # §SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——
             # 占位臂 state=disabled；恢复条件 SEE-1619 原子化改造后共享
             # 进程分片（env GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0）。
+            # SEE-1623 H4：暂停契约与归属模式解耦——此前写成
+            # `acceptance_disabled() and test_attribution`，普通路径落入
+            # 双臂执行（额外成本 + 无关失败劫持 exit + 披露缺位），显式
+            # env=1 亦被无视。
             from .arms import run_arm
             arm_a = run_arm(
                 "gut_full", root=Path(root), recipe=inp["recipe"],
@@ -832,7 +836,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     # §SPEC-PLANFIRST B：映射构建全链分段落盘（消灭 prepare 盲区）
     clock.add("total", time.monotonic() - t_total)
     report["stage_timings"] = clock.disclosure()
-    if acceptance_disabled() and test_attribution:
+    if acceptance_disabled():
         report["acceptance_arm"] = ("disabled_pending_atomization — "
                                     "restored after SEE-1619 (shared-"
                                     "process shards); env override "

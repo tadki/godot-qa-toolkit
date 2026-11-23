@@ -133,6 +133,14 @@ def run_single_round(args, round_type: str, round_index: int,
               f"speed_gate={s.get('speed_gate')} — complete but not "
               "MEASURED", file=sys.stderr)
         return 1
+    # §SPEC-029：交错已开始但独立 A/A 基线不足 = 终态失败——基线块必须
+    # 位于交错之前，末尾追加无法补足，不得按可 resume 处理。
+    if s.get("interleaved_pairs") and s.get("baseline_samples", 0) < 3:
+        print(f"INCONCLUSIVE report: interleaved pairs present but A/A "
+              f"baseline samples={s.get('baseline_samples')} < 3 — the "
+              "baseline block must precede interleaving and cannot be "
+              "established by appending", file=sys.stderr)
+        return 1
     note = ("report incomplete (rounds_complete=false) — append more "
             "rounds to resume; final verdict is read back by the full "
             "mode")

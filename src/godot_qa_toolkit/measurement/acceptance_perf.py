@@ -39,14 +39,26 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
                          keys: int) -> dict:
     """纯函数：由逐轮记录汇总噪声带/倍率/进程账/判据。分批前台模式下
     每轮追加后重算，测量口径与单次全量模式一致。"""
-    a_walls = [r.get("acceptance_wall_s") for r in rounds
-               if r.get("mode") == "shared" and r.get("acceptance_wall_s")]
+    # §SPEC-029：A/A 噪声基线只取首个 B 之前的独立 A/A 块——交错 A 轮
+    # 不得充作（或稀释）基线；无独立 A/A≥3 的报告不得 complete/MEASURED。
+    baseline_walls: list[float] = []
+    n_leading_shared = 0
+    for r in rounds:
+        if r.get("mode") == "per_feature":
+            break
+        if r.get("mode") == "shared":
+            n_leading_shared += 1
+            if r.get("acceptance_wall_s"):
+                baseline_walls.append(r["acceptance_wall_s"])
+    n_shared_total = sum(1 for r in rounds if r.get("mode") == "shared")
+    interleaved_shared_rounds = n_shared_total - n_leading_shared
     noise = {}
-    if a_walls:
-        med = statistics.median(a_walls)
-        spread = max(a_walls) - min(a_walls)
-        noise = {"samples": a_walls, "median_s": round(med, 3),
-                 "min_s": min(a_walls), "max_s": max(a_walls),
+    if baseline_walls:
+        med = statistics.median(baseline_walls)
+        spread = max(baseline_walls) - min(baseline_walls)
+        noise = {"samples": baseline_walls, "median_s": round(med, 3),
+                 "min_s": min(baseline_walls),
+                 "max_s": max(baseline_walls),
                  "spread_s": round(spread, 3),
                  "spread_pct": round(spread / med * 100, 2)
                  if med else None}
@@ -55,7 +67,8 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
               if p["ratio_b_over_a"] is not None]
     all_valid = all(r.get("valid") for r in rounds) and bool(rounds)
     reps = rounds[0].get("repeats") if rounds else None
-    complete = len(a_walls) >= 3 and len(ratios) >= 3
+    # §SPEC-029：完整报告要求独立 A/A 基线 ≥3 且交错对 ≥3。
+    complete = len(baseline_walls) >= 3 and len(ratios) >= 3
     # §SPEC-026：孤立 B = 证据缺口，rounds_complete 必须为 False 且具名
     # 披露（旧实现连续 B 覆盖、尾部 B 静默丢弃）。
     rounds_complete = complete and not orphan_b
@@ -76,6 +89,9 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
         "fanout_shared": shards_a * (reps or 0),
         "fanout_per_feature": keys * (reps or 0),
         "aa_noise_band": noise,
+        "baseline_samples": len(baseline_walls),
+        "interleaved_shared_rounds": interleaved_shared_rounds,
+        "interleaved_pairs": len(pairs),
         "ab_pairs": pairs,
         "orphan_b_rounds": [b.get("round") for b in orphan_b],
         "median_ratio_b_over_a": med_ratio,

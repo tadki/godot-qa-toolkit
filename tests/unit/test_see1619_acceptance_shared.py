@@ -31,8 +31,11 @@ def _script(key: str) -> str:
 
 def _make_fake_run_arm(shared_red: set[str], isolated_red: set[str],
                        shared_rec_fail: bool = False,
-                       isolated_rec_fail: bool = False):
-    """按轮次与分组构造 run_arm 桩结果：第一轮=共享，第二轮=隔离。"""
+                       isolated_rec_fail: bool = False,
+                       fb_state: str = "valid",
+                       fb_rec_present: bool = True):
+    """按轮次与分组构造 run_arm 桩结果：第一轮=共享，第二轮=隔离。
+    §SPEC-025：fb_state / fb_rec_present 支撑隔离轮证据形态反例。"""
     calls: list[dict] = []
 
     def fake(name: str, *, acceptance=None, **kw):
@@ -51,7 +54,12 @@ def _make_fake_run_arm(shared_red: set[str], isolated_red: set[str],
             rec_shards.append({"ok": not (rec_fail and gi == 0),
                                "keys": list(g["keys"])})
         ok_pairs = sorted(f"{s}::{t}" for s, t in pairs)
-        return {"arm": name, "state": "valid", "gut_ok": not pairs,
+        rec: dict | None = None
+        if rnd == 0 or fb_rec_present:
+            rec = {"ok": not rec_fail, "shards": rec_shards}
+        return {"arm": name,
+                "state": "valid" if rnd == 0 else fb_state,
+                "gut_ok": not pairs,
                 "wall_s": 1.0, "run_uuid": f"uuid-{rnd}",
                 "arm_fail_pairs": set(pairs),
                 "arm_failures": {t for _, t in pairs},
@@ -62,8 +70,7 @@ def _make_fake_run_arm(shared_red: set[str], isolated_red: set[str],
                     "new": sorted({t for _, t in pairs}),
                     "new_pairs": ok_pairs,
                     "instrumentation_intolerant": []},
-                "reconciliation": {
-                    "ok": not rec_fail, "shards": rec_shards},
+                "reconciliation": rec,
                 "bundles_data": {}}
 
     return fake, calls

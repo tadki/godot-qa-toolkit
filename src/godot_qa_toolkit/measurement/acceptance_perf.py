@@ -8,25 +8,31 @@ import statistics
 from pathlib import Path
 
 
-def _pair_rounds(rounds: list[dict]) -> list[dict]:
-    """交错语义：每个 B 轮与其后第一个 shared（A）轮配对。纯函数。"""
+class DuplicateRoundError(ValueError):
+    """重复 batch round：具名拒绝（重跑同轮不得静默覆盖样本）。"""
+
+
+def _pair_rounds(rounds: list[dict]) -> tuple[list[dict], list[dict]]:
+    """交错语义：每个 B 轮与其后第一个 shared（A）轮配对一次（FIFO——
+    连续多个 B 时取最旧 pending，未配对者原样返回，证据不静默丢弃）。
+    纯函数。"""
     pairs: list[dict] = []
-    pending_b: dict | None = None
+    pending: list[dict] = []
     for r in rounds:
         if r.get("mode") == "per_feature":
-            pending_b = r
-        elif r.get("mode") == "shared" and pending_b is not None:
+            pending.append(r)
+        elif r.get("mode") == "shared" and pending:
+            b = pending.pop(0)
             wa = r.get("acceptance_wall_s")
-            wb = pending_b.get("acceptance_wall_s")
-            pairs.append({"b_round": pending_b.get("round"),
+            wb = b.get("acceptance_wall_s")
+            pairs.append({"b_round": b.get("round"),
                           "a_round": r.get("round"),
                           "b_wall_s": wb, "a_wall_s": wa,
                           "ratio_b_over_a": (round(wb / wa, 3)
                                              if wa and wb else None),
-                          "b_valid": pending_b.get("valid"),
+                          "b_valid": b.get("valid"),
                           "a_valid": r.get("valid")})
-            pending_b = None
-    return pairs
+    return pairs, pending
 
 
 def compute_perf_summary(rounds: list[dict], shards_a: int,
@@ -44,12 +50,25 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
                  "spread_s": round(spread, 3),
                  "spread_pct": round(spread / med * 100, 2)
                  if med else None}
-    pairs = _pair_rounds(rounds)
+    pairs, orphan_b = _pair_rounds(rounds)
     ratios = [p["ratio_b_over_a"] for p in pairs
               if p["ratio_b_over_a"] is not None]
     all_valid = all(r.get("valid") for r in rounds) and bool(rounds)
     reps = rounds[0].get("repeats") if rounds else None
     complete = len(a_walls) >= 3 and len(ratios) >= 3
+    # §SPEC-026：孤立 B = 证据缺口，rounds_complete 必须为 False 且具名
+    # 披露（旧实现连续 B 覆盖、尾部 B 静默丢弃）。
+    rounds_complete = complete and not orphan_b
+    med_ratio = (statistics.median(ratios) if len(ratios) >= 3 else None)
+    # §SPEC-026：速度门——median B/A 改善必须超过 A/A 噪声带
+    # （阈值 = 1 + spread_pct/100）；回归方向（B/A<1）与噪声内改善
+    # 一律 INCONCLUSIVE，B 慢于基线反例不得 exit 0。
+    speed_gate = None
+    if med_ratio is not None and noise.get("spread_pct") is not None:
+        threshold = round(1 + noise["spread_pct"] / 100, 4)
+        speed_gate = {"median_ratio_b_over_a": round(med_ratio, 4),
+                      "threshold_b_over_a": threshold,
+                      "ok": bool(med_ratio >= threshold)}
     return {
         "keys": keys,
         "shards_a": shards_a,
@@ -58,11 +77,13 @@ def compute_perf_summary(rounds: list[dict], shards_a: int,
         "fanout_per_feature": keys * (reps or 0),
         "aa_noise_band": noise,
         "ab_pairs": pairs,
-        "median_ratio_b_over_a": statistics.median(ratios)
-        if len(ratios) >= 3 else None,
+        "orphan_b_rounds": [b.get("round") for b in orphan_b],
+        "median_ratio_b_over_a": med_ratio,
+        "speed_gate": speed_gate,
         "all_rounds_valid": all_valid,
-        "rounds_complete": complete,
-        "verdict": ("MEASURED" if all_valid and complete
+        "rounds_complete": rounds_complete,
+        "verdict": ("MEASURED" if all_valid and rounds_complete
+                    and speed_gate is not None and speed_gate["ok"]
                     else "INCONCLUSIVE"),
     }
 
@@ -75,7 +96,7 @@ def merge_round_into_report(doc: dict, round_record: dict, shards_a: int,
     report_path 给定时落盘。"""
     name = round_record.get("round")
     if any(r.get("round") == name for r in doc.get("rounds", [])):
-        raise ValueError(f"duplicate round: {name}")
+        raise DuplicateRoundError(f"duplicate round: {name}")
     doc.setdefault("doc", "see1619-acceptance-perf/1")
     doc.setdefault("rounds", []).append(round_record)
     doc["summary"] = compute_perf_summary(doc["rounds"], shards_a, keys)

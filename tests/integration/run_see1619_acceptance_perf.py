@@ -24,6 +24,7 @@ from pathlib import Path
 
 from godot_qa_toolkit.measurement.acceptance_perf import (
     compute_perf_summary,
+    DuplicateRoundError,
     merge_round_into_report,
 )
 
@@ -97,8 +98,13 @@ def run_single_round(args, round_type: str, round_index: int,
     doc: dict = {"doc": "see1619-acceptance-perf/1", "rounds": []}
     if report_path.is_file():
         doc = json.loads(report_path.read_text(encoding="utf-8"))
-    merge_round_into_report(doc, rec, args.shards_a, keys,
-                            report_path=report_path)
+    try:
+        merge_round_into_report(doc, rec, args.shards_a, keys,
+                                report_path=report_path)
+    except DuplicateRoundError as e:
+        # §SPEC-026：重复 batch round 具名拒绝，不裸 ValueError 崩溃。
+        print(f"REFUSAL: {e}", file=sys.stderr)
+        return 2
     s = doc["summary"]
     print(f"[{rec['round']}] valid={rec['valid']} "
           f"wall={rec.get('acceptance_wall_s')}s "

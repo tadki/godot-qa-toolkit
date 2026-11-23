@@ -87,10 +87,11 @@ def _wire(monkeypatch, tmp_path: Path, fake_run_arm) -> None:
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = Path(tmp_path) / f"suite-{counter['n']}"
+        d = (Path(tmp_path) / "gherkin" / "generated" /
+             f".gqt-run-{counter['n']}")
         d.mkdir(parents=True, exist_ok=True)
-        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
-                                  encoding="utf-8")
+        # 所有权标记内容 = 目录名（绑定身份契约）
+        (d / ".gqt-owner").write_text(d.name + "\n", encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
@@ -231,10 +232,11 @@ def test_flow_never_touches_harness_contract_position(
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = Path(tmp_path) / f"suite-{counter['n']}"
+        d = (Path(tmp_path) / "gherkin" / "generated" /
+             f".gqt-run-{counter['n']}")
         d.mkdir(parents=True, exist_ok=True)
-        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
-                                  encoding="utf-8")
+        # 所有权标记内容 = 目录名（绑定身份契约）
+        (d / ".gqt-owner").write_text(d.name + "\n", encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
@@ -334,10 +336,11 @@ def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = Path(tmp_path) / f"suite-{counter['n']}"
+        d = (Path(tmp_path) / "gherkin" / "generated" /
+             f".gqt-run-{counter['n']}")
         d.mkdir(parents=True, exist_ok=True)
-        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
-                                  encoding="utf-8")
+        # 所有权标记内容 = 目录名（绑定身份契约）
+        (d / ".gqt-owner").write_text(d.name + "\n", encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", boom)
@@ -390,11 +393,13 @@ def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = Path(tmp_path) / f"suite-{counter['n']}"
+        n = counter["n"]
+        counter["n"] += 1
+        d = (Path(tmp_path) / "gherkin" / "generated" / f".gqt-run-{n}")
         d.mkdir(parents=True, exist_ok=True)
         made.append(d)
-        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
-                                  encoding="utf-8")
+        # 所有权标记内容 = 目录名（绑定身份契约）
+        (d / ".gqt-owner").write_text(d.name + "\n", encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
@@ -454,11 +459,13 @@ def _fb_compile_setup(monkeypatch, tmp_path):
 
     def fake_suite_dir(r):
         counter["n"] += 1
-        d = Path(tmp_path) / f"suite-{counter['n']}"
+        n = counter["n"]
+        counter["n"] += 1
+        d = (Path(tmp_path) / "gherkin" / "generated" / f".gqt-run-{n}")
         d.mkdir(parents=True, exist_ok=True)
         made.append(d)
-        (d / ".gqt-owner").write_text("gqt-gherkin-private-suite/1\n",
-                                  encoding="utf-8")
+        # 所有权标记内容 = 目录名（绑定身份契约）
+        (d / ".gqt-owner").write_text(d.name + "\n", encoding="utf-8")
         return d
 
     monkeypatch.setattr(arms, "replay_check", fake_replay)

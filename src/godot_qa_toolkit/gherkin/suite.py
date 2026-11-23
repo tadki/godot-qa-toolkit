@@ -34,10 +34,10 @@ import time
 import uuid
 from pathlib import Path
 
-from .addon import (SUITE_OWNER_MARKER, SUITE_OWNER_TOKEN,
-                    AddonError, compile_preflight, features_root,
-                    is_owned_suite_dir, normalize_feature_key,
+from .addon import (SUITE_OWNER_MARKER, AddonError, compile_preflight,
+                    features_root, is_owned_suite_dir, normalize_feature_key,
                     resolve_feature, run_validator_preflight)
+from .isolation import isolated_godot_env
 from .compile import compile_feature
 from .run import GherkinRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
@@ -71,8 +71,9 @@ def create_suite_dir(project_root: str | Path, *,
             f"private suite dir already exists (must be created empty): {d}")
     d.mkdir(parents=True)
     # 所有权标记：清理只删带此标记的目录（调用方目录永不被删）。
-    (d / SUITE_OWNER_MARKER).write_text(SUITE_OWNER_TOKEN + "\n",
-                                         encoding="utf-8")
+    # 所有权标记内容 = 本目录名（绑定身份）：复制到别处的 marker 内容不匹配
+    # → 调用方目录永不被删（§SPEC-019 CRITICAL-1）。
+    (d / SUITE_OWNER_MARKER).write_text(d.name + "\n", encoding="utf-8")
     return d
 
 
@@ -190,7 +191,9 @@ def reconcile(project_root: str | Path, suite_dir: str | Path,
     """gherkin-suite/1 对账五项。纯检查无副作用（清理归 run_suite_dir）。"""
     root = Path(project_root)
     suite_dir = Path(suite_dir)
-    keys = sorted(set(keys))
+    # key 归一：编译产物按归一键命名（my-demo → my_demo），对账必须用同一
+    # 口径读 manifest/生成物（§SPEC-019 HIGH-4：原按原 key 读 → 崩）。
+    keys = sorted({normalize_feature_key(k) for k in keys})
     gen = suite_dir / "generated"
     expected_files = {f"test_{k}.gd" for k in keys}
     actual_files = {p.name for p in gen.glob("test_*.gd")}
@@ -285,13 +288,15 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     rel = suite_dir.relative_to(root).as_posix()
     try:
-        with GlobalGodotGate(str(root)):
-            r = spawn_godot(
-                [godot_command(), "--headless", "--path", str(root),
-                 "-s", "res://addons/gut/gut_cmdln.gd",
-                 "-gdir=res://" + rel + "/generated", "-gexit"],
-                capture_output=True, text=True, timeout=timeout_s,
-                cwd=str(root))
+        # 一次性隔离环境（§SPEC-019 HIGH-3）：GUT 执行不得写真实用户目录。
+        with isolated_godot_env() as iso_env:
+            with GlobalGodotGate(str(root)):
+                r = spawn_godot(
+                    [godot_command(), "--headless", "--path", str(root),
+                     "-s", "res://addons/gut/gut_cmdln.gd",
+                     "-gdir=res://" + rel + "/generated", "-gexit"],
+                    capture_output=True, text=True, timeout=timeout_s,
+                    cwd=str(root), env=iso_env)
     except subprocess.TimeoutExpired as e:
         raise GherkinRunError(
             f"GUT timed out after {timeout_s}s on private suite dir") from e

@@ -51,6 +51,7 @@ from pathlib import Path
 
 from . import OPS_VERSION
 from .addon import AddonError, run_validator_preflight
+from .isolation import isolated_godot_env
 from .compile import GENERATED_DIR, WORKER_FILENAME
 from .mutate import Mutant, mutate_ir
 from .run import GherkinRunError, _strip_ansi, replay_check
@@ -87,13 +88,15 @@ def _mutated_ir(ir: dict, mutant: Mutant) -> dict:
 
 def _run_gut(root: Path, timeout_s: int) -> tuple[int, str]:
     try:
-        with GlobalGodotGate(str(root)):
-            r = spawn_godot(
-                [godot_command(), "--headless", "--path", str(root),
-                 "-s", "res://addons/gut/gut_cmdln.gd",
-                 "-gdir=res://" + GENERATED_DIR, "-gexit"],
-                capture_output=True, text=True, timeout=timeout_s,
-                cwd=str(root))
+        # 一次性隔离环境（§SPEC-019 HIGH-3）：GUT 执行零写真实用户目录。
+        with isolated_godot_env() as iso_env:
+            with GlobalGodotGate(str(root)):
+                r = spawn_godot(
+                    [godot_command(), "--headless", "--path", str(root),
+                     "-s", "res://addons/gut/gut_cmdln.gd",
+                     "-gdir=res://" + GENERATED_DIR, "-gexit"],
+                    capture_output=True, text=True, timeout=timeout_s,
+                    cwd=str(root), env=iso_env)
     except subprocess.TimeoutExpired as e:
         raise GherkinRunError(
             f"GUT timed out after {timeout_s}s on mutant round") from e
@@ -234,26 +237,36 @@ def _spawn_worker(root: Path) -> tuple[subprocess.Popen, Path]:
         raise GherkinRunError(
             f"worker artifact missing: {worker_res} — recompile with "
             f"gqt gherkin compile --write")
-    # Final Review #6：并发 worker 互写/互删——scratch 必须每次运行独立，
-    # 并配独立 XDG/TMPDIR 隔离（不复用共享 .qa-cache 目录）。
+    # Final Review #6：并发 worker 互写/互删——scratch 必须每次运行独立。
+    # §SPEC-019 HIGH-3/MEDIUM-5：worker 也走**一次性隔离环境**（HOME 在内），
+    # 且**任意**配置/启动失败（含 godot_command() 的 BinaryConfigError）都
+    # 回收 scratch 与隔离目录——零残留。
     scratch = (Path(root) / ".qa-cache" /
                f"gqt-gherkin-worker-{uuid.uuid4().hex[:12]}")
     scratch.mkdir(parents=True, exist_ok=True)
-    xdg = Path(tempfile.mkdtemp(prefix="gqt-gherkin-worker-xdg-"))
-    tmpd = Path(tempfile.mkdtemp(prefix="gqt-gherkin-worker-tmp-"))
-    env = dict(os.environ, XDG_DATA_HOME=str(xdg), TMPDIR=str(tmpd))
+    iso = isolated_godot_env()
+    try:
+        env = iso.__enter__()
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
     try:
         proc = subprocess.Popen(
             [godot_command(), "--headless", "--path", str(root),
              "-s", worker_res],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, cwd=str(root), env=env)
-    except OSError as e:
-        shutil.rmtree(scratch, ignore_errors=True)
-        shutil.rmtree(xdg, ignore_errors=True)
-        shutil.rmtree(tmpd, ignore_errors=True)
-        raise GherkinRunError(f"worker process spawn failed: {e}") from e
-    return proc, scratch, (xdg, tmpd)
+    except BaseException as e:
+        # 任意失败（OSError / BinaryConfigError 等）→ 零残留
+        try:
+            iso.__exit__(type(e), e, e.__traceback__)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if isinstance(e, OSError):
+            raise GherkinRunError(f"worker process spawn failed: {e}") from e
+        raise GherkinRunError(
+            f"worker process spawn failed ({type(e).__name__}): {e}") from e
+    return proc, scratch, (iso,)
 
 
 def _exchange_verdict_line(proc, request: str,  # noqa: ANN001 — Popen/fake 双形态
@@ -296,8 +309,8 @@ def _worker_exempt_baseline(root: Path, ir: dict, exempt: list[dict],
     finally:
         _shutdown_worker(proc)
         shutil.rmtree(scratch, ignore_errors=True)
-        for d in env_dirs:
-            shutil.rmtree(d, ignore_errors=True)
+        for iso in env_dirs:
+            iso.__exit__(None, None, None)
     total = len(ir.get("cases", []))
     err = verdict.get("run_error")
     executed_n = int(verdict.get("executed", 0))
@@ -536,8 +549,8 @@ def _run_worker_channel(root: Path, ir: dict, mutants: list[Mutant],
     finally:
         _shutdown_worker(proc)
         shutil.rmtree(scratch, ignore_errors=True)
-        for d in env_dirs:
-            shutil.rmtree(d, ignore_errors=True)
+        for iso in env_dirs:
+            iso.__exit__(None, None, None)
     return verdicts
 
 

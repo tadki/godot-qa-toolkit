@@ -21,6 +21,7 @@ from . import OPS_VERSION
 from .compile import GENERATED_DIR, WORKER_FILENAME, sha256_of
 from .addon import (AddonError, compile_preflight, features_root,
                     normalize_feature_key, run_validator_preflight)
+from .isolation import isolated_godot_env
 from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
 from ..mutation.inject import godot_command, spawn_godot
 from ..mutation.godot_gate import GlobalGodotGate
@@ -203,13 +204,15 @@ def run_suite(project_root: str | Path, feature_key: str,
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     env = dict(os.environ)
     try:
-        with GlobalGodotGate(str(root)):
-            r = spawn_godot(
-                [godot_command(), "--headless", "--path", str(root),
-                 "-s", "res://addons/gut/gut_cmdln.gd",
-                 "-gdir=res://" + GENERATED_DIR, "-gexit"],
-                capture_output=True, text=True, timeout=timeout_s,
-                cwd=str(root), env=env)
+        # 一次性隔离环境（§SPEC-019 HIGH-3）：GUT 执行零写真实用户目录。
+        with isolated_godot_env() as iso_env:
+            with GlobalGodotGate(str(root)):
+                r = spawn_godot(
+                    [godot_command(), "--headless", "--path", str(root),
+                     "-s", "res://addons/gut/gut_cmdln.gd",
+                     "-gdir=res://" + GENERATED_DIR, "-gexit"],
+                    capture_output=True, text=True, timeout=timeout_s,
+                    cwd=str(root), env=iso_env)
     except subprocess.TimeoutExpired as e:
         raise GherkinRunError(
             f"GUT timed out after {timeout_s}s on generated suite") from e

@@ -39,6 +39,9 @@ def toy_target(tmp_path):
     proj.mkdir()
     target = proj / "toy.gd"
     target.write_text(TOY_GD, encoding="utf-8")
+    # SEE-1623 M6：显式 tests glob 在 plan 级校验存在性（error 级阻断
+    # 先于任何 GUT）——toy 工程补齐真实形态的 tests 目录。
+    (proj / "tests").mkdir()
     return str(proj), str(target)
 
 

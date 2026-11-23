@@ -169,11 +169,13 @@ def gut_addon_hash(project_root: str) -> str:
 
 def identity_pack(project_root: str, binary_kind: str | None,
                   godot_bin: str | None = None,
-                  exec_scheme: str = COLD_SCHEME) -> dict:
+                  exec_scheme: str | None = COLD_SCHEME) -> dict:
     """完整身份包（终案 §3.5）。godot_bin 缺省经统一解析源取（与启动同源）。
 
     exec_scheme（§SPEC-020）：cold-shadow/1（M0 冷通道）vs worker-reset/1
     （常驻 worker）——入身份包 → file_key/killed 证书按 scheme 隔离。
+    SEE-1623 H2：None = 尚未解析（编排层占位形态）——占位值不得冒充权威
+    scheme 参与下游漂移比对；解析权在 planning/core（首次解析即权威）。
     """
     if godot_bin is None:
         from .inject import godot_command
@@ -190,8 +192,16 @@ def identity_pack(project_root: str, binary_kind: str | None,
 
 
 def identity_sha1(pack: dict) -> str:
-    """身份包 → 稳定 sha1（file_key 成分；键序无关，值序固定）。"""
-    parts = [f"{k}={pack[k]}" for k in sorted(pack)]
+    """身份包 → 稳定 sha1（file_key 成分；键序无关，值序固定）。
+
+    SEE-1623 H2：exec_scheme=None（未解析占位）按缺省 cold 归一——占位
+    形式变化不影响 file_key（既有 store / dry-run 差分预估读侧逐位稳定）。"""
+    parts = []
+    for k in sorted(pack):
+        v = pack[k]
+        if k == "exec_scheme" and v is None:
+            v = COLD_SCHEME
+        parts.append(f"{k}={v}")
     return _sha1_text("\n".join(parts))
 
 

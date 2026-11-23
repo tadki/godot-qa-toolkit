@@ -429,6 +429,18 @@ def _core_dry_run(path, mutants, budget, scoped, total_sites, project_root,
         clock = StageClock()
     if t0 is None:
         t0 = time.monotonic()
+    # SEE-1623 M5：dry-run 预览与真实执行同构——显式寻址（--mutation/
+    # --lines）先于估算应用（此前计数用全量位点，预览失真且掩盖数值
+    # 校验）；全无位点抛与真实运行同文的显式错误（不再 exit 0 假成功）。
+    if select_ids is not None or select_lines is not None:
+        from .planner import selection_preview
+        from .reporting import _setup_error_result
+        try:
+            mutants, sel_disc = selection_preview(mutants, select_ids,
+                                                  select_lines)
+        except ValueError as e:
+            return _setup_error_result(str(path), e)
+        total_sites = len(mutants)
     with clock.stage("planning"):
         estimate = dry_run_estimate(
             str(path), mutants, budget, scoped, total_sites,

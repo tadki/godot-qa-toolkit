@@ -346,17 +346,18 @@ class TestCliRouting:
     def test_cli_negative_budget_returns_flat_empty_result(
             self, tmp_path: Path, sealed: None,
             capsys: pytest.CaptureFixture[str]) -> None:
-        """负 budget 不得让默认单文件解包空 results 并抛出 IndexError。"""
+        """SEE-1623 M4 改约：负 budget 不得让默认单文件解包空 results 并
+        抛出 IndexError——也不得假绿（旧约 exit 0 / mutants=0 已判缺陷）。
+        用法层即拒：exit 2、stdout 无 JSON、stderr 可读提示。"""
         proj, target = _write_project(tmp_path)
         args = build_parser().parse_args(
             ["mutation", target, "--project-root", proj, "--budget", "-1",
              "--select", "full"])
         rc = cli_mod.cmd_mutation(args)
-        out = cli_mod.json.loads(capsys.readouterr().out)
-        assert rc == 0
-        assert set(out) == {"tool", "ok", "summary", "failures"}
-        assert out["summary"]["mutants"] == 0
-        assert out["summary"]["jobs"] == 0
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert captured.out == ""
+        assert "budget" in captured.err
 
     def test_cli_jobs_one_keeps_flat_contract_and_summary_jobs(
             self, tmp_path: Path, sealed: None,

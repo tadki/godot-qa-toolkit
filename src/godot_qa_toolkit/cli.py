@@ -531,8 +531,51 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
     return None
 
 
+def _mutation_numeric_arg_error(args: argparse.Namespace) -> str | None:
+    """SEE-1623 M4：数值参数下限前置校验（§5 用法错误 exit 2）。
+
+    budget/jobs/timeout 下限 1（此前 0/负数静默假绿或瞬间超时）；
+    `--lines` 形态在解析层校验（此前非法形态泄露 Python int() 转换
+    异常）。返回 None = 合法。"""
+    if getattr(args, "budget", None) is not None and args.budget < 1:
+        return f"--budget must be >= 1 (got {args.budget})"
+    if getattr(args, "jobs", None) is not None and args.jobs < 1:
+        return f"--jobs must be >= 1 (got {args.jobs})"
+    if getattr(args, "timeout", None) is not None and args.timeout < 1:
+        return f"--timeout must be >= 1 (got {args.timeout})"
+    spec = getattr(args, "lines", None)
+    if spec:
+        from .mutation.truth_lines import parse_lines_spec
+        try:
+            parse_lines_spec(spec)
+        except ValueError as e:
+            return f"--lines {spec!r}: {e}"
+    return None
+
+
+def _measure_timeout_arg_error(args: argparse.Namespace) -> str | None:
+    """SEE-1623 M4：measure 面 --timeout 下限（Refacty L9：负值被接受，
+    两臂瞬间超时）。"""
+    if getattr(args, "timeout", None) is not None and args.timeout < 1:
+        return f"--timeout must be >= 1 (got {args.timeout})"
+    return None
+
+
+def _usage_exit(message: str) -> int:
+    """§5 用法/装载错误档：stderr 可读提示，stdout 无 JSON，exit 2。"""
+    print(f"gqt: usage error — {message}", file=sys.stderr)
+    return 2
+
+
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import detect_binary_kind
+
+    # SEE-1623 M4：数值参数校验前置（budget 0/负数此前静默假绿、负
+    # timeout 瞬间超时、--lines 非法形态泄露 Python 异常）——dry-run 与
+    # 真实运行同样即拒（§SPEC-002 非法参数 dry-run 即拒同源达成）。
+    _num_err = _mutation_numeric_arg_error(args)
+    if _num_err is not None:
+        return _usage_exit(_num_err)
 
     # §SPEC-1525-002 + 修复轮 F-1/F-2：覆盖注入与二进制早验证/重判统一在
     # _apply_godot_bin_or_contract（三子命令同源同形态）——此处取已重钉的
@@ -1228,6 +1271,10 @@ def cmd_measure_run(args: argparse.Namespace) -> int:
     from .measurement.recipe import verify_recipe
 
     run_started = _time.time()
+    # SEE-1623 M4：负 timeout 此前被接受（两臂瞬间超时）——用法层即拒。
+    _num_err = _measure_timeout_arg_error(args)
+    if _num_err is not None:
+        return _usage_exit(_num_err)
     rc = _apply_godot_bin_or_contract("measure.run", args)
     if rc is not None:
         return rc

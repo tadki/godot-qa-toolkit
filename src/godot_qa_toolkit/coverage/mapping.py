@@ -146,6 +146,29 @@ def _mapping_target(project_root: Path, file_path: str) -> tuple:
     return path, rel, path.read_text(encoding="utf-8")
 
 
+def filter_selection_face(scripts, tests_glob: str) -> list:
+    """SEE-1623 M9：显式 tests 面过滤 + 空选择面哨兵（单一出处）。
+
+    面过滤按边界匹配：目录以 `face/` 为前缀，单文件精确相等。过滤后
+    0 脚本 = 空 选择面（glob 写错或映射面不含该面）→ 具名
+    CoverageMappingError——绝不静默产出权威外观的 0.0%（F1 缺陷）。"""
+    face = tests_glob
+    prefix = face if face.endswith("/") else face + "/"
+
+    def _in_face(s: str) -> bool:
+        s = str(s)
+        return s == face or s.startswith(prefix)
+
+    out = [s for s in scripts if _in_face(s)]
+    if not out:
+        raise CoverageMappingError(
+            f"empty selection face: tests_glob {face!r} matched no "
+            "test scripts in the mapping selection — refusing "
+            "authoritative 0.0% (named sentinel; check the glob or "
+            "omit --tests to cover the mapped face)")
+    return out
+
+
 def project_file_coverage(
     project_root: str | Path,
     file_path: str,
@@ -177,14 +200,8 @@ def project_file_coverage(
     scripts = list(sel.get("tests") or [])
     face = tests_glob or "res://tests/"
     if tests_glob:
-        # 面过滤按边界匹配：目录必须以 `face/` 为前缀；单文件精确相等。
-        prefix = face if face.endswith("/") else face + "/"
-
-        def _in_face(s: str) -> bool:
-            s = str(s)
-            return s == face or s.startswith(prefix)
-
-        scripts = [s for s in scripts if _in_face(s)]
+        # SEE-1623 M9：空选择面具名哨兵（filter_selection_face 单一出处）。
+        scripts = filter_selection_face(scripts, tests_glob)
     covered = _mapping_project(root, path, rel, doc, scripts, tests_glob,
                                binary_kind, identity, tests_face)
     inst = set(doc.get("instrumentable_lines", {}).get(rel, []))

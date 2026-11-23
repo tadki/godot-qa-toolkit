@@ -21,7 +21,6 @@ import json
 import uuid
 
 from godot_qa_toolkit.mutation import worker_session as ws
-from godot_qa_toolkit.mutation.runner import _gut_extra_args
 
 
 def _captured_request(tmp_path, monkeypatch, tests_glob, project_root=None):
@@ -54,12 +53,19 @@ def _project_with_gutconfig(tmp_path, data):
     return proj
 
 
-def _cold_effective_dir_recurse(tests_glob, project_root):
-    """冷通道在目录类选面的有效递归：full 面 CLI 旗标恒递归；显式目录面
-    由项目 `.gutconfig include_subdirs` 决定（worker 须逐面复刻）。"""
-    if "-ginclude_subdirs" in _gut_extra_args(tests_glob):
+def _expected_dir_recurse(tests_glob, cfg_value):
+    """独立 oracle（不调用产品函数，避免对实现近似自证）。
+
+    由已知写入的配置状态直接推导期望：full 面 CLI 旗标 `-ginclude_subdirs`
+    恒递归（覆盖项目配置）；`.gd` 恒单脚本精确；显式目录面跟随项目
+    `.gutconfig include_subdirs`——仅 True 递归，false/缺失/非法/无键/非对象
+    一律非递归（GUT 缺省 false）。
+    """
+    if tests_glob is None:
         return True
-    return ws._project_include_subdirs(str(project_root))
+    if tests_glob.endswith(".gd"):
+        return False
+    return cfg_value is True
 
 
 class TestWorkerRecursionFlag:
@@ -109,13 +115,12 @@ class TestWorkerRecursionFlag:
 class TestWorkerColdAlignment:
     def test_directory_faces_match_cold_recursion_condition(
             self, tmp_path, monkeypatch):
-        """目录类选面：worker 递归标记 == 冷通道附加 `-ginclude_subdirs`
-        （无项目配置时，显式目录面两边均非递归）。"""
+        """目录类选面：worker 递归标记 == 独立 oracle 的冷通道语义
+        （无项目配置时，full 恒递归、显式目录面均非递归）。"""
         for glob in (None, "", "res://tests/", "res://tests/unit",
                      "res://tests/unit/"):
             req = _captured_request(tmp_path, monkeypatch, glob)
-            expected = _cold_effective_dir_recurse(glob, tmp_path)
-            assert req["tests_recurse"] == expected, glob
+            assert req["tests_recurse"] == _expected_dir_recurse(glob, None), glob
 
 
 class TestGutconfigRecursionAlignment:
@@ -166,14 +171,35 @@ class TestGutconfigRecursionAlignment:
                                 project_root=proj)
         assert req["tests_recurse"] is False
 
-    def test_worker_matches_cold_effective_recurse_across_config_states(
+    def test_config_dict_without_key_falls_back_to_non_recursive(
             self, tmp_path, monkeypatch):
-        """三态（true/false/缺失）× 目录类选面：worker == 冷通道有效递归。"""
+        """合法字典但无 `include_subdirs` 键：GUT 缺省 false（非递归）。
+
+        回归钉：读取不得用下标（无键会 KeyError），默认值必须为 false。
+        """
+        proj = _project_with_gutconfig(tmp_path, {"other_setting": True})
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit",
+                                project_root=proj)
+        assert req["tests_recurse"] is False
+
+    def test_non_dict_json_falls_back_to_non_recursive(
+            self, tmp_path, monkeypatch):
+        """合法 JSON 但非对象（数组）：回落非递归且不崩溃（GUT 缺省 false）。"""
+        proj = _project_with_gutconfig(tmp_path, [])
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit",
+                                project_root=proj)
+        assert req["tests_recurse"] is False
+
+    def test_worker_matches_independent_recurse_across_config_states(
+            self, tmp_path, monkeypatch):
+        """三态（true/false/缺失）× 目录类选面 + `.gd`：worker 递归标记
+        == 独立 oracle 推导值（oracle 不调用产品函数，消除近似自证）。"""
         for cfg in (True, False, None):
             proj = _project_with_gutconfig(
                 tmp_path, None if cfg is None else {"include_subdirs": cfg})
-            for glob in (None, "", "res://tests/", "res://tests/unit"):
+            for glob in (None, "", "res://tests/", "res://tests/unit",
+                         "res://tests/unit/", "res://tests/unit/x.gd"):
                 req = _captured_request(tmp_path, monkeypatch, glob,
                                         project_root=proj)
-                expected = _cold_effective_dir_recurse(glob, proj)
-                assert req["tests_recurse"] == expected, (cfg, glob)
+                assert req["tests_recurse"] == _expected_dir_recurse(
+                    glob, cfg), (cfg, glob)

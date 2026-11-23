@@ -34,8 +34,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .addon import (AddonError, features_root, resolve_feature,
-                    run_validator_preflight)
+from .addon import (AddonError, compile_preflight, features_root,
+                    resolve_feature, run_validator_preflight)
 from .compile import compile_feature
 from .run import GherkinRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
@@ -70,6 +70,33 @@ def create_suite_dir(project_root: str | Path, *,
 
 # SEE-1624：features 解析收口到 addon 单根（缺根/空集/未知 key 均具名
 # fail-loud），此处不再持有旧布局常量。
+
+def compile_keys_auto_suite(project_root: str | Path,
+                            keys: list[str]) -> dict:
+    """自动创建私有套件并编译选中 keys（§SPEC-016 / C1-R2）。
+
+    纪律：键解析（单根 features）与 schema 纯解析握手**先于任何目录
+    创建**；编译期任一异常回收本函数创建的目录后重抛——失败路径零
+    `.gqt-run-*` 残留（QA DEF-1/1b/1c）。显式 --out-dir 场景由调用方
+    持有目录，不走本函数。"""
+    root = Path(project_root)
+    selected = sorted(set(keys))
+    if not selected:
+        raise SuiteError("no keys parsed")
+    compile_preflight(root)          # AddonError：schema 缺/损/漂移等
+    for k in selected:
+        resolve_feature(root, k)     # AddonError：未知 key / 缺根 / 空集
+    suite_dir = create_suite_dir(root)
+    try:
+        return compile_keys_to_suite(root, selected, suite_dir)
+    except BaseException:
+        # 编译中失败（含 parse 错误、写入异常）：回收已建目录，零残留。
+        try:
+            _cleanup_suite_dir(suite_dir)
+        except OSError:
+            pass
+        raise
+
 
 def compile_keys_to_suite(project_root: str | Path, keys: list[str],
                           suite_dir: str | Path) -> dict:
@@ -272,21 +299,34 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
 
 def run_gherkin_probe(project_root: str | Path, keys: list[str],
                          timeout_s: int = 120) -> dict:
-    """W4 gherkin 成本探针：私有目录管线实测「编译 + 执行」墙钟。"""
+    """W4 gherkin 成本探针：私有目录管线实测「编译 + 执行」墙钟。
+
+    §SPEC-016 / C1-R2：编译前失败（缺根/未知 key/schema）零目录创建；
+    编译后、业务 GUT 前的失败（重放/validator 红）回收本探针创建的私有
+    目录——probe 入口与 measure 核心路径同纪律（QA DEF-2）。"""
     root = Path(project_root)
     selected = sorted(set(keys))
     t0 = time.monotonic()
-    suite_dir = create_suite_dir(root)
     try:
-        compile_keys_to_suite(root, selected, suite_dir)
-    except AddonError as e:
-        # 诊断面具名降级（reason 落 error 键）：发现面违例（缺根/空集/
-        # 未知 key）不冒充测量成功，也不向 CLI 裸抛。
+        compile_rec = compile_keys_auto_suite(root, selected)
+    except (AddonError, SuiteError) as e:
+        # 诊断面具名降级（reason 落 error 键）：发现面违例不冒充测量
+        # 成功，也不向 CLI 裸抛；目录未创建（helper 保证）或已回收。
         return {"probe_version": PROBE_VERSION, "keys": selected,
                 "suite_ok": False, "error": str(e)}
+    suite_dir = Path(compile_rec["suite_dir"])
     compile_s = time.monotonic() - t0
     t1 = time.monotonic()
-    record = run_suite_dir(root, suite_dir, timeout_s)
+    try:
+        record = run_suite_dir(root, suite_dir, timeout_s)
+    except (SuiteError, GherkinRunError):
+        # 业务 GUT 前失败（重放/预检）：探针创建的目录零残留后按原
+        # 异常路径上抛（CLI JSON 出口具名披露）。
+        try:
+            _cleanup_suite_dir(suite_dir)
+        except OSError:
+            pass
+        raise
     run_s = time.monotonic() - t1
     return {
         "probe_version": PROBE_VERSION,

@@ -94,6 +94,7 @@ gqt
 - IR schema（/2）：`{ops_version, feature, source_path, cases:[{scenario, scenario_line, example_row_line, values, steps, types, then_unchanged, mutation_exempt, test_name}]}`。schema 冻结五件套（Examples 表一等公民、占位符 `<x>` 归一化、`# types:` 类型声明含 `enum{...}`/`float_near:<tol>` 域与 `str`/`bool`/`not_contains`/`in_set`/`signal_count` 族（声明类型与 cell 形态失配 = parse error；`in_set` 成员以逗号分隔、**周边空白由 compile 期归一化剥离**（QA F2：IR 存归一化 cell，parse 面与模板 naive split 同源）、**成员内含逗号不可表达**）、`# unchanged:` 反向断言槽（/2 放宽多段点路径 `a.b.c`）、manifest 哈希绑定）+ `# mutation: exempt` scenario 级指令（每 scenario 恰好一行，重复 = parse error）全部在 parse 期 fail-fast（违规 = GherkinSyntaxError → JSON 契约 ok:false）。
 - 产物三件：`acceptance/ir/<key>.json` + `acceptance/generated/test_<key>.gd`（GUT 目录扫描按 `test_` 前缀过滤——非 test_ 前缀脚本被忽略；**/2 起 run_step 全量 await 化**——GDScript await 对非协程返回值透传，同步 harness 零破坏，场景生命周期步骤可为协程）+ `acceptance/generated/<key>.manifest.json`（含 ir_hash/generated_hash/worker_hash sha256 绑定 + attribution 表）。worker 生成物（`accept_worker.gd`）NDJSON 循环协程化（`_drive()` fire-and-forget，协议不变）。
 - 写入仅限 §6 白名单两目录；先清空再生成（`--no-clean` 退路）；写入 opt-in（`--write`），`summary.wrote` 逐文件披露；GUT runner 缺失 = JSON 契约 ok:false。
+- **生成测试的对称生命周期（SEE-1619 §SPEC-002）**：生成 GUT 测试具备 `before_each`/`after_each` 对称还原——harness 已创建后，init 失败、断言红、测试体提前 return 与后续场景均经 `after_each` 可靠还原，不再只依赖普通测试体末尾语句；崩溃/超时仍由外层 arm 清理，不伪称 reset 成功。既有 IR/manifest/replay 语义不变。
 
 ### 4.2b `gqt gherkin run <dir> --project-root <root> --key <feature-key> [--timeout 120] [--godot-bin <path>]`（SEE-1426 P2）
 
@@ -402,7 +403,8 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 批式臂双源编排（§SPEC-037；目标全集一次插桩 → 每臂 1 次 GUT → 逐文件 sink 读回 → bundle → union）：
 
 - **臂 gut_full**：.gutconfig 面（无 `-gdir`——GUT 缺省读配置，GUT 9.6 实测锚定）；
-- **臂 acceptance**：`acceptance/features` 全量 keys 编译进私有目录 `.gqt-run-<uuid>/`（§12 管线）+ 重放校验 + 重新插桩（新 run_uuid+sink 名）→ 1 次 GUT → **对账五项**（任一 false → 臂 invalid）→ 私有目录清理零残留；
+- **臂 acceptance（SEE-1619 §SPEC-005 共享分片）**：`acceptance/features` 全量 keys 按共享分片分组编译进私有目录 `.gqt-run-<uuid>/`（§12 管线）+ 逐 key 重放校验 + 重新插桩（新 run_uuid+sink 名）→ 组内多 key 共享 GUT 进程，真实扇出 = `len(groups) × reps`（不再默认 44 feature×3 进程）；`acceptance_shards` 为分片/并发上限。对账五项、逐 key replay、独立 XDG/sink/run UUID、rep 收敛语义保留；私有目录与全部异常路径清理零残留。
+- **per-process 临时降级（SEE-1619 §SPEC-006）**：仅当某 feature 当次未通过共享校验时才 singleton 执行，并在 `process_fallbacks:[{key,reason}]` 逐 feature 披露名称与原因——按 key 排序、每项恰含 `key/reason`、成功/suite_error/清理失败等所有返回路径均存在（早失败为空数组）、全原子时 `process_fallbacks=[]`；共享红且隔离也红不得包装为有效降级，GUT map 与 union 完整性按既定口径降级，修复后必须回共享。降级轮并发同样 ≤ `acceptance_shards`；清理失败该臂 invalid 并披露残留路径，禁止带残留报 valid。
 - **逐文件 sink** `qa-coverage-hits-{run_uuid}-{file_key8}.txt`（`file_key8 = sha1(relpath)[:8]`），落盘即清、沿 §10 prune 纪律；
 - **在树插桩**：备份 per-uid 私有目录 `/tmp/gqt-canonical-backups-<uid>/<run_uuid>/`（started-record + 逐文件原文；0700、ownership 校验、拒 symlink），finally 原子恢复；启动时回收同项目陈旧备份（崩溃恢复：marker schema 校验 + 恢复写入经 pinned-root 逐组件 O_NOFOLLOW dirfd 走廊限定 project root 内）；KOL 生产树零残留；
 - 两臂共用同一 registry/probe manifest（同源码、同 manifest），run UUID 每臂独立；
@@ -420,6 +422,14 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 ### 13.3 性能门（§SPEC-039）
 
 端到端墙钟（插桩 + 两臂 GUT + union，recipe 构建与 W4 探针不计）对「现有 GUT + acceptance 序贯基线」3+3 交错中位数 ≤1.0×（§SPEC-052 现行最终性能门；旧 §SPEC-039 时代的 1.5× 中间门已作废）；**不达标=停下汇报、不得合并**；loadavg+CPU 双记录（§SPEC-022 协议）随交付。
+
+### 13.3a acceptance 共享分片性能验收（SEE-1619 §SPEC-010，`tests/integration/run_see1619_acceptance_perf.py`）
+
+- **对比对象**：同一 gqt 分支内「共享分片」对「master per-feature 进程」两种形态，同 KOL 输入、同 reps、同并发、独立 store；不得跨 gqt 版本比较，不得以进程数推算墙钟。
+- **A/A 独立基线（§SPEC-029）**：噪声样本只取首个 B 之前的独立 shared A 块，`baseline_samples ≥ 3`；交错 A/B 对数 `interleaved_pairs ≥ 3` 且必须位于基线块之后。交错已开始而基线不足时 batch 具名 exit 1；纯 A/A 中间轮可合法不完整。
+- **速度门（§SPEC-026）**：`speed_gate.ok = (median_ratio > threshold)` **严格大于**——等于阈值不算 PASS。报告绝对秒数、倍率、每轮进程/分片账与逐轮原始记录；任何 INCONCLUSIVE 不得写 PASS。
+- **batch/全量出口（§SPEC-028）**：`rounds_complete=true` 时以合并 summary 判定出口（MEASURED → exit 0；speed_gate 失败等 → exit 1），`--mode A/B --round-index` 的单轮 batch 不得绕过 summary/speed gate 形成假绿；不完整报告可按同一语义 resume。
+- **披露边界（LOW D-A）**：perf 汇总不携带底层 `rc/exit_semantics`/gut 臂状态；单轮 `rc=1/ok=false` 属 uncertified 设计语义，`MEASURED` 的证明域 = acceptance 臂有效 + 轮次完备 + 速度门。
 
 ### 13.4 契约增量分类
 

@@ -67,6 +67,11 @@ gqt gherkin run --project-root . --acceptance-probe-keys save
 
 - Only a strict Gherkin subset is accepted; the old Python steps runner and
   the `--steps` flag do not exist.
+- Generated GUT tests have a **symmetric before/after lifecycle** (SEE-1619):
+  once the harness is created, `after_each` restores state even on init
+  failure, red assertions, early return, and for subsequent scenarios.
+  Crash/timeout cleanup stays with the outer arm and is never reported as a
+  successful reset.
 - `--write` only writes the two `acceptance/ir|generated` directories
   (clean-then-generate); nothing else is written.
 - Mutation here is **contract-level** (IR cell semantics), not source-level;

@@ -22,7 +22,7 @@ from godot_qa_toolkit.gherkin.addon import (
     SCHEMA_VERSION,
     AddonError,
     compile_preflight,
-    run_preflight,
+    run_validator_preflight,
 )
 from godot_qa_toolkit.gherkin.compile import compile_feature
 from godot_qa_toolkit.gherkin.mutate_runner import run_mutate
@@ -165,7 +165,7 @@ def test_run_preflight_spawns_addon_validator_and_verifies_majors(
         project: Path, monkeypatch) -> None:
     calls: list = []
     _install_fake_godot(monkeypatch, calls)
-    verdict = run_preflight(project)
+    verdict = run_validator_preflight(project)
     assert verdict["ok"] is True
     assert len(calls) == 1
     assert any("validator.gd" in str(a) for a in calls[0])
@@ -178,7 +178,7 @@ def test_run_preflight_red_verdict_is_named(project: Path,
                       "reason": "harness.gd missing"})
     _install_fake_godot(monkeypatch, calls, verdict=red)
     with pytest.raises(AddonError, match="harness.gd missing"):
-        run_preflight(project)
+        run_validator_preflight(project)
 
 
 def test_run_preflight_supported_set_drift_is_named(
@@ -188,14 +188,14 @@ def test_run_preflight_supported_set_drift_is_named(
                           "reason": ""})
     _install_fake_godot(monkeypatch, calls, verdict=drifted)
     with pytest.raises(AddonError, match="supported_majors"):
-        run_preflight(project)
+        run_validator_preflight(project)
 
 
 def test_run_preflight_missing_validator_is_named(
         tmp_path: Path) -> None:
     project = make_addon_project(tmp_path / "proj", validator_gd=None)
     with pytest.raises(AddonError, match="validator"):
-        run_preflight(project)
+        run_validator_preflight(project)
 
 
 def test_run_preflight_unparseable_verdict_is_named(
@@ -203,7 +203,7 @@ def test_run_preflight_unparseable_verdict_is_named(
     calls: list = []
     _install_fake_godot(monkeypatch, calls, verdict="Godot banner noise")
     with pytest.raises(AddonError, match="verdict"):
-        run_preflight(project)
+        run_validator_preflight(project)
 
 
 def test_run_suite_preflights_once_then_runs(project: Path,
@@ -249,6 +249,76 @@ def test_run_mutate_preflights_once(project: Path,
     validator_calls = [c for c in calls
                        if any("validator.gd" in str(a) for a in c)]
     assert len(validator_calls) == 1
+
+
+# ---------- §SPEC-016：纯域校验先于 Godot 预检（无二进制双形态） ----------
+
+def test_replay_domain_error_precedes_validator_spawn(
+        project: Path, monkeypatch) -> None:
+    """篡改产物 → replay 域错误必须胜出：即便 Godot 二进制不可用（环境
+    错误），零 spawn 且具名 "hash mismatch"——域检查不依赖环境。"""
+    import godot_qa_toolkit.gherkin.addon as addon_mod
+    src = write_feature(project, "demo")
+    suite, error = compile_feature(src, project, write=True)
+    assert error is None
+    gd = project / "gherkin" / "generated" / "test_demo.gd"
+    gd.write_text(gd.read_text(encoding="utf-8") + "\n# tampered\n",
+                  encoding="utf-8")
+    monkeypatch.setattr(addon_mod, "godot_command",
+                        lambda: "/nonexistent-godot-binary")
+    spawn_calls: list = []
+
+    def _must_not_spawn(*a, **k):  # 任何拉起即证明次序回退
+        spawn_calls.append(list(a[0]) if a else [])
+        raise AssertionError("business/preflight spawn must not happen")
+
+    monkeypatch.setattr(sp, "run", _must_not_spawn)
+    with pytest.raises(GherkinRunError,
+                       match="generated test hash mismatch"):
+        run_suite(project, "demo")
+    assert spawn_calls == []
+
+
+def test_replay_pure_preflight_error_precedes_validator_spawn(
+        project: Path, monkeypatch) -> None:
+    """schema 缺失属纯解析预检 → replay 阶段即具名失败，零 spawn。"""
+    src = write_feature(project, "demo")
+    suite, error = compile_feature(src, project, write=True)
+    assert error is None
+    (project / "addons" / "gqt_gherkin" / "schema.json").unlink()
+    spawn_calls: list = []
+
+    def _must_not_spawn(*a, **k):
+        spawn_calls.append(list(a[0]) if a else [])
+        raise AssertionError("spawn must not happen")
+
+    monkeypatch.setattr(sp, "run", _must_not_spawn)
+    with pytest.raises(GherkinRunError, match="preflight"):
+        run_suite(project, "demo")
+    assert spawn_calls == []
+
+
+def test_validator_spawns_after_replay_before_gut(
+        project: Path, monkeypatch) -> None:
+    """干净产物：validator 恰一次且在业务 GUT 之前（次序钉 + 进程账）。"""
+    calls: list = []
+    _install_fake_godot(
+        monkeypatch, calls,
+        gut_output=("res://gherkin/generated/test_demo.gd\n"
+                    "* test_x_000_00\n* test_x_001_01\n"))
+    src = write_feature(project, "demo")
+    suite, error = compile_feature(src, project, write=True)
+    assert error is None
+    result = run_suite(project, "demo")
+    assert result["ok"] is True
+    targets = []
+    for c in calls:
+        joined = " ".join(str(a) for a in c)
+        if "validator.gd" in joined:
+            targets.append("validator")
+        elif "gut_cmdln.gd" in joined:
+            targets.append("gut")
+    assert targets == ["validator", "gut"]
 
 
 # ---------- measure 核心路径共用同一预检 ----------

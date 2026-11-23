@@ -10,8 +10,10 @@ acceptance 目录）不再是合法输入：缺根/空集/缺声明 fail-loud，
 - compile_preflight：纯解析握手——schema.json 存在、`gqt-gherkin-addon/1`
   major 受支持、requires.gqt 不高于本工具、requires.testing_api 与本
   工具 testing-api token 一致；零 Godot 进程。
-- run_preflight：解析握手 + 拉起 addon 自带 `validator.gd` 一次，断言
+- run_validator_preflight：拉起 addon 自带 `validator.gd` 一次，断言
   其 `supported_majors` 与本工具支持集完全相等（漂移即拒）。
+调用方按「纯解析握手 → 纯域校验（replay）→ validator 阶段 → 业务
+执行」装配——域错误不被缺二进制的环境错误抢占（§SPEC-016）。
 """
 
 from __future__ import annotations
@@ -148,13 +150,16 @@ def compile_preflight(project_root: str | Path) -> dict:
     return doc
 
 
-def run_preflight(project_root: str | Path,
-                  timeout_s: int = 60) -> dict:
-    """run/mutate 侧预检（§SPEC-003）：解析握手 + 业务执行前拉起 addon
-    内同一 `validator.gd` 一次；verdict `ok=false`（V/P 检查红）、
+def run_validator_preflight(project_root: str | Path,
+                            timeout_s: int = 60) -> dict:
+    """validator 拉起阶段（§SPEC-003）：业务执行前拉起 addon 内同一
+    `validator.gd` 一次；verdict `ok=false`（V/P 检查红）、
     `supported_majors` 与本工具支持集不完全相等（漂移）、verdict 缺失
-    或不可解析均具名拒绝。返回 validator verdict dict。"""
-    doc = compile_preflight(project_root)
+    或不可解析均具名拒绝。返回 validator verdict dict。
+
+    与 `compile_preflight`（纯解析）分离：调用方按 纯解析握手 → 纯域
+    校验（replay）→ 本阶段 → 业务执行 的次序装配——replay 等不需要
+    Godot 的领域检查不得被缺少二进制的环境错误抢占（§SPEC-016）。"""
     validator_path = Path(project_root) / VALIDATOR_RELPATH
     if not validator_path.is_file():
         raise AddonError(
@@ -200,3 +205,4 @@ def run_preflight(project_root: str | Path,
             f"this GQT's supported set {expected!r} — supported-set drift "
             f"is rejected")
     return verdict
+

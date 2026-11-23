@@ -327,6 +327,24 @@ def test_early_failure_path_carries_process_fallbacks(tmp_path, monkeypatch):
     assert out["process_fallbacks"] == []
 
 
+def test_isolated_rec_failure_not_wrapped_as_fallback(tmp_path, monkeypatch):
+    """§SPEC-011 hardener：隔离轮对账失败（即使零红对）不得当作"隔离绿"
+    ——ok_keys 判定必须同时要求隔离轮 reconciliation ok。对账失败的
+    隔离证据结构面存疑，不得具名降级，共享红保持可见。"""
+    root = _proj(tmp_path)
+    fake, calls = _make_fake_run_arm({"k2"}, set(), isolated_rec_fail=True)
+    _wire(monkeypatch, tmp_path, fake)
+    out = _flow(root, shards=2)
+    assert len(calls) == 2, "降级轮必须发生"
+    assert out["process_fallbacks"] == [], \
+        "隔离轮对账失败不得产出降级披露"
+    assert out["state"] == "invalid", "对账存疑时不得转 valid"
+    assert out["gut_ok"] is False
+    assert any("test_k2.gd" in p
+               for p in out["test_failures"]["observed_pairs"]), \
+        "共享红保持可见（未被隔离证据推翻）"
+
+
 def test_replay_fail_cleans_all_group_suites(tmp_path, monkeypatch):
     """共享轮 replay 失败：全部组 suite 目录（含降级轮已建组）回收。"""
     root = _proj(tmp_path)

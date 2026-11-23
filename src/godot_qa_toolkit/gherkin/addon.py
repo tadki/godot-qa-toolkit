@@ -78,19 +78,45 @@ def is_owned_suite_dir(suite_dir: str | Path) -> bool:
     return True
 
 
+def _addon_physical_root(project_root: str | Path) -> Path:
+    """addon 的**物理根**：addon 根自身及父路径不得逃出项目根。
+
+    §SPEC-019 HIGH-2 补漏（R5）：不能以 `(root / ADDON_DIR_RELPATH).resolve()`
+    作为允许根——addon 根本身是 symlink 时该值随之逃到项目外，两个"已被
+    同一逃逸解析后的路径"相互比较恒真。此处以**项目物理根**为基准独立
+    判定：addon 根不得是 symlink，其父路径（如 `addons/`）亦不得经 symlink
+    把物理位置带出项目根。"""
+    root = Path(project_root).resolve()
+    addon_root = root / ADDON_DIR_RELPATH
+    if addon_root.is_symlink():
+        raise AddonError(
+            f"addon root must not be a symlink: {addon_root} — the strict "
+            f"single root requires a physical {ADDON_DIR_RELPATH}/ inside the "
+            f"project")
+    resolved = addon_root.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise AddonError(
+            f"addon root escapes the project root: {resolved} — parent path "
+            f"symlinks may not move {ADDON_DIR_RELPATH}/ outside the project")
+    return resolved
+
+
 def addon_file(project_root: str | Path, relpath: str, what: str) -> Path:
     """addon 内文件的物理位置校验：不得是 symlink，且解析后仍在 addon 根内。
 
     §SPEC-019 HIGH-2：schema / validator / harness 经 symlink 逃逸严格单根
-    一律 fail-loud（标准 addon 内的正常文件不受影响）。"""
+    一律 fail-loud（标准 addon 内的正常文件不受影响）；整个 addon 根或其
+    父路径逃逸同样拒绝（R5 补漏，独立物理根判定）。"""
     root = Path(project_root).resolve()
+    addon_root = _addon_physical_root(root)
     path = root / relpath
     if path.is_symlink():
         raise AddonError(
             f"{what} must not be a symlink: {path} — the strict single root "
             f"rejects files that escape {ADDON_DIR_RELPATH}/")
     resolved = path.resolve()
-    addon_root = (root / ADDON_DIR_RELPATH).resolve()
     try:
         resolved.relative_to(addon_root)
     except ValueError:

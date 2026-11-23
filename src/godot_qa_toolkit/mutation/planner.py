@@ -82,12 +82,13 @@ def plan_execution(path, project_root, mutants, header_hash, scope_hashes,
                         map_path=map_path)
 
 
-def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
-    """§SPEC-1420-11（D7 卡尺）：显式寻址 = 公平的重跑通道——不查缓存。
+def selection_preview(mutants, select_ids, select_lines):
+    """SEE-1623 M5：卡尺选择的纯判定面（真实执行与 dry-run 预览共用）。
 
-    SEE-1587：`--lines` 与请求行求交并披露 `requested / hit /
-    skipped_no_site`（请求行中无变异位点的显式列出）；全部无位点才显式
-    失败。`--mutation` 单 id 契约不变（无命中 = 显式错误）。"""
+    与 _plan_selection 同一谓词与同一错误文本（单一失败出处）：返回
+    (executed_list, disclosures)；零命中/stale id 抛同文 ValueError。
+    """
+    disclosures: dict = {}
     if select_ids is not None:
         wanted = set(select_ids)
         executed_list = [m for m in mutants if m.stable_id in wanted]
@@ -96,22 +97,34 @@ def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
             raise ValueError(
                 "selection matched no mutation sites (stale id after source "
                 f"change, or out-of-range line?): {sorted(missing)[:5]}")
-    else:
-        lines = {int(l) for l in (select_lines or [])}
-        executed_list = [m for m in mutants if m.line in lines]
-        hit = sorted({m.line for m in executed_list})
-        disclosures["lines_selection"] = {
-            "requested": sorted(lines),
-            "requested_count": len(lines),
-            "hit": hit,
-            "hit_count": len(hit),
-            "skipped_no_site": sorted(lines - set(hit)),
-        }
-        if not executed_list:
-            raise ValueError(
-                "selection matched no mutation sites on the requested lines "
-                f"(no-site lines: {sorted(lines)[:10]}"
-                f"{'…' if len(lines) > 10 else ''})")
+        return executed_list, disclosures
+    lines = {int(l) for l in (select_lines or [])}
+    executed_list = [m for m in mutants if m.line in lines]
+    hit = sorted({m.line for m in executed_list})
+    disclosures["lines_selection"] = {
+        "requested": sorted(lines),
+        "requested_count": len(lines),
+        "hit": hit,
+        "hit_count": len(hit),
+        "skipped_no_site": sorted(lines - set(hit)),
+    }
+    if not executed_list:
+        raise ValueError(
+            "selection matched no mutation sites on the requested lines "
+            f"(no-site lines: {sorted(lines)[:10]}"
+            f"{'…' if len(lines) > 10 else ''})")
+    return executed_list, disclosures
+
+
+def _plan_selection(store2, mutants, select_ids, select_lines, disclosures):
+    """§SPEC-1420-11（D7 卡尺）：显式寻址 = 公平的重跑通道——不查缓存。
+
+    SEE-1587：`--lines` 与请求行求交并披露 `requested / hit /
+    skipped_no_site`（请求行中无变异位点的显式列出）；全部无位点才显式
+    失败。`--mutation` 单 id 契约不变（无命中 = 显式错误）。"""
+    executed_list, sel_disc = selection_preview(mutants, select_ids,
+                                                select_lines)
+    disclosures.update(sel_disc)
     prior_entries = store2.load_entries()  # streak 连续性（仅读）
     disclosures["executed"] = len(executed_list)
     disclosures["selected"] = True

@@ -462,7 +462,9 @@ def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
 def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
     """§SPEC-PREREQ-MATRIX：P1 prepare-blockers 默认停（一次列全 +
     修复命令/成本）；--auto-prepare 续跑；--select full 不需要 map；
-    目标不存在时交由下游原错误契约。"""
+    目标不存在时交由下游原错误契约。SEE-1623 M1：显式 `--tests` 用户
+    接管测试面——映射前置对显式面不适用（此前 prepare_required 阻断，
+    显式面接管语义名存实亡）。"""
     from .source_io import anchor_to_project_root as _anchor
     p1 = [p for p in plan["problems"]
           if p.get("level") == "P1" and p.get("severity") == "warning"]
@@ -472,6 +474,8 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
                                                   False):
         return None
     if getattr(args, "select_mode", "line") == "full":
+        return None
+    if getattr(args, "tests", None):
         return None
     files = list(getattr(args, "files", []) or [])
     if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
@@ -613,8 +617,10 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         # A20（SEE-1594 S5）：显式 --select full 是全脸审计——不需要映射，
         # 不得被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file
         # 默认路径仍自动生成/复用新鲜映射；不可用 fail-loud）。
+        # SEE-1623 M1：显式 --tests 同理——用户接管测试面，映射非必需，
+        # 不触发 ensure_map（prepare_required/映射构建都不该拦显式面）。
         full_face = getattr(args, "select_mode", "line") == "full"
-        if not full_face:
+        if not full_face and not getattr(args, "tests", None):
             # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
             rc = _bootstrap_import_or_contract("mutation", args)
             if rc is not None:

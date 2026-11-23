@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import OPS_VERSION
 from .compile import GENERATED_DIR, WORKER_FILENAME, sha256_of
-from .addon import AddonError, run_preflight
+from .addon import AddonError, compile_preflight, run_validator_preflight
 from ..mutation.gutrun import _looks_like_godot_launch_failure, _parse_failing_tests
 from ..mutation.inject import godot_command, spawn_godot
 from ..mutation.godot_gate import GlobalGodotGate
@@ -47,8 +47,17 @@ def replay_check(project_root: str | Path, feature_key: str,
     现场重编译，核对产出 IR 与磁盘 IR 哈希一致——锚定回源文件。源文件
     缺失 = run_error（防删源保伪造产物）。重锚核对无旁路参数（原
     source_check 形参为参数化旁路面，已移除）。
+
+    SEE-1624 §SPEC-016：重放校验是纯域检查（零 Godot）——先过
+    `compile_preflight` 纯解析握手（单根/schema 契约），再核产物哈希；
+    validator 拉起属独立阶段（run_validator_preflight），由调用方排在
+    本函数之后、业务执行之前。缺 Godot 二进制不得抢占下文域错误。
     """
     root = Path(project_root)
+    try:
+        compile_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
     gen_dir = (Path(suite_dir) / "generated") if suite_dir is not None \
         else root / GENERATED_DIR
     man_path = gen_dir / f"{feature_key}.manifest.json"
@@ -124,20 +133,21 @@ def _reanchor_check(root: Path, manifest: dict, ir_hash: str) -> None:
 
 def run_suite(project_root: str | Path, feature_key: str,
               timeout_s: int = 120) -> dict:
-    """schema/validator 预检 + 重放校验 + headless GUT 执行 + 统一契约回译。
+    """重放校验 → validator 预检 → headless GUT 执行 + 统一契约回译。
 
-    SEE-1624 §SPEC-003：run 侧预检（拉起 addon validator 一次）先于一切
-    业务 Godot 进程——CLI 与 measure 核心路径共用，不在 cmd_gherkin 单点
-    守门。"""
+    SEE-1624 §SPEC-003/016 次序：replay_check 先做纯解析握手 + 纯域
+    哈希校验（零 Godot，域错误不被环境错误抢占）；随后拉起 addon
+    validator 一次（仍先于业务执行）；最后才是业务 GUT 进程。CLI 与
+    measure 核心路径共用同一预检实现，不在 cmd_gherkin 单点守门。"""
     root = Path(project_root)
     gut = root / "addons" / "gut" / "gut_cmdln.gd"
     if not gut.is_file():
         raise GherkinRunError(f"GUT runner not found: {gut}")
+    manifest = replay_check(project_root, feature_key)
     try:
-        run_preflight(root)
+        run_validator_preflight(root)
     except AddonError as e:
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
-    manifest = replay_check(project_root, feature_key)
     env = dict(os.environ)
     try:
         with GlobalGodotGate(str(root)):

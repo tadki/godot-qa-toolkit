@@ -31,7 +31,9 @@ def _proj(tmp_path: Path, *, with_contract: bool = True) -> Path:
 
 
 def _stub_flow(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(arms, "run_preflight",
+    monkeypatch.setattr(arms, "compile_preflight",
+                        lambda root, **k: {"ok": True})
+    monkeypatch.setattr(arms, "run_validator_preflight",
                         lambda root, **k: {"ok": True})
     monkeypatch.setattr(arms, "compile_keys_to_suite",
                         lambda project_root, keys, suite_dir: None)

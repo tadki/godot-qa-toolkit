@@ -499,3 +499,15 @@ def test_perf_resume_accepts_current_doc() -> None:
            "gherkin_wall_s": 10.0}
     out = merge_round_into_report(doc, rec, 4, 44)
     assert len(out["rounds"]) == 1
+
+
+def test_mutate_sentinel_detects_ansi_prefixed_test_stream() -> None:
+    """真实 Godot 输出带 ANSI 颜色前缀——mutate 基线哨兵必须剥除转义
+    后再计数（否则真实工程下"无测试流"假阴性 → 误报 run_error）。"""
+    from godot_qa_toolkit.gherkin import mutate_runner as mr
+    ansi = ("\x1b[0m* test_demo_000_00\x1b[0m\n"
+            "\x1b[1m1/1 passed.\x1b[0m\n")
+    assert "* test_" in ansi
+    assert mr._count_test_stream(ansi) == 1
+    # 基线轮执行集解析同一实现（曾直接 findall 未剥 ANSI → 真实工程假阴性）
+    assert mr._test_stream_names(ansi) == {"test_demo_000_00"}

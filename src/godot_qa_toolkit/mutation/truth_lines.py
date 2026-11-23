@@ -33,13 +33,25 @@ def parse_lines_spec(spec: str) -> list[int]:
             raise ValueError(f"invalid --lines segment (empty): {spec!r}")
         if "-" in seg:
             lo_s, _, hi_s = seg.partition("-")
-            lo, hi = int(lo_s), int(hi_s)
+            # SEE-1623 M4：裸 int() 转换把 Python 异常文本（invalid
+            # literal...）泄漏给用户——转换失败转可读用法提示。
+            try:
+                lo, hi = int(lo_s), int(hi_s)
+            except ValueError:
+                raise ValueError(
+                    f"invalid --lines range {seg!r} (need integer "
+                    f"endpoints lo-hi)") from None
             if lo <= 0 or hi < lo:
                 raise ValueError(
                     f"invalid --lines range {seg!r} (need 1<=lo<=hi)")
             lines.update(range(lo, hi + 1))
         else:
-            n = int(seg)
+            try:
+                n = int(seg)
+            except ValueError:
+                raise ValueError(
+                    f"invalid --lines value {seg!r} (need a positive "
+                    f"integer line number)") from None
             if n <= 0:
                 raise ValueError(f"invalid --lines value {seg!r} (need >=1)")
             lines.add(n)

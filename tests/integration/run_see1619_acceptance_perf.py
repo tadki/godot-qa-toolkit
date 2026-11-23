@@ -83,7 +83,15 @@ def run_single_round(args, round_type: str, round_index: int,
                      project_root: Path, keys: int, recipe: Path,
                      report_path: Path) -> int:
     """分批前台模式：执行单轮并合并入既有报告（resume 语义），逐轮
-    追加后重算汇总——测量口径与单次全量模式一致。"""
+    追加后重算汇总——测量口径与单次全量模式一致。
+
+    §SPEC-028 出口契约（显式）：
+    - 本轮 invalid → exit 1；
+    - 报告已完整（rounds_complete）时以合并 summary 判定：MEASURED → 0，
+      否则（如 speed_gate 失败）→ exit 1，不得 round valid 即 0；
+    - 报告尚不完整 → exit 0（可 resume 追加），stderr 显式提示
+      resume 语义与未配对的孤立 B 轮——最终判定由全量模式重读 verdict
+      承担（那里同样以 MEASURED 为 exit 0 前提）。"""
     shards = args.shards_a if round_type == "A" else keys
     rec = _acceptance_wall(project_root, args.gqt, args.godot, recipe,
                            report_path.parent
@@ -114,7 +122,25 @@ def run_single_round(args, round_type: str, round_index: int,
     if not rec["valid"]:
         print("INCONCLUSIVE round:", rec["round"], rec.get("run_error"),
               file=sys.stderr)
-    return 0 if rec["valid"] else 1
+        return 1
+    # §SPEC-028：round valid 不等于报告合格——完整报告必须服从合并
+    # summary 的 verdict/speed_gate；不完整报告可 resume，但收尾语义
+    # （孤立 B 待配对、最终以全量模式重读判定）必须显式提示。
+    if s.get("rounds_complete"):
+        if s.get("verdict") == "MEASURED":
+            return 0
+        print(f"INCONCLUSIVE report: verdict={s.get('verdict')} "
+              f"speed_gate={s.get('speed_gate')} — complete but not "
+              "MEASURED", file=sys.stderr)
+        return 1
+    note = ("report incomplete (rounds_complete=false) — append more "
+            "rounds to resume; final verdict is read back by the full "
+            "mode")
+    if s.get("orphan_b_rounds"):
+        note += (f"; unpaired B rounds pending next shared A: "
+                 f"{s['orphan_b_rounds']}")
+    print(note, file=sys.stderr)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -403,7 +403,7 @@ acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省�
 
 ### 13.3a acceptance 共享分片性能验收（SEE-1619 §SPEC-010，`tests/integration/run_see1619_acceptance_perf.py`）
 
-- **对比对象**：同一 gqt 分支内「共享分片」对「master per-feature 进程」两种形态，同 KOL 输入、同 reps、同并发、独立 store；不得跨 gqt 版本比较，不得以进程数推算墙钟。
+- **对比对象**：**同一 gqt 分支内**「共享分片（shared）」与「逐 feature 独立进程（per-feature）」两种进程形态，同 KOL 输入、同 reps、同并发、独立 store；**不是跨 gqt 版本的 master 对比**，不得以进程数推算墙钟。
 - **A/A 独立基线（§SPEC-029）**：噪声样本只取首个 B 之前的独立 shared A 块，`baseline_samples ≥ 3`；交错 A/B 对数 `interleaved_pairs ≥ 3` 且必须位于基线块之后。交错已开始而基线不足时 batch 具名 exit 1；纯 A/A 中间轮可合法不完整。
 - **速度门（§SPEC-026）**：`speed_gate.ok = (median_ratio > threshold)` **严格大于**——等于阈值不算 PASS。报告绝对秒数、倍率、每轮进程/分片账与逐轮原始记录；任何 INCONCLUSIVE 不得写 PASS。
 - **batch/全量出口（§SPEC-028）**：`rounds_complete=true` 时以合并 summary 判定出口（MEASURED → exit 0；speed_gate 失败等 → exit 1），`--mode A/B --round-index` 的单轮 batch 不得绕过 summary/speed gate 形成假绿；不完整报告可按同一语义 resume。

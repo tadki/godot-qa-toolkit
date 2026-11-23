@@ -153,10 +153,10 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 ## Acceptance performance harness (SEE-1619)
 
-`tests/integration/run_see1619_acceptance_perf.py` compares shared sharding
-against master per-feature processes on the same KOL input, reps, concurrency
-and an isolated store (never across gqt versions, never extrapolating wall
-clock from process counts):
+`tests/integration/run_see1619_acceptance_perf.py` compares the **shared-shard
+and per-feature process shapes within the same gqt branch** (not a cross-version
+master comparison) on the same KOL input, reps, concurrency and an isolated
+store, never extrapolating wall clock from process counts:
 
 ```bash
 PYTHONPATH=src python3 -I tests/integration/run_see1619_acceptance_perf.py \

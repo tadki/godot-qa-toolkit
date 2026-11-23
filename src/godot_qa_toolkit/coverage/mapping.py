@@ -60,9 +60,11 @@ def _mapping_select(root: Path, path: Path, timeout_s: int | None) -> dict:
     try:
         sel = truth.resolve_selection(str(root), str(path), timeout_s=timeout_s)
     except truth.MutationSelectionError as e:
+        # SEE-1623 M10/F4：detail 用 e.detail（str(e) 已含 reason 前缀，
+        # 再拼一次产生 auto_update_still_stale:… 双写）。
         raise CoverageMappingError(
             getattr(e, "reason", None) or "attribution_selection_unavailable",
-            str(e)) from e
+            getattr(e, "detail", None) or str(e)) from e
     except (TypeError, ValueError, AttributeError) as e:
         raise CoverageMappingError(
             "attribution_map_malformed",

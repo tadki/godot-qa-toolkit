@@ -708,6 +708,9 @@ def _detail_of(base: dict) -> str | None:
         bits.append(f"arms_valid={mp.get('arms_valid')}")
     if base.get("ambiguous_names"):
         bits.append(f"ambiguous={base['ambiguous_names'][:3]}")
+    if base.get("universe_guidance"):
+        # SEE-1623 M10：universe 缺目标的可操作重建指引随 detail 出信封。
+        bits.append(base["universe_guidance"])
     return ", ".join(bits) or None
 
 
@@ -828,6 +831,20 @@ def resolve_selection(project_root: str | Path, target_file: str,
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
     evaluation["mapping"]["path"] = path
+    # SEE-1623 M10：预存映射 universe 不含目标 → 增量通道无法归类该路径
+    # （unknown_changed_paths 必失败且白跑一次 gut_full 臂）——零 GUT
+    # 具名失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。
+    if (auto and renew and not explicit
+            and evaluation.get("reason") == "file_binding_missing_or_stale"
+            and (doc.get("file_sha256") or {})
+            and rel not in (doc.get("file_sha256") or {})):
+        base["reason"] = "target_not_in_map_universe"
+        base["universe_guidance"] = (
+            f"the existing attribution map does not bind {rel} — rebuild "
+            "the map so the target enters its universe (delete "
+            ".qa-cache/attribution-map.json and rerun, or gqt measure "
+            "map-update --changed <path>)")
+        return _finish(base, strict)
     evaluation, terminal = _auto_renew_step(
         root, path, doc, rel, evaluation, explicit=explicit, auto=auto,
         renew=renew, timeout_s=timeout_s, base=base, strict=strict)

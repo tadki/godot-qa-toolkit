@@ -794,6 +794,21 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         arm_fail_pairs=arm_fail_pairs, gut_ok=gut_ok,
         acceptance=acceptance, results=results, run_error=run_error,
         timed_out=timed_out)
+    # SEE-1623 M10：空测试面哨兵——gut_full 臂选面 0 个测试键（F3：
+    # tests 目录存在但零测试）时臂不得自报 valid（无具名原因的权威
+    # 外观）；零执行证据不可能成立 → 具名 invalid。
+    if (name == "gut_full" and arm_valid and invalid_reason is None
+            and not all_keys and not timeout_excluded):
+        arm_valid = False
+        gut_ok = False
+        run_error = True
+        invalid_reason = "empty_test_face"
+        invalid_evidence = {
+            "note": ("selection resolved 0 test keys — no execution "
+                     "evidence is possible for this face; add tests or "
+                     "fix the tests glob/recipe"),
+            "all_causes": ["empty_test_face"],
+        }
     return _arm_result(
         name, root=root, prepared=prepared, acceptance=acceptance,
         arms_parallel=arms_parallel, evidence_dir=evidence_dir,

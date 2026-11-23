@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -24,7 +25,10 @@ from ..coverage.evidence import (
     write_bundle,
     write_run_record,
 )
-from ..coverage.runner import _looks_like_godot_launch_failure
+from ..coverage.runner import (
+    _GUT_RUN_EVIDENCE,
+    _looks_like_godot_launch_failure,
+)
 from ..coverage.union import arm_record_from_bundle
 from ..gherkin.run import AcceptRunError, replay_check
 from ..gherkin.suite import (
@@ -200,9 +204,10 @@ def _arm_fail_scan(results: list[dict]) -> tuple:
 
     §SPEC-TIMEOUT-ADAPT：分片超时**不再置 run_error**——该分片计划内
     测试按名收进 timeout_excluded（reason=shard_timeout，PLANFIRST
-    partial 语义），仅有其它失败仍照旧 fail-closed。返回 (gut_ok,
-    run_error, timed_out, arm_failures, arm_fail_pairs, timeout_excluded,
-    all_keys)。"""
+    partial 语义），仅有其它失败仍照旧 fail-closed。
+
+    SEE-1623 M10：返回追加 (collected_total, executed_stream)——真实
+    收集脚本数与"任一 rep 出现 GUT 测试流证据"（零执行证据门证据）。"""
     gut_ok = True
     run_error = False
     timed_out = False
@@ -210,6 +215,8 @@ def _arm_fail_scan(results: list[dict]) -> tuple:
     arm_fail_pairs: set[tuple[str, str]] = set()
     timeout_excluded: list[dict] = []
     all_keys: list[str] = []
+    collected_total = 0
+    executed_stream = False
     for r in results:
         shard = _scan_shard_row(r)
         timed_out = timed_out or shard["timed_out"]
@@ -218,33 +225,67 @@ def _arm_fail_scan(results: list[dict]) -> tuple:
         arm_fail_pairs |= shard["fail_pairs"]
         arm_failures |= shard["failures"]
         all_keys += shard["keys"]
+        collected_total += shard["collected"]
+        executed_stream = executed_stream or shard["stream"]
         if shard["timed_out"]:
             timeout_excluded.append({"shard": shard["shard_id"],
                                      "keys": shard["keys"],
                                      "reason": "shard_timeout"})
     return _finalize_shard_scan(gut_ok, run_error, timed_out, arm_failures,
-                                arm_fail_pairs, timeout_excluded, all_keys)
+                                arm_fail_pairs, timeout_excluded, all_keys,
+                                collected_total, executed_stream)
 
 
-def _scan_shard_row(r: dict) -> dict:
-    """§SPEC-TIMEOUT-ADAPT：单分片行扫描（keys 解析 + 逐 rep 归类）。"""
-    plan = r.get("plan") or {}
-    # gut_full 分片计划为 -gdir 组（keys=None）——排除粒度按 dir 组；
-    # acceptance 分片有 keys 列表按名排除
+def _plan_collection_evidence(plan: dict) -> tuple:
+    """SEE-1623 M10：分片计划的收集证据 → (collected, keys)。
+
+    `collected` = arms_stage 注入的真实 test_*.gd 脚本数（可能缺省 0）；
+    `keys` 保持既有语义——gut_full 为 `-gdir` 目录组 token（仅作超时
+    排除粒度），acceptance 按名。"""
     keys = ([str(k) for k in (plan.get("keys") or [])]
             or [a for a in (plan.get("args") or [])
                 if str(a).startswith("-gdir=")])
+    return int(plan.get("collected") or 0), keys
+
+
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _shard_stream_evidence(r: dict) -> bool:
+    """SEE-1623 M10：任一非超时 rep 输出含 GUT 测试流证据。
+
+    GUT 在带色输出下测试流行以 ANSI SGR 前缀开头（如
+    `\\x1b[0m* test_add`），`^` 锚定会失配——先剥 ANSI 再判定。"""
+    return any(
+        _GUT_RUN_EVIDENCE.search(
+            _ANSI_SGR_RE.sub("", rep.get("out") or ""))
+        for rep in (r.get("reps") or []) if not rep.get("timed_out"))
+
+
+def _scan_shard_row(r: dict) -> dict:
+    """§SPEC-TIMEOUT-ADAPT：单分片行扫描（keys 解析 + 逐 rep 归类）。
+
+    SEE-1623 M10：追加真实收集证据——`collected`（分片计划中的
+    test_*.gd 脚本数，来自 arms_stage 的同一发现口径）与 `stream`
+    （任一非超时 rep 的输出含 GUT 测试流证据）。目录 token 不再冒充
+    "非空测试键集"。"""
+    plan = r.get("plan") or {}
+    collected, keys = _plan_collection_evidence(plan)
     shard_id = str(plan.get("keys") or plan.get("suite_dir")
                    or ";".join(keys) or "")[:120]
     shard = _scan_shard(r, keys, shard_id)
     shard["keys"] = keys
+    shard["collected"] = collected
+    shard["stream"] = _shard_stream_evidence(r)
     return shard
 
 
 def _finalize_shard_scan(gut_ok: bool, run_error: bool, timed_out: bool,
                          arm_failures: set, arm_fail_pairs: set,
                          timeout_excluded: "list[dict]",
-                         all_keys: "list[str]") -> tuple:
+                         all_keys: "list[str]",
+                         collected_total: int = 0,
+                         executed_stream: bool = False) -> tuple:
     """§SPEC-TIMEOUT-ADAPT：排除后无可用测试 → 整体拒绝。"""
     excluded_keys = {k for e in timeout_excluded for k in e["keys"]}
     usable = [k for k in all_keys if k not in excluded_keys]
@@ -252,7 +293,40 @@ def _finalize_shard_scan(gut_ok: bool, run_error: bool, timed_out: bool,
         gut_ok = False
         run_error = True
     return (gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs,
-            timeout_excluded, all_keys)
+            timeout_excluded, all_keys, collected_total, executed_stream)
+
+def _zero_evidence_gate(name: str, *, arm_valid: bool, invalid_reason,
+                        invalid_evidence, gut_ok: bool, run_error: bool,
+                        collected_total: int, executed_stream: bool,
+                        timeout_excluded) -> tuple:
+    """SEE-1623 M10：gut_full 的零执行证据门（真实管线）。
+
+    - 收集 0 个测试脚本（tests 目录存在但零测试，F3）→ `empty_test_face`；
+    - 收集 >0 但全部 rep 无 GUT 测试流（引擎 rc=0 零输出等）→
+      `no_execution_evidence`（零执行证据不得判 valid 臂）。
+    仅当臂当前 valid、无其它具名 invalid 原因且无超时排除时生效；
+    acceptance 臂不参与（其空面语义由 acceptance 管线自理）。"""
+    if (name != "gut_full" or not arm_valid or invalid_reason is not None
+            or timeout_excluded):
+        return arm_valid, invalid_reason, invalid_evidence, gut_ok, run_error
+    if collected_total == 0:
+        reason = "empty_test_face"
+        note = ("selection collected 0 test scripts — no execution "
+                "evidence is possible for this face; add tests or fix "
+                "the tests glob/recipe")
+    elif not executed_stream:
+        reason = "no_execution_evidence"
+        note = ("engine produced no GUT run stream for the collected "
+                f"{collected_total} test script(s) (e.g. rc=0 with empty "
+                "engine output) — execution cannot be attested; check the "
+                "godot binary and engine stdout")
+    else:
+        return arm_valid, invalid_reason, invalid_evidence, gut_ok, run_error
+    return (False, reason,
+            {"note": note, "all_causes": [reason],
+             "collected_scripts": int(collected_total)},
+            False, True)
+
 
 _BASELINE_TOP_N = 10  # 具名披露 top-N（与预检路径同口径）
 
@@ -620,11 +694,13 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
             concurrency=concurrency)
         wall_s = time.monotonic() - t_arm
         (gut_ok, run_error, timed_out, arm_failures, arm_fail_pairs,
-         timeout_excluded, all_keys) = _arm_fail_scan(results)
+         timeout_excluded, all_keys, collected_total,
+         executed_stream) = _arm_fail_scan(results)
     finally:
         _arm_restore(root, started, backup_dir)
     return (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
-            arm_failures, arm_fail_pairs, timeout_excluded, all_keys)
+            arm_failures, arm_fail_pairs, timeout_excluded, all_keys,
+            collected_total, executed_stream)
 def _scan_shard_problems(results, timeout_s: int, timeout_source: str):
     """§SPEC-PLANFIRST：分片级问题扫描——(launch, timeouts, unattributed)
     三类明细（超时分片带超时值与来源；不可归因分片带 rc 与输出尾部）。"""
@@ -799,7 +875,7 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
     vacuous_rels = stage["vacuous_rels"]
     (results, gut_ok, run_error, timed_out, wall_s, xdg_homes,
      arm_failures, arm_fail_pairs, timeout_excluded,
-     all_keys) = _arm_execute(
+     all_keys, collected_total, executed_stream) = _arm_execute(
         name, root=root, shadow_instrument=shadow_instrument,
         timeout_s=timeout_s, adaptive_reps=adaptive_reps,
         shard_log_dir=shard_log_dir, stage=stage,
@@ -813,22 +889,15 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         arm_fail_pairs=arm_fail_pairs, gut_ok=gut_ok,
         acceptance=acceptance, results=results, run_error=run_error,
         timed_out=timed_out)
-    # SEE-1623 M10：空测试面哨兵——gut_full 臂选面 0 个测试键（F3：
-    # tests 目录存在但零测试）时臂不得自报 valid（无具名原因的权威
-    # 外观）；零执行证据不可能成立 → 具名 invalid。
-    if (name == "gut_full" and arm_valid and invalid_reason is None
-            and not all_keys and not timeout_excluded):
-        arm_valid = False
-        gut_ok = False
-        run_error = True
-        invalid_reason = "empty_test_face"
-        invalid_evidence = {
-            "note": ("selection resolved 0 test keys — no execution "
-                     "evidence is possible for this face; add tests or "
-                     "fix the tests glob/recipe"),
-            "all_causes": ["empty_test_face"],
-        }
-    return _arm_result(
+    # SEE-1623 M10：零执行证据门（真实管线收集计数 + 测试流证据）。
+    (arm_valid, invalid_reason, invalid_evidence, gut_ok,
+     run_error) = _zero_evidence_gate(
+        name, arm_valid=arm_valid, invalid_reason=invalid_reason,
+        invalid_evidence=invalid_evidence, gut_ok=gut_ok,
+        run_error=run_error, collected_total=collected_total,
+        executed_stream=executed_stream,
+        timeout_excluded=timeout_excluded)
+    doc = _arm_result(
         name, root=root, prepared=prepared, acceptance=acceptance,
         arms_parallel=arms_parallel, evidence_dir=evidence_dir,
         shard_log_dir=shard_log_dir, timeout_s=timeout_s,
@@ -845,6 +914,11 @@ def run_arm(name: str, *, root: Path, prepared: dict, recipe: dict,
         manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes,
         vacuous_rels=vacuous_rels,
         suspected_draft=suspected_draft)
+    if name == "gut_full":
+        # SEE-1623 M10：真实收集执行面作为臂证据披露（机器可审计）。
+        doc["collected_scripts"] = int(collected_total)
+        doc["execution_stream"] = bool(executed_stream)
+    return doc
 def _arm_readback(name: str, *, root: Path, prepared: dict, acceptance,
                   test_attribution: bool, results, run_uuid: str, reps: int,
                   sink_by_rel: dict, manifest_by_rel: dict,

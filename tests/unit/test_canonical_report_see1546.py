@@ -129,6 +129,19 @@ class FakeGodot:
                     for att in man.get("attribution", []):
                         parts.append("* " + att["test_name"])
                 flow = "\n".join(parts)
+        else:
+            # SEE-1623 M10：gutconfig 面（gut_full 臂）仿真真实 GUT 运行流
+            # （脚本头 + `* test_name` 行）——空输出会触发零执行证据门，
+            # 而真实引擎恒打印测试流。
+            parts = []
+            for gd in sorted((self.root / "tests").rglob("test_*.gd")):
+                rel = gd.relative_to(self.root).as_posix()
+                parts.append("res://" + rel)
+                for name in re.findall(r"^func\s+(test_\w+)",
+                                       gd.read_text(encoding="utf-8"),
+                                       re.M):
+                    parts.append("* " + name)
+            flow = "\n".join(parts)
         pg = self.root / "project.godot"
         self.pg_at_gut.append(pg.read_text(encoding="utf-8")
                               if pg.is_file() else "")
@@ -944,7 +957,10 @@ class FailingConfigFaceGodot(FakeGodot):
         if ("gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd
                 and "-gpre_run_script=" in cmd):
             r.returncode = 1
-            r.stderr = ("- test_font_row_height\n"
+            # SEE-1623 M10：注入失败置于 Run Summary 段（真实引擎的
+            # 回显形态）——脚本归属不可知 → 裸名身份与基线/声明匹配。
+            r.stderr = ("= Run Summary\n"
+                        "- test_font_row_height\n"
                         "  [Failed] Expected row height 12 got 13\n")
         return r
 
@@ -1058,7 +1074,10 @@ class TwoFailuresConfigFaceGodot(FakeGodot):
         cmd = " ".join(a[0])
         if "gut_cmdln.gd" in cmd and ".gqt-run-" not in cmd:
             r.returncode = 1
-            r.stderr = ("- test_font_row_height\n"
+            # SEE-1623 M10：注入失败置于 Run Summary 段（真实回显形态，
+            # 脚本归属不可知 → 裸名身份与基线/声明匹配）。
+            r.stderr = ("= Run Summary\n"
+                        "- test_font_row_height\n"
                         "  [Failed] Expected row height 12 got 13\n"
                         "- test_intolerant_probe_shape\n"
                         "  [Failed] byte-exact source contract sees probe "

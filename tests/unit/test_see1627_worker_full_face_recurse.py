@@ -59,6 +59,25 @@ class TestWorkerRecursionFlag:
         assert req["tests_recurse"] is False
         assert req["tests_glob"] == "res://tests/unit"
 
+    def test_empty_glob_collapses_to_root_and_stays_non_recursive(
+            self, tmp_path, monkeypatch):
+        """空 glob 与冷通道一致：折叠为根目录且不递归。
+
+        回归钉：递归决策必须由 `tests_glob is None`（full 面）决定，而非
+        真值判断——空串是显式目录面（冷通道 `_gut_extra_args("")` 折叠为
+        `-gdir=res://tests/` 且不递归），不得被误判为 full 面递归。
+        """
+        req = _captured_request(tmp_path, monkeypatch, "")
+        assert req["tests_recurse"] is False
+        assert req["tests_glob"] == "res://tests/"
+
+    def test_explicit_directory_with_trailing_slash_stays_non_recursive(
+            self, tmp_path, monkeypatch):
+        """带尾斜杠的显式目录仍是显式面：不因尾斜杠被误判为递归。"""
+        req = _captured_request(tmp_path, monkeypatch, "res://tests/unit/")
+        assert req["tests_recurse"] is False
+        assert req["tests_glob"] == "res://tests/unit/"
+
     def test_gd_form_is_single_script_non_recursive(self, tmp_path, monkeypatch):
         req = _captured_request(
             tmp_path, monkeypatch, "res://tests/unit/test_calc.gd")
@@ -70,7 +89,8 @@ class TestWorkerColdAlignment:
     def test_directory_faces_match_cold_recursion_condition(
             self, tmp_path, monkeypatch):
         """目录类选面：worker 递归标记 == 冷通道附加 `-ginclude_subdirs`。"""
-        for glob in (None, "res://tests/", "res://tests/unit"):
+        for glob in (None, "", "res://tests/", "res://tests/unit",
+                     "res://tests/unit/"):
             req = _captured_request(tmp_path, monkeypatch, glob)
             cold_recurses = "-ginclude_subdirs" in _gut_extra_args(glob)
             assert req["tests_recurse"] == cold_recurses, glob

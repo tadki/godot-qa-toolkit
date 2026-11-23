@@ -53,7 +53,7 @@ from . import OPS_VERSION
 from .addon import AddonError, run_validator_preflight
 from .compile import GENERATED_DIR, WORKER_FILENAME
 from .mutate import Mutant, mutate_ir
-from .run import GherkinRunError, replay_check
+from .run import GherkinRunError, _strip_ansi, replay_check
 from ..mutation.gutrun import (_looks_like_godot_launch_failure,
                                _parse_failing_tests)
 from ..mutation.inject import godot_command, register_temp, spawn_godot
@@ -104,8 +104,16 @@ def _run_gut(root: Path, timeout_s: int) -> tuple[int, str]:
 _TEST_STREAM_RE = re.compile(r"(?m)^[*-]\s+(test_\S+)")
 
 
+def _test_stream_names(output: str) -> set[str]:
+    """GUT 运行流的测试名集合（统一剥除 ANSI 转义——F3' 同款纪律：
+    真机输出带颜色前缀时 `^` 锚定永不命中，会把"有测试流"误判为无）。"""
+    return set(_TEST_STREAM_RE.findall(_strip_ansi(output)))
+
+
 def _count_test_stream(output: str) -> int:
-    return len(set(_TEST_STREAM_RE.findall(output)))
+    # F3' 同款纪律：GUT 输出带 ANSI 颜色前缀时 `^` 锚定永不命中——统一
+    # 剥除转义序列后再计数（run.py 的 _strip_ansi 为同一实现）。
+    return len(_test_stream_names(output))
 
 
 def _mutant_round_error(mutant: Mutant, output: str) -> str | None:
@@ -209,7 +217,7 @@ def _batch_exempt_baseline(root: Path,
         raise GherkinRunError(
             "godot launch failed on baseline round: "
             f"{' / '.join(output.splitlines()[-3:])}")
-    executed = set(_TEST_STREAM_RE.findall(output))
+    executed = _test_stream_names(output)
     if not executed:
         raise GherkinRunError(
             "sentinel check failed — no test stream in baseline "

@@ -24,7 +24,7 @@
    map build/refresh, **baseline preflight**, warm pool provisioning. Stage
    timings are disclosed on the report as
    `stage_timings.{instrument_prepare, baseline_preflight, gut_full_arm,
-   acceptance_arm, planning, total}` (seconds, summed across the matching
+   gherkin_arm, planning, total}` (seconds, summed across the matching
    stage if it fires more than once). Each stage carries its own wall clock;
    a missing stage means it did not run.
 3. **run** — the active instrumented arm or arms consume the prepared map.
@@ -49,15 +49,15 @@ path is skipped when preflight has already produced the failing-pair set).
 **Acceptance arm is paused by default** (Owner decision in SEE-1615
 §SPEC-PLANFIRST). This applies equally to ordinary runs and
 `--test-attribution` runs. The acceptance arm has `state=disabled`,
-`stage_timings.acceptance_arm` is `0.0`, and the report field
-`report.acceptance_arm = "disabled_pending_atomization — acceptance arm
+`stage_timings.gherkin_arm` is `0.0`, and the report field
+`report.gherkin_arm = "disabled_pending_atomization — gherkin arm
 paused by default; restore via GQT_MEASUREMENT_ACCEPTANCE_DISABLED=0 once
 SEE-1619 atomization lands"` discloses the pause.
 
 While paused, an ordinary run without `--test-attribution` uses single-arm
 exit semantics: a valid, passing `gut_full` arm returns `ok=true` / exit `0`
 with `certification=uncertified` and
-`exit_semantics=single_arm_usable_acceptance_paused`; an invalid or failing
+`exit_semantics=single_arm_usable_gherkin_paused`; an invalid or failing
 arm returns `ok=false` / exit `1`. Attribution runs retain their
 `attribution_usable` semantics, and an explicitly restored dual-arm run keeps
 the union semantics. To restore acceptance measurement, set
@@ -73,7 +73,7 @@ whole project root (<root>)`. The fallback is named, not silent.
 
 ## Prerequisites
 
-- `.gutconfig.json` and `acceptance/features/**/*.feature` exist (suite); GUT
+- `.gutconfig.json` and `addons/gqt_gherkin/features/*.feature` exist (suite); GUT
   plus a Godot binary for `run` / `diagnose` / `map-update`.
 - Measurement artifacts are exploratory / diagnostic-only (`not_certified`),
   not a certification gate or CI KPI.
@@ -118,7 +118,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 
 - `tool` is `measure.suite` / `measure.run` / `measure.diagnose` /
   `measure.map-update` respectively.
-- suite: `measurement-suite/2`, with `gut_face`, `acceptance_face`,
+- suite: `measurement-suite/2`, with `gut_face`, `gherkin_face`,
   `toolchain`, `exclusions`, `recipe_hash` (identical content hashes
   identically across paths).
 - run: `measurement-report/2`, with `crap` records (see crap.md) and
@@ -129,12 +129,12 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - run exit semantics: `summary` adds `certification` (`certified` /
   `uncertified` / `unusable`), `union_certified`, `attribution_usable`,
   `exit_semantics` (`certified` / `artifacts_usable_union_uncertified` /
-  `single_arm_usable_acceptance_paused` / `failed`) and `attribution_map`
+  `single_arm_usable_gherkin_paused` / `failed`) and `attribution_map`
   when an attribution artifact exists. A fresh, execution-backed attribution
   map with an uncertified union exits **0** as
   `artifacts_usable_union_uncertified`. With acceptance paused, an ordinary
   run without attribution instead exits **0** when `gut_full` is valid,
-  disclosed as `single_arm_usable_acceptance_paused`. Outside those usable
+  disclosed as `single_arm_usable_gherkin_paused`. Outside those usable
   forms, an invalid union or arm exits **1** with
   `reason="union invalid or arms invalid"`; stale map files alone do not make
   an attribution run usable.
@@ -231,7 +231,7 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   concurrency is still capped by `--acceptance-shards`. Cleanup failure marks
   the arm invalid and discloses the residue path.
 - The W4 probe (default `aidomain_integration`) records measured wall clock
-  into `performance.acceptance_probe`; `measure risk --performance-file`
+  into `performance.gherkin_probe`; `measure risk --performance-file`
   accepts externally fed measurements.
 - The `/6` attribution map stores `test_to_lines`, `script_to_lines`,
   `line_to_tests`, and the instrumentable line surface. File/function views are
@@ -316,18 +316,18 @@ acceptance arm is explicitly restored; while paused, that arm stays disabled.
 | `--baseline-failures <path>` | omitted | JSON of pre-existing un-instrumented failing `(script, test)` pairs; new failing pairs gate the arm; bare names are rejected as ambiguous |
 |  |  | Without it, the gut_full arm **lazily** acquires the baseline only when the instrumented arm observed failures (one same-face uninstrumented GUT run; green arms pay zero extra GUT); acquisition failure is fail-loud and the arm stays invalid. With `--test-attribution`, the emitted attribution map records a `baseline_failures_meta` disclosure key (`method` / `face` / `count` / `sha256` / `wall_s`) describing how that baseline was acquired; the key is carried across `measure map-update` increments and is disclosure-only (consumers do not read it). The acceptance arm is never baselined — its failures stay visible |
 | `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; declared tests bypass failure gating by name and are disclosed as coverage blind spots |
-| `--acceptance-probe-keys [keys]` | `aidomain_integration` | W4 acceptance cost-probe keys |
+| `--gherkin-probe-keys [keys]` | `aidomain_integration` | W4 gherkin cost-probe keys |
 | `--timeout <s>` | 180 | GUT timeout seconds per arm (must be ≥1); zero or negative values are usage errors: exit `2`, readable stderr, no stdout JSON |
 | `--stability-baseline <path>` | omitted | Prior measurement report; fids whose covered lines differ route to the unstable lane (no score) |
 | `--shard-width <n>` | 6 | gut_full parallel shard count (1 = sequential) |
-| `--acceptance-repeats <n>` | 3 | Acceptance arm runs each shard group N times and unions the line sets; convergence round disclosed |
-| `--acceptance-shards <n>` | 4 | Acceptance parallel shard count |
+| `--gherkin-repeats <n>` | 3 | Acceptance arm runs each shard group N times and unions the line sets; convergence round disclosed |
+| `--gherkin-shards <n>` | 4 | Acceptance parallel shard count |
 | `--shard-log-dir <dir>` | omitted | Retain per-shard full logs and raw sink copies |
 | `--evidence-dir <dir>` | omitted | Per-arm `coverage-evidence/2` bundle + run record output dir |
 | `--test-attribution` | off | Emit a line-primary `test-attribution/6` artifact with per-test/per-script covered lines, reverse lookup, derived file/function views and execution evidence. When off, no attribution artifact is written; while acceptance is paused the ordinary run uses the documented single-arm exit semantics |
 | `--test-attribution-out <path>` | `<--out>.attribution.json` | Attribution artifact path |
 | `--attribution-causal` | off | Also wrap `call_deferred/create_timer` creation sites so their callbacks are attributed to the creating test; requires `--test-attribution` |
-| `--acceptance-adaptive` | off | Run acceptance reps round-by-round and stop early once the line-set union stabilises (bound stays `--acceptance-repeats`) |
+| `--gherkin-adaptive` | off | Run acceptance reps round-by-round and stop early once the line-set union stabilises (bound stays `--gherkin-repeats`) |
 | `--arms-parallel` | off | Run gut_full and acceptance arms concurrently; the timing baseline must be redefined when enabled |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override |
 

@@ -89,17 +89,17 @@ gqt
 
 ### 4.2a `gqt gherkin compile <feature> --project-root <root> [--write] [--no-clean]`（SEE-1426 P2；SEE-1468 /2；SEE-1583 更名）
 
-- `.feature` → 版本化 IR（`ops_version = "see1468-accept/2"`）→ 数据驱动 GUT 测试（运行时读 IR，逐 case 一个 GUT 测试方法）→ 归因 manifest（scenario→test_name，非 ASCII 场景名标识符化 + 序号保障唯一）。
+- `.feature` → 版本化 IR（`ops_version = "see1468-gherkin/2"`）→ 数据驱动 GUT 测试（运行时读 IR，逐 case 一个 GUT 测试方法）→ 归因 manifest（scenario→test_name，非 ASCII 场景名标识符化 + 序号保障唯一）。
 - **ops_version major bump 纪律（/2）**：schema 键集或调用约定变更 = major bump；旧版本 manifest 在 run 侧 replay_check 严格相等校验下 run_error（fail-fast，零新增机制代码）。
 - IR schema（/2）：`{ops_version, feature, source_path, cases:[{scenario, scenario_line, example_row_line, values, steps, types, then_unchanged, mutation_exempt, test_name}]}`。schema 冻结五件套（Examples 表一等公民、占位符 `<x>` 归一化、`# types:` 类型声明含 `enum{...}`/`float_near:<tol>` 域与 `str`/`bool`/`not_contains`/`in_set`/`signal_count` 族（声明类型与 cell 形态失配 = parse error；`in_set` 成员以逗号分隔、**周边空白由 compile 期归一化剥离**（QA F2：IR 存归一化 cell，parse 面与模板 naive split 同源）、**成员内含逗号不可表达**）、`# unchanged:` 反向断言槽（/2 放宽多段点路径 `a.b.c`）、manifest 哈希绑定）+ `# mutation: exempt` scenario 级指令（每 scenario 恰好一行，重复 = parse error）全部在 parse 期 fail-fast（违规 = GherkinSyntaxError → JSON 契约 ok:false）。
-- 产物三件：`acceptance/ir/<key>.json` + `acceptance/generated/test_<key>.gd`（GUT 目录扫描按 `test_` 前缀过滤——非 test_ 前缀脚本被忽略；**/2 起 run_step 全量 await 化**——GDScript await 对非协程返回值透传，同步 harness 零破坏，场景生命周期步骤可为协程）+ `acceptance/generated/<key>.manifest.json`（含 ir_hash/generated_hash/worker_hash sha256 绑定 + attribution 表）。worker 生成物（`accept_worker.gd`）NDJSON 循环协程化（`_drive()` fire-and-forget，协议不变）。
+- 产物三件：`gherkin/ir/<key>.json` + `gherkin/generated/test_<key>.gd`（GUT 目录扫描按 `test_` 前缀过滤——非 test_ 前缀脚本被忽略；**/2 起 run_step 全量 await 化**——GDScript await 对非协程返回值透传，同步 harness 零破坏，场景生命周期步骤可为协程）+ `gherkin/generated/<key>.manifest.json`（含 ir_hash/generated_hash/worker_hash sha256 绑定 + attribution 表）。worker 生成物（`gherkin_worker.gd`）NDJSON 循环协程化（`_drive()` fire-and-forget，协议不变）。
 - 写入仅限 §6 白名单两目录；先清空再生成（`--no-clean` 退路）；写入 opt-in（`--write`），`summary.wrote` 逐文件披露；GUT runner 缺失 = JSON 契约 ok:false。
 - **生成测试的对称生命周期（SEE-1619 §SPEC-002）**：生成 GUT 测试具备 `before_each`/`after_each` 对称还原——harness 已创建后，init 失败、断言红、测试体提前 return 与后续场景均经 `after_each` 可靠还原，不再只依赖普通测试体末尾语句；崩溃/超时仍由外层 arm 清理，不伪称 reset 成功。既有 IR/manifest/replay 语义不变。
 
 ### 4.2b `gqt gherkin run <dir> --project-root <root> --key <feature-key> [--timeout 120] [--godot-bin <path>]`（SEE-1426 P2）
 
 - 执行前三件哈希绑定重放校验：manifest 的 ir_hash/generated_hash 与磁盘实际 sha256 必须一致，任一失配 = run_error（`summary.run_error: true`，无告警放行档）；GUT runner 缺失同理。**重锚防线（§SPEC-1426-24）**：run 侧把 manifest.source_path 指向的源 `.feature` 现场重编译核对 IR 哈希一致——源文件缺失或漂移 = run_error。**tests_executed 守卫（§SPEC-1426-24）**：GUT 输出零测试流而 exit 0 = 判定失败（`summary.tests_executed: 0` + 显式 failure，不是绿）。
-- 执行：一次性 `godot --headless` 子进程跑 GUT（`-gdir=res://acceptance/generated`），跨进程槽位闸包裹（复用 mutation 的 GlobalGodotGate）。
+- 执行：一次性 `godot --headless` 子进程跑 GUT（`-gdir=res://gherkin/generated`），跨进程槽位闸包裹（复用 mutation 的 GlobalGodotGate）。
 - 输出：统一契约回译——失败测试名经 manifest attribution 对回 scenario/line，失败 reason 附 GUT `[Failed]` 断言明细（§SPEC-1426-25，含 unchanged slot 违规文本）；无法归因的失败显式披露（`scenario: null` + `not attributable` reason）。`summary.{replay_checked, ir_hash, exit_code, tests_executed, wrote}`。
 
 ### 4.2c `gqt gherkin mutate <dir> --project-root <root> --key <feature-key> [--timeout 120] [--worker] [--godot-bin <path>]`（SEE-1426 P3）
@@ -108,7 +108,7 @@ gqt
 - 变异矩阵（§SPEC-1426-11；/2 扩展）：数值 ±1 + 边界外推（0→-1）、布尔翻转、枚举声明域内邻值切换（域外从不生成；域未声明的 Then 绑定在 parse 期已被拒）、`float_near:<tol>` ±max(1, 2×tol)、`not_contains` **断言语义翻转**（not_contains → contains：载荷不变，mutant 经 `case.mutated_not_contains` 通道翻转发该 cell 断言极性，harness 按契约消费——基线绿 ⇒ actual 真不含 needle ⇒ 翻转断言必假 = 确定性 kill，与检查惯用法无关；QA F1 裁定）、`in_set` 退化坍缩集（模板 `split(",", false)` 下 `"" → []` → 必挂）、`signal_count` ±1；**`str` 零变异 = 默认豁免**（Owner 裁决 3：启用 str ±1 须 per-suite 显式声明，未启用前「str 恒豁免」为正常结局）；unchanged 槽纳入矩阵（基线污染探针）。
 - **豁免轮（/2，exempt ≠ skip）**：`# mutation: exempt` 场景的 typed 矩阵不产 mutants，但其 case 在 mutate 侧执行一次未变异基线轮（先于 mutant 轮）：绿 = 逐 case `exempt_verified`、挂 = 逐 case run_error 计入门禁；未变异基线任何 case 挂 = fail-fast 跳过 mutant 轮（`summary.exempt_baseline_failed: true`）。纯豁免特性（零 mutants + 有豁免 case）走基线轮收口，不触发 `no mutants generated`。
 - 三层防伪（§SPEC-1426-12）：① 变异器对抗性金测（70/71 fixture 恰好 ±1/边界/邻值，单测面）；② 哨兵核对——GUT 输出零测试流 = 执行链失真 = run_error 面失败；③ unchanged 槽变异必挂（挂不掉 = survived 打回）。零 Then 绑定且零 unchanged 且零豁免的 IR = run_error（`no mutants generated`）。
-- `--worker`（§SPEC-1426-14）：opt-in **真常驻通道**——compile 产出的 worker 生成物（`acceptance/generated/accept_worker.gd`，受先清空再生成管辖 + `worker_hash` 哈希绑定）以单个 godot 进程服务全矩阵：stdin NDJSON 请求行（`{mutant_id, ir_file}` 小载荷，恒 <1024B——`OS.read_string_from_stdin()` 行缓冲上限 1024B，QA-1 实证）+ 变异 IR 经 `.qa-cache/gqt-accept-worker/` 轮转临时文件（FileAccess 读，零行缓冲限制，用后即删、通道结束清目录）；每 mutant 结束硬纪律 = 释放全部 testing_api 实例 + 重建（reload）+ 自检探针断言复位，不符即 run_error verdict。读侧带超时（复用 `--timeout` 为每轮 verdict 等待上限，超时 = _WorkerDead → 剩余 mutant 记 run_error，MEDIUM-1 修复）。验收 = batch 与 worker 两条真实代码路径的差分对照 verdict 一致性（实机口径：IR ≥1678B 量级、非挂死、ok/killed/survived 三项相等）。
+- `--worker`（§SPEC-1426-14）：opt-in **真常驻通道**——compile 产出的 worker 生成物（`gherkin/generated/gherkin_worker.gd`，受先清空再生成管辖 + `worker_hash` 哈希绑定）以单个 godot 进程服务全矩阵：stdin NDJSON 请求行（`{mutant_id, ir_file}` 小载荷，恒 <1024B——`OS.read_string_from_stdin()` 行缓冲上限 1024B，QA-1 实证）+ 变异 IR 经 `.qa-cache/gqt-gherkin-worker/` 轮转临时文件（FileAccess 读，零行缓冲限制，用后即删、通道结束清目录）；每 mutant 结束硬纪律 = 释放全部 testing_api 实例 + 重建（reload）+ 自检探针断言复位，不符即 run_error verdict。读侧带超时（复用 `--timeout` 为每轮 verdict 等待上限，超时 = _WorkerDead → 剩余 mutant 记 run_error，MEDIUM-1 修复）。验收 = batch 与 worker 两条真实代码路径的差分对照 verdict 一致性（实机口径：IR ≥1678B 量级、非挂死、ok/killed/survived 三项相等）。
 - 输出：`summary.{feature, feature_key, ops_version, mutants, killed, survived, run_errors, full_matrix, worker, exempt_cases, exempt_results}`；`failures` = survived（含 target/kind/original/mutated/rationale）+ run_errors。`exempt_cases` == 源 .feature 内 `# mutation: exempt` 指令行数（V4 机器判据），`exempt_results` 逐 case 具名披露（`exempt_verified` / `run_error: ...`）。
 
 - **W 通道（§SPEC-020，worker-reset/1，默认启用；D-W1/D-W2 修复轮 + R-DW4 Owner 裁决 + 默认化实测轮修订）**：常驻 GUT 直驱 worker 对 statically eligible 目标**默认启用**（Owner 裁决实测轮：无旗标即 worker，全部自动降级护栏保留——parity 前置 / 状态漂移 / canary 失配=通道资格否证 / 会话致命整批作废 / 两连失败冷降级）；`--worker-channel` 保留为诊断性强制；env `GQT_MUTATION_WORKER=0|false|no` 为**关断逃生门**（整体回退冷通道，全部执行路径一致生效）；baseline 永远实测走冷通道（红线不变）。静态路由判 worker 的目标（非 autoload/接线链/GUT 域/场景持有者；引用图含 **class_name 裸名使用边** 与 **`closure_scene_cached` 场景持有者谓词**——闭包任一成员被 `.tscn/.tres` ext_resource 引用即冷，Owner 裁决 R-DW4：PackedScene 缓存持有加载时脚本对象、腿间重置不可达，指针旁路彻底退役，§SPEC-001「take_over_path 零命中」判据原样成立）在每 run 单进程内逐 mutant 执行 R-C 硬序（IGNORE 原位刷码 → LIFO teardown → 逐闭包 reload（reload 集收敛 .gd，compile-time 绑定唯一载体）→ 顺序门 → fresh Gut 直驱（**error_tracker 注册对齐 GutRunner**，headless pause 跳过）→ beacon）。等价性门（D-W2）：① **parity 前置门**——会话首腿以原始源执行，直驱失败集必须逐位等于冷 baseline 失败集，失配 → stderr 披露 + 整文件冷降级；② **状态漂移门**——连接指纹 / `user://` 树（每腿清场）相对首腿基线漂移 → 会话致命；③ **canary 失配 = 通道资格否证**——窗口改冷权威 + 剩余全部冷降级（不再作废窗口后继续 worker）；会话致命（闭包任一 reload rc≠0 / loaded-source 哈希门失配 / autoload 交叠 / 腿挂死）仍走 respawn + 自上次 canary 窗口整批作废 + 冷重跑 + stderr 披露。summary 增 `exec_scheme`（`cold-shadow/1` vs `worker-reset/1`，只加不改；并行合并面 passthrough 同步在场），killed 证书按 scheme 隔离（身份包入 file_key）。canary 粒度 env `GQT_WORKER_CANARY_EVERY`（缺省 25：首 mutant 强制双通道预检）。**每轮通道披露（SEE-1589 B §SPEC-002）**：`summary.worker_channel` 恒给出 `requested` / `route` / `exec_scheme` / `decision` / `reason` / `route_reasons` / `reason_counts` / `closure_size` / `override_refused`。`decision` 枚举 `worker` / `cold_route_excluded` / `cold_worker_disabled` / `cold_gut_direct_unavailable` / `cold_unknown` / `worker_degraded_cold`；`reason` 对应 `worker_reset_session` / `route_reason_present` / `worker_flag_or_env_off` / `gut_addon_missing` / `unresolved`，会话致命降级另给 `user_state_drift` / `connection_drift` / `parity_mismatch` / `session_fatal`，并附 `fatal_events` 与 `equivalence=cold_rerun_all_remaining_legs`。路由 reason 码为 `target_in_autoload_table` / `closure_member_in_autoload_table:<member>` / `target_in_gut_domain` / `closure_intersects_gut_domain:<member>` / `closure_scene_cached:<member>` / `eligible_worker`；`reason_counts` 按冒号前码折叠计数。显式 `--worker-channel` 但路由判冷 → `requested=true` 且 `override_refused=true`；禁止无解释的静默冷通道。
@@ -197,11 +197,11 @@ gqt
   注意：该形态下 `summary` 无 `killed` 等键（消费方不要按默认 0 读取）。baseline 超时中止另附 `summary.suggested_action` 与 `summary.suggested_action_kind`（SEE-1589 A-H1）：`raise_timeout` = `--timeout` 未达 600s 预算上限，建议抬到上限；`narrow_face` = 已到/超上限，`--select full` 跑整套 GUT 审计、真实规模项目装不进该预算，建议改 `--select line|fn`（缺省 line）或卡尺面 `--lines`/`--mutation`，或缩减 `.gutconfig.json` 的 dirs。已在上限时不得再回显同值 `--timeout`。**SEE-1606 P1 起默认 `--timeout` 即 600（=上限）**：未显式降低时超时一律落 `narrow_face`，`raise_timeout` 仅出现于显式低于上限的调用；阶梯键义与上限值不变（非契约变更）。
 - 正常输出：`summary: {file, mutants, killed, survived, timeout, run_errors, kill_rate, budget}` + SEE-1312 `{suspect, invalid_mutants, adaptive_timeout_s}` + SEE-1420 按模式增量 `{resumed, diff_skipped, retry_total, executed, untouched_ranges, total_sites, attention, timeout_pinned, coverage_prefilter, selected}`（仅在对应语义在场时出现）+ SEE-1550 按模式增量 `{inject_scheme, slot_mode, freshness, killed_by_certificates, suspected_orphans}`（条件在场性见上「summary 机制披露」条）+ SEE-1571/1589 按语义增量 `{zero_ref_short_circuit, short_circuit_reason}`（仅短路定终态记录在场；`short_circuit_reason=no_mutation_sites` 为 no-sites 路径）+ SEE-1581/1587/1589 按语义增量 `{selection_mode, selection_groups, jobs_limit_reason, test_selection, attribution, lines_selection, worker_channel, farm, prewarm, stage_reconciliation}`（行级真值选面/卡尺/机制披露在场时；`coverage_prefilter` 另含 source 分层来源）；`failures` = 非 killed 的 mutant 明细，每项增 **`id`** 列（verdict ∈ survived/timeout/run_error/suspect/invalid_mutant/**timeout_pinned**/**uncovered**；survived 记录在疑似孤儿诊断命中时另带 `suspected_orphan: true`）。
 - **execution_plan 只读聚合（SEE-1615 §SPEC-P0）**：普通 run 与 dry-run 的 `summary.execution_plan` 均把已算出的值按 `selection/route/budget/diff/preconditions` 五组重排，纯读现有 dict，不新增副作用或改变既有键。dry-run 额外携带 `execution_plan_meta`（derived/observed/runtime 分区、仅 derived 的 `plan_id`、四类 answers、只读 `map_state` 与 lint-only assumptions），结构见 `--dry-run` 条。
-- **plan-first 三段式（SEE-1615 §SPEC-PLANFIRST）**：mutation 与 measure run 共用 `plan → prepare → run` 流。plan 段（`mutation/plancheck.py::static_plan`）为只读静态穷查，硬预算 `PLAN_BUDGET_S=10s`；覆盖 autoload 目标、tests preload/load、Godot 二进制、GUT addon、import 缓存与映射状态；problems 以 `{severity ∈ {error,warning}, code, evidence, fix}` 形态落 `plan.problems[]`，`estimated_costs` 披露贵操作清单（同源 `runner._expensive_operations()`）。error 级 problems 触发 `plan_blocked` 中止；warning 级仅披露不阻断。prepare 段执行 import 缓存、映射构建/增量刷新、基线预检与 warm pool 准备，分段计时披露于 `summary.stage_timings` 的 `instrument_prepare` / `baseline_preflight` / `gut_full_arm` / `acceptance_arm` / `planning` / `total`。run 段消费 prepare 产物。整条流以「盲跑 10-20 分钟后弹 run_error」为反面目标：plan 在 ≤10s 内把可静态发现的问题暴露，中断具名（`plan_blocked` / `route_drift` / `baseline_preflight_red` / `suspected_instrumentation_intolerance` / 五类 `invalid_reason`），不再以通用 `run_error` 收尾。
+- **plan-first 三段式（SEE-1615 §SPEC-PLANFIRST）**：mutation 与 measure run 共用 `plan → prepare → run` 流。plan 段（`mutation/plancheck.py::static_plan`）为只读静态穷查，硬预算 `PLAN_BUDGET_S=10s`；覆盖 autoload 目标、tests preload/load、Godot 二进制、GUT addon、import 缓存与映射状态；problems 以 `{severity ∈ {error,warning}, code, evidence, fix}` 形态落 `plan.problems[]`，`estimated_costs` 披露贵操作清单（同源 `runner._expensive_operations()`）。error 级 problems 触发 `plan_blocked` 中止；warning 级仅披露不阻断。prepare 段执行 import 缓存、映射构建/增量刷新、基线预检与 warm pool 准备，分段计时披露于 `summary.stage_timings` 的 `instrument_prepare` / `baseline_preflight` / `gut_full_arm` / `gherkin_arm` / `planning` / `total`。run 段消费 prepare 产物。整条流以「盲跑 10-20 分钟后弹 run_error」为反面目标：plan 在 ≤10s 内把可静态发现的问题暴露，中断具名（`plan_blocked` / `route_drift` / `baseline_preflight_red` / `suspected_instrumentation_intolerance` / 五类 `invalid_reason`），不再以通用 `run_error` 收尾。
 - **`_roots_of` 项目根锚定与 targets_root_fallback 披露（SEE-1615 §SPEC-PLANFIRST）**：变更文件相对路径先经 `anchor_to_project_root` 锚到 `--project-root`（与 runner 同源口径），再求首层目录并集；进程 CWD≠项目根时不再抛 ValueError 导致目标被静默跳过。工程外路径（其它检出/临时目录）与工程顶层文件（无首层目录可纳）触发到工程根的 fallback 时，stderr 必须具名披露 `measure: targets_root_fallback (<reason>) — target face widened to the whole project root (<root>); pass paths in project subdirectories to narrow it`；`<reason>` 为 `"<N> file(s) outside project root"` 或 `"top-level file(s) (no parent directory to scope)"`。fallback 不再静默。
 - **不耐受中断 + `--intolerant-tests` 声明草稿（SEE-1615 §SPEC-PLANFIRST）**：插桩臂观测到未插桩基线通过的 `(script, test)` 对失败时，以 `classification=suspected_instrumentation_intolerance` 中断 attribution map 构建路径。中断消息含：具名失败对、未插桩基线 face 与 wall_s、`instrumented run` 证据、可直接保存的声明草稿 `{"tests":[{"name","reason","script"}...], "coverage_limitations":[]}`、两条选项文案。落盘草稿后通过 `--intolerant-tests <path>` 或 `GQT_MEASUREMENT_INTOLERANT_TESTS=<path>`（测量链 auto-build 路径专用 env 单点）生效。测量侧 arm 在观测到 intolerance 时同步写入 `instrumentation_intolerant=[(script, test), ...]`，仅作披露不替代 `--intolerant-tests` 声明。声明按 `(script, test)` 身份精确旁路失败门控，并披露为 coverage 盲点。
 - **臂 `invalid_reason` 五类（SEE-1615 §SPEC-PLANFIRST）**：臂 invalid 按优先级 `launch_failure > shard_timeout > unattributed_failures > new_failures > reconciliation_failed` 给出单类归因 + 对应 `invalid_evidence` 块。`launch_failure` 证据 `launch_failures=[shard ids]`；`shard_timeout` 证据 `shard_timeouts=[shard ids]`；`unattributed_failures` 证据 `unattributed=[(script, test), ...]`（top-N of total）；`new_failures` 证据 `new_failures=[(script, test), ...]`；`reconciliation_failed` 证据 `reconciliation_failed=true`。证据块仅供披露，不覆盖优先级排序。invalid 臂不进入 union、不出分。
-- **measure acceptance 臂默认暂停（SEE-1615 §SPEC-PLANFIRST，Owner 决定；SEE-1623 H4 全路径契约遵守；H4-A 单臂可用语义）**：`gqt measure run` 默认不执行 acceptance 套件——普通路径（无 `--test-attribution`）与归属路径同权（此前普通路径落入双臂执行、显式 env=1 亦被无视）；占位臂 `state=disabled`、`stage_timings.acceptance_arm = 0.0`、`acceptance_arm = "disabled_pending_atomization — …"` 具名披露在两路径同样在场，exit 不被 acceptance 失败劫持。**暂停期间的退出语义（Owner 2026-11-23 裁决 A）**：普通 run 仅 `gut_full` 单臂执行且不产出归属映射，按单臂可用语义——`gut_full` 臂有效且通过 → `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=single_arm_usable_acceptance_paused`（§13.1 退出语义族，见下条）；`gut_full` 无效或失败 → `ok=false` / exit 1（`failures[0].reason=union invalid or arms invalid`）；`--test-attribution` 路径与显式 env=0 恢复双臂的路径该语义零变化（归属路径沿用 `attribution_usable` 判定）。`GQT_MEASUREMENT_ACCEPTANCE_DISABLED` 缺省视为 `1`（暂停）；显式设为 `0` / `false` / 空串才恢复 acceptance 执行（恢复对普通路径同权生效；SEE-1619 原子化改造完成后恢复双臂 → union 认证语义回归，单臂分支自动失效）。
+- **measure gherkin 臂默认暂停（SEE-1615 §SPEC-PLANFIRST，Owner 决定；SEE-1623 H4 全路径契约遵守；H4-A 单臂可用语义）**：`gqt measure run` 默认不执行 gherkin 套件——普通路径（无 `--test-attribution`）与归属路径同权（此前普通路径落入双臂执行、显式 env=1 亦被无视）；占位臂 `state=disabled`、`stage_timings.gherkin_arm = 0.0`、`gherkin_arm = "disabled_pending_atomization — …"` 具名披露在两路径同样在场，exit 不被 gherkin 失败劫持。**暂停期间的退出语义（Owner 2026-11-23 裁决 A）**：普通 run 仅 `gut_full` 单臂执行且不产出归属映射，按单臂可用语义——`gut_full` 臂有效且通过 → `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=single_arm_usable_gherkin_paused`（§13.1 退出语义族，见下条）；`gut_full` 无效或失败 → `ok=false` / exit 1（`failures[0].reason=union invalid or arms invalid`）；`--test-attribution` 路径与显式 env=0 恢复双臂的路径该语义零变化（归属路径沿用 `attribution_usable` 判定）。`GQT_MEASUREMENT_ACCEPTANCE_DISABLED` 缺省视为 `1`（暂停）；显式设为 `0` / `false` / 空串才恢复 gherkin 执行（恢复对普通路径同权生效；SEE-1619 原子化改造完成后恢复双臂 → union 认证语义回归，单臂分支自动失效）。
 - **measure 基线预检与红测解耦（SEE-1615 §SPEC-PREFLIGHT×PLANFIRST）**：映射构建路径在插桩臂前跑一次同面无插桩 GUT 作为基线预检。预检到红测默认按名排除：map 标 `status=partial` + `excluded_tests=[[script, test], ...]` 披露，stderr 打 `measure: baseline_preflight RED — N failing pair(s) ... EXCLUDED by name ... mapping marked partial, run continues`，run 继续。显式开关 `GQT_MEASUREMENT_FAIL_ON_RED_BASELINE=1`（非空 / 非 `0` / 非 `false`）改为短停：抛 `MeasurementError("baseline_preflight_red: ... top-N of M failing tests")`，插桩臂不执行。预检产生的 failing-pair 集复用给双臂，跳过懒获取路径（绿臂零额外 GUT）。
 - **test 级筛选披露（SEE-1610 §SPEC-JSON，只加不改）**：`summary.test_filter = {enabled, disabled_by, applied, allow_identities, script_lane_fallback, scope}`。`enabled`/`disabled_by` 描述开关及关断来源；`applied` 表示是否实际下发非空 allow；`allow_identities` 是 `[script,test]` 对数，`script_lane_fallback` 是 `[script,"*"]` 整脚本保留数；`scope` 实际下发时恒为 `line`（SEE-1615 D1 闭包回退已移除），未下发时为 `null`。逐 mutant `verdict.test_face` 含 `requested`（allow 对数）、`kept`（保留测试数）、`removed`（物理移除测试数）、`whole_script_fallback`（整脚本保留的脚本数）；cold marker v2 另含 `matched_pairs`（命中 collector 的 allow 对数）与 `overlap_red`（其中已被 skip_red 先删的重叠对数），worker 腿披露 `overlap_red`、不保证 `matched_pairs`。过滤已启用但宿主未及打点（如 timeout/run_error）时以 `marker_missing=true` 兜底，各计数为 `null`。五档 `killed`/`survived`/`timeout`/`run_error`/`suspect` 均可携带该键；killed 记录另落 `summary.killed_by_certificates[].test_face` 与 resume store 条目（store 为**最后写者**披露，后续关断轮或 worker 覆写可替换，消费方不得当作不可变历史证书）。`summary.test_face = {applied_legs, kept, removed, whole_script_fallback, marker_missing_legs, overlap_red, by_verdict}` 聚合实际有披露的腿；`kept`/`removed` 只累加 marker 在场腿，`marker_missing_legs` 单列，`by_verdict` 给各 verdict 档腿数。
 - **validity 契约**（SEE-1312 + SEE-1420）：`invalid_mutant` = 语法预检失败（不跑 GUT）；`suspect` = baseline 脏 ∧ 差集空；`timeout_pinned` = 跨 run 连续 timeout ≥2 的降级独立档；`uncovered` = reused coverage 判定该行未被测试覆盖（quality 信号，非工具失败）。
@@ -259,7 +259,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 - **Godot 二进制定位（SEE-1525）**：三级优先 = `--godot-bin <path>`（命令级覆盖，`mutation` / `measure coverage` / `gherkin run|mutate` 同语义）> 环境变量 `GQT_GODOT_BIN` > `PATH` 首匹配（均无 → 字面量 `godot`）。显式路径（env 或 flag）不存在/不可读/不可执行 → `BinaryConfigError` → 统一 JSON 错误契约（`ok:false`，消息含来源标签与路径）。**`--path` 形态随二进制类型同源**（`detect_binary_kind()` 判定）：win64 通道 `/mnt/` 绝对路径经 `wslpath -w` 转 Windows 形式（不可转换原样），linux 通道一律原生形态不转换——转换原语单一出处（`mutation/inject.py`），mutation 与 coverage 共用。**未设变量且未传 flag 时全部子命令行为与 SEE-1525 前逐字节一致（opt-in 冻结）**。
 - 工具在该 root 下运行 `<godot> --headless --path <root> -s res://addons/gut/gut_cmdln.gd [-gdir=<tests_glob>] -gexit`（`<godot>` 为上述解析结果；`-s` 必须是 res:// 形式，绝对路径会被 Godot 拒绝加载——见 mutation/runner.py 注释）。
 - 工具可能写入的路径仅限：`measure run` 映射构建的临时插桩目标（finally 恢复；direct coverage 已改行级映射投影，不再单独改写目标文件；**mutation 侧 SEE-1550 起零写入真实仓**——mutant 只写影子槽内目标，见 §4.3 M0 条）、遗留 coverage sink 的显式清理（`--prune-sinks`；不再作为 `measure coverage` 数据源）、影子槽池 `<root>/.qa-cache/mutation-pool/slots/`（Linux/win64 同机制；池锁不可用时回退项目外 fresh ext4 农场 `gqt-mutation-farm`，XDG/tmp 下、归还即删），以及 `<root>/.qa-cache/` 下的工具自有缓存（gqt-timing 预算锚、gqt-mutation-resume-v2 断点续跑（manifest 索引层 + per-id 条目；SEE-1550 起 file-key 含身份包成分）、**mutation-pool 持久 warm 池**（SEE-1550；SEE-1589 B 起 Linux/win64 同机制；池 schema `see1550-pool/1`：槽位 hardlink COW 影子树 + `.godot` 实拷贝 + 池账本/每槽 flock；槽数上限 8、磁盘预算 `GQT_MUTATION_POOL_BUDGET_MB`（缺省 512）LRU/prune）、gqt-mutation-resume（v1，代码已随 SEE-1463 删除；目录不读不写不删、静默忽略）、gqt-coverage 行级覆盖事实（SEE-1420 P2；SEE-1550 起含身份包）、gqt-godot-slots 并发闸锁文件、gqt-mutation-progress 运行进度分片（SEE-1525，per-worker 分片 + 读侧聚合，见 §4.3）、gqt-mutation-cost-priors.json 成本感知四键先验（SEE-1571，收尾方单点原子写）、gqt-prewarm 新鲜度证明与项目级锁（SEE-1571，proof.json / prewarm.lock / 失效侧写 .stale）——均自含 .gitignore；建槽前置先写 `.qa-cache/.gitignore` 为 `*`，失败 fail-loud）。
-- **生成类持久写入档（SEE-1426，Owner 批准的 §6 首次扩张）**：`gqt gherkin compile --write` 可写 `<root>/acceptance/ir/` 与 `<root>/acceptance/generated/` 两目录（gitignored 一次性产物；先清空再生成；写入 opt-in，`summary.wrote` 逐文件披露；写入前置校验 `<root>/addons/gut/gut_cmdln.gd` 在场）。除此之外零写入。
+- **生成类持久写入档（SEE-1426，Owner 批准的 §6 首次扩张）**：`gqt gherkin compile --write` 可写 `<root>/gherkin/ir/` 与 `<root>/gherkin/generated/` 两目录（gitignored 一次性产物；先清空再生成；写入 opt-in，`summary.wrote` 逐文件披露；写入前置校验 `<root>/addons/gut/gut_cmdln.gd` 在场）。除此之外零写入。
 - timeout 语义：单次 GUT 全套测试的 wall-clock 上限（`--timeout` 默认 600s，SEE-1606 P1；`BUDGET_CAP_S` 同值）；被测项目基线超过 timeout 时 mutation 返回 run_error 中止（数据不可信优于慢数据）。SEE-1312 起 mutation per-mutant 上限自适应 = max(显式 timeout, baseline 实测耗时 × F)（SEE-1420 起 F 可由 `--timeout-factor` 覆盖，默认 2.0 不变；只放大不收紧，`summary.adaptive_timeout_s` 可查）。SEE-1400 起全部 godot 子进程（mutation baseline/per-mutant 与 coverage）经跨进程 flock 槽位闸（容量 env `GQT_GLOBAL_GODOT_SLOTS`，缺省 max(2,cpu//2)；等槽时间不计入 timeout；fcntl 缺失平台告警一次后放行不阻塞）。
 
 ## 7. 契约增量分类（SEE-1312 plan-debate 定案：四类归并）
@@ -305,7 +305,7 @@ PYTHONPATH=src python -m godot_qa_toolkit.cli mutation <file>.gd --project-root 
 
 ### 9.3 `gqt measure registry-diff <old.json> <new.json> [--out diff.json]`（`func-registry-diff/1`；SEE-1583 扁平化，原 `registry diff` 子命令组）
 
-statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed` / `identity_changed_candidate`（removed∩added 且 body_hash 一致——机器候选，`human_final:true`，不得自动计收益）/ `removed_identity_candidate`（removed 行被配对进候选后的状态；summary 的 `removed` 计数同时含 `removed` 与 `removed_identity_candidate` 两类行）。scope escape 规则（L1）：`escape_dir`（路径落入 `acceptance/generated/`、`.godot/`、`addons/`）、`lambda_kind`、`moved_into_inner_class`；escape 行单独计数、**永不计入治理净收益**——机器门 `governance_net.countable_added == added - scope_escape`。
+statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed` / `identity_changed_candidate`（removed∩added 且 body_hash 一致——机器候选，`human_final:true`，不得自动计收益）/ `removed_identity_candidate`（removed 行被配对进候选后的状态；summary 的 `removed` 计数同时含 `removed` 与 `removed_identity_candidate` 两类行）。scope escape 规则（L1）：`escape_dir`（路径落入 `gherkin/generated/`、`.godot/`、`addons/`）、`lambda_kind`、`moved_into_inner_class`；escape 行单独计数、**永不计入治理净收益**——机器门 `governance_net.countable_added == added - scope_escape`。
 
 ### 9.4 契约增量分类
 
@@ -341,7 +341,7 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 只读构建 measurement suite 定义（`measurement-suite/2`；SEE-1583 前为 `canonical-recipe/1`，旧产物一次性失效），**不跑 GUT、不插桩、不宣称 certified**（单轮 exploratory；WP5 拥有双轮认证）：
 
 - **gut_face**：`.gutconfig.json` 现役非 quarantine GUT 面解析（dirs/include_subdirs/prefix 等扫描键原文进 hash）+ config sha256；
-- **acceptance_face**：`acceptance/features/**/*.feature` 全量扫描，逐 feature `{key, source, sha256}`（KOL 定版 36）；harness 接线 sha256；
+- **gherkin_face**：`addons/gqt_gherkin/features/*.feature` 全量扫描，逐 feature `{key, source, sha256}`（KOL 定版 36）；harness 接线 sha256；
 - **toolchain**：gqt/OPS/Godot/GUT 版本——版本变化即 recipe 变化。§SPEC-041 L1 注记：`gqt measure suite` CLI 缺省 toolchain 字段为 `unknown`——真实版本由 measure 编排器（§SPEC-037，PR-C）在测量时注入，注入路径下版本变化即 recipe 变化成立；
 - **exclusions**：必须带理由——**空理由 = 配方非法（fail-loud ok=false）**；排除名单与理由全部进 recipe hash；
 - **recipe_hash**：对除自身与 `project_root`（provenance 字段）外的规范化 JSON（`sort_keys=True, separators=(',',':')`）取 sha256——路径非测量面：同内容跨路径 hash 一致；同输入同 hash、任一字节变化即变；`verify` 路径（`recipe_hash` 重算比对）校验加载/恢复后的 recipe。
@@ -350,26 +350,26 @@ statuses：`unchanged` / `edited`（同 fid body_hash 变）/ `added` / `removed
 
 `gqt measure suite` 命令（原 `gqt recipe`）+ measurement-suite/2 快照 = **capability**（能力面；SEE-1583 命令更名无兼容）；`coverage/runner.py` 插桩判定面、`mutation/`、`risk/` 域本 PR 零触碰。
 
-## 12. gherkin 私有目录管线契约（SEE-1546 WP3 PR-B，acceptance-suite/1）
+## 12. gherkin 私有目录管线契约（SEE-1546 WP3 PR-B，gherkin-suite/1）
 
 ### 12.1 `gqt gherkin compile <feature> --project-root R [--out-dir D]` / `[--keys k1,k2] [--out-dir D]`
 
 选择在编译期完成：`--keys` 把选中 features 逐个编译进一次性私有目录
-`acceptance/generated/.gqt-run-<uuid>/`（不传 `--out-dir` 则自动创建；
+`gherkin/generated/.gqt-run-<uuid>/`（不传 `--out-dir` 则自动创建；
 传入则写入该目录）。**目录即选择集**——私有目录只含选中 keys 的产物，
 run 侧整目录执行，绕开 GUT `-gselect` 子串碰撞（选 `{save}` 不会误吸
 `test_save_roundtrip.gd`）。私有目录非空即拒（`suite_error`，绝不复用
-旧目录）；主 `acceptance/ir|generated` 全程只读不碰；单 feature 不带
+旧目录）；主 `gherkin/ir|generated` 全程只读不碰；单 feature 不带
 `--out-dir` 时缺省行为与 PR-A 前逐字节一致。裸 `gherkin compile`（无
 `<feature>` 且无 `--keys`）错误道为结构化 `ok:false` rc=1（`gherkin
 compile needs <feature> or --keys`），不经 argparse usage error rc=2，
 与 §5 exit code 语义一致（exit 2 = 调用方用法错误，exit 1 = 被测对象
 判为失败）。
 
-### 12.2 `gqt gherkin run --project-root R --suite-dir D`（与 `--acceptance-probe-keys` 互斥）
+### 12.2 `gqt gherkin run --project-root R --suite-dir D`（与 `--gherkin-probe-keys` 互斥）
 
 重放(R5) → 整目录 GUT 执行（`-gdir` 指向私有目录 generated）→
-acceptance-suite/1 对账五项 → 全过清理（零残留：父目录为本管线创建且
+gherkin-suite/1 对账五项 → 全过清理（零残留：父目录为本管线创建且
 已空才一并移除）；重放失配 = `run_error`（先于 GUT，不执行不可信产物）；
 对账任一不过 = `ok:false` 且私有目录保留现场。对账五项：
 
@@ -381,37 +381,37 @@ acceptance-suite/1 对账五项 → 全过清理（零残留：父目录为本�
 | R4 | `unselected_absent` | 私有目录无未选/多余产物 + 主 ir/generated 字节级快照前后一致 |
 | R5 | `replay_checked` | 私有目录内每份 manifest 三件哈希绑定重放通过 |
 
-### 12.3 `gqt gherkin run --project-root R --acceptance-probe-keys [k1,k2]`（W4 成本探针）
+### 12.3 `gqt gherkin run --project-root R --gherkin-probe-keys [k1,k2]`（W4 成本探针）
 
 缺省 `aidomain_integration`。编译+执行私有目录管线实测墙钟，产出
-`performance.acceptance_probe` 记录
+`performance.gherkin_probe` 记录
 `{keys, compile_s, run_s, extrapolation_assumption: "linear-in-feature-count", suite_ok, reconciliation}`；
 `measure risk --performance-file` 外部喂入通道保持不变（向后兼容）。
 
 ### 12.4 契约增量分类
 
-`compile --keys/--out-dir`、`run --suite-dir`、`--acceptance-probe-keys`、
-acceptance-suite/1 记录 = **capability**（新能力面，全加法，缺省行为不变）；
+`compile --keys/--out-dir`、`run --suite-dir`、`--gherkin-probe-keys`、
+gherkin-suite/1 记录 = **capability**（新能力面，全加法，缺省行为不变）；
 `compile.py` 仅新增 `out_dir` 分支（主路径代码逐字节未动）、`run.py`
 仅 `replay_check` 新增 `suite_dir` keyword（缺省路径不变）；`mutation/`、
 `risk/`、`coverage/` 域本 PR 零触碰。
 
 ## 13. measure 双源编排契约（SEE-1546 WP3 PR-C，measurement-report/2 + coverage-union/1；原 canonical 编排）
 
-### 13.1 `gqt measure run <roots...> --project-root R --recipe recipe.json --out report.json [--acceptance-probe-keys [k1,k2]] [--timeout N] [--evidence-dir D]`（原 `gqt canonical`）
+### 13.1 `gqt measure run <roots...> --project-root R --recipe recipe.json --out report.json [--gherkin-probe-keys [k1,k2]] [--timeout N] [--evidence-dir D]`（原 `gqt canonical`）
 
 批式臂双源编排（§SPEC-037；目标全集一次插桩 → 每臂 1 次 GUT → 逐文件 sink 读回 → bundle → union）：
 
 - **臂 gut_full**：.gutconfig 面（无 `-gdir`——GUT 缺省读配置，GUT 9.6 实测锚定）；
-- **臂 acceptance（SEE-1619 §SPEC-005 共享分片）**：`acceptance/features` 全量 keys 按共享分片分组编译进私有目录 `.gqt-run-<uuid>/`（§12 管线）+ 逐 key 重放校验 + 重新插桩（新 run_uuid+sink 名）→ 组内多 key 共享 GUT 进程，真实扇出 = `len(groups) × reps`（不再默认 44 feature×3 进程）；`acceptance_shards` 为分片/并发上限。对账五项、逐 key replay、独立 XDG/sink/run UUID、rep 收敛语义保留；私有目录与全部异常路径清理零残留。
-- **per-process 临时降级（SEE-1619 §SPEC-006）**：仅当某 feature 当次未通过共享校验时才 singleton 执行，并在 `process_fallbacks:[{key,reason}]` 逐 feature 披露名称与原因——按 key 排序、每项恰含 `key/reason`、成功/suite_error/清理失败等所有返回路径均存在（早失败为空数组）、全原子时 `process_fallbacks=[]`；共享红且隔离也红不得包装为有效降级，GUT map 与 union 完整性按既定口径降级，修复后必须回共享。降级轮并发同样 ≤ `acceptance_shards`；清理失败该臂 invalid 并披露残留路径，禁止带残留报 valid。
+- **臂 gherkin（SEE-1619 §SPEC-005 共享分片）**：`addons/gqt_gherkin/features` 全量 keys 按共享分片分组编译进私有目录 `.gqt-run-<uuid>/`（§12 管线）+ 逐 key 重放校验 + 重新插桩（新 run_uuid+sink 名）→ 组内多 key 共享 GUT 进程，真实扇出 = `len(groups) × reps`（不再默认 44 feature×3 进程）；`gherkin_shards` 为分片/并发上限。对账五项、逐 key replay、独立 XDG/sink/run UUID、rep 收敛语义保留；私有目录与全部异常路径清理零残留。
+- **per-process 临时降级（SEE-1619 §SPEC-006）**：仅当某 feature 当次未通过共享校验时才 singleton 执行，并在 `process_fallbacks:[{key,reason}]` 逐 feature 披露名称与原因——按 key 排序、每项恰含 `key/reason`、成功/suite_error/清理失败等所有返回路径均存在（早失败为空数组）、全原子时 `process_fallbacks=[]`；共享红且隔离也红不得包装为有效降级，GUT map 与 union 完整性按既定口径降级，修复后必须回共享。降级轮并发同样 ≤ `gherkin_shards`；清理失败该臂 invalid 并披露残留路径，禁止带残留报 valid。
 - **逐文件 sink** `qa-coverage-hits-{run_uuid}-{file_key8}.txt`（`file_key8 = sha1(relpath)[:8]`），落盘即清、沿 §10 prune 纪律；
 - **在树插桩**：备份 per-uid 私有目录 `/tmp/gqt-canonical-backups-<uid>/<run_uuid>/`（started-record + 逐文件原文；0700、ownership 校验、拒 symlink），finally 原子恢复；启动时回收同项目陈旧备份（崩溃恢复：marker schema 校验 + 恢复写入经 pinned-root 逐组件 O_NOFOLLOW dirfd 走廊限定 project root 内）；KOL 生产树零残留；
 - 两臂共用同一 registry/probe manifest（同源码、同 manifest），run UUID 每臂独立；
 - `recipe.arm` 显式注入（`gut_full|gut_core|acceptance`）；缺省不传 arm 保留 tests_glob 推断（既有 stdout 契约零漂移）；
 - **certification.status="not_certified"**、`evidence_level="exploratory"`、`diagnostic_only=true`、`dynamic_cache=false`（单轮 exploratory；WP5 拥有双轮认证）；
-- **可用映射的退出语义（SEE-1589 A-M1；SEE-1623 H4-A 单臂族扩展）**：`summary` 增 `certification`（`certified` / `uncertified` / `unusable`）、`union_certified`、`attribution_usable` 与 `exit_semantics`（`certified` / `artifacts_usable_union_uncertified` / `single_arm_usable_acceptance_paused` / `failed`），有归属产物时另附 `attribution_map`。union 不可认证但归属映射**本轮新鲜**且臂执行证据有效（`arms_valid`）= `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=artifacts_usable_union_uncertified`——读退出码的消费方不得丢弃可用产物；**acceptance 暂停期间普通 run（无 `--test-attribution`）**：`acceptance_arm` 暂停披露在场 且 `gut_full` 臂 `state=valid` = `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=single_arm_usable_acceptance_paused`（Owner 2026-11-23 裁决 A，§4.2 暂停条衔接）；无可用映射（含仅有陈旧 map 文件）且非上述单臂形态仍 `ok=false` / exit 1，`failures[0].reason=union invalid or arms invalid`。产物可用 ≠ union 已认证，两个语义分列披露；
-- W4 探针（缺省 `aidomain_integration`）实测墙钟写入 `performance.acceptance_probe`；`measure risk --performance-file` 兼容保留。
+- **可用映射的退出语义（SEE-1589 A-M1；SEE-1623 H4-A 单臂族扩展）**：`summary` 增 `certification`（`certified` / `uncertified` / `unusable`）、`union_certified`、`attribution_usable` 与 `exit_semantics`（`certified` / `artifacts_usable_union_uncertified` / `single_arm_usable_gherkin_paused` / `failed`），有归属产物时另附 `attribution_map`。union 不可认证但归属映射**本轮新鲜**且臂执行证据有效（`arms_valid`）= `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=artifacts_usable_union_uncertified`——读退出码的消费方不得丢弃可用产物；**acceptance 暂停期间普通 run（无 `--test-attribution`）**：`gherkin_arm` 暂停披露在场 且 `gut_full` 臂 `state=valid` = `ok=true` / exit 0、`certification=uncertified`、`exit_semantics=single_arm_usable_gherkin_paused`（Owner 2026-11-23 裁决 A，§4.2 暂停条衔接）；无可用映射（含仅有陈旧 map 文件）且非上述单臂形态仍 `ok=false` / exit 1，`failures[0].reason=union invalid or arms invalid`。产物可用 ≠ union 已认证，两个语义分列披露；
+- W4 探针（缺省 `aidomain_integration`）实测墙钟写入 `performance.gherkin_probe`；`measure risk --performance-file` 兼容保留。
 
 ### 13.2 `coverage-union/1` 有效性矩阵（§SPEC-036）
 

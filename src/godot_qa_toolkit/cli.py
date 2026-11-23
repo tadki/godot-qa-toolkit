@@ -1323,7 +1323,7 @@ def _attribution_usable(attribution_out, run_started: float,
 def _acceptance_paused_single_arm(report: dict) -> bool:
     """SEE-1623 H4-A（Owner 2026-11-23 裁决 A）：暂停期间单臂可用判定。
 
-    acceptance_arm 暂停披露在场 且 gut_full 臂 state=valid（臂门控已覆盖
+    gherkin_arm 暂停披露在场 且 gut_full 臂 state=valid（臂门控已覆盖
     new_failures/超时/run_error/空测试面等 invalid 原因）→ 单臂可用。
     恢复双臂运行时无该披露 → 恒 False（回到 union 认证语义）。"""
     if not isinstance(report.get("gherkin_arm"), str):
@@ -1341,8 +1341,8 @@ def _measure_run_summary(report: dict, attribution_out,
     SEE-1623 H4-A（Owner 裁决 A）：acceptance 暂停期间普通 run（无
     --test-attribution，即 attribution_out 缺省）按单臂可用语义——
     gut_full 有效且通过 → ok=true / exit 0、certification=uncertified、
-    exit_semantics=single_arm_usable_acceptance_paused（保留
-    acceptance_arm 暂停披露）；gut_full 无效/失败仍 failed / exit 1。
+    exit_semantics=single_arm_usable_gherkin_paused（保留
+    gherkin_arm 暂停披露）；gut_full 无效/失败仍 failed / exit 1。
     归属路径（--test-attribution）与恢复双臂路径语义零变化。"""
     union_certified = bool(report.get("ok"))
     single_arm_usable = (attribution_out is None and not union_certified
@@ -1353,7 +1353,7 @@ def _measure_run_summary(report: dict, attribution_out,
             "certified", "certified", True)
     elif single_arm_usable:
         certification, exit_semantics, ok = (
-            "uncertified", "single_arm_usable_acceptance_paused", True)
+            "uncertified", "single_arm_usable_gherkin_paused", True)
     elif attribution_usable:
         certification, exit_semantics, ok = (
             "uncertified", "artifacts_usable_union_uncertified", True)

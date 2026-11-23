@@ -86,7 +86,7 @@ GQT_TOOLKIT_ROOT=~/tools/godot-qa-toolkit gqt doctor
 - doctor judges install consistency, not project quality; it never emits a
   verdict JSON.
 
-## Command reference (aligned with v0.3.0 `--help`)
+## Command reference (aligned with v0.4.0 `--help`)
 
 ### measure arch
 

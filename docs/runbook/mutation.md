@@ -147,12 +147,16 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   collect test subdirectories recursively on this face (cold uses
   `-ginclude_subdirs`; worker uses the equivalent GUT `include_subdirectories`
   setting), so tests in layouts such as `tests/unit/` actually run on the
-  worker channel. Worker collection for an explicit `--tests <dir>` remains
-  non-recursive as before; the cold channel's explicit-directory behavior is
-  unchanged. An explicit `.gd` path runs exactly that script. A genuinely empty
-  face still makes any worker leg that ran zero tests a named `run_error`, not
-  a survivor; fail-closed evidence, canary/parity and R-C reset semantics are
-  unchanged.
+  worker channel even when the project sets `include_subdirs:false`.
+  For an explicit `--tests <dir>`, worker recursion follows `include_subdirs`
+  in the project `.gutconfig.json`: `true` enables recursion; `false` or a
+  missing, unreadable, or malformed file, a missing key, or non-object JSON
+  disables recursion (the worker fallback). This fallback affects only worker
+  collection; cold-channel configuration parsing and failure behavior are
+  unchanged. An explicit `.gd` path runs exactly that script regardless of
+  this setting. A genuinely empty face still makes any worker leg that ran
+  zero tests a named `run_error`, not a survivor; fail-closed evidence,
+  canary/parity and R-C reset semantics are unchanged.
 - `--jobs 1`: the explicit serial path still uses a file-level union glob. It is
   a correct superset, but less converged than line-signature grouping.
 

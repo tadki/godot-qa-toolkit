@@ -85,10 +85,10 @@ class TestS62LazyAcquireBaseline:
         assert meta["method"] == "uninstrumented_run"
         assert meta["lazy"] is True
         assert meta["face"] == "res://tests"
-        # 混合形态：1 个归因对 + 1 个 Run Summary 未归因回显
-        assert meta["count"] == len(pairs) == 2
-        assert ("res://tests/unit/test_game.gd", "test_already_red") in pairs
-        assert ("", "test_already_red") in pairs
+        # SEE-1623 M8 改约：混合形态（1 归因对 + 同失败裸名回显）按失败
+        # 身份规范化——计数唯一（此前 1 个失败计 2 对，证据翻倍）。
+        assert meta["count"] == len(pairs) == 1
+        assert pairs == {("res://tests/unit/test_game.gd", "test_already_red")}
         assert all(isinstance(x, str) for p in meta["pairs"] for x in p)
         assert isinstance(meta["sha256"], str) and len(meta["sha256"]) == 64
 

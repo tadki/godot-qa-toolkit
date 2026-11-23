@@ -257,7 +257,8 @@ class TestS63LazyBaselineRunMeasurement:
         assert fake.lazy_calls == [], "显式基线在场时不得懒获取"
         meta = _map_doc(tmp_path).get("baseline_failures_meta")
         assert meta and meta["method"] == "explicit_param"
-        assert meta["count"] == 2
+        # SEE-1623 M8：同一失败的双形态按身份规范化，计数不翻倍。
+        assert meta["count"] == 1
 
     def test_explicit_baseline_nonabsorbing_no_lazy(self, project, tmp_path):
         """显式基线在场但不吸收观测失败 → 懒获取零触发（显式提供即终局，

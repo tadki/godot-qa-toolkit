@@ -1036,9 +1036,10 @@ def _run_mutant_loop(
         # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
         slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
         if dirty:
-            slot_info["baseline_skip"] = {
-                "applied": bool(skip_applied), "face": bail_face,
-                "requested": len(baseline_failures)}
+            slot_info["baseline_skip"] = _baseline_skip_disclosure(
+                dirty=dirty, skip_applied=skip_applied,
+                worker_host=worker_host, bail_face=bail_face,
+                requested=len(baseline_failures))
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
             slot_info["suspected_orphan"] = _orphan_disclosure(
                 project_root, target_res)
@@ -1050,6 +1051,23 @@ def _ordered_bail_scripts(project_root, path, bail_scripts):
         return bail_scripts
     return killbail.order_scripts_by_history(
         bail_scripts, killbail.kill_history(str(project_root), str(path)))
+
+
+def _baseline_skip_disclosure(*, dirty: bool, skip_applied: bool,
+                              worker_host: bool, bail_face: str,
+                              requested: int) -> dict:
+    """SEE-1623 M3：baseline_skip 披露自洽（单一出处）。
+
+    worker 直驱宿主物理跳红测试时 face 如实标注通道（此前
+    face=unsupported_explicit_or_full 与 applied=true 同块并存，自相
+    矛盾——face 字段描述的是冷通道 bail 支持面，不是实际跳过通道）；
+    冷通道不支持物理跳时 applied=false（不支持面不得宣称已跳过）。"""
+    return {
+        "applied": bool(skip_applied),
+        "face": ("worker_direct_drive" if (dirty and worker_host)
+                 else bail_face),
+        "requested": int(requested),
+    }
 
 
 def _preflight_route_check(identity, project_root, path, worker_channel):

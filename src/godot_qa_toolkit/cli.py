@@ -62,6 +62,15 @@ def _emit(result: dict) -> int:
     return 0 if result["ok"] else 1
 
 
+def _lark_unexpected_input() -> "tuple[type, ...]":
+    """lark 解析异常族（UnexpectedCharacters/UnexpectedToken 的公共基类）。
+
+    延迟导入保持 §SPEC-114 最小 CI 面（gdtoolkit/lark 缺席环境不因本
+    except 分支收集失败）。"""
+    from lark.exceptions import UnexpectedInput
+    return (UnexpectedInput,)
+
+
 def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | None:
     """§SPEC-1525-002：--godot-bin 命令级覆盖注入（> GQT_GODOT_BIN > PATH），
     显式配置错误 → 统一 JSON 错误契约（ok:false，与既有 BinaryConfigError
@@ -788,9 +797,29 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
         )
     performance_input = None
     if args.performance_file:
-        performance_input = json.loads(
-            Path(args.performance_file).read_text(encoding="utf-8")
-        )
+        # SEE-1623 H6：坏 JSON / 不可读 performance 文件转结构化信封——
+        # 原始 JSONDecodeError/OSError traceback 即工具崩溃形态（§5 exit 1
+        # 判定失败；stdout 恒有 JSON）。
+        try:
+            performance_input = json.loads(
+                Path(args.performance_file).read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError) as e:
+            return _emit({
+                "tool": "measure.risk",
+                "ok": False,
+                "summary": {
+                    "error": (f"performance file not usable: "
+                              f"{args.performance_file}"),
+                    "reason": "performance_file_unparseable",
+                    "reason_detail": f"{type(e).__name__}: {e}",
+                    "suggested_action": (
+                        "pass a JSON file written by a prior measure run "
+                        "(performance block); check the path is readable"),
+                },
+                "failures": [{"reason": "performance_file_unparseable: "
+                                        f"{type(e).__name__}: {e}"}],
+            })
     # SEE-1605 §SPEC-001：首触 auto 生成须一次覆盖全部请求文件的首层目录——
     # 车道内逐文件 ensure_map 只绑定当前文件目录，跨目录文件会退化为逐车道
     # 增量（virgin 上即 QA 实测的静默落空）。预温生成失败 = 本轮测量面不可
@@ -1048,6 +1077,27 @@ def cmd_measure_coverage(args: argparse.Namespace) -> int:
             "summary": {"file": args.file, "error": str(e)},
             "failures": [{"reason": str(e)}],
         }
+    except _lark_unexpected_input() as e:
+        # SEE-1623 H6：非 .gd 目标 / 畸形 .gd 的解析异常转结构化信封——
+        # stdout 恒有 JSON、零 traceback 泄漏（§5：判定侧输入畸形 =
+        # 判定失败 exit 1，不是用法错误 exit 2）。
+        return _emit({
+            "tool": "measure.coverage",
+            "ok": False,
+            "summary": {
+                "file": str(args.file),
+                "error": "coverage target is not parseable GDScript",
+                "reason": "target_not_parseable_gdscript",
+                "reason_detail": str(e),
+                "suggested_action": (
+                    "pass a .gd GDScript file as the coverage target; "
+                    "if the target is a .gd file, fix the syntax error "
+                    "at the cited line/column (parse detail in "
+                    "reason_detail)"),
+            },
+            "failures": [{"reason":
+                          f"target_not_parseable_gdscript: {str(e)[:200]}"}],
+        })
     return _emit(result)
 
 

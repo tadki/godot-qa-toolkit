@@ -225,17 +225,30 @@ class TestH8RealFileInstrumentation:
         gdtoolkit_parser.parse(instrumented)
 
     def test_else_branch_head_line_not_instrumented(self):
-        # else_branch/elif_branch 头行是 if 结构的一部分——探针插其前 = 语法非法
+        # SEE-1623 H3 改约：elif 条件行入行集（真实会被求值，假 uncovered
+        # 缺陷）——探针锚定分支体首语句发射，语法安全由 reparse 钉守护；
+        # else_branch 头行仍排除（无求值语义、无变异位点）。
         from godot_qa_toolkit.coverage.runner import _collect_executable_lines
         src = ("func f(x):\n\tif x:\n\t\treturn 1\n\telif False:\n\t\tpass\n"
                "\telse:\n\t\treturn 2\n")
         els = _collect_executable_lines(src)
-        assert not any(e.node in ("else_branch", "elif_branch") for e in els)
+        by_line = {e.line: e.node for e in els}
+        assert by_line.get(4) == "elif_branch"
+        assert not any(e.node == "else_branch" for e in els)
 
     def test_instrumented_else_source_reparses(self):
         from godot_qa_toolkit.coverage.runner import _instrument
         from gdtoolkit.parser import parser as gdtoolkit_parser
         src = "func f(x):\n\tif x:\n\t\treturn 1\n\telse:\n\t\treturn 2\n"
+        instrumented, _ = _instrument(src, "qa-coverage-hits-test.txt")
+        gdtoolkit_parser.parse(instrumented)
+
+    def test_instrumented_elif_source_reparses(self):
+        # 回潮即红：elif 头行前物理插桩 = Parse Error——锚定发射必须保持。
+        from godot_qa_toolkit.coverage.runner import _instrument
+        from gdtoolkit.parser import parser as gdtoolkit_parser
+        src = ("func f(x):\n\tif x:\n\t\treturn 1\n\telif x > 1:\n"
+               "\t\treturn 2\n\telse:\n\t\treturn 3\n")
         instrumented, _ = _instrument(src, "qa-coverage-hits-test.txt")
         gdtoolkit_parser.parse(instrumented)
 

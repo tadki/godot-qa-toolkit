@@ -312,8 +312,12 @@ def _attr_var_name(sink_name: str) -> str:
 def _probe_calls(src: str, line_to_id: dict[int, int],
                  flags: bool = False, sink_name: str = "",
                  attribution: bool = False,
-                 attr_probe_ids: "frozenset[int] | None" = None) -> list[str]:
+                 attr_probe_ids: "frozenset[int] | None" = None,
+                 insert_at: "dict[int, int] | None" = None) -> list[str]:
     """每个可执行语句前插一行探针调用（整数 probe_id）。
+
+    insert_at（SEE-1623 H3）：probe 行 → 实际发射行（elif 头行锚定到分支
+    体首语句行——头行前物理插桩语法非法）。无锚定形态逐字节等价旧行为。
 
     flags 形态（§SPEC-046）：语句前只做内存 flag 标记（预置尺寸静态 Array
     的索引写）——零 I/O、零函数调用、零 append，写入（落盘）次数由统一
@@ -331,10 +335,13 @@ def _probe_calls(src: str, line_to_id: dict[int, int],
     out = []
     attr = _attr_var_name(sink_name)
     fn_mode = attr_probe_ids is not None
+    emit: dict[int, list[int]] = {}
+    for probe_line, pid in sorted(line_to_id.items()):
+        emit.setdefault((insert_at or {}).get(probe_line, probe_line),
+                        []).append(pid)
     for idx, line_text in enumerate(src.splitlines(keepends=True), start=1):
-        if idx in line_to_id:
+        for pid in emit.get(idx, ()):
             indent = re.match(r"^(\s*)", line_text).group(1)
-            pid = line_to_id[idx]
             if flags:
                 out.append(
                     f"{indent}{_flag_var_name(sink_name)}"
@@ -598,7 +605,19 @@ def _instrument_blocks(src: str, sink_name: str,
     attribution=True 时 attr_probe_ids 指定携带归属块的 probe 集合
     （方向②函数入口级）；None = 全部 probe 携带（hit 级）。"""
     execs = list(_collect_executable_lines(src))
-    bmap = _blocks_from_execs(execs, src)
+    # SEE-1623 H3：elif 头行不入块入口（其前物理插桩语法非法）；经锚点
+    # 并入分支体首语句所在块——体首命中即记 elif 行覆盖。探针几何与
+    # 行集纳入前逐字节同构（starts 集合不变）。
+    anchors = _rt()._elif_head_anchors(src)
+    head_lines = set(anchors)
+    bmap = _blocks_from_execs(
+        [e for e in execs if e.line not in head_lines], src)
+    for head, body_first in anchors.items():
+        for entry, lines in bmap.items():
+            if body_first in lines:
+                if head not in lines:
+                    bmap[entry] = sorted(lines + [head])
+                break
     starts = sorted(bmap)
     if not starts:
         return src, [], {}
@@ -627,8 +646,14 @@ def _instrument(src: str, sink_name: str, flags: bool = False,
     if flags and not manifest:
         # 零可执行行：无探针面，插桩产物 = 原文（vacuous 车道在编排器落）
         return src, manifest
+    # SEE-1623 H3：elif 头行探针锚定到分支体首语句行发射（头行前物理
+    # 插桩语法非法）；锚点缺失（体首不可得）→ 头行探针不发射，行保持
+    # 未覆盖（与既有行为一致）。
+    anchors = _rt()._elif_head_anchors(src)
+    insert_at = {h: b for h, b in anchors.items()
+                 if h in line_to_id and b in line_to_id}
     body = "".join(_probe_calls(src, line_to_id, flags, sink_name,
-                                attribution))
+                                attribution, insert_at=insert_at))
     if flags:
         return (body + _flag_probe_block(sink_name, len(manifest),
                                          runtime_sink, attribution, causal),

@@ -16,10 +16,13 @@ from dataclasses import dataclass
 from gdtoolkit.parser import parser as gdtoolkit_parser
 from lark import Tree
 
-# 可插桩语句形态集合（与 runner 原 `_EXECUTABLE_NODE_NAMES` 逐项一致）
+# 可插桩语句形态集合（SEE-1623 H3：elif_branch 条件行纳入——真实会被求值
+# 的行此前被标 uncovered 并被 mutation prefilter 跳过；else_branch 仍排除，
+# 其头行无求值语义且无变异位点）
 EXECUTABLE_NODE_NAMES = frozenset(
     {
         "if_branch",
+        "elif_branch",
         "for_stmt",
         "while_stmt",
         "return_stmt",
@@ -107,3 +110,41 @@ def collect_executable_lines(src: str) -> list[ExecutableLine]:
     # 代价：内部类体（通常为测试桩）不计量——在套件自测量场景可接受。
     tree_depth_walk(tree, visit, prune=lambda n: getattr(n, "data", None) == "class_def")
     return dedupe_sorted(lines)
+
+
+def elif_head_anchors(src: str) -> dict[int, int]:
+    """SEE-1623 H3：elif 头行 → 分支体首语句行（探针锚定发射点）。
+
+    elif 条件行进入可插桩行集，但 if 链内其前无合法插桩位置（同缩进语句
+    会破坏 if/elif/else 链——硬化反例：探针插头行前 → Parse Error）。头行
+    探针改在【分支体首语句】的插入点一并发射：体首执行 ⟺ 条件为真，与
+    if_branch 头行「求值即点火」的差异（false 路径求值不计）在
+    docs/contract.md 披露。体首不可得（class_def 剪枝等）→ 不入映射——
+    头行保持未覆盖，与既有行为一致，不虚构锚点。"""
+    tree = gdtoolkit_parser.parse(src, gather_metadata=True)
+    anchors: dict[int, int] = {}
+
+    def visit(node, depth=0):
+        if getattr(node, "data", None) == "elif_branch":
+            head = node_line(node)
+            body_first = None
+            children = [c for c in getattr(node, "children", [])
+                        if hasattr(c, "data")]
+            stack = children[1:]
+            while stack:
+                cur = stack.pop(0)
+                if getattr(cur, "data", None) == "class_def":
+                    continue
+                ln = node_line(cur)
+                if ln is not None:
+                    body_first = (ln if body_first is None
+                                  else min(body_first, ln))
+                stack.extend(c for c in getattr(cur, "children", [])
+                             if hasattr(c, "data"))
+            if head is not None and body_first is not None \
+                    and body_first != head:
+                anchors[head] = body_first
+
+    tree_depth_walk(tree, visit,
+                    prune=lambda n: getattr(n, "data", None) == "class_def")
+    return anchors

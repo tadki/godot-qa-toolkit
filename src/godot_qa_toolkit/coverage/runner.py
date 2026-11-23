@@ -37,6 +37,7 @@ from ..registry.lines import (
     IF_BRANCH_NODES as _IF_BRANCH_NODES,
     ExecutableLine,
     collect_executable_lines as _collect_executable_lines,
+    elif_head_anchors as _elif_head_anchors,
     node_line as _node_line,
     paren_depths as _paren_depths,
     tree_depth_walk as _tree_depth_walk,
@@ -86,10 +87,12 @@ _SINK_DIR_MARKER = "user://"
 _PROBE_PREFIX = "__qa_cov_probe_"
 
 # 可执行语句的规则/树形节点名（插桩目标）——语句级，不深挖表达式。
-# 注意：else_branch/elif_branch 不在此列——它们的头行是 if 结构的一部分
-# （`else:` / `elif cond:` 不是独立语句），在其前插同缩进探针会产出语法非法
-# 的插桩文件（硬化 反例实证：含 else 的文件 coverage 全体 run_error）。
-# 分支执行语义由 _derive_branches 的体首语句行锚定承担。
+# SEE-1623 H3：elif_branch 条件行已纳入（真实会被求值的行此前被标
+# uncovered 并被 prefilter 跳过）——头行前物理插桩仍语法非法，探针经
+# elif_head_anchors 锚定到分支体首语句行发射（覆盖语义 = 条件为真；
+# false 路径求值不计，docs/contract.md 披露）。else_branch 仍排除——
+# 其头行无求值语义且无变异位点。分支（真值）语义由 _derive_branches
+# 的体首语句行锚定承担。
 
 @dataclass(frozen=True)
 class ExecutableLine:

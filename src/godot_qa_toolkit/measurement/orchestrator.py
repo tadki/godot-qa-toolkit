@@ -27,7 +27,6 @@ import re
 import shutil
 import stat as stat_module
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Iterator

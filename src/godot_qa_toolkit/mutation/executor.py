@@ -731,7 +731,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
               "(§SPEC-020; cold start skipped)", file=sys.stderr)
     else:
         print(f"mutation: verdict baseline via legacy cold start "
-              f"(GQT_MUTATION_BASELINE_SOURCE=cold, disclosed)",
+              "(GQT_MUTATION_BASELINE_SOURCE=cold, disclosed)",
               file=sys.stderr)
         baselines, baseline_failures = _precompute_baselines(
             files, project_root, timeout_s, tests_glob, clock=clock,

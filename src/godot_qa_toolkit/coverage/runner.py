@@ -294,7 +294,7 @@ def _cov_probes_evidence(path, src, tests_glob, evidence_out, min_percent,
                                min_percent)
     try:
         probes = int(probes_raw)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError):
         msg = (f"attribution map probes_fired malformed "
                f"({probes_raw!r}); refusing to fabricate")
         return None, _cov_fail(path, src, tests_glob, evidence_out, msg,

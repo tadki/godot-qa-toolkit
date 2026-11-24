@@ -709,8 +709,6 @@ def _arm_execute(name: str, *, root: Path, shadow_instrument: bool,
 def _scan_shard_problems(results, timeout_s: int, timeout_source: str):
     """§SPEC-PLANFIRST：分片级问题扫描——(launch, timeouts, unattributed)
     三类明细（超时分片带超时值与来源；不可归因分片带 rc 与输出尾部）。"""
-    from .orchestrator import _parse_failing_pairs
-
     unattributed: list[dict] = []
     timeouts: list[dict] = []
     launch: list[dict] = []
@@ -1239,8 +1237,6 @@ def _apply_gherkin_comparison(result: dict, root: Path,
       valid；
     - 取不到证据：失败对保持 new_failures——臂保持 invalid（fail-loud）。
     对账未执行的事实如实标注（executed=False），不虚构对账失败。"""
-    from .orchestrator import _parse_failing_pairs
-
     verdict = _gherkin_uninstrumented_comparison(root, failed_keys,
                                                  timeout_s)
     result["gherkin_comparison"] = {

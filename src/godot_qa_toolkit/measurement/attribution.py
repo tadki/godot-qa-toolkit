@@ -679,10 +679,6 @@ def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
             out[ident] = {"verdict": "red", "classification": cls}
             classified.add(ident)
     # 未分类红（不在行事实宇宙 = 臂 invalid 已拒装的产物面）：如实记录
-    for cls in ("new",):
-        pass
-    known_reds = red_by_class["pre_existing"] \
-        | red_by_class["suspected_intolerant"]
     for arm in arms:
         tf = arm.get("test_failures") or {}
         raw_observed = set(tf.get("observed_pairs") or [])

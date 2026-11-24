@@ -145,16 +145,13 @@ def map_baseline_snapshots(files: list[str], project_root: str,
     _assert_fresh(project_root, doc, files)
     reds = _red_entries(doc)
     prefix = None
-    selection_dir = False
     if tests_glob:
         base = str(tests_glob)
         if base.startswith("res://"):
             base = base[len("res://"):]
-        if ".gqt-attr-select/" in base:
-            # 选面目录只承载选中脚本的 wrapper（wrapper 名 = 原脚本名）——
-            # 按 basename 对应，不做目录前缀过滤。
-            selection_dir = True
-        else:
+        # 选面目录只承载选中脚本的 wrapper（wrapper 名 = 原脚本名）——
+        # 按 basename 对应，不做目录前缀过滤（prefix 保持 None）。
+        if ".gqt-attr-select/" not in base:
             prefix = base.rstrip("/") + "/"
     face_pairs: set[tuple[str, str]] = set()
     for ident, (cls, _full) in reds.items():
@@ -267,7 +264,6 @@ def prepare_map_for_baseline(project_root: str, files: list[str],
             IncrementError, run_attribution_increment,
         )
         from ..measurement.recipe import build_recipe
-        from ..source_io import anchor_to_project_root as _anchor
 
         root = Path(project_root).resolve()
         recipe, error = build_recipe(root)

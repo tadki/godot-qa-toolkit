@@ -83,7 +83,6 @@ def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | N
     类型（与 mutation 既有 refresh 语义对齐）。"""
     from .mutation.inject import BinaryConfigError, apply_godot_bin_override, \
         detect_binary_kind, resolve_env_godot_bin_relative
-    from .mutation.verdict_source import BaselineSourceError
 
     try:
         # §SPEC-078 M2：flag/env 显式相对路径统一在入口按子进程 cwd
@@ -552,10 +551,6 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
     # SEE-1631 §SPEC-021：map 源判定基线（默认）下，map 缺失/过期是
     # prepare 可自动补齐的阻断项——不再要求显式 --auto-prepare，由
     # prepare 阶段自动续新（成功后进入 run；失败才具名 fail-loud）。
-    from .mutation.verdict_source import (
-        baseline_source as _bl_source,
-    )
-
     map_blockers = [p for p in p1
                     if p.get("code") == "attribution_map_missing_or_stale"]
     other_p1 = [p for p in p1 if p not in map_blockers]

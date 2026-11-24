@@ -150,7 +150,7 @@ _FEATURES_REL_PREFIX = "addons/gqt_gherkin/features/"
 def _baseline_gherkin_feature_keys(baseline: dict) -> set[str]:
     """基线 gherkin 臂的 feature key 全集（feature_to_lines 权威 + 行事实
     身份前缀反推兜底——旧增量产物可能缺 feature 视图）。"""
-    from .attribution import GHERKIN_IDENTITY_PREFIX, _gherkin_feature_of
+    from .attribution import _gherkin_feature_of
 
     garm = ((baseline.get("arms") or {}).get("gherkin") or {})
     keys = set(garm.get("feature_to_lines") or {})

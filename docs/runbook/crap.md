@@ -97,7 +97,7 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 - Results from 2–3 files must not be extrapolated into whole-repo conclusions;
   CRAP ranks candidates, and the final refactor decision stays with a human.
 
-## Command reference (aligned with v0.4.0 `--help`)
+## Command reference (aligned with v0.4.1 `--help`)
 
 ### measure risk
 

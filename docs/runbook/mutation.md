@@ -309,7 +309,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   remaining host poll is the worker's 10ms req/STOP filesystem rendezvous,
   which has no one-shot filesystem event API.
 
-## Command reference (aligned with v0.4.0 `--help`)
+## Command reference (aligned with v0.4.1 `--help`)
 
 `gqt mutation [<files...>] [--project-root <root>] [all options]`
 

@@ -16,7 +16,7 @@
 接线动作（固定单根，接口人工实现）：
 1. 按 `docs/contract.md` §4.2a 准备 `addons/gqt_gherkin/schema.json` 与
    `validator.gd`：schema 最小形如
-   `{"schema":"gqt-gherkin-addon/1.0","requires_gqt":"v0.4.0","testing_api":"see1468-gherkin/2"}`；
+   `{"schema":"gqt-gherkin-addon/1.0","requires_gqt":"v0.4.1","testing_api":"see1468-gherkin/2"}`；
    validator 必须 exit 0，且最后一份含 `supported_majors` 的合法 verdict 为
    `ok=true`、`supported_majors=[1]`。无需 enable addon 或配置 autoload。
 2. 复制 `testing_api.gd.md` 模板到 `res://addons/gqt_gherkin/harness.gd`，

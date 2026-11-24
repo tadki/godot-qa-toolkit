@@ -536,55 +536,71 @@ def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
         _os.environ[truth_mod.ENV_MODE] = "off"
 
 
-def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
+def _p1_map_source_auto(args: argparse.Namespace,
+                        map_blockers: list) -> bool:
+    """SEE-1631 §SPEC-021：map 源判定基线（默认）下，map 缺失/过期是
+    prepare 可自动补齐的阻断项——不再要求显式 --auto-prepare，由
+    prepare 阶段自动续新（成功后进入 run；失败才具名 fail-loud）。"""
     from .mutation.verdict_source import baseline_source
+
+    return bool(
+        map_blockers
+        and getattr(args, "select_mode", "line") != "full"
+        and not getattr(args, "attribution_map", None)
+        and baseline_source() == "map")
+
+
+def _p1_gate_continues(args: argparse.Namespace, p1: list) -> bool:
+    """P1 门放行梯：dry-run/--auto-prepare、--select full、显式 --tests、
+    无剩余 P1、目标文件不在盘上（交下游原错误契约）——任一命中即放行。"""
+    from .source_io import anchor_to_project_root as _anchor
+
+    if getattr(args, "dry_run", False) or getattr(args, "auto_prepare",
+                                                  False):
+        return False
+    if getattr(args, "select_mode", "line") == "full":
+        return False
+    if getattr(args, "tests", None):
+        return False
+    if not p1:
+        return False
+    files = list(getattr(args, "files", []) or [])
+    if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
+        return False
+    return True
+
+
+def _p1_gate_notice(args: argparse.Namespace) -> str:
+    """SEE-1623 M6：显式 --attribution-map 只读、绝不重建——修复提示不得
+    与该契约相反（此前一律建议 --auto-prepare，Harti 障碍4）。"""
+    _map_arg = getattr(args, "attribution_map", None)
+    if _map_arg and str(_map_arg) not in ("auto", "off"):
+        return ("preconditions missing — the explicit attribution map "
+                f"{_map_arg} is read-only and will never be rebuilt: "
+                "fix or replace the map file, or omit --attribution-map "
+                "to use the auto-managed map")
+    return ("preconditions missing — fix the listed items or rerun "
+            "with --auto-prepare to build them automatically")
+
+
+def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
     """§SPEC-PREREQ-MATRIX：P1 prepare-blockers 默认停（一次列全 +
     修复命令/成本）；--auto-prepare 续跑；--select full 不需要 map；
     目标不存在时交由下游原错误契约。SEE-1623 M1：显式 `--tests` 用户
     接管测试面——映射前置对显式面不适用（此前 prepare_required 阻断，
     显式面接管语义名存实亡）。"""
-    from .source_io import anchor_to_project_root as _anchor
     p1 = [p for p in plan["problems"]
           if p.get("level") == "P1" and p.get("severity") == "warning"]
     if not p1:
         return None
-    # SEE-1631 §SPEC-021：map 源判定基线（默认）下，map 缺失/过期是
-    # prepare 可自动补齐的阻断项——不再要求显式 --auto-prepare，由
-    # prepare 阶段自动续新（成功后进入 run；失败才具名 fail-loud）。
     map_blockers = [p for p in p1
                     if p.get("code") == "attribution_map_missing_or_stale"]
-    other_p1 = [p for p in p1 if p not in map_blockers]
-    map_source_auto = bool(
-        map_blockers
-        and getattr(args, "select_mode", "line") != "full"
-        and not getattr(args, "attribution_map", None)
-        and baseline_source() == "map")
-    if map_source_auto:
+    if _p1_map_source_auto(args, map_blockers):
         # §SPEC-021：map 阻断项由 prepare 自动续新接管；其余 P1 照旧。
-        p1 = other_p1
-    if getattr(args, "dry_run", False) or getattr(args, "auto_prepare",
-                                                  False):
+        p1 = [p for p in p1 if p not in map_blockers]
+    if not _p1_gate_continues(args, p1):
         return None
-    if getattr(args, "select_mode", "line") == "full":
-        return None
-    if getattr(args, "tests", None):
-        return None
-    if not p1:
-        return None
-    files = list(getattr(args, "files", []) or [])
-    if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
-        return None
-    # SEE-1623 M6：显式 --attribution-map 只读、绝不重建——修复提示不得
-    # 与该契约相反（此前一律建议 --auto-prepare，Harti 障碍4）。
-    _map_arg = getattr(args, "attribution_map", None)
-    if _map_arg and str(_map_arg) not in ("auto", "off"):
-        _notice = ("preconditions missing — the explicit attribution map "
-                   f"{_map_arg} is read-only and will never be rebuilt: "
-                   "fix or replace the map file, or omit --attribution-map "
-                   "to use the auto-managed map")
-    else:
-        _notice = ("preconditions missing — fix the listed items or rerun "
-                   "with --auto-prepare to build them automatically")
+    _notice = _p1_gate_notice(args)
     # SEE-1623 M7：信封归一——plan 只在 summary（顶层 error/plan 键撤销），
     # failures 恒在场（§SPEC-1312 flat 契约：{tool, ok, summary, failures}）。
     return _emit({"tool": "mutation", "ok": False,
@@ -688,6 +704,66 @@ def _usage_exit(message: str) -> int:
     return 2
 
 
+def _map_source_prepare_early(args: argparse.Namespace,
+                              files_all: list) -> "int | None":
+    """SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
+    --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
+    入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。"""
+    from .mutation.verdict_source import BaselineSourceError, \
+        prepare_map_for_baseline
+
+    try:
+        prepare_map_for_baseline(
+            str(Path(args.project_root)), files_all,
+            timeout_s=int(getattr(args, "timeout", 600) or 600))
+    except BaselineSourceError as e:
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    return None
+
+
+def _mutation_single_target_check(args: argparse.Namespace) -> "int | None":
+    """SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
+    （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig 错误）。
+    多文件收集失败契约（SEE-1321 LOW-6：缺失文件以 per-file error 进
+    results）不在此拦——处理仍在 dispatch 层。"""
+    from .source_io import anchor_to_project_root as _anchor_t
+
+    _files = getattr(args, "files", None) or []
+    _t = _files[0] if len(_files) == 1 else None
+    if _t is not None:
+        _anchored = Path(_anchor_t(_t, args.project_root))
+        if not _anchored.is_file():
+            _msg = (f"mutation target not found: {_t} (anchored: "
+                    f"{_anchored})")
+            return _emit({"tool": "mutation", "ok": False,
+                          "summary": {"files": args.files,
+                                      "error": _msg},
+                          "failures": [{"reason": _msg}]})
+    return None
+
+
+def _mapping_face_gate(args: argparse.Namespace, full_face: bool,
+                       files_all: list) -> "tuple[bool, int | None]":
+    """入口早退梯（§SPEC-021 + legacy A20/M1 契约）。返回 (terminate,
+    rc)：map 源 prepare 失败终止（rc=emit 值）；map 源 prepare 后
+    full-face/显式 --tests 终止（None, None）；cold 源 full-face/显式
+    --tests 按 A20/M1 终止；其余继续准备链 (False, None)。"""
+    from .mutation.verdict_source import baseline_source
+
+    if baseline_source() == "map" and files_all:
+        rc = _map_source_prepare_early(args, files_all)
+        if rc is not None:
+            return True, rc
+        if full_face or getattr(args, "tests", None):
+            return True, None
+        return False, None
+    if full_face or getattr(args, "tests", None):
+        return True, None
+    return False, None
+
+
 def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     """默认映射面的运行前准备链（非 dry-run 且 full-face / 显式 --tests
     接管面以外）：单文件目标存在性校验 → 自动导入 → ensure_map。
@@ -702,47 +778,18 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     if getattr(args, "dry_run", False):
         return None
     full_face = getattr(args, "select_mode", "line") == "full"
-    # SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
-    # --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
-    # 入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。
-    from .mutation.verdict_source import (
-        BaselineSourceError, baseline_source, prepare_map_for_baseline,
-    )
-    _files_all = [str(f) for f in (getattr(args, "files", None) or [])]
-    if baseline_source() == "map" and _files_all:
-        try:
-            prepare_map_for_baseline(
-                str(Path(args.project_root)), _files_all,
-                timeout_s=int(getattr(args, "timeout", 600) or 600))
-        except BaselineSourceError as e:
-            return _emit({"tool": "mutation", "ok": False,
-                          "summary": {"error": str(e)},
-                          "failures": [{"reason": str(e)}]})
-        if full_face or getattr(args, "tests", None):
-            return None
-    elif full_face or getattr(args, "tests", None):
-        # cold 源（legacy A20/显式 --tests 契约）：不预建/校验映射
-        return None
-    # SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
-    # （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig 错误）。
-    # 多文件收集失败契约（SEE-1321 LOW-6：缺失文件以 per-file error 进
-    # results）不在此拦——处理仍在 dispatch 层。
     from .mutation.truth_select import MutationSelectionError
     from .mutation.verdict_source import (
-        BaselineSourceError, baseline_source, prepare_map_for_baseline,
+        baseline_source, prepare_map_for_baseline,
     )
-    from .source_io import anchor_to_project_root as _anchor_t
-    _files = getattr(args, "files", None) or []
-    _t = _files[0] if len(_files) == 1 else None
-    if _t is not None:
-        _anchored = Path(_anchor_t(_t, args.project_root))
-        if not _anchored.is_file():
-            _msg = (f"mutation target not found: {_t} (anchored: "
-                    f"{_anchored})")
-            return _emit({"tool": "mutation", "ok": False,
-                          "summary": {"files": args.files,
-                                      "error": _msg},
-                          "failures": [{"reason": _msg}]})
+    _files_all = [str(f) for f in (getattr(args, "files", None) or [])]
+    # cold 源（legacy A20/显式 --tests 契约）不预建/校验映射，同梯早退。
+    terminate, rc = _mapping_face_gate(args, full_face, _files_all)
+    if terminate:
+        return rc
+    rc = _mutation_single_target_check(args)
+    if rc is not None:
+        return rc
     # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
     rc = _bootstrap_import_or_contract("mutation", args)
     if rc is not None:

@@ -75,9 +75,14 @@ class TestA19SharedBaseline:
 
 class TestA20FullFaceNoPrebuild:
     def test_full_face_skips_map_bootstrap(self, tmp_path, monkeypatch):
-        """A20：--select full 无映射也不阻断——ensure_map 不被调用。"""
+        """A20（SEE-1631 §SPEC-021/022 映射）：cold 源下 --select full
+        仍不预建/校验映射（原契约）；map 源（默认）下判定基线 = map，
+        full 面同样走 prepare 自动续新（ensure_map 被调用一次）。"""
         from godot_qa_toolkit import cli
         from godot_qa_toolkit.mutation import truth_select as _truth
+        from godot_qa_toolkit.mutation.verdict_source import (
+            ENV_BASELINE_SOURCE,
+        )
         calls = {"ensure": 0}
 
         def boom(*a, **k):
@@ -107,10 +112,20 @@ class TestA20FullFaceNoPrebuild:
             "mutation", str(proj / "src_game" / "cell.gd"),
             "--project-root", str(proj), "--select", "full",
         ])
+        # cold 源（legacy）：A20 原契约——full 不预建不校验
+        monkeypatch.setenv(ENV_BASELINE_SOURCE, "cold")
         rc = cli.cmd_mutation(args)
         assert calls["ensure"] == 0, (
-            "A20：显式 full 不得预建/校验映射")
+            "cold 源：显式 full 不得预建/校验映射")
         assert rc == 0
+        # map 源（§SPEC-020/021 默认）：full 面同样走 prepare 自动续新
+        monkeypatch.setenv(ENV_BASELINE_SOURCE, "map")
+        calls["ensure"] = 0
+        rc = cli.cmd_mutation(args)
+        assert calls["ensure"] == 1, (
+            "map 源：full 面判定基线 = map，prepare 自动续新必须发生")
+
+
 
 
 class TestA22CentralFreshness:

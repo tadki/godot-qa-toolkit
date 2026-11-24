@@ -538,6 +538,7 @@ def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
 
 
 def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
+    from .mutation.verdict_source import baseline_source
     """§SPEC-PREREQ-MATRIX：P1 prepare-blockers 默认停（一次列全 +
     修复命令/成本）；--auto-prepare 续跑；--select full 不需要 map；
     目标不存在时交由下游原错误契约。SEE-1623 M1：显式 `--tests` 用户
@@ -548,12 +549,32 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
           if p.get("level") == "P1" and p.get("severity") == "warning"]
     if not p1:
         return None
+    # SEE-1631 §SPEC-021：map 源判定基线（默认）下，map 缺失/过期是
+    # prepare 可自动补齐的阻断项——不再要求显式 --auto-prepare，由
+    # prepare 阶段自动续新（成功后进入 run；失败才具名 fail-loud）。
+    from .mutation.verdict_source import (
+        baseline_source as _bl_source,
+    )
+
+    map_blockers = [p for p in p1
+                    if p.get("code") == "attribution_map_missing_or_stale"]
+    other_p1 = [p for p in p1 if p not in map_blockers]
+    map_source_auto = bool(
+        map_blockers
+        and getattr(args, "select_mode", "line") != "full"
+        and not getattr(args, "attribution_map", None)
+        and baseline_source() == "map")
+    if map_source_auto:
+        # §SPEC-021：map 阻断项由 prepare 自动续新接管；其余 P1 照旧。
+        p1 = other_p1
     if getattr(args, "dry_run", False) or getattr(args, "auto_prepare",
                                                   False):
         return None
     if getattr(args, "select_mode", "line") == "full":
         return None
     if getattr(args, "tests", None):
+        return None
+    if not p1:
         return None
     files = list(getattr(args, "files", []) or [])
     if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
@@ -686,13 +707,35 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     if getattr(args, "dry_run", False):
         return None
     full_face = getattr(args, "select_mode", "line") == "full"
-    if full_face or getattr(args, "tests", None):
+    # SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
+    # --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
+    # 入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。
+    from .mutation.verdict_source import (
+        BaselineSourceError, baseline_source, prepare_map_for_baseline,
+    )
+    _files_all = [str(f) for f in (getattr(args, "files", None) or [])]
+    if baseline_source() == "map" and _files_all:
+        try:
+            prepare_map_for_baseline(
+                str(Path(args.project_root)), _files_all,
+                timeout_s=int(getattr(args, "timeout", 600) or 600))
+        except BaselineSourceError as e:
+            return _emit({"tool": "mutation", "ok": False,
+                          "summary": {"error": str(e)},
+                          "failures": [{"reason": str(e)}]})
+        if full_face or getattr(args, "tests", None):
+            return None
+    elif full_face or getattr(args, "tests", None):
+        # cold 源（legacy A20/显式 --tests 契约）：不预建/校验映射
         return None
     # SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
     # （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig 错误）。
     # 多文件收集失败契约（SEE-1321 LOW-6：缺失文件以 per-file error 进
     # results）不在此拦——处理仍在 dispatch 层。
     from .mutation.truth_select import MutationSelectionError
+    from .mutation.verdict_source import (
+        BaselineSourceError, baseline_source, prepare_map_for_baseline,
+    )
     from .source_io import anchor_to_project_root as _anchor_t
     _files = getattr(args, "files", None) or []
     _t = _files[0] if len(_files) == 1 else None
@@ -711,8 +754,15 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
         return rc
     # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
     try:
-        _truth.ensure_map(str(Path(args.project_root)),
-                          [str(f) for f in args.files])
+        if baseline_source() == "map":
+            # §SPEC-021：map 源判定基线——prepare 自动续新（含增量），
+            # 新鲜 map 直接复用（幂等）。
+            prepare_map_for_baseline(
+                str(Path(args.project_root)), [str(f) for f in args.files],
+                timeout_s=int(getattr(args, "timeout", 600) or 600))
+        else:
+            _truth.ensure_map(str(Path(args.project_root)),
+                              [str(f) for f in args.files])
     except MutationSelectionError as e:
         return _selection_error_payload(args, e)
     return None

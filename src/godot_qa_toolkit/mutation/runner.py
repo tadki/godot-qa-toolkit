@@ -885,6 +885,9 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
         )
 
         if baseline_source() == "map" and _map_mode() != "off":
+            # §SPEC-021：prepare 阶段（CLI）已自动续新；此处为库内直调
+            # 兜底——合成前再校验一致性，漂移即具名 fail-loud（不静默
+            # 退化，续新由调用方的 prepare 链承担）。
             try:
                 syn, _fail = map_baseline_snapshots(
                     [str(path)], project_root, tests_glob)
@@ -928,29 +931,10 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
         raise _BaselineDirtyFailure(baseline_failures)
-    # SEE-1631 §SPEC-020：map 源判定基线的首批验证腿——负对照判据要求
-    # "map 与实跑不一致"必须具名 fail-loud（禁止批量假 kill）：复用冷启动
-    # 同面一次未插桩实测，逐位对照合成 verdict（双向：map 绿实跑红 =
-    # 疑似插桩不耐受新形态；map 红实跑绿 = 陈旧吸收）。树一致性门
-    # （tests_face/目标文件 sha/recipe pristine）已在合成前 fail-loud。
-    if precomputed_baseline is not None \
-            and precomputed_baseline.get("source") == "map":
-        real_rc, real_tail, _real_elapsed = _run_baseline(
-            project_root, tests_glob, timeout_s)
-        real_failures = _parse_failing_tests(real_tail)
-        phantom_green = real_failures - set(baseline_failures)
-        phantom_red = set(baseline_failures) - real_failures
-        if phantom_green or phantom_red:
-            from .verdict_source import BaselineSourceError
-
-            raise BaselineSourceError(
-                "baseline_map_mismatch: attribution-map verdict baseline "
-                f"diverged from real execution — map-green-but-ran-red="
-                f"{sorted(phantom_green)[:4]}, map-red-but-ran-green="
-                f"{sorted(phantom_red)[:4]}; batch invalidated")
-        print("mutation: map verdict baseline verified against real "
-              "unmutated face (§SPEC-020 first-batch verification)",
-              file=sys.stderr)
+    # SEE-1631 §SPEC-022（Owner 终裁）：map 新鲜且与当前树一致时，跑
+    # mutant 之前不执行任何未插桩全脸基线/验证运行——判定基线 = map
+    # verdict 表（树一致性已在合成前 fail-loud 门承担）。残余通道内不
+    # 一致由既有 parity 门 / re-canary / 失配整批作废守护兜底。
     return baseline_failures, bool(baseline_failures), baseline_reused, \
         baseline_elapsed
 

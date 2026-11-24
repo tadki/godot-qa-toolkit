@@ -14,6 +14,7 @@ map 源下 parity 失配由 runner 升级为具名 fail-loud（见 runner）。
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 ENV_BASELINE_SOURCE = "GQT_MUTATION_BASELINE_SOURCE"
@@ -170,3 +171,155 @@ def map_baseline_snapshots(files: list[str], project_root: str,
                       "red_names": sorted(n for _s, n in face_pairs),
                       "red_pairs": sorted(face_pairs)}
     return baselines, {}
+
+
+def _map_drift(doc: dict, project_root: str, files: list[str]
+               ) -> "tuple[list[str], list[str]]":
+    """map 与当前树的漂移分类 → (增量可续新的变更路径, 全部漂移描述)。
+
+    增量可续新 = 目标生产文件 sha 漂移 + tests_face（测试脚本）sha 漂移
+    （map-update 的增量语义覆盖）；recipe pristine 失配 / 结构性缺失
+    → 只能全脸重建（增量列表为空但漂移描述在场）。"""
+    import hashlib
+
+    root = Path(project_root).resolve()
+    changed: set[str] = set()
+    drift: set[str] = set()
+    shas = doc.get("file_sha256") or {}
+    face = doc.get("tests_face") or {}
+
+    def _sha(p: Path) -> "str | None":
+        if not p.is_file():
+            return None
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    # 目标生产文件（显式 files 优先，其余取 map 记录面）
+    targets = {rel: want for rel, want in shas.items()}
+    for raw in files:
+        p = Path(raw)
+        rel = str(p.resolve().relative_to(root)) if p.is_absolute() \
+            else str(p)
+        targets[rel] = shas.get(rel)
+    for rel, want in targets.items():
+        p = root / rel
+        have = _sha(p)
+        if have is None:
+            drift.add(f"removed:{rel}")
+        elif have != want:
+            changed.add(rel)
+            drift.add(f"changed:{rel}")
+    for rel, want in face.items():
+        p = root / rel
+        have = _sha(p)
+        if have is None:
+            drift.add(f"removed:{rel}")
+        elif have != want:
+            changed.add(rel)
+            drift.add(f"changed:{rel}")
+    return sorted(changed), sorted(drift)
+
+
+def prepare_map_for_baseline(project_root: str, files: list[str],
+                             timeout_s: int = 600) -> str:
+    """§SPEC-021：map 源判定基线的 prepare 自动续新（Owner 指导：静态探
+    测发现 → prepare 更新 → 成功后进入 run）。
+
+    阶梯：map 缺失 → `ensure_map` 全脸自动建图（measure run 同形态）；
+    map 在场且漂移 → 优先增量续新（`run_attribution_increment`，只重跑
+    失效面）；recipe pristine 失配等不可增量形态 → 全脸重建。续新后
+    复检一致性（schema/臂证据/pristine/tests_face/目标 sha）——仍不一致
+    → `BaselineSourceError` 具名 fail-loud（消费方转结构化 JSON）。
+    返回可用 map 路径。"""
+    from .truth_select import MutationSelectionError, ensure_map, load_map, \
+        map_path
+
+    path = map_path(Path(project_root).resolve())
+    if not path or not Path(path).is_file():
+        print("mutation prepare: attribution map missing — building "
+              "(§SPEC-021 auto renewal)", file=sys.stderr)
+        try:
+            ensure_map(project_root, files, timeout_s=timeout_s)
+        except MutationSelectionError as e:
+            raise BaselineSourceError(
+                f"prepare renewal failed (map build): {e}") from e
+        return _verify_prepared(project_root, files)
+
+    try:
+        doc = load_map(path)
+    except MutationSelectionError as e:
+        raise BaselineSourceError(
+            f"prepare renewal failed (map unreadable): {e}") from e
+    changed, drift = _map_drift(doc, project_root, files)
+    pristine_ok = True
+    from .truth_select import _fresh_recipe_hash
+    pristine = _fresh_recipe_hash(str(Path(project_root).resolve()))
+    if pristine is not None and pristine != doc.get("recipe_hash_pristine"):
+        pristine_ok = False
+        drift.append("recipe_hash_pristine")
+    if not drift:
+        return path
+    print(f"mutation prepare: attribution map stale ({len(drift)} drift "
+          f"item(s)) — renewing (§SPEC-021 auto renewal)", file=sys.stderr)
+    if changed and pristine_ok:
+        # 增量续新（只重跑失效面）：目标面取自基线 target_files（建图时
+        # 的测量宇宙），recipe 由当前树现场构建（build_recipe 单源）。
+        from ..measurement.increment import (
+            IncrementError, run_attribution_increment,
+        )
+        from ..measurement.recipe import build_recipe
+        from ..source_io import anchor_to_project_root as _anchor
+
+        root = Path(project_root).resolve()
+        recipe, error = build_recipe(root)
+        if error is not None:
+            raise BaselineSourceError(
+                f"prepare renewal failed (recipe build): {error}")
+        targets = [str(root / t) for t in (doc.get("target_files") or [])]
+        targets = [t for t in targets if Path(t).is_file()]
+        if not targets:
+            raise BaselineSourceError(
+                "prepare renewal failed: no measurable targets in map")
+        try:
+            run_attribution_increment(
+                project_root, targets, recipe, path, changed, path,
+                timeout_s=timeout_s)
+        except IncrementError as e:
+            raise BaselineSourceError(
+                f"prepare renewal failed (increment): {e}") from e
+    else:
+        # 全脸重建（measure run 同形态；recipe pristine 失配/结构性漂移
+        # 不可增量）——auto 管理的默认 map 允许安全重建，重建前移除旧
+        # 产物（ensure_map 仅在不可复用时重建，stale 旧图须显式移除）。
+        try:
+            Path(path).unlink(missing_ok=True)
+            ensure_map(project_root, files, timeout_s=timeout_s)
+        except MutationSelectionError as e:
+            raise BaselineSourceError(
+                f"prepare renewal failed (rebuild): {e}") from e
+    return _verify_prepared(project_root, files)
+
+
+def _verify_prepared(project_root: str, files: list[str]) -> str:
+    """续新后一致性复检：失配即具名 fail-loud（不静默进入 run）。"""
+    from .truth_select import load_map, map_path
+
+    path = map_path(Path(project_root).resolve())
+    if not path:
+        raise BaselineSourceError(
+            "prepare renewal produced no map at the default path")
+    try:
+        doc = load_map(path)
+        _assert_fresh(project_root, doc, files)
+    except Exception as e:
+        from .truth_select import MutationSelectionError
+        if isinstance(e, MutationSelectionError):
+            raise BaselineSourceError(
+                f"prepare renewal still inconsistent: {e}") from e
+        raise BaselineSourceError(
+            f"prepare renewal still inconsistent: {e}") from e
+    states = doc.get("arms_state") or {}
+    if not states or all(st.get("state") not in ("valid", "disabled")
+                         for st in states.values()):
+        raise BaselineSourceError(
+            "prepare renewal produced a map without a valid arm")
+    return path

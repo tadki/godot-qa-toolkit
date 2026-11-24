@@ -31,7 +31,7 @@ the target path or CWD, and fail loudly if none exists.
 - **Gherkin acceptance pipeline.** `.feature` files compile to a versioned IR
   and generated GUT tests, then run and contract-mutate inside your project —
   full-matrix mutation proves the assertions actually bite. No steps registry;
-  tests call your project's `testing_api.gd` adapter.
+  tests call your project's `addons/gqt_gherkin/harness.gd` adapter.
 - **Mutation testing that picks the right tests.** Line-level runtime facts are
   the primary truth: each mutant uses the tests that executed its source line,
   and sites with identical test sets share one generated test glob and baseline.
@@ -92,10 +92,16 @@ sight is skipped gracefully, not reported as an error).
   imported once; set `GQT_AUTO_IMPORT=0` to disable that bootstrap.
 - A resolvable Godot binary: per-command `--godot-bin` wins, then
   `GQT_GODOT_BIN`, then the first `godot` on `PATH`.
-- For the Gherkin pipeline: the thin adapter at
-  `res://addons/gqt_gherkin/harness.gd` implementing
-  [`docs/templates/testing_api.gd.md`](docs/templates/testing_api.gd.md)
-  (one-time wiring, no auto-discovery).
+- For the Gherkin pipeline: the strict addon root
+  `res://addons/gqt_gherkin/` contains `features/*.feature`, `schema.json`,
+  `validator.gd`, and `harness.gd` implementing
+  [`docs/templates/testing_api.gd.md`](docs/templates/testing_api.gd.md).
+  Alternate feature or harness roots are rejected. `compile` performs the pure
+  schema handshake without launching Godot or resolving a Godot binary;
+  `compile --write` and `--keys` additionally require the GUT runner file but
+  not a Godot binary. The harness implementation is needed only when generated
+  tests execute. `run` / `mutate` additionally run the addon validator before
+  business GUT execution.
 
 Typical calls:
 

@@ -44,6 +44,7 @@ func query_state(path: String):
     ## 状态快照查询："entity.field" 点路径。Then 断言与 unchanged
     ## 基线快照都经此读取；未知路径返回 null（比对必挂，fail-safe）。
     ## **/2 查询路径扩展**（见下节）。
+```
 
 > **typed cell 双重语义（Revy QA LOW 澄清）**：`case.values` 里的
 > typed cell 同时是**执行输入与期望值的唯一数据面**——变异轮改的就是
@@ -55,6 +56,7 @@ func query_state(path: String):
 > mutant，执行输入必须与 values 分离（从步骤文本等未变异来源驱动）。
 > 两种形态都在本契约内，adoption_spec 接线时二选一并写明。
 
+```gdscript
 func check_expectations(case: Dictionary) -> String:
     ## Then 期望值比对（数据驱动断言核心，§SPEC-1426-13）：case.values
     ## 里的每个类型声明 cell 是本 case 的期望值——harness 按自己的
@@ -67,7 +69,7 @@ func check_expectations(case: Dictionary) -> String:
 
 | 模板方法 | testing_api 对应 | 生成测试调用时机 |
 |---|---|---|
-| `smoke_check` | init/tick/query 连招 | 首个 case 前，一次 |
+| `smoke_check` | init/tick/query 连招 | harness 创建时，以及后续每个 case 的 `before_each`（worker rebuild 后也做探针） |
 | `init_case` | init_battle_state(case) | 每 case 开始 |
 | `run_step` | execute_tick / apply_player_action | 每 Given/When 步（/2 起被 `await` 调用） |
 | `query_state` | query_entity_state(path) | Then 断言 + unchanged 基线 |

@@ -51,9 +51,11 @@ as untrustworthy, not as a verdict fail. `gqt doctor` is the exception: its
 self-check JSON goes to **stderr** and stdout stays empty.
 
 **`--project-root`** is the only entry point for the target project; the tool
-never discovers or guesses structure. GUT-driven commands require
+never guesses alternate project layouts. GUT-driven commands require
 `<root>/addons/gut/gut_cmdln.gd`; the measurement chain requires
-`.gutconfig.json` and `addons/gqt_gherkin/features/`.
+`.gutconfig.json` and `addons/gqt_gherkin/features/`. Gherkin reads only the
+strict `addons/gqt_gherkin/` addon root, including its schema, harness, and
+validator; other feature or harness roots are not fallback candidates.
 
 **Godot binary**: commands that launch Godot resolve it as
 **`--godot-bin` > `GQT_GODOT_BIN` > PATH**. An unusable explicit path becomes a

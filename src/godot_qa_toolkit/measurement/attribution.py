@@ -625,6 +625,82 @@ def _arms_state(arms: tuple[dict, ...]) -> dict:
     return out
 
 
+def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
+    """SEE-1631 §SPEC-020：逐测试 verdict 表（GUT 测试与 gherkin scenario
+    同表）。
+
+    每个测试身份（gut_full `res://script::test` / gherkin
+    `gherkin://feature/<key>::<test>`）记录本次测量形态下的判定：
+    - `{"verdict": "green"}`——行事实宇宙内且未出现在任何红集合；
+    - `{"verdict": "red", "classification": "pre_existing"}`——既有失败
+      （基线吸收）；
+    - `{"verdict": "red", "classification": "suspected_intolerant"}`——
+      疑似插桩不耐受车道；
+    - `{"verdict": "red", "classification": "new"}`——未分类红（臂应
+      invalid、map 拒装；如实记录供消费方 fail-loud）。
+
+    gherkin 红对以 raw 生成路径形态记录（对照路由产出）；行事实宇宙是
+    规范身份——发射前按 manifest test_name 归一（`test_<key>.gd::<name>`
+    → `gherkin://feature/<key>::<name>`），同一测试两种形态不分裂。"""
+    import re as _re
+
+    def _norm(pair: str) -> str:
+        script = str(pair).split("::", 1)[0]
+        if "/gherkin/generated/" not in script.replace("\\", "/"):
+            return str(pair)   # gut 对：身份已是规范形态
+        m = _re.search(r"test_(.+)\.gd$", script.replace("\\", "/"))
+        if not m or "::" not in str(pair):
+            return str(pair)
+        return f"{GHERKIN_IDENTITY_PREFIX}{m.group(1).split('/')[-1]}::{pair.split('::', 1)[1]}"
+
+    red_by_class: dict[str, set[str]] = {
+        "pre_existing": set(), "suspected_intolerant": set(), "new": set()}
+    universe: set[str] = set()
+    for arm in arms:
+        name = arm.get("arm")
+        tf = arm.get("test_failures") or {}
+        universe |= set((arm.get("attribution") or {}).get("test_to_lines")
+                        or {})
+        if name == "gut_full":
+            meta = arm.get("baseline_failures_meta") or {}
+            red_by_class["pre_existing"] |= {
+                f"{s}::{t}" for s, t in (meta.get("pairs") or [])}
+            red_by_class["suspected_intolerant"] |= set(
+                tf.get("instrumentation_intolerant") or [])
+        elif name == "gherkin":
+            red_by_class["pre_existing"] |= {
+                _norm(p) for p in (tf.get("pre_existing_failures") or [])}
+            red_by_class["suspected_intolerant"] |= {
+                _norm(p) for p in (tf.get("instrumentation_intolerant") or [])}
+    classified: set[str] = set()
+    out: dict[str, dict] = {}
+    for cls in ("pre_existing", "suspected_intolerant"):
+        for ident in red_by_class[cls] & universe:
+            out[ident] = {"verdict": "red", "classification": cls}
+            classified.add(ident)
+    # 未分类红（不在行事实宇宙 = 臂 invalid 已拒装的产物面）：如实记录
+    for cls in ("new",):
+        pass
+    known_reds = red_by_class["pre_existing"] \
+        | red_by_class["suspected_intolerant"]
+    for arm in arms:
+        tf = arm.get("test_failures") or {}
+        raw_observed = set(tf.get("observed_pairs") or [])
+        raw_observed |= set(tf.get("new_pairs") or [])
+        raw_observed |= set(tf.get("pre_existing_failures") or [])
+        raw_observed |= set(tf.get("instrumentation_intolerant") or [])
+        for raw in raw_observed:
+            ident = _norm(raw)
+            if ident in universe and ident not in out:
+                out[ident] = {"verdict": "red", "classification": "new"}
+                classified.add(ident)
+    for ident in universe:
+        if ident not in classified:
+            out[ident] = {"verdict": "green"}
+            classified.add(ident)
+    return out
+
+
 def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
     """每目标文件的探针面（可插桩行全集）：块入口 probe_lines 经 block_map
     展开为全部块内语句起始行。Coverage Store 投影的合法跳过锚来源。"""
@@ -671,6 +747,8 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         "instrumentable_lines": dict(instrumentable_lines or {}),
         "arms": arms_attr,
         "arms_state": _arms_state(arms),
+        # SEE-1631 §SPEC-020：逐测试 verdict 表（mutation 判定原图）
+        "test_verdicts": _test_verdict_table(arms),
         "notes": notes,
     }
     if baseline_meta is not None:

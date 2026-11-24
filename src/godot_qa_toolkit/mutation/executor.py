@@ -718,9 +718,24 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     # A19（SEE-1594 S5）：baseline 共享判定必须使用实际生效的 select_mode
     # （缺省 full 会把自动选面 glob 判成 None → 多文件 baseline 不共享 →
     # chunk 退串行）。
-    baselines, baseline_failures = _precompute_baselines(
-        files, project_root, timeout_s, tests_glob, clock=clock,
-        knob_state=knob_state, select_mode=select_mode)
+    # SEE-1631 §SPEC-020：判定基线单一真源——默认读 map verdict 表合成
+    # 快照（零冷启动）；`GQT_MUTATION_BASELINE_SOURCE=cold` 显式回退旧
+    # 冷启动路径。map 缺失/过期/与树不一致 → BaselineSourceError 具名
+    # fail-loud（不静默退化全脸）。
+    from .verdict_source import baseline_source, map_baseline_snapshots
+
+    if baseline_source() == "map":
+        baselines, baseline_failures = map_baseline_snapshots(
+            files, project_root, tests_glob, select_mode=select_mode)
+        print("mutation: verdict baseline sourced from attribution map "
+              "(§SPEC-020; cold start skipped)", file=sys.stderr)
+    else:
+        print(f"mutation: verdict baseline via legacy cold start "
+              f"(GQT_MUTATION_BASELINE_SOURCE=cold, disclosed)",
+              file=sys.stderr)
+        baselines, baseline_failures = _precompute_baselines(
+            files, project_root, timeout_s, tests_glob, clock=clock,
+            knob_state=knob_state, select_mode=select_mode)
     run_id = new_run_id()
     chunks: list[dict] = []
     settled: list[dict] = []

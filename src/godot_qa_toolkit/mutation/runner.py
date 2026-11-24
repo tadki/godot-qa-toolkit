@@ -876,6 +876,29 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。"""
     backup_path = os.path.join(workdir, "original.gd")
     shutil.copy2(str(path), backup_path)
+    # SEE-1631 §SPEC-020：判定基线单一真源——map 源时此处不再冷启动
+    # GUT，直接由 verdict 表合成既有形状的快照（下游解析/判定零改动）。
+    if precomputed_baseline is None:
+        from .truth_select import mode as _map_mode
+        from .verdict_source import (
+            BaselineSourceError, baseline_source, map_baseline_snapshots,
+        )
+
+        if baseline_source() == "map" and _map_mode() != "off":
+            try:
+                syn, _fail = map_baseline_snapshots(
+                    [str(path)], project_root, tests_glob)
+            except BaselineSourceError as e:
+                raise BaselineSourceError(
+                    f"loop baseline: {e}") from e
+            precomputed_baseline = syn.get(tests_glob) \
+                or syn.get(None)
+            if precomputed_baseline is None:
+                raise BaselineSourceError(
+                    "loop baseline: map produced no baseline snapshot "
+                    f"for glob {tests_glob!r}")
+            print("mutation: verdict baseline sourced from attribution "
+                  "map (§SPEC-020; cold start skipped)", file=sys.stderr)
     if precomputed_baseline is not None:
         baseline_rc = int(precomputed_baseline["rc"])
         baseline_tail = str(precomputed_baseline["tail"])
@@ -905,6 +928,29 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
         raise _BaselineDirtyFailure(baseline_failures)
+    # SEE-1631 §SPEC-020：map 源判定基线的首批验证腿——负对照判据要求
+    # "map 与实跑不一致"必须具名 fail-loud（禁止批量假 kill）：复用冷启动
+    # 同面一次未插桩实测，逐位对照合成 verdict（双向：map 绿实跑红 =
+    # 疑似插桩不耐受新形态；map 红实跑绿 = 陈旧吸收）。树一致性门
+    # （tests_face/目标文件 sha/recipe pristine）已在合成前 fail-loud。
+    if precomputed_baseline is not None \
+            and precomputed_baseline.get("source") == "map":
+        real_rc, real_tail, _real_elapsed = _run_baseline(
+            project_root, tests_glob, timeout_s)
+        real_failures = _parse_failing_tests(real_tail)
+        phantom_green = real_failures - set(baseline_failures)
+        phantom_red = set(baseline_failures) - real_failures
+        if phantom_green or phantom_red:
+            from .verdict_source import BaselineSourceError
+
+            raise BaselineSourceError(
+                "baseline_map_mismatch: attribution-map verdict baseline "
+                f"diverged from real execution — map-green-but-ran-red="
+                f"{sorted(phantom_green)[:4]}, map-red-but-ran-green="
+                f"{sorted(phantom_red)[:4]}; batch invalidated")
+        print("mutation: map verdict baseline verified against real "
+              "unmutated face (§SPEC-020 first-batch verification)",
+              file=sys.stderr)
     return baseline_failures, bool(baseline_failures), baseline_reused, \
         baseline_elapsed
 
@@ -913,7 +959,7 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                target_res, kind, idpack, exec_scheme_resolved, worker_channel,
                reporter, store2, prior_entries, scopes, clock, slot_info,
                t_slot, kill_bail=False, direct_scripts=None,
-               red_pairs=None) -> list:
+               red_pairs=None, baseline_snapshot: dict | None = None) -> list:
     """beacon 播种 → worker/冷腿执行 → 槽归还断言与 slot_sync 计时。"""
     ownership_holder: list = []
 
@@ -1040,7 +1086,20 @@ def _run_mutant_loop(
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,
             target_res, detect_binary_kind(), idpack, scheme, worker_channel,
             reporter, store2, prior_entries, scopes, clock, slot_info, t_slot,
-            bail_effective, bail_scripts, red_pairs)
+            bail_effective, bail_scripts, red_pairs,
+            baseline_snapshot=precomputed_baseline)
+        # SEE-1631 §SPEC-020：map 源判定基线下 parity 门失配 = "map 说绿
+        # 而执行红（或反之）"被实跑证伪——整批作废、具名 fail-loud（不得
+        # 降级继续产出批量假 kill）。冷源（legacy）维持原降级语义。
+        if baseline_snapshot_from_map(precomputed_baseline):
+            for ev in slot_info.get("worker_fatal_events") or []:
+                if str(ev).startswith("mode parity gate"):
+                    from .verdict_source import BaselineSourceError
+
+                    raise BaselineSourceError(
+                        "baseline_map_mismatch: attribution-map verdict "
+                        "baseline diverged from real execution "
+                        f"(parity gate) — batch invalidated: {ev}")
         slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
         slot_info["slot_mode"] = slot.mode
         slot_info["freshness"] = list(slot.freshness)
@@ -1103,6 +1162,12 @@ def _baseline_skip_disclosure(*, dirty: bool, skip_applied: bool,
         out["degraded"] = True
         out["degrade_reason"] = degrade_reason or "worker_degraded_cold"
     return out
+
+
+def baseline_snapshot_from_map(precomputed_baseline: dict | None) -> bool:
+    """SEE-1631 §SPEC-020：当前判定基线是否来自 attribution map。"""
+    return bool(precomputed_baseline
+                and precomputed_baseline.get("source") == "map")
 
 
 def _worker_degraded_state(slot_info: dict) -> tuple[bool, str | None]:

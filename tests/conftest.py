@@ -63,3 +63,15 @@ def _attribution_map_default_off(monkeypatch):
     truth_select.reset_ledger()
     yield
     truth_select.reset_ledger()
+
+
+@pytest.fixture(autouse=True)
+def _mutation_baseline_default_cold(monkeypatch):
+    """SEE-1631 §SPEC-020：单元测试面默认 legacy 冷启动判定基线。
+
+    生产默认（map 源）由 CLI 消费方生效；单元套件的大量 mutation 机制
+    反例（并行分片/预算重试/prefilter 复用/进度面等）以冷启动为既定主体
+    ——统一在此回退 cold，map 源行为由 test_c2_verdict_source_see1631.py
+    专属覆盖（该文件显式改写本默认）。"""
+    monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
+    yield

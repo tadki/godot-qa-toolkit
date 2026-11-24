@@ -83,6 +83,7 @@ def _apply_godot_bin_or_contract(tool: str, args: argparse.Namespace) -> int | N
     类型（与 mutation 既有 refresh 语义对齐）。"""
     from .mutation.inject import BinaryConfigError, apply_godot_bin_override, \
         detect_binary_kind, resolve_env_godot_bin_relative
+    from .mutation.verdict_source import BaselineSourceError
 
     try:
         # §SPEC-078 M2：flag/env 显式相对路径统一在入口按子进程 cwd
@@ -754,6 +755,7 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # 领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
     from .mutation.truth_select import MutationSelectionError
+    from .mutation.verdict_source import BaselineSourceError
     from .mutation import truth_select as _truth
     _truth.reset_ledger()
     _apply_mutation_map_flags(args, _truth)
@@ -772,6 +774,12 @@ def cmd_mutation(args: argparse.Namespace) -> int:
         result = _dispatch_mutation(args, binary_kind)
     except MutationSelectionError as e:
         return _selection_error_payload(args, e)
+    except BaselineSourceError as e:
+        # SEE-1631 §SPEC-020：map 源判定基线不可用/与实跑失配——具名
+        # fail-loud（整批作废），零 traceback 泄漏。
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     except BinaryConfigError as e:
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},

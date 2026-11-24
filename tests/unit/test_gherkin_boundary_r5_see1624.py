@@ -237,6 +237,32 @@ def test_hyphenated_feature_key_chain_consistent(project: Path) -> None:
 
 # ============ R5-5 worker 配置失败零残留（MEDIUM） ============
 
+def _iso_residue() -> set[str]:
+    """隔离残留：产品现用 `gqt-godot-iso-*`（历史命名 gqt-gherkin-worker-*
+    一并纳入，避免命名漂移再次造成假绿）。"""
+    import glob
+    import tempfile as _tf
+
+    root = _tf.gettempdir()
+    found: set[str] = set()
+    for pattern in ("gqt-godot-iso-*", "gqt-gherkin-worker-*"):
+        found |= set(glob.glob(os.path.join(root, pattern)))
+    return found
+
+
+def test_iso_residue_probe_has_discriminating_power(tmp_path: Path) -> None:
+    """判别力自检：预置一个 `gqt-godot-iso-*` 目录必须被残留探测捕获——
+    若 glob 仍查旧名 `gqt-gherkin-worker-*`，本用例判红。"""
+    import tempfile as _tf
+
+    planted = Path(_tf.gettempdir()) / f"gqt-godot-iso-probe-{os.getpid()}"
+    planted.mkdir(exist_ok=True)
+    try:
+        assert str(planted) in _iso_residue()
+    finally:
+        planted.rmdir()
+
+
 def test_worker_config_failure_leaves_no_residue(project: Path,
                                                 monkeypatch,
                                                 tmp_path: Path) -> None:
@@ -253,14 +279,12 @@ def test_worker_config_failure_leaves_no_residue(project: Path,
         project / "addons" / "gqt_gherkin" / "features" / "demo.feature",
         project, write=True)
     monkeypatch.setenv("GQT_GODOT_BIN", "/nonexistent/godot-binary")
-    tmp_root = _tf.gettempdir()
-    before_iso = set(glob.glob(os.path.join(tmp_root,
-                                           "gqt-gherkin-worker-*")))
+    before_iso = _iso_residue()
     before_scratch = set(glob.glob(os.path.join(str(project / ".qa-cache"),
                                               "gqt-gherkin-worker-*")))
     with pytest.raises(mr.GherkinRunError):
         mr._spawn_worker(project)
-    after_iso = set(glob.glob(os.path.join(tmp_root, "gqt-gherkin-worker-*")))
+    after_iso = _iso_residue()
     after_scratch = set(glob.glob(os.path.join(str(project / ".qa-cache"),
                                              "gqt-gherkin-worker-*")))
     assert after_scratch == before_scratch, (
@@ -474,3 +498,61 @@ def test_cli_outside_suite_dir_single_json(project: Path,
     assert "outside the project root" in payload["summary"]["error"]
     assert "Traceback" not in r.stderr
     assert (outside / "caller.txt").read_text(encoding="utf-8") == "keep"
+
+
+# ============ R5-11 diagnose 连字符 key 归一（MEDIUM） ============
+
+def test_diagnose_accepts_hyphen_key(monkeypatch) -> None:
+    """recipe 键为归一形态 my_demo 时，--features my-demo 必须被接受；
+    未知键仍具名拒绝。"""
+    import godot_qa_toolkit.measurement.diagnose as diag_mod
+    from godot_qa_toolkit.measurement.backup import MeasurementError
+
+    # 本用例只验证 key 归一；recipe 结构合同由既有 recipe 测试覆盖。
+    monkeypatch.setattr(diag_mod, "verify_recipe", lambda r: (True, ""))
+    recipe = {"gherkin_face": {"features": [
+        {"key": "my_demo", "source": "res://addons/gqt_gherkin/features/"
+                                      "my-demo.feature"}]}}
+    feature_by_key, _sources = diag_mod._diagnose_prepare(
+        recipe, ["my-demo"], [])
+    assert "my_demo" in feature_by_key
+    with pytest.raises(MeasurementError, match="unknown gherkin features"):
+        diag_mod._diagnose_prepare(recipe, ["no-such"], [])
+
+
+# ============ R5-12 symlink loop 具名域错误（MEDIUM） ============
+
+def test_addon_symlink_loop_is_named(tmp_path: Path) -> None:
+    from godot_qa_toolkit.gherkin.addon import AddonError, compile_preflight
+
+    loop = tmp_path / "loop-project"
+    loop.symlink_to(loop)
+    with pytest.raises(AddonError, match="resolved|symlink loop"):
+        compile_preflight(loop)
+
+
+def test_suite_dir_symlink_loop_is_named(project: Path,
+                                         tmp_path: Path) -> None:
+    from godot_qa_toolkit.gherkin.suite import (
+        SuiteError, ensure_suite_dir_in_project)
+
+    loop = tmp_path / "loop-suite"
+    loop.symlink_to(loop)
+    with pytest.raises(SuiteError, match="resolved|symlink loop"):
+        ensure_suite_dir_in_project(project, loop)
+
+
+# ============ R5-13 非 UTF-8 ownership marker（MEDIUM） ============
+
+def test_non_utf8_marker_treated_as_caller_owned(project: Path) -> None:
+    """不可信 marker（非 UTF-8）→ 视为 caller-owned 并保留，清理不得破裂。"""
+    from godot_qa_toolkit.gherkin.addon import is_owned_suite_dir
+    from godot_qa_toolkit.gherkin.suite import _cleanup_suite_dir
+
+    d = project / "gherkin" / "generated" / ".gqt-run-badmarker"
+    d.mkdir(parents=True)
+    (d / ".gqt-owner").write_bytes(b"\xff\xfe")
+    (d / "notes.txt").write_text("keep", encoding="utf-8")
+    assert is_owned_suite_dir(d, project) is False
+    assert _cleanup_suite_dir(d, project) == "kept-caller-owned"
+    assert (d / "notes.txt").read_text(encoding="utf-8") == "keep"

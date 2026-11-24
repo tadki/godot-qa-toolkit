@@ -15,6 +15,7 @@ from pathlib import Path
 from ..coverage.evidence import clear_sink, make_run_uuid
 from ..coverage.runner import _instrument, _read_hits
 from ..gherkin.run import GherkinRunError
+from ..gherkin.addon import normalize_feature_key
 from ..gherkin.suite import (
     SuiteError,
     _cleanup_suite_dir,
@@ -81,10 +82,12 @@ def _diagnose_prepare(recipe: dict, feature_keys: list[str],
     ok, reason = verify_recipe(recipe)
     if not ok:
         raise MeasurementError(f"recipe invalid: {reason}")
-    feature_by_key = {f["key"]: f
+    # key 与 compile/group/reconcile 同口径归一（my-demo → my_demo）：
+    # 原样比较会让 recipe 键 my_demo 拒掉 --features my-demo（§SPEC-019 R5e）。
+    feature_by_key = {normalize_feature_key(f["key"]): f
                       for f in recipe["gherkin_face"]["features"]}
     unknown = [k for spec in feature_keys for k in spec.split("+")
-               if k and k not in feature_by_key]
+               if k and normalize_feature_key(k) not in feature_by_key]
     if unknown:
         raise MeasurementError(f"unknown gherkin features: {unknown}")
     sources: dict[str, str] = {}
@@ -101,7 +104,7 @@ def _diagnose_feature_text(root: Path, feature_by_key: dict,
                            sub_keys: list[str]) -> str:
     feature_text = ""
     for sk in sub_keys:
-        src = feature_by_key[sk].get("source", "")
+        src = feature_by_key[normalize_feature_key(sk)].get("source", "")
         if isinstance(src, str) and src.startswith("res://"):
             fpath = root / src[len("res://"):]
             if fpath.is_file():

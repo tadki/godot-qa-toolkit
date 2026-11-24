@@ -441,9 +441,32 @@ def _feature_key_conflict(root: Path, feature_key: str,
     return None
 
 
+def out_dir_error(out_dir: str | Path, project_root: str | Path) -> str | None:
+    """显式 --out-dir 的**一次**校验（DEF-B）：返回具名错误或 None。
+
+    多 key 单次调用只在校验一次——否则第一个 key 的产物会让第二个 key
+    触发自己写的 "out_dir must be empty"。约束不变：目录必须不存在、
+    为空，或归属工具私有套件（受管形态 + 绑定 marker）；调用方预先存在
+    的文件/目录一律拒绝且零删除。"""
+    try:
+        out = Path(out_dir).resolve()
+    except (OSError, RuntimeError) as e:
+        return (f"out_dir cannot be resolved ({type(e).__name__}: {e}) — "
+                f"symlink loops are rejected")
+    if not out.exists():
+        return None
+    if not out.is_dir():
+        return f"out_dir is not a directory: {out}"
+    if any(out.iterdir()) and not is_owned_suite_dir(out, project_root):
+        return (f"out_dir must be empty: {out} — caller-owned dirs are "
+                f"never cleared or deleted by gqt")
+    return None
+
+
 def compile_feature(feature_path: str | Path, project_root: str | Path,
                     *, write: bool = True, clean: bool = True,
-                    out_dir: str | Path | None = None
+                    out_dir: str | Path | None = None,
+                    prepared_out_dir: bool = False
                     ) -> tuple[CompiledSuite | None, dict]:
     """编译一个 .feature。write=False 时纯内存（golden-file 单测用）。
 
@@ -514,15 +537,13 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
             return None, {"reason": f"out_dir must live inside the project "
                                     f"for res:// resolution: {out_dir}"}
         # CRITICAL（Final Review #1）：显式 --out-dir 是**调用方持有**的
-        # 目录——gqt 只写入、从不清理/删除；为保证产物可判且不覆盖调用方
-        # 数据，目录必须不存在或为空，否则具名拒绝（零写入）。
-        if out.exists():
-            if not out.is_dir():
-                return None, {"reason": f"out_dir is not a directory: {out}"}
-            if any(out.iterdir()) and not is_owned_suite_dir(out, root):
-                return None, {"reason": (
-                    f"out_dir must be empty: {out} — caller-owned dirs are "
-                    f"never cleared or deleted by gqt")}
+        # 目录——gqt 只写入、从不清理/删除；目录必须不存在或为空，否则
+        # 具名拒绝（零写入）。多 key 单次调用由调用方预先统一校验一次
+        # （prepared_out_dir=True，DEF-B）——逐 key 复检会被同批产物误拒。
+        if not prepared_out_dir:
+            reason = out_dir_error(out_dir, root)
+            if reason is not None:
+                return None, {"reason": reason}
         ir_rel = f"{base}/ir/{feature_key}.json"
         gd_rel = f"{base}/generated/test_{feature_key}.gd"
     else:

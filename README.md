@@ -72,7 +72,7 @@ gqt
 Install from a release tag (no PyPI channel):
 
 ```bash
-pip install "git+https://github.com/tadki/godot-qa-toolkit.git@v0.4.1"
+pip install "git+https://github.com/tadki/godot-qa-toolkit.git@v0.4.2"
 gqt --help     # sanity-check: exactly four top-level entries
 ```
 
@@ -187,7 +187,7 @@ map is in [`docs/contract.md`](docs/contract.md) §2.
 ## Versioning
 
 Consumers pin by **git tag**; `pyproject.toml` `version` is the single source
-of truth and must equal the tag (currently `0.4.1` ↔ `v0.4.1`). Below `1.0` a
+of truth and must equal the tag (currently `0.4.2` ↔ `v0.4.2`). Below `1.0` a
 minor bump may carry breaking CLI/contract changes (`v0.2.0` and `v0.3.0`
 both did); from `1.0` on, breaking changes require a major.
 

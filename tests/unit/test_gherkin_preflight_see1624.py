@@ -108,7 +108,7 @@ def test_unsupported_schema_major_fails(project: Path,
                                         bad_version: str) -> None:
     src = write_feature(project, "demo")
     doc = {"schema": bad_version,
-           "requires_gqt": "v0.4.1",
+           "requires_gqt": "v0.4.2",
            "testing_api": "see1468-gherkin/2"}
     (project / "addons" / "gqt_gherkin" /
      "schema.json").write_text(json.dumps(doc), encoding="utf-8")
@@ -133,7 +133,7 @@ def test_requires_too_high_fails(project: Path) -> None:
 def test_missing_required_declaration_fails(project: Path,
                                             missing: str) -> None:
     doc = {"schema": "gqt-gherkin-addon/1.0",
-           "requires_gqt": "v0.4.1",
+           "requires_gqt": "v0.4.2",
            "testing_api": "see1468-gherkin/2"}
     doc.pop(missing)
     (project / "addons" / "gqt_gherkin" /
@@ -144,7 +144,7 @@ def test_missing_required_declaration_fails(project: Path,
 
 def test_testing_api_token_drift_fails(project: Path) -> None:
     doc = {"schema": "gqt-gherkin-addon/1.0",
-           "requires_gqt": "v0.4.1",
+           "requires_gqt": "v0.4.2",
            "testing_api": "see1468-accept/2"}
     (project / "addons" / "gqt_gherkin" /
      "schema.json").write_text(json.dumps(doc), encoding="utf-8")

@@ -31,8 +31,8 @@ SCHEMA_VERSION = "gqt-gherkin-addon/1"
 # 版本协商取交集语义会让"半兼容"静默通过，违背 fail-loud 纪律。
 SUPPORTED_ADDON_MAJORS = (1,)
 # 本工具自身版本（与 pyproject / 发布 tag 同步）：schema requires.gqt 的
-# 比较基准。发布 v0.4.1 起由本常量承载，不读元数据（可测试、零依赖）。
-GQT_VERSION = "v0.4.1"
+# 比较基准。发布 v0.4.2 起由本常量承载，不读元数据（可测试、零依赖）。
+GQT_VERSION = "v0.4.2"
 
 ADDON_DIR_RELPATH = "addons/gqt_gherkin"
 FEATURES_DIR_RELPATH = f"{ADDON_DIR_RELPATH}/features"

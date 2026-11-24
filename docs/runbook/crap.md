@@ -110,7 +110,7 @@ gqt measure risk src/systems/example.gd --project-root . --skip-measure --report
 | `--core-tests <dir>` | `res://tests/unit/` | GUT dir for the core recipe |
 | `--full-tests <dir>` | `res://tests/` (via `.gutconfig` dirs) | GUT dir for the full recipe |
 | `--report <path>` | `./shadow-report.json` | Shadow JSON output path |
-| `--performance-file <path>` | omitted | Optional JSON with measured complexity/coverage head-vs-master medians |
+| `--performance-file <path>` | omitted | Optional JSON with measured complexity/coverage head-vs-master medians; Gherkin timing uses `gherkin_cost`, while retired `acceptance_cost` is rejected rather than silently dropped |
 | `--skip-measure` | off | Static-only dry run: no GUT rounds executed |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override |
 

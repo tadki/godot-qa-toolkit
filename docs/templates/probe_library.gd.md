@@ -17,7 +17,7 @@ Resource**（`extends RefCounted`/`Resource`、零引擎 API、显式 RNG 注入
 由 harness 加载驱动；把业务逻辑直接写进 harness/探针库 = 逃逸 arch 门禁，
 属接线违规，adoption_spec 声明面外。
 
-## 接口速览（与 testing_api.gd.md /2 一一对应）
+## 接口速览（helper API；harness 包装层负责把结果适配为 testing_api 的 `String` 成功/错误契约）
 
 ```gdscript
 extends RefCounted
@@ -41,8 +41,8 @@ extends RefCounted
 # 失败形态统一 {"__error": "..."}；未知 op 同形态（"no harness binding" 纪律）。
 
 # ---- 场景生命周期族（harness 转发）----
-func mount_scene(path: String) -> Node            # 实例化 + 挂 current scene 兄弟位
-func advance_frames(n: int) -> void               # await process_frame × n（确定性输入）
+func mount_scene(path: String) -> Variant         # Node 或 {"__error": ...}；harness 转成 String 结果
+func advance_frames(n: int) -> void               # await process_frame × n；harness 转成 String 结果
 func settle_until(cond: Callable, max_frames: int) -> String  # 静息判定，超预算报错
 func current_scene_name() -> String
 
@@ -60,7 +60,7 @@ func resolve_query(path: String) -> Variant       # a.b.c / node:…:prop / ref:
 ## 参考实现（骨架全量可拷贝；`_root` 由 harness 注入 `root` 节点）
 
 ```gdscript
-class_name GqtAcceptProbe
+class_name GqtGherkinProbe
 extends RefCounted
 
 var _root: Node = null                 # harness 注入：场景树根

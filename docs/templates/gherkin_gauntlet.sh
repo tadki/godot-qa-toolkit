@@ -5,6 +5,7 @@
 # exit 非 0 即打回（CI 与本地同规则，v1 无 stamp）。
 #
 # 用法：bash gherkin_gauntlet.sh <project-root> <feature-path> [feature-key]
+# feature-path 必须位于 <project-root>/addons/gqt_gherkin/features/。
 # 锁文件落 <project-root>/.qa-cache/gherkin-gauntlet.lock（flock，进程死
 # 亡自动释放；复用 godot_gate.py 的 flock 模式）。并行双会话：第二条
 # 流水线等待锁而非互删生成物。
@@ -12,9 +13,9 @@ set -euo pipefail
 
 PROJECT_ROOT="${1:?usage: gherkin_gauntlet.sh <project-root> <feature-path> [feature-key]}"
 FEATURE="${2:?usage: gherkin_gauntlet.sh <project-root> <feature-path> [feature-key]}"
-KEY="${3:-$(basename "${FEATURE%.feature}" | tr -c 'A-Za-z0-9_' '_')}"
-
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+KEY="${3:-$("$PYTHON_BIN" -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9_]", "_", sys.argv[1]))' "$(basename "${FEATURE%.feature}")")}"
+
 GQT="PYTHONPATH=\"$(dirname "$0")/../../src\" $PYTHON_BIN -m godot_qa_toolkit.cli"
 
 mkdir -p "$PROJECT_ROOT/.qa-cache"

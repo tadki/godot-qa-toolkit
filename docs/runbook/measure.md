@@ -50,9 +50,9 @@ path is skipped when preflight has already produced the failing-pair set).
 §SPEC-PLANFIRST). This applies equally to ordinary runs and
 `--test-attribution` runs. The acceptance arm has `state=disabled`,
 `stage_timings.gherkin_arm` is `0.0`, and the report field
-`report.gherkin_arm = "disabled_pending_atomization — gherkin arm
-paused by default; restore via GQT_MEASUREMENT_GHERKIN_DISABLED=0 once
-SEE-1619 atomization lands"` discloses the pause.
+`report.gherkin_arm = "disabled_pending_atomization — restored after SEE-1619
+(shared-process shards); env override GQT_MEASUREMENT_GHERKIN_DISABLED=0"`
+discloses the pause.
 
 While paused, an ordinary run without `--test-attribution` uses single-arm
 exit semantics: a valid, passing `gut_full` arm returns `ok=true` / exit `0`
@@ -62,7 +62,11 @@ arm returns `ok=false` / exit `1`. Attribution runs retain their
 `attribution_usable` semantics, and an explicitly restored dual-arm run keeps
 the union semantics. To restore acceptance measurement, set
 `GQT_MEASUREMENT_GHERKIN_DISABLED=0` after SEE-1619 has landed; the default
-(unset or `1`) keeps the arm paused.
+(unset or `1`) keeps the arm paused. Exact stripped `""`, `0`, or `false`
+restores it, so a whitespace-only value also restores; other values keep it
+paused. Any presence of the retired `GQT_MEASUREMENT_ACCEPTANCE_DISABLED` —
+including `""`, whitespace, `0`, or `false` — is a named error, never a silent
+alias.
 
 **Target universe anchoring**: positional roots are anchored to the
 project root via `anchor_to_project_root`. When the requested paths fall
@@ -74,7 +78,9 @@ whole project root (<root>)`. The fallback is named, not silent.
 ## Prerequisites
 
 - `.gutconfig.json` and `addons/gqt_gherkin/features/*.feature` exist (suite); GUT
-  plus a Godot binary for `run` / `diagnose` / `map-update`.
+  plus a Godot binary for `run` / `diagnose` / `map-update`. `measure suite`
+  also requires the strict-root `harness.gd` and a nonempty addon
+  `.gd`/`.feature` source set for its adapter fingerprint.
 - Measurement artifacts are exploratory / diagnostic-only (`not_certified`),
   not a certification gate or CI KPI.
 
@@ -120,7 +126,13 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   `measure.map-update` respectively.
 - suite: `measurement-suite/3`, with `gut_face`, `gherkin_face`,
   `toolchain`, `exclusions`, `recipe_hash` (identical content hashes
-  identically across paths).
+  identically across paths). `gherkin_face` requires `features`, `count`,
+  `excluded`, `harness`, `adapter_source_sha256`, and `adapter_source_files`;
+  `harness` requires `worker="generated/gherkin_worker.gd"`, `ops_version`, and
+  `wiring_sha256`. The adapter fingerprint recursively covers addon
+  `.gd`/`.feature` sources (no-follow; `.uid`, README, and `.json` excluded).
+  Legacy `/2`, `acceptance_face`, and `acceptance_feature` inputs fail loud;
+  the exclusion scope is `gherkin_feature`.
 - run: `measurement-report/3`, with `crap` records (see crap.md) and
   active-arm coverage data; a restored dual-arm run carries the two-arm
   coverage union. Every report remains
@@ -216,11 +228,20 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   lane. Save the draft and pass it via `--intolerant-tests <path>` (or
   `GQT_MEASUREMENT_INTOLERANT_TESTS=<path>` for auto-build) to declare the
   tests as coverage blind spots.
+- **Intolerant declaration schema**: `--intolerant-tests` uses
+  `gherkin_scenarios[]`; each entry requires non-empty `feature`, `scenario`,
+  and `reason`, with optional `scenario_line` and `example_row_line`. The
+  retired `acceptance_scenarios` key fails loudly instead of being ignored.
 
 ## Boundaries
 
 - `measure run` temporarily instruments the target tree and restores it
   atomically in `finally`; no residue on production trees.
+- A restored Gherkin arm uses the same addon preflight as `gherkin run`:
+  `compile_preflight` and per-key replay run before one `validator.gd` launch,
+  which in turn precedes shared GUT fan-out. A failed validator marks the arm
+  invalid and leaves no tool-owned private-suite residue. This addon handshake
+  is distinct from the uninstrumented `baseline_preflight` described above.
 - The acceptance arm runs **shared shards** (SEE-1619): features are grouped
   into private suites so several keys share one GUT process, with real fan-out
   `len(groups) × reps` instead of one process per feature per rep. A feature
@@ -228,8 +249,9 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   run; such downgrades are disclosed by name in `process_fallbacks:[{key,reason}]`
   (sorted by key, present on every return path, empty when fully atomic), never
   packaged as valid when both shared and isolated runs are red, and their
-  concurrency is still capped by `--gherkin-shards`. Cleanup failure marks
-  the arm invalid and discloses the residue path.
+  concurrency is still capped by `--gherkin-shards`. Only tool-owned private
+  suites are deleted; caller-owned directories are preserved. Cleanup failure
+  marks the arm invalid and discloses the residue path.
 - The W4 probe (default `aidomain_integration`) records measured wall clock
   into `performance.gherkin_probe`; `measure risk --performance-file`
   accepts externally fed measurements.
@@ -268,10 +290,15 @@ master comparison) on the same KOL input, reps, concurrency and an isolated
 store, never extrapolating wall clock from process counts:
 
 ```bash
-PYTHONPATH=src python3 -I tests/integration/run_see1619_gherkin_perf.py \
+GQT_MEASUREMENT_GHERKIN_DISABLED=0 PYTHONPATH=src python3 -I tests/integration/run_see1619_gherkin_perf.py \
   --project-root <kol-copy> --godot "$GODOT" --aa 3 --rounds 3 \
   --report <work>/acceptance-perf.json
 ```
+
+The environment prefix restores the Gherkin arm, which is otherwise paused by
+default. Reports use `doc="see1619-gherkin-perf/1"` and per-round
+`gherkin_wall_s`; resume rejects the retired `see1619-acceptance-perf/1`
+document instead of mixing old and new rounds.
 
 - A/A noise samples come only from the independent shared-A block before the
   first B (`baseline_samples ≥ 3`); interleaved A/B pairs (`interleaved_pairs
@@ -306,6 +333,9 @@ PYTHONPATH=src python3 -I tests/integration/run_see1619_gherkin_perf.py \
 
 Acceptance-specific repeat/shard/adaptive/parallel knobs apply only when the
 acceptance arm is explicitly restored; while paused, that arm stays disabled.
+The retired `--acceptance-probe-keys`, `--acceptance-shards`,
+`--acceptance-repeats`, and `--acceptance-adaptive` spellings are not aliases:
+they are argparse usage errors (exit `2`, no stdout JSON).
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -342,7 +372,7 @@ measure: arm=gut_full start shards=6 reps=1
 measure: arm=gut_full shard=3/6 rep=0/1 start
 measure: arm=gut_full shard=3/6 done s=42.1
 measure: arm=gut_full done state=valid wall_s=180.3
-measure: arm=acceptance start shards=4 reps=3
+measure: arm=gherkin start shards=4 reps=3
 measure: lazy baseline 2 failing pairs acquired uninstrumented (75.7s) — only NEW failures gate the arm
 ```
 
@@ -358,7 +388,7 @@ For per-shard raw GUT logs, pass `--shard-log-dir <dir>` and follow the files:
 | `<roots...>` (positional) | required | Directories whose `.gd` files are instrumented |
 | `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
 | `--recipe <path>` | required | Measurement suite JSON (verify + feature lookup) |
-| `--features <k1,k2>` | required | Comma-separated acceptance feature keys |
+| `--features <k1,k2>` | required | Comma-separated acceptance feature keys; recipe keys and requested keys (including `a+b` members) normalize non-`[A-Za-z0-9_]` characters to `_`, so `my-demo` and `my_demo` resolve identically |
 | `--out <path>` | required | Diagnostic report JSON path (progress written after each feature) |
 | `--timeout <s>` | 480 | Per-leg GUT timeout seconds |
 | `--godot-bin <path>` | omitted | Per-command Godot binary override |

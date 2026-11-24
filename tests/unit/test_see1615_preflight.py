@@ -1,169 +1,49 @@
-"""SEE-1615 §SPEC-PREFLIGHT — 基线红短停与具名判据。
+"""SEE-1631 §SPEC-019：auto map 构建入口与 measure run 同形态。
 
-P1 基线臂前置：映射构建路径（test_attribution + baseline_preflight）基线红
-即 fail-fast（不进插桩臂、map 零写入），reason 具名（阶段/总数/top-N 测试
-名 + 放行指引）；--allow-red-baseline 具名放行且基线结果复用给 arms（P4
-零懒获取）；绿基线同样复用空集。默认（未传 baseline_preflight）既有
-measure 语义零变化。
+历史注记（退役映射，Owner 2026-11-24 裁决）：本文件原为 §SPEC-PREFLIGHT
+（映射构建前置未插桩全脸基线 GUT：红短停/放行复用/三路分派）的反例组。
+§SPEC-019 退役该预检——map 构建（ensure_map/regenerate）直接插桩，全绿
+零额外运行，红了在臂门控内按 gut_full 既有懒基线语义分类（既有失败具名
+吸收标 partial / 疑似插桩不耐受车道），显式 fail-on-red = 拒绝安装该 map
+的 fail-loud。臂超时不再由预检墙钟事前校准（参数/env 来源）。原预检语义
+测试的映射：
+- 红 partial 继续 / 绿复用 arms / 三路分派 → 预检删除，由懒基线与对照
+  路径承接（test_see1594_s63_lazy_baseline.py + test_c1r1_see1631.py）；
+- fail-on-red 短停 → 改为建图后拒绝安装（本文件）。
+mutation 执行阶段自身的 verdict 基线（_precompute_baselines）不在本轮
+范围（§SPEC-019 仅限 map 构建入口）。
 """
 
 from __future__ import annotations
 
+import inspect
+import json
+from pathlib import Path
+from unittest import mock
+
 import pytest
 
-from godot_qa_toolkit.measurement import orchestrator as mo
-from godot_qa_toolkit.measurement.backup import MeasurementError
 
-_RECIPE = {"tests_glob": "res://tests/", "recipe_hash": "h"}
+# --------------------------------------------------------------------------
+# 入口形态：run_measurement 不再有 baseline_preflight 参数
+# --------------------------------------------------------------------------
 
+def test_run_measurement_has_no_baseline_preflight_param():
+    """§SPEC-019：映射构建入口的前置基线参数退役——传旧参数必须
+    TypeError（不得静默忽略后继续旧行为）。"""
+    from godot_qa_toolkit.measurement.orchestrator import run_measurement
 
-class _ArmsCalled(Exception):
-    """execute_arms spy 哨兵——arms 被调用即抛，下游聚合不进判据。"""
-
-
-def _run_measure(monkeypatch, *, pairs, allow_red=False,
-                 acquire_impl=None, request_preflight=True):
-    """预检段装配：输入校验 mock；execute_arms spy 记录 kwargs 后抛
-    _ArmsCalled。返回 (arms_calls, exc_info)。"""
-    calls: list = []
-
-    def spy_arms(**k):
-        # SEE-1631 默认双臂：execute_arms 收 arm_kwargs 包装——展平后与
-        # run_arm 直调形态同构（断言只关心基线复用键）
-        inner = k.get("arm_kwargs") or {}
-        calls.append({"arm_kwargs": {**{x: y for x, y in k.items()
-                                        if x != "arm_kwargs"}, **inner}})
-        raise _ArmsCalled()
-
-    def spy_run_arm(*a, **k):
-        calls.append({"arm_kwargs": k})
-        raise _ArmsCalled()
-
-    monkeypatch.setattr(mo, "_measure_inputs", lambda *a, **k: {
-        "root": "/p", "recipe": _RECIPE, "recipe_hash": "h",
-        "baseline_pairs": set(), "declared_scoped": set(),
-        "declared_bare": set()})
-    monkeypatch.setattr(mo, "_measure_stage", lambda *a, **k: {
-        "prepared": {}, "evidence_dir": None})
-    # §SPEC-PLANFIRST 任务 2：映射构建路径默认 acceptance 暂停 → 单臂
-    # run_arm；两条调用点都 spy（分支无关，语义 = arms 被触达即停）
-    from godot_qa_toolkit.measurement import arms as arms_mod
-    monkeypatch.setattr(arms_mod, "run_arm", spy_run_arm)
-    monkeypatch.setattr(mo, "execute_arms", spy_arms)
-    monkeypatch.setattr(mo, "_measure_crap", lambda *a, **k: {})
-    monkeypatch.setattr(mo, "_measure_perf", lambda *a, **k: {})
-    monkeypatch.setattr(mo, "_gate_comparable",
-                        lambda *a, **k: ({}, False))
-    monkeypatch.setattr(mo, "_build_unions", lambda *a, **k: [])
-    if acquire_impl is not None:
-        monkeypatch.setattr(mo, "_acquire_lazy_baseline", acquire_impl)
-    else:
-        monkeypatch.setattr(mo, "_acquire_lazy_baseline",
-                            lambda root, args, t: (set(pairs), {
-                                "method": "uninstrumented_run", "face":
-                                "gutconfig_default", "count": len(pairs),
-                                "wall_s": 0.1,
-                                "pairs": sorted([list(p) for p in pairs])}))
-    if allow_red:
-        monkeypatch.setenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE", "1")
-    else:
-        monkeypatch.delenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE",
-                           raising=False)
-    with pytest.raises((_ArmsCalled, MeasurementError)) as ei:
-        mo.run_measurement("/p", ["a.gd"], _RECIPE, test_attribution=True,
-                           baseline_preflight=request_preflight,
-                           attribution_out="/tmp/never.json")
-    return calls, ei
+    sig = inspect.signature(run_measurement)
+    assert "baseline_preflight" not in sig.parameters
 
 
-def test_baseline_red_partial_continue_by_default(monkeypatch):
-    """PLANFIRST 默认：基线红**不短停**——红测试按名排除（基线复用给
-    arms 吸收），run 继续（meta.status=partial 语义由 stderr 披露 +
-    attribution doc.baseline_preflight 承载）。"""
-    calls, ei = _run_measure(
-        monkeypatch, pairs=[("res://tests/a.gd", "test_x1"),
-                            ("res://tests/b.gd", "test_y2")])
-    assert isinstance(ei.value, _ArmsCalled)  # 继续进臂，不短停
-    assert calls[0]["arm_kwargs"]["baseline_failures"] == [
-        ("res://tests/a.gd", "test_x1"), ("res://tests/b.gd", "test_y2")]
+def test_no_preflight_stage_or_helper():
+    """预检 stage/helper 退役：run_baseline_preflight 不复存在；
+    stage_timings 不含 baseline_preflight 段。"""
+    import godot_qa_toolkit.measurement.orchestrator as mo
+
+    assert not hasattr(mo, "run_baseline_preflight")
 
 
-def test_fail_on_red_fails_fast_named(monkeypatch):
-    """显式开关（默认关）：基线红即短停——arms 不被调用（不进插桩臂）、
-    异常 reason 含阶段名/总数/top-N 具名测试名。"""
-    calls, ei = _run_measure(
-        monkeypatch, pairs=[("res://tests/a.gd", "test_x1"),
-                            ("res://tests/b.gd", "test_y2")], allow_red=True)
-    assert not isinstance(ei.value, _ArmsCalled)
-    msg = str(ei.value)
-    assert "baseline_preflight" in msg
-    assert "2 failing test pair" in msg
-    assert "test_x1" in msg and "test_y2" in msg
-    assert calls == []  # 不进插桩臂
-
-
-def test_green_baseline_reused_empty(monkeypatch):
-    """基线绿：空集同样显式传 arms（零懒获取路径），不短停。"""
-    calls, ei = _run_measure(monkeypatch, pairs=[])
-    assert isinstance(ei.value, _ArmsCalled)
-    assert calls[0]["arm_kwargs"]["baseline_failures"] == []
-
-
-def test_preflight_off_by_default(monkeypatch):
-    """默认（未传 baseline_preflight）不触发预检——既有 measure 语义零
-    变化（懒基线兜底照旧，baseline_failures 仍为 None）。"""
-
-    def boom(*a, **k):
-        raise AssertionError("preflight must not run when disabled")
-
-    calls, ei = _run_measure(monkeypatch, pairs=[], acquire_impl=boom,
-                             request_preflight=False)
-    assert isinstance(ei.value, _ArmsCalled)
-    assert calls[0]["arm_kwargs"]["baseline_failures"] is None
-
-
-# ------------- PLANFIRST steer：三类路径分派 + 不耐受中断报告形态
-
-
-def test_new_failure_gate_reports_intolerance_draft(tmp_path):
-    """steer-1/2：插桩臂相对基线的新增失败 → gate 中断报告归类
-    suspected_instrumentation_intolerance，消息含具名对 + 证据 +
-    --intolerant-tests 声明草稿 JSON + 三处置选项（端到端：ensure_map）。"""
-    import json as _json
-    from godot_qa_toolkit.mutation.truth_select import (
-        MutationSelectionError, _build_gate_fail_reason)
-
-    doc = {
-        "arms_state": {"gut_full": {"state": "invalid",
-                                    "invalid_reason": "new_failures",
-                                    "bundles": 2, "pairs": 6,
-                                    "probes_fired": 9}},
-        "arms": {"gut_full": {"test_failures": {"new_pairs": [
-            "res://tests/unit/test_game.gd::test_other_fail"]}}},
-    }
-    msg = _build_gate_fail_reason(doc)
-    assert "suspected_instrumentation_intolerance" in msg
-    assert "test_other_fail" in msg
-    assert "passes uninstrumented baseline, fails instrumented run" in msg
-    assert "--intolerant-tests" in msg
-    draft = msg[msg.index("[{"):msg.rindex("}]") + 2]
-    item = _json.loads(draft)[0]
-    assert item["script"] == "res://tests/unit/test_game.gd"
-    assert item["test"] == "test_other_fail"
-    assert "reason" in item
-    assert "GQT_MEASUREMENT_EXPLICIT_PARTIAL_CONTINUE" in msg
-
-
-def test_three_way_dispatch_matrix(monkeypatch):
-    """steer-5 分派矩阵：red → 复用继续（partial）；timeout → 既有
-    timed_out→invalid 语义（本子步不改，具名交回）；new-failure → gate
-    中断报告（上一用例）。此处钉 red 与显式 fail-on-red 两支。"""
-    # red 默认继续（partial）
-    calls, ei = _run_measure(
-        monkeypatch, pairs=[("res://tests/a.gd", "test_x1")])
-    assert isinstance(ei.value, _ArmsCalled)
-    assert calls[0]["arm_kwargs"]["baseline_failures"]
-    # red + 显式开关 → 短停
-    calls2, ei2 = _run_measure(
-        monkeypatch, pairs=[("res://tests/a.gd", "test_x1")], allow_red=True)
-    assert not isinstance(ei2.value, _ArmsCalled)
+# 进程账与 fail-on-red 拒装的行为判据在 test_see1594_s63_lazy_baseline.py
+# 的 TestS63EnsureMapEntry（同夹具复用，避免双份假 GOT）。

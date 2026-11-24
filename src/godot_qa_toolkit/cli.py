@@ -1344,7 +1344,9 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
             [str(c) for c in args.changed], args.out,
             timeout_s=args.timeout,
             attribution_causal=bool(args.attribution_causal),
-            calibration_every=args.calibration_every)
+            calibration_every=args.calibration_every,
+            gherkin_rerun_full_face_ratio=float(
+                args.gherkin_rerun_full_face_ratio))
     except IncrementError as e:
         return _emit({"tool": "measure.map-update", "ok": False,
                       "summary": {"error": str(e), "increment_error": True},
@@ -2037,6 +2039,11 @@ def build_parser() -> argparse.ArgumentParser:
                           "(test-attribution/6, line-primary)")
     inc.add_argument("--changed", action="append", default=[],
                      help="changed/new/removed file path (repeatable)")
+    inc.add_argument("--gherkin-rerun-full-face-ratio", type=float,
+                     default=0.05,
+                     help="SEE-1631 §SPEC-016: gherkin feature rerun "
+                          "surface above baseline_features * ratio falls "
+                          "back to a named full rebuild (default 0.05)")
     inc.add_argument("--out", required=True,
                      help="incremented attribution artifact output path")
     inc.add_argument("--timeout", type=int, default=180)

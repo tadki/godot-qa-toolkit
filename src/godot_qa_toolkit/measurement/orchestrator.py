@@ -569,14 +569,12 @@ ENV_ACCEPTANCE_DISABLED_RETIRED = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
 _ENV_ARM_TIMEOUT_S = "GQT_MEASUREMENT_ARM_TIMEOUT_S"
 
 
-def resolve_arm_timeout(requested_timeout_s: int,
-                        preflight_wall_s: "float | None" = None
-                        ) -> "tuple[int, str]":
-    """§SPEC-TIMEOUT-ADAPT：分片 GUT 超时自适应。
+def resolve_arm_timeout(requested_timeout_s: int) -> "tuple[int, str]":
+    """§SPEC-TIMEOUT-ADAPT：分片 GUT 超时来源。
 
-    优先级：显式 env GQT_MEASUREMENT_ARM_TIMEOUT_S > 预检 wall_s 校准
-    （wall × 安全系数 4，向上取整；无预检=无校准源）> 传入默认。
-    返回 (effective_timeout_s, source)。"""
+    SEE-1631 §SPEC-019：映射构建入口不再前置未插桩基线——预检 wall_s
+    校准源退役。优先级：显式 env GQT_MEASUREMENT_ARM_TIMEOUT_S > 传入
+    默认。返回 (effective_timeout_s, source)。"""
     import os as _os
     raw = _os.environ.get(_ENV_ARM_TIMEOUT_S, "").strip()
     if raw:
@@ -585,11 +583,6 @@ def resolve_arm_timeout(requested_timeout_s: int,
                                       f"{_ENV_ARM_TIMEOUT_S}={raw}")
         except ValueError:
             pass
-    if preflight_wall_s:
-        calibrated = max(requested_timeout_s,
-                         int(-(-preflight_wall_s * 4.0 // 1)))
-        return calibrated, (f"preflight_calibrated x4 "
-                            f"(baseline wall_s={preflight_wall_s})")
     return requested_timeout_s, f"parameter timeout_s={requested_timeout_s}s"
 
 
@@ -626,41 +619,6 @@ def fail_on_red_baseline() -> bool:
     import os as _os
     return _os.environ.get(ENV_FAIL_ON_RED_BASELINE, "").strip() \
         not in ("", "0", "false")
-
-
-def run_baseline_preflight(root, recipe, timeout_s):
-    """§SPEC-PREFLIGHT P1/P2/P4：映射构建路径的基线臂前置预检。
-
-    未插桩基线 GUT 先跑（同面、零探针）：红即 MeasurementError 具名短停
-    （阶段 baseline_preflight + 总数 + top-N 测试名）——不进插桩臂、不写
-    map、不跑 acceptance；放行（--allow-red-baseline）或绿时把基线结果
-    复用给 arms（P4——baseline_failures 非 None，懒获取不再发生）。"""
-    pairs, meta = _acquire_lazy_baseline(
-        root, _gutconfig_face_args(recipe), timeout_s)
-    if pairs:
-        top = sorted(pairs)[:_BASELINE_TOP_N]
-        named = ", ".join(f"{s}::{t}" for s, t in top)
-        if fail_on_red_baseline():
-            raise MeasurementError(
-                f"baseline_preflight_red: uninstrumented baseline GUT has "
-                f"{len(pairs)} failing test pair(s) (stage="
-                f"baseline_preflight, face={meta.get('face')}, "
-                f"wall_s={meta.get('wall_s')}) — named failures (top-"
-                f"{len(top)} of {len(pairs)}): {named}")
-        # 默认（PLANFIRST 口径）：红测试按名排除、继续构建——映射标
-        # partial、excluded_tests 具名披露（arms 按基线吸收，非静默）
-        meta = {**meta, "status": "partial", "excluded_tests": sorted(
-            [list(p) for p in pairs])}
-        print(f"measure: baseline_preflight RED — {len(pairs)} failing "
-              f"pair(s) (wall_s={meta.get('wall_s')}) EXCLUDED by name "
-              f"(top-{len(top)}: {named}); mapping marked partial, run "
-              f"continues (fail-on-red available via "
-              f"{ENV_FAIL_ON_RED_BASELINE})", file=sys.stderr)
-    else:
-        meta = {**meta, "status": "green"}
-        print(f"measure: baseline_preflight green (wall_s="
-              f"{meta.get('wall_s')}) — reused for arms", file=sys.stderr)
-    return sorted(pairs), meta
 
 
 def _measure_arms(root, recipe, prepared, *, timeout_s, test_attribution,
@@ -769,8 +727,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                   gherkin_repeats: int = 3, test_attribution: bool = False,
                   attribution_out: str | None = None,
                   attribution_causal: bool = False, arms_parallel: bool = False,
-                  gherkin_adaptive: bool = False,
-                  baseline_preflight: bool = False) -> dict:
+                  gherkin_adaptive: bool = False) -> dict:
     """measurement 双源批式编排，产出 measurement-report/3（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
     from ..mutation.stagetiming import StageClock
@@ -781,27 +738,10 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                               baseline_failures, intolerant_config,
                               inject_toolchain)
     root = inp["root"]
-    # §SPEC-PREFLIGHT P1/P4：映射构建路径（baseline_preflight=True）且未
-    # 显式提供基线时——基线臂前置，红即具名短停；绿/放行则复用结果
-    # （arms 收到 baseline_failures，懒获取不再发生）。既有 measure 调用
-    # （默认 False）语义零变化。
-    _pf_meta = None
     timeout_source = f"parameter timeout_s={timeout_s}s"
-    if baseline_preflight and baseline_failures is None:
-        with clock.stage("baseline_preflight"):
-            baseline_failures, _pf_meta = run_baseline_preflight(
-                root, inp["recipe"], timeout_s)
-        # §SPEC-TIMEOUT-ADAPT：自适应分片超时——预检 wall_s 为校准源
-        # （显式 env > 校准 x4 > 传入值），来源随 pf_meta 披露
-        timeout_s, timeout_source = resolve_arm_timeout(
-            timeout_s, (_pf_meta or {}).get("wall_s"))
-        _pf_meta = {**(_pf_meta or {}), "arm_timeout_s": timeout_s,
-                    "arm_timeout_source": timeout_source}
-        print(f"measure: arm timeout {timeout_s}s "
-              f"(source: {timeout_source})", file=sys.stderr)
-        # 生效基线通道是 baseline_pairs（_gate_ctx 的 effective 来源）——
-        # 预检结果必须双写（failures 供 meta 判定，pairs 供吸收判定）
-        inp["baseline_pairs"] = {tuple(p) for p in baseline_failures}
+    # SEE-1631 §SPEC-019：映射构建入口不再前置未插桩全脸基线 GUT——
+    # 与 measure run --test-attribution 同形态（直接插桩，红了走既有
+    # 懒基线/对照分类）；臂超时沿用参数/env 来源，不做事前校准。
     with clock.stage("instrument_prepare"):
         st = _measure_stage(
             root, target_files, inp["recipe_hash"], block_compress,
@@ -864,7 +804,6 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         arm_a, arm_b, st["prepared"], test_attribution=test_attribution,
         recipe_hash=inp["recipe_hash"], root=root,
         attribution_out=attribution_out, attribution_causal=attribution_causal,
-        preflight_meta=_pf_meta,
         causal_sites=st["causal_sites"],
         pristine_recipe_hash=inp["pristine_recipe_hash"])
     report = _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,

@@ -351,13 +351,43 @@ def _ensure_generate(root: str, out: str, files: list[str],
         if it_path.strip():
             it_cfg = json.loads(Path(it_path.strip()).read_text(
                 encoding="utf-8"))
+        # SEE-1631 §SPEC-019：auto map 构建与 measure run --test-attribution
+        # 同形态——不再前置未插桩全脸基线 GUT（全绿零额外运行）；红了按
+        # gut_full 既有懒基线语义在臂门控内分类（既有失败具名吸收标
+        # partial / 疑似插桩不耐受车道），gherkin 臂按 §SPEC-017 只对照
+        # 红 feature。臂超时沿用参数/env 来源（不做事前校准）。
+        print("mutation: auto map build without uninstrumented baseline "
+              "preflight (SEE-1631 §SPEC-019) — arm timeout from "
+              "parameter/env; red handling runs post-build via arm gates",
+              file=sys.stderr)
         measurement = run_measurement(
             root, targets, recipe, test_attribution=True,
-            attribution_out=tmp, baseline_preflight=True,
+            attribution_out=tmp,
             intolerant_config=it_cfg,
             **({"timeout_s": int(timeout_s)}
                if timeout_s is not None else {}))
         doc = load_map(tmp)
+        # §SPEC-019：显式 fail-on-red = 拒绝安装该 map 的 fail-loud
+        # （默认路径：红在臂门控内被既有失败吸收/车道化并标 partial，
+        # map 照常安装、partial 披露在场）。tmp 产物经 finally 清理。
+        from ..measurement.orchestrator import fail_on_red_baseline
+        if fail_on_red_baseline():
+            red_bits = []
+            for arm_name, st in (doc.get("arms_state") or {}).items():
+                if st.get("state") not in ("valid", "disabled"):
+                    red_bits.append(f"{arm_name}:"
+                                    f"{st.get('invalid_reason')}")
+                elif st.get("excluded_tests"):
+                    red_bits.append(f"{arm_name}:partial("
+                                    f"{len(st['excluded_tests'])} excluded)")
+            bfm = doc.get("baseline_failures_meta") or {}
+            if bfm.get("status") == "partial":
+                red_bits.append(f"baseline_partial:"
+                                f"{len(bfm.get('excluded_tests') or [])}")
+            if red_bits:
+                raise MutationSelectionError(
+                    "fail_on_red_baseline: refusing to install auto-built "
+                    f"attribution map — red evidence: {sorted(red_bits)}")
         gate = _build_gate_fail_reason(doc)
         if gate is not None:
             # §SPEC-PREFLIGHT×PLANFIRST steer：新增失败的中断报告从
@@ -626,12 +656,24 @@ def _gherkin_disclosure(doc: dict, rel: str) -> "dict | None":
     下不是可执行测试面——选面/投影保持 gut_full 单源口径不变；gherkin
     边只做披露（命中行、feature key、身份数）。"选中 gherkin 测试如何
     执行"属框架级决策，经 Owner 裁决前不静默丢弃、不静默扩大选面。
+    SEE-1631 §SPEC-015：gherkin 臂 state!=valid 时其边不得当命中——
+    披露转为具名 unavailable（state/invalid_reason 在场），行集与
+    feature key 一律不出场；valid 时披露不变。
     无 gherkin 臂或目标文件无 gherkin 边 → None（报告形状零变化）。"""
     arm = (doc.get("arms") or {}).get("gherkin")
     if not isinstance(arm, dict):
         return None
     if not (arm.get("test_to_lines") or arm.get("script_to_lines")):
         return None
+    gh_state = ((doc.get("arms_state") or {}).get("gherkin") or {})
+    if gh_state.get("state") != "valid":
+        return {"unavailable": True,
+                "state": gh_state.get("state"),
+                "invalid_reason": gh_state.get("invalid_reason"),
+                "lines": [], "feature_keys": [],
+                "consumption": ("not disclosed: invalid gherkin arm edges "
+                                "are not truth (state=%s)"
+                                % (gh_state.get("state"),))}
     lines: set[int] = set()
     idents: set[str] = set()
     for ln_s, ids in (arm.get("line_to_tests") or {}).get(rel, {}).items():

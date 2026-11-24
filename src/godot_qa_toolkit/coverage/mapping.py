@@ -140,12 +140,23 @@ def _mapping_report(path: Path, covered: set, inst: set, scripts: list,
 def _gherkin_projection_disclosure(doc: dict, rel: str,
                                    covered: set) -> "dict | None":
     """SEE-1631 §SPEC-005：coverage 投影的 gherkin 命中披露（行集/百分比
-    parity 不变；仅披露 gherkin 覆盖行与 gut 投影的差集）。"""
+    parity 不变；仅披露 gherkin 覆盖行与 gut 投影的差集）。
+    SEE-1631 §SPEC-015：gherkin 臂 state!=valid 时不得把其边当命中——
+    披露转为具名 unavailable，行集不出场；valid 时披露不变。"""
     garm = (doc.get("arms") or {}).get("gherkin")
     if not isinstance(garm, dict):
         return None
     if not (garm.get("test_to_lines") or garm.get("script_to_lines")):
         return None
+    gh_state = ((doc.get("arms_state") or {}).get("gherkin") or {})
+    if gh_state.get("state") != "valid":
+        return {"unavailable": True,
+                "state": gh_state.get("state"),
+                "invalid_reason": gh_state.get("invalid_reason"),
+                "covered_lines": [], "gherkin_only_lines": [],
+                "consumption": ("not disclosed: invalid gherkin arm edges "
+                                "are not truth (state=%s)"
+                                % (gh_state.get("state"),))}
     glines: set[int] = set()
     for _ident, by_rel in (garm.get("test_to_lines") or {}).items():
         glines |= set((by_rel or {}).get(rel) or [])

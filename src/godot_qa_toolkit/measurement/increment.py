@@ -65,6 +65,10 @@ from .orchestrator import (
 # 0.5 在中位面上让增量比全脸慢 4.3-5.2 倍，故收紧到 0.05（≈14 脚本，帽内
 # 增量仍 ≤ ~140s，保住 ≥38% 节省且留出噪声带余量）。
 DEFAULT_RERUN_FULL_FACE_RATIO = 0.05
+# SEE-1631 §SPEC-016：gherkin 臂自身的重跑比例上限（与 gut_full 同语义的
+# 经济性闸——重跑面超过基线 feature 数 × cap 时，整臂全脸回退更便宜）。
+# 校准基准待 KOL 复测由 Owner 判定；初值沿用 gut 侧实测口径。
+DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO = 0.05
 _FWD_KEYS = ("test_to_files", "test_to_functions",
              "script_to_files", "script_to_functions")
 _LINE_KEYS = ("test_to_lines", "script_to_lines")
@@ -289,19 +293,20 @@ def compute_invalidation(root: Path, baseline: dict,
 def _gherkin_invalidation_surface(baseline: dict,
                                   classes: dict[str, list[str]]
                                   ) -> set[str]:
-    """SEE-1631：gherkin 臂失效 feature 键集（增量续新的 gherkin 判据）。
-
-    feature 变更键（normalize stem）∪ 基线 gherkin 行事实触达
-    prod_changed/prod_removed 的 feature 键。非空 → 具名全脸回退（双臂
-    重跑、行事实重绑）；空 → gherkin 臂身份稳定、原样并入产物。"""
-    garm = (baseline.get("arms") or {}).get("gherkin")
-    if not isinstance(garm, dict) or not garm:
-        return set()
+    """SEE-1631 §SPEC-016（Owner 裁决：增量对齐 gut_full）：gherkin 臂
+    重跑 feature 键集 = feature 变更键 ∪ 新增 feature 键 ∪ 基线 gherkin
+    行事实触达 prod_changed/prod_removed 的 feature 键。非空 → 只重跑
+    这些 feature（其余原样继承）；超比例上限才整臂具名回退。"""
     from ..gherkin.addon import normalize_feature_key
 
     out: set[str] = set()
     for rel in classes.get("feature_changed", []):
         out.add(normalize_feature_key(Path(rel).stem))
+    for rel in classes.get("feature_new", []):
+        out.add(normalize_feature_key(Path(rel).stem))
+    garm = (baseline.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict) or not garm:
+        return out
     f2l = garm.get("feature_to_lines") or {}
     changed_rels = set(classes.get("prod_changed") or []) | set(
         classes.get("prod_removed") or [])
@@ -318,6 +323,123 @@ def _gherkin_invalidation_surface(baseline: dict,
                 if k:
                     out.add(k)
     return out
+
+
+def _baseline_gherkin_dropped(baseline: dict,
+                              classes: dict[str, list[str]]) -> set[str]:
+    """SEE-1631 §SPEC-016：删除 feature 键集（边剔除、无重跑）。"""
+    from ..gherkin.addon import normalize_feature_key
+
+    out: set[str] = set()
+    for rel in classes.get("feature_removed", []):
+        out.add(normalize_feature_key(Path(rel).stem))
+    return out
+
+def _merge_gherkin_arm(baseline_gherkin: "dict | None",
+                       fresh: "dict | None",
+                       rerun_keys: set[str],
+                       dropped_keys: set[str],
+                       removed_rels: set[str]) -> "dict | None":
+    """SEE-1631 §SPEC-016：gherkin 臂增量合并（与 gut_full 同口径）。
+
+    重跑 feature 的身份整体替换为 fresh；删除 feature 与被删除生产文件
+    触达的边剔除；其余 feature 原样继承（行事实逐位不变）。行事实是主
+    真值——feature/scenario 视图与计数从合并后行事实单源重算。基线无
+    gherkin 臂 → fresh 原样（无重跑键时 None）。"""
+    def _feature_of(ident: str) -> "str | None":
+        from .attribution import _gherkin_feature_of
+
+        return _gherkin_feature_of(str(ident))
+
+    def _keep(ident: str) -> bool:
+        k = _feature_of(ident)
+        return k not in rerun_keys and k not in dropped_keys
+
+    base_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
+                  for i, by_rel in ((baseline_gherkin or {}).get(
+                      "test_to_lines") or {}).items()
+                  if _keep(i)}
+    base_script_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
+                         for i, by_rel in ((baseline_gherkin or {}).get(
+                             "script_to_lines") or {}).items()
+                         if _keep(i)}
+    fresh_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
+                   for i, by_rel in ((fresh or {}).get(
+                       "test_to_lines") or {}).items()}
+    fresh_script_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
+                          for i, by_rel in ((fresh or {}).get(
+                              "script_to_lines") or {}).items()}
+    test_to_lines: dict[str, dict[str, set]] = {}
+    for src in (base_facts, fresh_facts):
+        for i, by_rel in src.items():
+            slot = test_to_lines.setdefault(i, {})
+            for r, ls in by_rel.items():
+                if r in removed_rels:
+                    continue
+                slot.setdefault(r, set()).update(ls)
+    script_to_lines: dict[str, dict[str, set]] = {}
+    for src in (base_script_facts, fresh_script_facts):
+        for i, by_rel in src.items():
+            slot = script_to_lines.setdefault(i, {})
+            for r, ls in by_rel.items():
+                if r in removed_rels:
+                    continue
+                slot.setdefault(r, set()).update(ls)
+    if not test_to_lines and not script_to_lines:
+        return None
+    from .attribution import (
+        _attribution_view_block,
+        _derive_views_from_line_facts,
+        _line_facts_views,
+        _line_pair_counts,
+    )
+
+    derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
+                                            None)
+    scenarios = {i: v for i, v in ((baseline_gherkin or {}).get(
+        "gherkin_scenarios") or {}).items() if _keep(i)}
+    scenarios.update({i: v for i, v in ((fresh or {}).get(
+        "gherkin_scenarios") or {}).items()})
+    line_pairs, script_line_pairs = _line_pair_counts(test_to_lines,
+                                                      script_to_lines)
+    unmapped = int(((fresh if fresh is not None else baseline_gherkin)
+                    or {}).get("gherkin_unmapped_identities") or 0)
+    out = {
+        # 派生视图经与全量相同的序列化出口（derived 内是 set 形态，
+        # 直接落盘会 JSON 爆炸——SEE-1587 口径：视图永不裸奔）
+        **_attribution_view_block(derived),
+        **_line_facts_views(test_to_lines, script_to_lines,
+                            derived["line_to_tests"]),
+        "feature_to_lines": _gherkin_views_from_lines(test_to_lines),
+        "line_to_features": _line_to_features_view(test_to_lines),
+        "gherkin_scenarios": scenarios,
+        "gherkin_unmapped_identities": unmapped,
+        "tests": len(derived["test_to_files"]),
+        "scripts": len(derived["script_to_files"]),
+        "files": len(derived["file_to_tests"]),
+        "pairs": sum(len(v) for v in derived["test_to_files"].values()),
+        "script_pairs": sum(len(v) for v in derived["script_to_files"]
+                            .values()),
+        "function_pairs": sum(len(v) for v in derived["test_to_functions"]
+                              .values()),
+        "line_pairs": line_pairs,
+        "script_line_pairs": script_line_pairs,
+    }
+    return out
+
+
+def _gherkin_views_from_lines(test_to_lines: dict) -> dict:
+    """合并后行事实 → feature_to_lines（单源重算，与全量口径一致）。"""
+    from .attribution import _gherkin_views
+
+    return _gherkin_views(test_to_lines)["feature_to_lines"]
+
+
+def _line_to_features_view(test_to_lines: dict) -> dict:
+    from .attribution import _gherkin_views
+
+    return _gherkin_views(test_to_lines)["line_to_features"]
+
 
 def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
                        replace_names: set[str], name_of) -> dict:
@@ -400,7 +522,9 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
 def _increment_decision(root: Path, recipe: dict, baseline: dict,
                         changed_files: list[str], since_full: int,
                         calibration_every: int,
-                        rerun_full_face_ratio: float) -> tuple:
+                        rerun_full_face_ratio: float,
+                        gherkin_rerun_full_face_ratio: float =
+                        DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO) -> tuple:
     """增量资格判定：hash 守恒 + 变更分类 + 失效计算 + fallback 仲裁。
     `recipe` 是已注入 toolchain 的配方（hash 判据用）。
     返回 (classes, invalidation, rerun, reason)。"""
@@ -428,11 +552,14 @@ def _increment_decision(root: Path, recipe: dict, baseline: dict,
     explicit = set(invalidation.get("explicit_rerun") or ())
     rerun = explicit | {n for n in invalidation["rerun"] if n in known}
     ratio = (len(rerun & known) / len(known)) if known else 0.0
+    gherkin_known = len(_baseline_gherkin_feature_keys(baseline))
     reason = _fallback_reason(hash_ok, classes, since_full,
                               calibration_every, ratio,
                               rerun_full_face_ratio,
                               feature_rerun=invalidation.get(
-                                  "feature_rerun") or set())
+                                  "feature_rerun") or set(),
+                              gherkin_known=gherkin_known,
+                              gherkin_ratio_cap=gherkin_rerun_full_face_ratio)
     return classes, invalidation, rerun, reason
 
 def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
@@ -470,7 +597,10 @@ def run_attribution_increment(project_root: str | Path,
                               attribution_causal: bool = False,
                               calibration_every: int = 5,
                               rerun_full_face_ratio: float
-                              = DEFAULT_RERUN_FULL_FACE_RATIO) -> dict:
+                              = DEFAULT_RERUN_FULL_FACE_RATIO,
+                              gherkin_rerun_full_face_ratio: float
+                              = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
+                              ) -> dict:
     """增量重建主入口（含产物落盘与 provenance）。"""
     t0 = time.monotonic()
     root = Path(project_root).resolve()
@@ -484,7 +614,7 @@ def run_attribution_increment(project_root: str | Path,
     since_full = int(prev.get("increments_since_full") or 0)
     classes, invalidation, rerun, reason = _increment_decision(
         root, recipe, baseline, changed_files, since_full, calibration_every,
-        rerun_full_face_ratio)
+        rerun_full_face_ratio, gherkin_rerun_full_face_ratio)
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
@@ -500,24 +630,61 @@ def run_attribution_increment(project_root: str | Path,
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,
                         invalidation["dropped"], fid_by_line_by_rel,
                         removed_rels=removed)
+    # SEE-1631 §SPEC-016：gherkin 臂增量腿——只重跑失效 feature（与
+    # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
+    # （与 gut 重跑同一插桩文本单源）。
+    gherkin_rerun = set(invalidation.get("feature_rerun") or [])
+    gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
+    templates = prepare_attr_templates(root, arm_targets, recipe,
+                                       attribution_causal)
+    gh_exec_s = 0.0
+    gh_executions: list[dict] = []
+    fresh_gherkin = None
+    if gherkin_rerun:
+        from .increment_runner import run_gherkin_increment_leg
+        from ..coverage.evidence import make_run_uuid
+
+        t_gh = time.monotonic()
+        fresh_gherkin, gh_executions = run_gherkin_increment_leg(
+            root, sorted(gherkin_rerun), templates, recipe,
+            attribution_causal, make_run_uuid(), timeout_s)
+        gh_exec_s = round(time.monotonic() - t_gh, 3)
+    baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
+    if isinstance(baseline_gherkin, dict) and baseline_gherkin or \
+            fresh_gherkin:
+        merged_gherkin = _merge_gherkin_arm(
+            baseline_gherkin, fresh_gherkin,
+            rerun_keys=gherkin_rerun, dropped_keys=gherkin_dropped,
+            removed_rels=removed)
+    else:
+        merged_gherkin = None
+    invalidation = {**invalidation,
+                    "gherkin_rerun": sorted(gherkin_rerun),
+                    "gherkin_dropped": sorted(gherkin_dropped)}
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
-        executions)
+        executions, merged_gherkin=merged_gherkin,
+        gh_exec_s=gh_exec_s, gh_executions=gh_executions)
     return _increment_emit(root, out_path, artifact, merged, classes, rerun,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
                      calibration_every: int, ratio: float,
                      ratio_cap: float,
-                     feature_rerun: "set | frozenset" = frozenset()) -> str:
+                     feature_rerun: "set | frozenset" = frozenset(),
+                     gherkin_known: int = 0,
+                     gherkin_ratio_cap: float =
+                     DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO) -> str:
+    """SEE-1631 §SPEC-016（Owner 裁决）：feature 失效面走增量重跑，不再
+    一刀切整臂回退；仅当 gherkin 重跑面超自身比例上限（增量不比整臂便宜）
+    时具名回退。既有回退条件（hash 失配/新增产品文件/校准到期/gut 比例
+    上限）不变。"""
     if not hash_ok:
         return "hash_mismatch_fallback"
     if classes["prod_new"]:
         return "new_prod_file_fallback"
-    if classes.get("feature_new"):
-        return "new_feature_fallback"
-    if feature_rerun:
-        return "gherkin_invalidation_fallback"
+    if gherkin_known and len(feature_rerun) > gherkin_known * gherkin_ratio_cap:
+        return "gherkin_rerun_surface_too_large_fallback"
     if since_full >= calibration_every:
         return "calibration_due_fallback"
     if ratio > ratio_cap:
@@ -649,17 +816,31 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
                               invalidation: dict, since_full: int,
                               arm_exec_s: float,
-                              executions: list[dict] | None = None) -> dict:
+                              executions: list[dict] | None = None,
+                              merged_gherkin: "dict | None" = None,
+                              gh_exec_s: float = 0.0,
+                              gh_executions: "list[dict] | None" = None
+                              ) -> dict:
     removed = set(classes.get("prod_removed") or [])
-    # SEE-1631 §SPEC-004：gherkin 臂继承（空 dict = 基线无 gherkin 臂，
-    # arms.gherkin 键不出场）；删除生产文件触达的 gherkin 边同步 purge。
-    carried_gherkin = _carried_gherkin_arm(baseline, removed)
+    # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
+    # gherkin 臂，arms.gherkin 键不出场）；删除生产文件触达的 gherkin 边
+    # 同步 purge。arms_state.gherkin 状态原样继承（invalid 不被洗白），
+    # pairs 按合并后 payload 重算。
+    carried_gherkin = merged_gherkin
+    if carried_gherkin is None:
+        carried_gherkin = _carried_gherkin_arm(baseline, removed)
     # SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
     # target_files 存储格式随入口不同）。
     removed_abs = {str((root / r).resolve()) for r in removed}
     targets = [t for t in (baseline.get("target_files")
                            or sorted((baseline.get("file_sha256") or {})))
                if t not in removed and str(Path(t).resolve()) not in removed_abs]
+    gh_state_out = dict((baseline.get("arms_state") or {}).get("gherkin")
+                        or {})
+    if carried_gherkin:
+        # SEE-1631 §SPEC-016：状态原样继承（invalid 不被洗白），pairs 按
+        # 合并后行事实重算
+        gh_state_out["pairs"] = int(carried_gherkin.get("pairs") or 0)
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
@@ -682,11 +863,13 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                         .get("unattributed_files") or ())
                     | set(classes.get("prod_changed") or [])
                     | set(classes.get("prod_new") or []))},
-            # SEE-1631 §SPEC-004：gherkin 臂身份稳定——无 feature 失效面时
-            # 原样并入（不因增量被静默清空）。feature 失效面非空时走全脸
-            # 回退（行事实重绑），永不到达此处。
+            # SEE-1631 §SPEC-016：gherkin 臂 feature 粒度增量——重跑键整体
+            # 替换、其余原样继承（不因增量被静默清空）；超比例上限才具名
+            # 整臂回退（行事实由全脸重建重绑）。
             **({"gherkin": carried_gherkin} if carried_gherkin else {})},
-        "arms_state": dict(baseline.get("arms_state") or {}),
+        "arms_state": {**dict(baseline.get("arms_state") or {}),
+                       **({"gherkin": gh_state_out}
+                          if carried_gherkin else {})},
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),
         "increment": {
@@ -696,14 +879,23 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
             "rerun_scripts": rerun_list,
             "dropped_scripts": sorted(invalidation["dropped"]),
             "rerun_sources": invalidation["sources"],
+            "gherkin_rerun_features": sorted(
+                invalidation.get("gherkin_rerun") or []),
+            "gherkin_dropped_features": sorted(
+                invalidation.get("gherkin_dropped") or []),
             "increments_since_full": since_full + 1,
             "calibration_policy": ("full face every N increments or on "
                                    "hash mismatch / new prod file / "
                                    "oversized rerun surface (deleted prod "
                                    "files stay incremental: edge purge + "
-                                   "toucher rerun, SEE-1610 §SPEC-N1)"),
+                                   "toucher rerun, SEE-1610 §SPEC-N1); "
+                                   "gherkin features rerun per invalidation "
+                                   "surface, own ratio cap (SEE-1631 "
+                                   "§SPEC-016)"),
             "event_counts_stale": True,
             "arm_exec_s": arm_exec_s,
+            "gherkin_leg_exec_s": gh_exec_s,
+            "gherkin_leg_executions": gh_executions or [],
             "rerun_executions": executions or [],
         },
     }

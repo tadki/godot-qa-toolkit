@@ -166,6 +166,9 @@ def _baseline_doc(tmp_path: Path) -> dict:
             "gherkin": {
                 "test_to_lines": {gher_ident: {"prod.gd": [7]}},
                 "script_to_lines": {},
+                "test_to_files": {gher_ident: ["prod.gd"]},
+                "file_to_tests": {"prod.gd": [gher_ident]},
+                "line_to_tests": {"prod.gd": {"7": [gher_ident]}},
                 "feature_to_lines": {"alpha": {"prod.gd": [7]}},
                 "line_to_features": {"prod.gd": {"7": ["alpha"]}},
                 "gherkin_scenarios": {gher_ident: {
@@ -232,18 +235,21 @@ def test_invalidation_reruns_gherkin_touching_features(tmp_path):
     assert "alpha" in inv["feature_rerun"]
 
 
-def test_feature_invalidation_forces_named_full_fallback(tmp_path):
+def test_feature_invalidation_takes_incremental_path(tmp_path):
+    """SEE-1631 §SPEC-016（Owner 裁决）：feature 失效面不再一刀切整臂
+    回退——低于 gherkin 比例上限时走增量；新增 feature 也不再触发整臂
+    回退（并入重跑面）；超上限仍具名回退。"""
     from godot_qa_toolkit.measurement.increment import _fallback_reason
 
     assert _fallback_reason(
         True, {"prod_new": [], "feature_new": []}, 0, 5, 0.0, 0.05,
-        feature_rerun={"alpha"}) == "gherkin_invalidation_fallback"
+        feature_rerun={"alpha"}, gherkin_known=40) == "incremental"
     assert _fallback_reason(
         True, {"prod_new": [], "feature_new": ["beta"]}, 0, 5, 0.0, 0.05,
-        feature_rerun=set()) == "new_feature_fallback"
+        feature_rerun={"beta"}, gherkin_known=40) == "incremental"
     assert _fallback_reason(
         True, {"prod_new": [], "feature_new": []}, 0, 5, 0.0, 0.05,
-        feature_rerun=set()) == "incremental"
+        feature_rerun=set(), gherkin_known=40) == "incremental"
 
 
 def test_increment_artifact_carries_gherkin_arm(tmp_path):

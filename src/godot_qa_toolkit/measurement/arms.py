@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1102,179 +1103,6 @@ def _gherkin_groups(keys: list[str], shards: int) -> list[list[str]]:
     return [g for g in groups if g]
 
 
-_FALLBACK_REASON = "shared_red_isolated_green"
-
-
-def _script_key(script: str) -> str | None:
-    m = re.search(r"test_(.+)\.gd$", script.replace("\\", "/"))
-    return m.group(1) if m else None
-
-
-def _reconciliation_failed_keys(result: dict) -> set[str]:
-    """对账失败分组的全组 key（对账 ok 或缺失时为空集）。"""
-    rec = result.get("reconciliation") or {}
-    if not rec or rec.get("ok"):
-        return set()
-    return {k for sh in rec.get("shards") or [] if not sh.get("ok")
-            for k in sh.get("keys") or []}
-
-
-def _failed_keys(result: dict, groups: list[dict]) -> list[str]:
-    """共享轮失败 key 集：观测失败对的脚本归属 + 对账失败分组的全组 key。"""
-    keys = {k for pair in (result.get("test_failures") or {}).get(
-        "observed_pairs", []) if (k := _script_key(pair.split("::", 1)[0]))}
-    keys |= _reconciliation_failed_keys(result)
-    return sorted(k for k in keys
-                  if any(k in g["keys"] for g in groups))
-
-
-def _green_script(pair_script: str, ok_keys: set[str]) -> bool:
-    return Path(pair_script.replace("\\", "/")).name in {
-        f"test_{k}.gd" for k in ok_keys}
-
-
-def _isolated_green_keys(fb_result: dict, fb_groups: list[dict]
-                         ) -> tuple[set[str], bool]:
-    """单例隔离轮：返回 (隔离绿 key 集, 对账 ok)。隔离红 key 不列入。
-    §SPEC-025：隔离绿必须以 fallback state=valid 且存在
-    reconciliation.ok is True 为前提——缺证据（None）、invalid、timeout
-    一律不算绿（旧实现缺 reconciliation 默认 ok=True 是假绿通道）。"""
-    fb_rec = fb_result.get("reconciliation")
-    fb_rec_ok = isinstance(fb_rec, dict) and fb_rec.get("ok") is True
-    fb_valid = fb_result.get("state") == "valid"
-    ok_keys: set[str] = set()
-    for g in fb_groups:
-        k = g["keys"][0]
-        script = f"test_{k}.gd"
-        red = [pr for pr in (fb_result.get("test_failures") or {}).get(
-            "observed_pairs", [])
-            if pr.split("::", 1)[0].endswith(script)]
-        if not red and fb_rec_ok and fb_valid:
-            ok_keys.add(k)
-    return ok_keys, fb_rec_ok
-
-
-def _keep_pairs(pairs, keep) -> set:
-    """按 (script, test) 二元组保留谓词为真的失败对。"""
-    return {pr for pr in pairs if keep(f"{pr[0]}::{pr[1]}")}
-
-
-def _keep_pair_strings(pairs, keep) -> list[str]:
-    """按 "script::test" 字符串保留谓词为真的失败对（排序）。"""
-    return sorted(pr for pr in pairs if keep(pr))
-
-
-def _drop_green_failures(result: dict, ok_keys: set[str]) -> None:
-    """共享轮红对移除隔离绿 key（进程残留伪红由隔离证据推翻）。"""
-    def keep(pair: str) -> bool:
-        return not _green_script(pair.split("::", 1)[0], ok_keys)
-
-    # SEE-1619 C3-R2：合并后键面必须 JSON 可序列化——set 形态会使
-    # cli.py 写报告时 TypeError 崩溃（A/A 三轮 rc=1 的根因）。以
-    # sorted "s::t" 字符串列表承载（与 test_failures 块同形）。
-    kept_pairs = _keep_pairs(
-        result.get("arm_fail_pairs") or set(), keep)
-    result["arm_fail_pairs"] = sorted(
-        f"{s}::{t}" for (s, t) in kept_pairs)
-    result["arm_failures"] = sorted({t for (_s, t) in kept_pairs})
-    result["new_pairs"] = sorted(
-        f"{s}::{t}" for (s, t) in _keep_pairs(
-            result.get("new_pairs") or set(), keep))
-    tf = result.get("test_failures") or {}
-    tf["observed_pairs"] = _keep_pair_strings(
-        tf.get("observed_pairs", []), keep)
-    tf["observed"] = sorted(
-        pr.split("::", 1)[1] for pr in tf["observed_pairs"])
-    tf["new_pairs"] = _keep_pair_strings(tf.get("new_pairs", []), keep)
-    tf["new"] = sorted(pr.split("::", 1)[1] for pr in tf["new_pairs"])
-    result["test_failures"] = tf
-
-
-def _merged_state(rec_ok: bool, remaining_fail: bool
-                  ) -> tuple[str, str | None]:
-    """合并后状态与 invalid_reason（valid 时 reason 为 None）。"""
-    if rec_ok and not remaining_fail:
-        return "valid", None
-    if not rec_ok:
-        return "invalid", "reconciliation_failed"
-    return "invalid", "isolated_red_not_fallback"
-
-
-def _merge_reconciliation(result: dict, fb_result: dict, fb_rec_ok: bool,
-                          ok_keys: set[str]) -> None:
-    """两轮 reconciliation 分项并列；gut_ok/state 按合并后残集重算。"""
-    shared_rec = result.get("reconciliation") or {}
-    rec_ok = (isinstance(shared_rec, dict)
-              and shared_rec.get("ok") is True) and fb_rec_ok
-    fb_rec = fb_result.get("reconciliation") or {}
-    merged_shards = list(shared_rec.get("shards") or []) + [
-        {**sh, "round": "fallback_singleton"}
-        for sh in (fb_rec.get("shards") or [])]
-    result["reconciliation"] = {
-        "ok": rec_ok,
-        "shards": merged_shards,
-        "fallback_round": {"ok": fb_rec_ok,
-                           "keys": sorted(ok_keys)},
-    }
-    remaining_fail = bool(result["arm_fail_pairs"]) or bool(
-        result["new_pairs"])
-    result["gut_ok"] = not remaining_fail
-    result["state"], result["invalid_reason"] = _merged_state(
-        rec_ok, remaining_fail)
-    result["wall_s"] = round(
-        float(result.get("wall_s") or 0.0)
-        + float(fb_result.get("wall_s") or 0.0), 3)
-
-
-def _merge_fallback_round(result: dict, fb_result: dict,
-                          fb_groups: list[dict]) -> dict:
-    """§SPEC-006 共享轮 → 单例隔离轮合并。
-
-    隔离绿 key：共享轮红对移除（进程残留伪红由隔离证据推翻）、process_
-    fallbacks 具名；隔离红 key：共享红保持、不列入降级（不得包装为有效
-    降级）。bundle/收敛/reps 保留共享轮证据（覆盖测量以共享轮为准）；
-    reconciliation 两轮分项并列披露；gut_ok/state 按合并后残集重算。"""
-    ok_keys, fb_rec_ok = _isolated_green_keys(fb_result, fb_groups)
-    _drop_green_failures(result, ok_keys)
-    _merge_reconciliation(result, fb_result, fb_rec_ok, ok_keys)
-    return result
-
-
-def _fallback_disclosure(result: dict, fb_groups: list[dict]) -> list[dict]:
-    """§SPEC-006 process_fallbacks：按 key 排序、每项恰含 key/reason。
-    披露即合并轮的隔离绿判定（fallback_round.keys）；隔离红 key 不列入
-    （不得包装为有效降级）；无降级轮为空数组。"""
-    if not fb_groups:
-        return []
-    rec = result.get("reconciliation") or {}
-    fb_round = rec.get("fallback_round") or {}
-    if fb_round.get("ok") is not True:
-        return []
-    fb_keys = {g["keys"][0] for g in fb_groups}
-    return sorted(
-        ({"key": k, "reason": _FALLBACK_REASON}
-         for k in set(fb_round.get("keys") or []) & fb_keys),
-        key=lambda f: f["key"])
-
-
-def _compile_into(sd: Path, root: Path, chunk: list[str]) -> dict:
-    """私有 suite 组编译 + 逐 key 重放校验（目录即选择集）。SEE-1631：
-    返回 {feature_key: manifest scenario 归属条目}——suite 目录在读回段
-    前被清理，feature/scenario 身份必须在编译期捕获。"""
-    out = compile_keys_to_suite(root, chunk, sd)
-    for k in chunk:
-        replay_check(root, k, suite_dir=sd)
-    return {key: (out["manifests"].get(key) or {}).get("attribution") or []
-            for key in chunk}
-
-
-def _finish_gherkin_result(result: dict, fb_groups: list[dict]) -> dict:
-    """成功路径收口：process_fallbacks 具名披露（harness 契约位是受控
-    源文件，SEE-1624 后无临时接线面，故不再有 residue 车道）。"""
-    result["process_fallbacks"] = _fallback_disclosure(result, fb_groups)
-    return result
-
-
 def _gherkin_error_result(e: Exception, groups: list[dict],
                           root: Path) -> dict:
     """异常路径：回收已建 suite 并组装 invalid 结果。
@@ -1299,6 +1127,184 @@ def _gherkin_error_result(e: Exception, groups: list[dict],
             "repeats": 0, "convergence": None}
 
 
+_GHERKIN_INTOL_REASON = (
+    "uninstrumented comparison green while attribution-instrumented red "
+    "(gherkin arm, SEE-1631 §SPEC-017 suspected instrumentation "
+    "intolerance)")
+
+
+def _script_key(script: str) -> "str | None":
+    m = re.search(r"test_(.+)\.gd$", script.replace("\\", "/"))
+    return m.group(1) if m else None
+
+
+def _observed_failed_keys(result: dict, groups: list[dict]) -> list[str]:
+    """共享轮观测红 key 集（§SPEC-017 对照腿的对象：只看红的 feature）。"""
+    keys = {k for pair in (result.get("test_failures") or {}).get(
+        "observed_pairs", []) if (k := _script_key(pair.split("::", 1)[0]))}
+    return sorted(k for k in keys
+                  if any(k in g["keys"] for g in groups))
+
+
+def _compile_into(sd: Path, root: Path, chunk: list[str]) -> dict:
+    """私有 suite 组编译 + 逐 key 重放校验（目录即选择集）。SEE-1631：
+    返回 {feature_key: manifest scenario 归属条目}——suite 目录在读回段
+    前被清理，feature/scenario 身份必须在编译期捕获。"""
+    out = compile_keys_to_suite(root, chunk, sd)
+    for k in chunk:
+        replay_check(root, k, suite_dir=sd)
+    return {key: (out["manifests"].get(key) or {}).get("attribution") or []
+            for key in chunk}
+
+
+def _finish_gherkin_result(result: dict) -> dict:
+    """成功路径收口：process_fallbacks 键保留恒空（§SPEC-017——判断
+    "同进程污染"的带归属插桩单例重跑已退役，feature 已全部原子化）。"""
+    result["process_fallbacks"] = []
+    return result
+
+
+def _gherkin_uninstrumented_comparison(root: Path, failed_keys: list[str],
+                                       timeout_s: int) -> dict:
+    """§SPEC-017：红 feature 的未插桩对照（零探针，非整脸）。
+
+    干净树（归属臂 finally 已还原）逐 key 编译私有 suite 并无钩子跑 GUT：
+    - 对照绿（无可解析失败对）→ suspected instrumentation intolerance；
+    - 对照红（有解析失败对）→ 既有失败；
+    - rc!=0 且无可解析失败对 → 取不到证据（臂保持 invalid，不静默转绿）。
+    返回 {"green"/"red"/"no_evidence": set, "executions": [...]}。
+    编译/预检失败（SuiteError/AddonError/GherkinRunError）→ 全员
+    no_evidence（fail-loud 不静默）。"""
+    from .orchestrator import _parse_failing_pairs
+    executions: list[dict] = []
+    green: set[str] = set()
+    red: set[str] = set()
+    no_evidence: set[str] = set()
+    preflight_error: "str | None" = None
+    try:
+        compile_preflight(root)
+    except (AddonError, GherkinRunError) as e:
+        preflight_error = str(e)
+    for key in failed_keys:
+        if preflight_error is not None:
+            no_evidence.add(key)
+            executions.append({"key": key, "rc": None,
+                               "error": f"preflight: {preflight_error}"})
+            continue
+        suite_dir = root / "gherkin" / "generated" / (
+            f".gqt-run-cmp-{uuid.uuid4().hex[:12]}")
+        try:
+            suite_dir.mkdir(parents=True)
+            compile_keys_to_suite(root, [key], suite_dir)
+            replay_check(root, key, suite_dir=suite_dir)
+            gen_res = ("res://" + suite_dir.joinpath("generated")
+                       .relative_to(root).as_posix())
+            import tempfile as _tempfile
+            xdg = _tempfile.mkdtemp(prefix="gqt-gh-cmp-")
+            argv = [f"-gdir={gen_res}"]   # 零探针：无 -gpre_run_script
+            from .orchestrator import _run_one_gut
+            env = dict(os.environ)
+            env["XDG_DATA_HOME"] = xdg
+            r, _w = _run_one_gut(root, argv, timeout_s, env=env,
+                                 gate_root=root)
+            out = (r.stdout or "") + "\n" + (r.stderr or "")
+            pairs = _parse_failing_pairs(out)
+            executions.append({"key": key, "rc": r.returncode,
+                               "pairs": len(pairs), "error": None})
+            if r.returncode == 0:
+                green.add(key)
+            elif pairs:
+                red.add(key)
+            else:
+                no_evidence.add(key)
+        except (SuiteError, AddonError, GherkinRunError, OSError) as e:
+            no_evidence.add(key)
+            executions.append({"key": key, "rc": None, "error": str(e)})
+        finally:
+            try:
+                _cleanup_suite_dir(suite_dir, root)
+            except OSError:
+                pass
+    return {"green": green, "red": red, "no_evidence": no_evidence,
+            "executions": executions}
+
+
+def _apply_gherkin_comparison(result: dict, root: Path,
+                              failed_keys: list[str], timeout_s: int) -> None:
+    """§SPEC-017：对照结果路由 + 臂状态按真实残集重算（H5 同语义）。
+
+    - 对照绿：失败对迁入具名 `instrumentation_intolerant` 车道 + 声明
+      草稿（stderr 披露），退出 new_failures 门禁——臂保持 valid；
+    - 对照红：既有失败吸收（`pre_existing_failures` 具名），臂保持
+      valid；
+    - 取不到证据：失败对保持 new_failures——臂保持 invalid（fail-loud）。
+    对账未执行的事实如实标注（executed=False），不虚构对账失败。"""
+    from .orchestrator import _parse_failing_pairs
+
+    verdict = _gherkin_uninstrumented_comparison(root, failed_keys,
+                                                 timeout_s)
+    result["gherkin_comparison"] = {
+        "green": sorted(verdict["green"]), "red": sorted(verdict["red"]),
+        "no_evidence": sorted(verdict["no_evidence"]),
+        "executions": verdict["executions"]}
+    tf = result.get("test_failures") or {}
+    # name → key 映射：Run Summary 段的未归因对（空脚本段）按同名归因对
+    # 解析 feature key（归因对在 observed_pairs 中恒在场）
+    name_to_key: dict[str, str] = {}
+    for pair in tf.get("observed_pairs") or []:
+        script, name = pair.split("::", 1)
+        k = _script_key(script)
+        if k:
+            name_to_key.setdefault(name, k)
+    # 车道形态与 gut_full 一致（sorted "s::t" 对字符串——报告聚合块按
+    # set(pairs) 消费）；dict 声明草稿走 suspected_intolerance_draft。
+    intolerant = list(tf.get("instrumentation_intolerant") or [])
+    pre_existing: list[str] = []
+    kept_new_pairs: list[str] = []
+    draft: list[dict] = []
+    for pair in tf.get("new_pairs") or []:
+        script, name = pair.split("::", 1)
+        k = _script_key(script) or name_to_key.get(name)
+        if k in verdict["green"]:
+            intolerant.append(pair)
+            draft.append({"script": script, "name": name,
+                          "reason": _GHERKIN_INTOL_REASON})
+        elif k in verdict["red"]:
+            pre_existing.append(pair)
+        else:
+            kept_new_pairs.append(pair)
+    tf["instrumentation_intolerant"] = intolerant
+    tf["pre_existing_failures"] = pre_existing
+    tf["new_pairs"] = kept_new_pairs
+    tf["new"] = sorted(p.split("::", 1)[1] for p in kept_new_pairs)
+    result["test_failures"] = tf
+    kept_new_pairs_set = {tuple(p.split("::", 1)) for p in kept_new_pairs}
+    # C3-R2 口径：顶层失败对以 sorted "s::t" 字符串列表承载（JSON 面）
+    kept_pairs = sorted(f"{s}::{t}" for (s, t) in kept_new_pairs_set)
+    result["arm_fail_pairs"] = kept_pairs
+    result["arm_failures"] = sorted({t for (_s, t) in kept_new_pairs_set})
+    result["new_pairs"] = kept_pairs
+    # 声明草稿 stderr 披露（与 gut_full 懒基线通道同形）
+    if draft:
+        print(f"measure: gherkin suspected instrumentation intolerance — "
+              f"{len(draft)} pair(s) (uninstrumented green, instrumented "
+              f"red); declaration draft for --intolerant-tests: "
+              f"{json.dumps(draft, ensure_ascii=False)}", file=sys.stderr)
+    if not kept_new_pairs:
+        # 全部红有对照结论 → 臂保持 valid（吸收/车道），对账未执行如实标注
+        result["state"] = "valid"
+        result["invalid_reason"] = None
+        result["invalid_evidence"] = None
+        result["gut_ok"] = True
+    else:
+        result["state"] = "invalid"
+        result["invalid_reason"] = "new_failures"
+    result["reconciliation"] = {"ok": None, "executed": False,
+                                "skipped_reason": ("new_failures_route"),
+                                "shards": []}
+    result["suspected_intolerance_draft"] = draft
+
+
 def run_gherkin_flow(*, root: Path, recipe: dict,
                      gherkin_keys: list[str] | None,
                      gherkin_shards: int,
@@ -1314,7 +1320,6 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
         f["key"] for f in recipe["gherkin_face"]["features"]]
     snapshot = _snapshot_main(root)
     groups: list[dict] = []
-    fb_groups: list[dict] = []
     cleanup_done = False
     try:
         try:
@@ -1349,36 +1354,27 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
                          concurrency=max(1, int(gherkin_shards or 1)),
                          **arm_kwargs)
 
-        # §SPEC-006：临时具名降级——仅当某 feature 当次未通过共享校验时
-        # singleton 隔离复跑；隔离绿 = process_fallbacks 具名披露，隔离
-        # 红 = 保持红（不得包装为有效降级）。全原子时为空数组。
-        failed = _failed_keys(result, groups)
+        # SEE-1631 §SPEC-017（Owner 裁决）：归属插桩单例重跑退役——红了
+        # 只对红的 feature 做未插桩对照（零探针、非整脸）：对照绿 = 疑似
+        # 插桩不耐受（具名车道 + 声明草稿，臂保持 valid，与 gut_full H5
+        # 同语义）；对照红 = 既有失败（吸收，具名）；取不到证据 = 臂保持
+        # invalid（不静默转绿）。"是否同进程污染"的重跑不再存在
+        # （feature 已全部原子化）；process_fallbacks 键保留恒空。
+        failed = _observed_failed_keys(result, groups)
         if failed:
-            fb_identities: dict[str, list] = {}
-            for k in failed:
-                sd = create_suite_dir(root)
-                fb_groups.append({"suite_dir": sd, "keys": [k]})
-                fb_identities.update(_compile_into(sd, root, [k]))
-            # §SPEC-005/006（C2-R1）：降级轮与共享轮共用同一并发上限——
-            # 多 key 失败时不得按失败数重新放开扇出（OOM 风险回潮）。
-            fb_result = run_arm(
-                "gherkin", root=root, recipe=recipe,
-                gherkin={"groups": fb_groups, "snapshot": snapshot,
-                         "identities": fb_identities},
-                shadow_instrument=arms_parallel,
-                adaptive_reps=gherkin_adaptive,
-                concurrency=max(1, int(gherkin_shards or 1)), **arm_kwargs)
-            result = _merge_fallback_round(result, fb_result, fb_groups)
+            _apply_gherkin_comparison(
+                result, root, failed,
+                timeout_s=int(arm_kwargs.get("timeout_s") or 180))
 
         cleanup_done = True
-        return _finish_gherkin_result(result, fb_groups)
+        return _finish_gherkin_result(result)
     except (SuiteError, GherkinRunError, MeasurementError, AddonError) as e:
         # §SPEC-025：异常路径必须连 fallback singleton suite 一并回收
         # （旧实现只清 shared groups，cleanup_done=True 跳过 finally，
         # 第二个 singleton 编译失败时前一个 singleton 目录泄漏）。
         # SEE-1631 §SPEC-007：AddonError（缺根/空 features/未知 key 在
         # 编译期被发现）同样具名转 invalid——不得裸 traceback 逃逸。
-        result = _gherkin_error_result(e, groups + fb_groups, root)
+        result = _gherkin_error_result(e, groups, root)
         cleanup_done = True
         return result
     finally:
@@ -1387,7 +1383,7 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
         # 清理自身失败逐项写 stderr，不静默）。已显式清理的路径由
         # cleanup_done 跳过（成功路径 suites 由 run_arm 读回段清理）。
         if not cleanup_done:
-            for g in groups + fb_groups:
+            for g in groups:
                 try:
                     _cleanup_suite_dir(Path(g["suite_dir"]), root)
                 except OSError as e:

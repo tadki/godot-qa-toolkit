@@ -137,6 +137,17 @@ def _mapping_report(path: Path, covered: set, inst: set, scripts: list,
     return out
 
 
+def _gherkin_projection_lines(garm: dict, rel: str) -> set:
+    """目标文件上的 gherkin 命中行集（test_to_lines ∪ script_to_lines
+    双车道并集）。"""
+    glines: set[int] = set()
+    for _ident, by_rel in (garm.get("test_to_lines") or {}).items():
+        glines |= set((by_rel or {}).get(rel) or [])
+    for _script, by_rel in (garm.get("script_to_lines") or {}).items():
+        glines |= set((by_rel or {}).get(rel) or [])
+    return glines
+
+
 def _gherkin_projection_disclosure(doc: dict, rel: str,
                                    covered: set) -> "dict | None":
     """SEE-1631 §SPEC-005：coverage 投影的 gherkin 命中披露（行集/百分比
@@ -157,11 +168,7 @@ def _gherkin_projection_disclosure(doc: dict, rel: str,
                 "consumption": ("not disclosed: invalid gherkin arm edges "
                                 "are not truth (state=%s)"
                                 % (gh_state.get("state"),))}
-    glines: set[int] = set()
-    for _ident, by_rel in (garm.get("test_to_lines") or {}).items():
-        glines |= set((by_rel or {}).get(rel) or [])
-    for _script, by_rel in (garm.get("script_to_lines") or {}).items():
-        glines |= set((by_rel or {}).get(rel) or [])
+    glines = _gherkin_projection_lines(garm, rel)
     if not glines:
         return None
     return {"covered_lines": sorted(glines),

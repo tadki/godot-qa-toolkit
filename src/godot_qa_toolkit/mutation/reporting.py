@@ -437,6 +437,34 @@ def _record_invalid_mutants(src: str, mutants: list,
     return results, len(invalid)
 
 
+def _baseline_skip_removed(tail: str) -> int:
+    """SEE-1631 §SPEC-027：从 GUT 输出尾部解析物理跳过证据（skip_red /
+    test_face 标记）→ 被物理移除的红测数（0 = 无证据）。"""
+    from .killbail import parse_skip_red_marker, parse_test_face_marker
+
+    skip = parse_skip_red_marker(tail)
+    face = parse_test_face_marker(tail)
+    removed = 0
+    if skip and int(skip.get("marked") or 0) >= 1:
+        removed = int(skip.get("marked") or 0)
+    elif face and int(face.get("removed") or 0) >= 1:
+        removed = int(face.get("removed") or 0)
+    return removed
+
+
+def _worker_leg_skip_removed(leg) -> int:
+    """SEE-1631 §SPEC-027：worker 腿结构化物理跳过证据（skip_red/allow
+    的 removed/marked 上限）→ 被移除红测数（解析失败按 0）。"""
+    skip_info = getattr(leg, "skip_red_info", None) or {}
+    face_info = getattr(leg, "allow_info", None) or {}
+    try:
+        return max(int(skip_info.get("marked") or 0),
+                   int(skip_info.get("removed") or 0),
+                   int(face_info.get("removed") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                          baseline_failures: set[str], baseline_dirty: bool) -> dict:
     """单 mutant run 结果分类（killed/survived/suspect/run_error）。
@@ -491,15 +519,7 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
     # 时，空差集 = 真实存活——判 survived（不落 suspect），冷/worker 两个
     # 车道同语义。
     if baseline_dirty:
-        from .killbail import parse_skip_red_marker, parse_test_face_marker
-
-        skip = parse_skip_red_marker(tail)
-        face = parse_test_face_marker(tail)
-        removed = 0
-        if skip and int(skip.get("marked") or 0) >= 1:
-            removed = int(skip.get("marked") or 0)
-        elif face and int(face.get("removed") or 0) >= 1:
-            removed = int(face.get("removed") or 0)
+        removed = _baseline_skip_removed(tail)
         if removed >= 1:
             return _mutant_record(
                 m, "survived",
@@ -793,15 +813,7 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
     # removed/marked>=1）且 fail_count==0（红测已被物理移除）→ survived
     # 具名跳过原因；无跳过证据时维持既有 fail_count==0 早退语义。
     if baseline_dirty:
-        skip_info = getattr(leg, "skip_red_info", None) or {}
-        face_info = getattr(leg, "allow_info", None) or {}
-        removed = 0
-        try:
-            removed = max(int(skip_info.get("marked") or 0),
-                          int(skip_info.get("removed") or 0),
-                          int(face_info.get("removed") or 0))
-        except (TypeError, ValueError):
-            removed = 0
+        removed = _worker_leg_skip_removed(leg)
         if removed >= 1 and leg.fail_count == 0:
             return _mutant_record(
                 m, "survived",
@@ -822,15 +834,7 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
         # SEE-1631 §SPEC-027：baseline_skip 物理跳过生效（结构化
         # skip_red/test_face 证据在场且 removed/marked>=1）→ 空差集 =
         # 真实存活（不落 suspect），worker 车道与冷车道同语义。
-        skip_info = getattr(leg, "skip_red_info", None) or {}
-        face_info = getattr(leg, "allow_info", None) or {}
-        removed = 0
-        try:
-            removed = max(int(skip_info.get("marked") or 0),
-                          int(skip_info.get("removed") or 0),
-                          int(face_info.get("removed") or 0))
-        except (TypeError, ValueError):
-            removed = 0
+        removed = _worker_leg_skip_removed(leg)
         if removed >= 1:
             return _mutant_record(
                 m, "survived",

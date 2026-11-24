@@ -160,6 +160,18 @@ def _baseline_gherkin_feature_keys(baseline: dict) -> set[str]:
     return keys
 
 
+def _path_lifecycle(p: Path, rel: str, raw: str, known: bool,
+                    changed: str, new: str, removed: str) -> "tuple[str, str]":
+    """盘上存在性与已知集合成对的通用生命周期分类（feature/test 车道
+    共用）：盘上+已知=changed、盘上+未知=new、已删+已知=removed、
+    其余=unknown。"""
+    if p.is_file():
+        return (changed if known else new), rel
+    if known:
+        return removed, rel
+    return "unknown", raw
+
+
 def _classify_one(root: Path, raw: str, edge_files: set[str],
                   known_fids: set[str],
                   test_identities: set[str],
@@ -179,19 +191,14 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
 
         key = normalize_feature_key(p.stem)
         known = key in (feature_keys or set())
-        if p.is_file():
-            return ("feature_changed" if known else "feature_new"), rel
-        if known:
-            return "feature_removed", rel
-        return "unknown", raw
+        return _path_lifecycle(p, rel, raw, known,
+                               "feature_changed", "feature_new",
+                               "feature_removed")
     name = p.name
     if rel.startswith("tests/") and name.startswith("test_"):
         known = any(_script_name_of(i) == name for i in test_identities)
-        if p.is_file():
-            return ("test_changed" if known else "test_new"), rel
-        if known:
-            return "test_removed", rel
-        return "unknown", raw
+        return _path_lifecycle(p, rel, raw, known,
+                               "test_changed", "test_new", "test_removed")
     prod = _classify_prod_entry(p, rel, edge_files, known_fids)
     if prod is not None:
         return prod
@@ -289,6 +296,28 @@ def compute_invalidation(root: Path, baseline: dict,
             "explicit_rerun": explicit_rerun, "feature_rerun": feature_rerun}
 
 
+def _gherkin_toucher_feature_keys(garm: dict,
+                                  changed_rels: set[str]) -> set[str]:
+    """基线 gherkin 臂中行事实触达 changed_rels 的 feature 键集。
+
+    feature 视图在场 → 按视图逐 key 判定；视图缺席（旧产物兜底）→
+    按行事实身份前缀反推。"""
+    out: set[str] = set()
+    f2l = garm.get("feature_to_lines") or {}
+    for key, by_rel in f2l.items():
+        if changed_rels & set(by_rel or {}):
+            out.add(key)
+    if not f2l:
+        from .attribution import _gherkin_feature_of
+
+        for ident, by_rel in (garm.get("test_to_lines") or {}).items():
+            if changed_rels & set(by_rel or {}):
+                k = _gherkin_feature_of(str(ident))
+                if k:
+                    out.add(k)
+    return out
+
+
 def _gherkin_invalidation_surface(baseline: dict,
                                   classes: dict[str, list[str]]
                                   ) -> set[str]:
@@ -306,21 +335,9 @@ def _gherkin_invalidation_surface(baseline: dict,
     garm = (baseline.get("arms") or {}).get("gherkin")
     if not isinstance(garm, dict) or not garm:
         return out
-    f2l = garm.get("feature_to_lines") or {}
     changed_rels = set(classes.get("prod_changed") or []) | set(
         classes.get("prod_removed") or [])
-    for key, by_rel in f2l.items():
-        if changed_rels & set(by_rel or {}):
-            out.add(key)
-    if not f2l:
-        # feature 视图缺席（旧产物兜底）：按行事实身份前缀反推
-        from .attribution import _gherkin_feature_of
-
-        for ident, by_rel in (garm.get("test_to_lines") or {}).items():
-            if changed_rels & set(by_rel or {}):
-                k = _gherkin_feature_of(str(ident))
-                if k:
-                    out.add(k)
+    out |= _gherkin_toucher_feature_keys(garm, changed_rels)
     return out
 
 

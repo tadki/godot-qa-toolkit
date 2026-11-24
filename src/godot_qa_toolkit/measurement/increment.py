@@ -335,6 +335,44 @@ def _baseline_gherkin_dropped(baseline: dict,
         out.add(normalize_feature_key(Path(rel).stem))
     return out
 
+def _gherkin_facts_by_identity(facts: "dict | None",
+                               skip_feature_keys: set[str]) -> dict:
+    """按 feature key 过滤拷贝行事实（身份 → {rel: [lines] } 浅拷贝，
+    行列表独立复制；skip 命中身份所属 feature 的整身份剔除）。"""
+    from .attribution import _gherkin_feature_of
+
+    out: dict = {}
+    for i, by_rel in (facts or {}).items():
+        if _gherkin_feature_of(str(i)) in skip_feature_keys:
+            continue
+        out[i] = {r: list(ls) for r, ls in by_rel.items()}
+    return out
+
+
+def _merged_line_facts(sources: "list[dict]",
+                       removed_rels: set[str]) -> "dict[str, dict[str, set]]":
+    """多源行事实同键合并（先到先建槽位，removed_rels 的边剔除）。"""
+    merged: dict[str, dict[str, set]] = {}
+    for src in sources:
+        for i, by_rel in src.items():
+            slot = merged.setdefault(i, {})
+            for r, ls in by_rel.items():
+                if r in removed_rels:
+                    continue
+                slot.setdefault(r, set()).update(ls)
+    return merged
+
+
+def _gherkin_scenarios_of_kept(scenarios: "dict | None",
+                               skip_feature_keys: set[str]) -> dict:
+    """按 feature key 过滤 scenario 视图（skip 命中身份所属 feature 的
+    整条剔除；值原样保留引用——与全量产物同口径）。"""
+    from .attribution import _gherkin_feature_of
+
+    return {i: v for i, v in (scenarios or {}).items()
+            if _gherkin_feature_of(str(i)) not in skip_feature_keys}
+
+
 def _merge_gherkin_arm(baseline_gherkin: "dict | None",
                        fresh: "dict | None",
                        rerun_keys: set[str],
@@ -346,45 +384,19 @@ def _merge_gherkin_arm(baseline_gherkin: "dict | None",
     触达的边剔除；其余 feature 原样继承（行事实逐位不变）。行事实是主
     真值——feature/scenario 视图与计数从合并后行事实单源重算。基线无
     gherkin 臂 → fresh 原样（无重跑键时 None）。"""
-    def _feature_of(ident: str) -> "str | None":
-        from .attribution import _gherkin_feature_of
-
-        return _gherkin_feature_of(str(ident))
-
-    def _keep(ident: str) -> bool:
-        k = _feature_of(ident)
-        return k not in rerun_keys and k not in dropped_keys
-
-    base_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
-                  for i, by_rel in ((baseline_gherkin or {}).get(
-                      "test_to_lines") or {}).items()
-                  if _keep(i)}
-    base_script_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
-                         for i, by_rel in ((baseline_gherkin or {}).get(
-                             "script_to_lines") or {}).items()
-                         if _keep(i)}
-    fresh_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
-                   for i, by_rel in ((fresh or {}).get(
-                       "test_to_lines") or {}).items()}
-    fresh_script_facts = {i: {r: list(ls) for r, ls in by_rel.items()}
-                          for i, by_rel in ((fresh or {}).get(
-                              "script_to_lines") or {}).items()}
-    test_to_lines: dict[str, dict[str, set]] = {}
-    for src in (base_facts, fresh_facts):
-        for i, by_rel in src.items():
-            slot = test_to_lines.setdefault(i, {})
-            for r, ls in by_rel.items():
-                if r in removed_rels:
-                    continue
-                slot.setdefault(r, set()).update(ls)
-    script_to_lines: dict[str, dict[str, set]] = {}
-    for src in (base_script_facts, fresh_script_facts):
-        for i, by_rel in src.items():
-            slot = script_to_lines.setdefault(i, {})
-            for r, ls in by_rel.items():
-                if r in removed_rels:
-                    continue
-                slot.setdefault(r, set()).update(ls)
+    keep_skip = rerun_keys | dropped_keys
+    base_facts = _gherkin_facts_by_identity(
+        (baseline_gherkin or {}).get("test_to_lines"), keep_skip)
+    base_script_facts = _gherkin_facts_by_identity(
+        (baseline_gherkin or {}).get("script_to_lines"), keep_skip)
+    fresh_facts = _gherkin_facts_by_identity(
+        (fresh or {}).get("test_to_lines"), set())
+    fresh_script_facts = _gherkin_facts_by_identity(
+        (fresh or {}).get("script_to_lines"), set())
+    test_to_lines = _merged_line_facts([base_facts, fresh_facts],
+                                       removed_rels)
+    script_to_lines = _merged_line_facts([base_script_facts,
+                                          fresh_script_facts], removed_rels)
     if not test_to_lines and not script_to_lines:
         return None
     from .attribution import (
@@ -396,17 +408,31 @@ def _merge_gherkin_arm(baseline_gherkin: "dict | None",
 
     derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
                                             None)
-    scenarios = {i: v for i, v in ((baseline_gherkin or {}).get(
-        "gherkin_scenarios") or {}).items() if _keep(i)}
+    scenarios = _gherkin_scenarios_of_kept(
+        (baseline_gherkin or {}).get("gherkin_scenarios"), keep_skip)
     scenarios.update({i: v for i, v in ((fresh or {}).get(
         "gherkin_scenarios") or {}).items()})
     line_pairs, script_line_pairs = _line_pair_counts(test_to_lines,
                                                       script_to_lines)
     unmapped = int(((fresh if fresh is not None else baseline_gherkin)
                     or {}).get("gherkin_unmapped_identities") or 0)
-    out = {
-        # 派生视图经与全量相同的序列化出口（derived 内是 set 形态，
-        # 直接落盘会 JSON 爆炸——SEE-1587 口径：视图永不裸奔）
+    return _gherkin_arm_out(derived, test_to_lines, script_to_lines,
+                            scenarios, unmapped, line_pairs,
+                            script_line_pairs)
+
+
+def _gherkin_arm_out(derived: dict, test_to_lines: dict, script_to_lines: dict,
+                     scenarios: dict, unmapped: int, line_pairs: int,
+                     script_line_pairs: int) -> dict:
+    """合并后派生数据 → gherkin 臂 payload（与全量相同的序列化出口：
+    derived 内是 set 形态，直接落盘会 JSON 爆炸——SEE-1587 口径：视图
+    永不裸奔）。"""
+    from .attribution import (
+        _attribution_view_block,
+        _line_facts_views,
+    )
+
+    return {
         **_attribution_view_block(derived),
         **_line_facts_views(test_to_lines, script_to_lines,
                             derived["line_to_tests"]),
@@ -425,7 +451,6 @@ def _merge_gherkin_arm(baseline_gherkin: "dict | None",
         "line_pairs": line_pairs,
         "script_line_pairs": script_line_pairs,
     }
-    return out
 
 
 def _gherkin_views_from_lines(test_to_lines: dict) -> dict:

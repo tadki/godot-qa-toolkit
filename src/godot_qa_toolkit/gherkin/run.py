@@ -41,10 +41,15 @@ def _contained_path(project_root: Path, value: str, what: str) -> Path:
     信任 manifest 自述的 ir_path/source_path。"""
     raw = str(value or "")
     rel = raw.removeprefix("res://")
-    root = project_root.resolve()
-    candidate = Path(rel)
-    resolved = (candidate if candidate.is_absolute()
-                else (root / rel)).resolve()
+    try:
+        root = project_root.resolve()
+        candidate = Path(rel)
+        resolved = (candidate if candidate.is_absolute()
+                    else (root / rel)).resolve()
+    except (OSError, RuntimeError) as e:
+        raise GherkinRunError(
+            f"{what} cannot be resolved ({type(e).__name__}: {e}) — "
+            f"symlink loops are rejected") from e
     try:
         resolved.relative_to(root)
     except ValueError:

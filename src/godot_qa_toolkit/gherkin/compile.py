@@ -456,10 +456,16 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     """
     # 源身份一律绝对化：manifest.source_path 与 key 冲突检测都以此比对
     # （相对路径会随调用方 CWD 漂移，造成同源误报冲突/异源漏报）。
-    p = Path(feature_path).resolve()
-    root = Path(project_root)
-    root_resolved = root.resolve()
-    allowed = features_root(root).resolve()
+    try:
+        p = Path(feature_path).resolve()
+        root = Path(project_root)
+        root_resolved = root.resolve()
+        allowed = features_root(root).resolve()
+    except (OSError, RuntimeError) as e:
+        # RuntimeError = symlink loop：具名域错误（单 JSON、无 traceback）。
+        return None, {"reason": (
+            f"project/feature paths cannot be resolved "
+            f"({type(e).__name__}: {e}) — symlink loops are rejected")}
     try:
         allowed.relative_to(root_resolved)
     except ValueError:
@@ -495,9 +501,15 @@ def compile_feature(feature_path: str | Path, project_root: str | Path,
     # 位于项目内，生成 .gd 嵌入的 IR 读取路径才能被 Godot 解析。
     root = Path(project_root)
     if out_dir is not None:
-        out = Path(out_dir).resolve()
         try:
-            base = out.relative_to(root.resolve()).as_posix()
+            out = Path(out_dir).resolve()
+            out_root = root.resolve()
+        except (OSError, RuntimeError) as e:
+            return None, {"reason": (
+                f"out_dir cannot be resolved ({type(e).__name__}: {e}) — "
+                f"symlink loops are rejected")}
+        try:
+            base = out.relative_to(out_root).as_posix()
         except ValueError:
             return None, {"reason": f"out_dir must live inside the project "
                                     f"for res:// resolution: {out_dir}"}

@@ -248,8 +248,14 @@ def ensure_suite_dir_in_project(project_root: str | Path,
 
     在重放/validator/Godot 之前调用：项目外路径具名失败（SuiteError →
     CLI 单 JSON、无 traceback），不读取 caller 文件。返回解析后的路径。"""
-    root = Path(project_root).resolve()
-    sd = Path(suite_dir).resolve()
+    try:
+        root = Path(project_root).resolve()
+        sd = Path(suite_dir).resolve()
+    except (OSError, RuntimeError) as e:
+        # RuntimeError = symlink loop：具名域错误，不得裸逃逸破坏单 JSON 契约。
+        raise SuiteError(
+            f"--suite-dir/project root cannot be resolved "
+            f"({type(e).__name__}: {e}) — symlink loops are rejected") from e
     try:
         sd.relative_to(root)
     except ValueError:
@@ -285,10 +291,11 @@ def run_suite_dir(project_root: str | Path, suite_dir: str | Path,
     SEE-1624 §SPEC-003：入口预检（addon validator 拉起一次）先于重放与
     业务执行。
     """
-    root = Path(project_root).resolve()
     # 入口 containment 必须先于一切读取与 Godot 拉起（DEF-2）：项目外
-    # 路径具名失败，不 glob、不 replay、不拉起 validator。
-    suite_dir = ensure_suite_dir_in_project(root, suite_dir)
+    # 路径具名失败，不 glob、不 replay、不拉起 validator。ensure 同时把
+    # symlink loop 转成具名 SuiteError（不得裸 RuntimeError 逃逸）。
+    suite_dir = ensure_suite_dir_in_project(project_root, suite_dir)
+    root = Path(project_root).resolve()
     gen = suite_dir / "generated"
     keys = sorted(p.name.removesuffix(".manifest.json")
                   for p in gen.glob("*.manifest.json"))

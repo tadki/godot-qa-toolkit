@@ -1227,6 +1227,42 @@ def _gherkin_uninstrumented_comparison(root: Path, failed_keys: list[str],
             "executions": executions}
 
 
+def _gherkin_name_to_key(tf: dict) -> dict:
+    """name → key 映射：Run Summary 段的未归因对（空脚本段）按同名归因对
+    解析 feature key（归因对在 observed_pairs 中恒在场）。"""
+    name_to_key: dict[str, str] = {}
+    for pair in tf.get("observed_pairs") or []:
+        script, name = pair.split("::", 1)
+        k = _script_key(script)
+        if k:
+            name_to_key.setdefault(name, k)
+    return name_to_key
+
+
+def _route_gherkin_new_pairs(tf: dict, verdict: dict,
+                             name_to_key: dict) -> "tuple[list, list, list, list]":
+    """new_pairs 按对照结论三路路由（车道形态与 gut_full 一致——sorted
+    "s::t" 对字符串，报告聚合块按 set(pairs) 消费；dict 声明草稿走
+    suspected_intolerance_draft）。返回 (intolerant, pre_existing,
+    kept_new_pairs, draft)。"""
+    intolerant = list(tf.get("instrumentation_intolerant") or [])
+    pre_existing: list[str] = []
+    kept_new_pairs: list[str] = []
+    draft: list[dict] = []
+    for pair in tf.get("new_pairs") or []:
+        script, name = pair.split("::", 1)
+        k = _script_key(script) or name_to_key.get(name)
+        if k in verdict["green"]:
+            intolerant.append(pair)
+            draft.append({"script": script, "name": name,
+                          "reason": _GHERKIN_INTOL_REASON})
+        elif k in verdict["red"]:
+            pre_existing.append(pair)
+        else:
+            kept_new_pairs.append(pair)
+    return intolerant, pre_existing, kept_new_pairs, draft
+
+
 def _apply_gherkin_comparison(result: dict, root: Path,
                               failed_keys: list[str], timeout_s: int) -> None:
     """§SPEC-017：对照结果路由 + 臂状态按真实残集重算（H5 同语义）。
@@ -1244,31 +1280,9 @@ def _apply_gherkin_comparison(result: dict, root: Path,
         "no_evidence": sorted(verdict["no_evidence"]),
         "executions": verdict["executions"]}
     tf = result.get("test_failures") or {}
-    # name → key 映射：Run Summary 段的未归因对（空脚本段）按同名归因对
-    # 解析 feature key（归因对在 observed_pairs 中恒在场）
-    name_to_key: dict[str, str] = {}
-    for pair in tf.get("observed_pairs") or []:
-        script, name = pair.split("::", 1)
-        k = _script_key(script)
-        if k:
-            name_to_key.setdefault(name, k)
-    # 车道形态与 gut_full 一致（sorted "s::t" 对字符串——报告聚合块按
-    # set(pairs) 消费）；dict 声明草稿走 suspected_intolerance_draft。
-    intolerant = list(tf.get("instrumentation_intolerant") or [])
-    pre_existing: list[str] = []
-    kept_new_pairs: list[str] = []
-    draft: list[dict] = []
-    for pair in tf.get("new_pairs") or []:
-        script, name = pair.split("::", 1)
-        k = _script_key(script) or name_to_key.get(name)
-        if k in verdict["green"]:
-            intolerant.append(pair)
-            draft.append({"script": script, "name": name,
-                          "reason": _GHERKIN_INTOL_REASON})
-        elif k in verdict["red"]:
-            pre_existing.append(pair)
-        else:
-            kept_new_pairs.append(pair)
+    name_to_key = _gherkin_name_to_key(tf)
+    intolerant, pre_existing, kept_new_pairs, draft = \
+        _route_gherkin_new_pairs(tf, verdict, name_to_key)
     tf["instrumentation_intolerant"] = intolerant
     tf["pre_existing_failures"] = pre_existing
     tf["new_pairs"] = kept_new_pairs

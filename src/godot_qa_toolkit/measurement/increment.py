@@ -30,7 +30,6 @@ function_pairs/line_pairs 由合并后的行事实精确重算）。行为耦合
 from __future__ import annotations
 from ..digest import sha256_file
 
-import hashlib
 import json
 import shutil
 import time
@@ -400,9 +399,7 @@ def _merge_gherkin_arm(baseline_gherkin: "dict | None",
     if not test_to_lines and not script_to_lines:
         return None
     from .attribution import (
-        _attribution_view_block,
         _derive_views_from_line_facts,
-        _line_facts_views,
         _line_pair_counts,
     )
 
@@ -852,6 +849,48 @@ def _carried_gherkin_arm(baseline: dict,
     return out
 
 
+def _effective_targets(baseline: dict, root: Path,
+                       removed: set[str]) -> list[str]:
+    """SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
+    target_files 存储格式随入口不同）。"""
+    removed_abs = {str((root / r).resolve()) for r in removed}
+    return [t for t in (baseline.get("target_files")
+                        or sorted((baseline.get("file_sha256") or {})))
+            if t not in removed and str(Path(t).resolve()) not in removed_abs]
+
+
+def _carried_gherkin_state(baseline: dict,
+                           carried_gherkin: "dict | None") -> dict:
+    """SEE-1631 §SPEC-016：arms_state.gherkin 状态原样继承（invalid 不被
+    洗白），pairs 按合并后行事实重算。"""
+    gh_state_out = dict((baseline.get("arms_state") or {}).get("gherkin")
+                        or {})
+    if carried_gherkin:
+        gh_state_out["pairs"] = int(carried_gherkin.get("pairs") or 0)
+    return gh_state_out
+
+
+def _increment_arms_block(baseline: dict, merged: dict, classes: dict,
+                          carried_gherkin: "dict | None") -> dict:
+    """arms 块：gut_full 保守并集 + gherkin 臂按存在性出场。
+
+    SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
+    ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
+    SEE-1631 §SPEC-016：gherkin 臂 feature 粒度增量——重跑键整体替换、
+    其余原样继承（不因增量被静默清空）；超比例上限才具名整臂回退
+    （行事实由全脸重建重绑）。"""
+    arms: dict = {"gut_full": {
+        **merged,
+        "unattributed_files": sorted(
+            set((baseline.get("arms", {}).get("gut_full") or {})
+                .get("unattributed_files") or [])
+            | set(classes.get("prod_changed") or [])
+            | set(classes.get("prod_new") or []))}}
+    if carried_gherkin:
+        arms["gherkin"] = carried_gherkin
+    return arms
+
+
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
                               invalidation: dict, since_full: int,
@@ -864,23 +903,12 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
     removed = set(classes.get("prod_removed") or [])
     # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
     # gherkin 臂，arms.gherkin 键不出场）；删除生产文件触达的 gherkin 边
-    # 同步 purge。arms_state.gherkin 状态原样继承（invalid 不被洗白），
-    # pairs 按合并后 payload 重算。
+    # 同步 purge。
     carried_gherkin = merged_gherkin
     if carried_gherkin is None:
         carried_gherkin = _carried_gherkin_arm(baseline, removed)
-    # SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
-    # target_files 存储格式随入口不同）。
-    removed_abs = {str((root / r).resolve()) for r in removed}
-    targets = [t for t in (baseline.get("target_files")
-                           or sorted((baseline.get("file_sha256") or {})))
-               if t not in removed and str(Path(t).resolve()) not in removed_abs]
-    gh_state_out = dict((baseline.get("arms_state") or {}).get("gherkin")
-                        or {})
-    if carried_gherkin:
-        # SEE-1631 §SPEC-016：状态原样继承（invalid 不被洗白），pairs 按
-        # 合并后行事实重算
-        gh_state_out["pairs"] = int(carried_gherkin.get("pairs") or 0)
+    targets = _effective_targets(baseline, root, removed)
+    gh_state_out = _carried_gherkin_state(baseline, carried_gherkin)
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
@@ -893,20 +921,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
-        "arms": {
-            "gut_full": {
-                **merged,
-                # SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
-                # ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
-                "unattributed_files": sorted(
-                    set((baseline.get("arms", {}).get("gut_full") or {})
-                        .get("unattributed_files") or ())
-                    | set(classes.get("prod_changed") or [])
-                    | set(classes.get("prod_new") or []))},
-            # SEE-1631 §SPEC-016：gherkin 臂 feature 粒度增量——重跑键整体
-            # 替换、其余原样继承（不因增量被静默清空）；超比例上限才具名
-            # 整臂回退（行事实由全脸重建重绑）。
-            **({"gherkin": carried_gherkin} if carried_gherkin else {})},
+        "arms": _increment_arms_block(baseline, merged, classes,
+                                      carried_gherkin),
         "arms_state": {**dict(baseline.get("arms_state") or {}),
                        **({"gherkin": gh_state_out}
                           if carried_gherkin else {})},

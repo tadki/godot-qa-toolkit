@@ -328,6 +328,34 @@ def _default_map_reuse(path: str | None, explicit: bool
     return path, None
 
 
+def _intolerant_tests_config() -> "dict | list | None":
+    """§SPEC-PLANFIRST 任务 1：源码契约用例的 --intolerant-tests 声明
+    豁免接线（env 单点；中断报告草稿可直接保存后经此生效）。"""
+    it_path = os.environ.get("GQT_MEASUREMENT_INTOLERANT_TESTS", "")
+    if it_path.strip():
+        return json.loads(Path(it_path.strip()).read_text(
+            encoding="utf-8"))
+    return None
+
+
+def _fail_on_red_bits(doc: dict) -> list:
+    """§SPEC-019 fail-on-red 的红证据清单：非 valid/disabled 臂（带
+    invalid_reason）、partial 臂（排除数）、基线 partial。"""
+    red_bits = []
+    for arm_name, st in (doc.get("arms_state") or {}).items():
+        if st.get("state") not in ("valid", "disabled"):
+            red_bits.append(f"{arm_name}:"
+                            f"{st.get('invalid_reason')}")
+        elif st.get("excluded_tests"):
+            red_bits.append(f"{arm_name}:partial("
+                            f"{len(st['excluded_tests'])} excluded)")
+    bfm = doc.get("baseline_failures_meta") or {}
+    if bfm.get("status") == "partial":
+        red_bits.append(f"baseline_partial:"
+                        f"{len(bfm.get('excluded_tests') or [])}")
+    return red_bits
+
+
 def _ensure_generate(root: str, out: str, files: list[str],
                      timeout_s: int | None, action: str,
                      rebuild_reason: str | None, t0: float) -> str:
@@ -344,13 +372,7 @@ def _ensure_generate(root: str, out: str, files: list[str],
     targets = _targets_under(_roots_of(files, root))
     tmp = _unique_tmp(out)
     try:
-        # §SPEC-PLANFIRST 任务 1：源码契约用例的 --intolerant-tests 声明
-        # 豁免接线（env 单点；中断报告草稿可直接保存后经此生效）
-        it_cfg = None
-        it_path = os.environ.get("GQT_MEASUREMENT_INTOLERANT_TESTS", "")
-        if it_path.strip():
-            it_cfg = json.loads(Path(it_path.strip()).read_text(
-                encoding="utf-8"))
+        it_cfg = _intolerant_tests_config()
         # SEE-1631 §SPEC-019：auto map 构建与 measure run --test-attribution
         # 同形态——不再前置未插桩全脸基线 GUT（全绿零额外运行）；红了按
         # gut_full 既有懒基线语义在臂门控内分类（既有失败具名吸收标
@@ -372,18 +394,7 @@ def _ensure_generate(root: str, out: str, files: list[str],
         # map 照常安装、partial 披露在场）。tmp 产物经 finally 清理。
         from ..measurement.orchestrator import fail_on_red_baseline
         if fail_on_red_baseline():
-            red_bits = []
-            for arm_name, st in (doc.get("arms_state") or {}).items():
-                if st.get("state") not in ("valid", "disabled"):
-                    red_bits.append(f"{arm_name}:"
-                                    f"{st.get('invalid_reason')}")
-                elif st.get("excluded_tests"):
-                    red_bits.append(f"{arm_name}:partial("
-                                    f"{len(st['excluded_tests'])} excluded)")
-            bfm = doc.get("baseline_failures_meta") or {}
-            if bfm.get("status") == "partial":
-                red_bits.append(f"baseline_partial:"
-                                f"{len(bfm.get('excluded_tests') or [])}")
+            red_bits = _fail_on_red_bits(doc)
             if red_bits:
                 raise MutationSelectionError(
                     "fail_on_red_baseline: refusing to install auto-built "
@@ -649,6 +660,33 @@ def arms_valid(states: dict) -> bool:
     return bool(vacuous or probes > 0)
 
 
+def _gherkin_unavailable_payload(gh_state: dict) -> dict:
+    """SEE-1631 §SPEC-015：invalid 臂的具名 unavailable 披露（行集与
+    feature key 一律不出场）。"""
+    return {"unavailable": True,
+            "state": gh_state.get("state"),
+            "invalid_reason": gh_state.get("invalid_reason"),
+            "lines": [], "feature_keys": [],
+            "consumption": ("not disclosed: invalid gherkin arm edges "
+                            "are not truth (state=%s)"
+                            % (gh_state.get("state"),))}
+
+
+def _gherkin_arm_hits(arm: dict, rel: str) -> "tuple[set[int], set[str]]":
+    """目标文件上的 gherkin 命中：(行集, 身份集)。line_to_tests 视图与
+    script_to_lines 车道并集（与全量投影同口径）。"""
+    lines: set[int] = set()
+    idents: set[str] = set()
+    for ln_s, ids in (arm.get("line_to_tests") or {}).get(rel, {}).items():
+        lines.add(int(ln_s))
+        idents.update(ids)
+    for script, by_rel in (arm.get("script_to_lines") or {}).items():
+        for ln in ((by_rel or {}).get(rel) or []):
+            lines.add(int(ln))
+            idents.add(str(script))
+    return lines, idents
+
+
 def _gherkin_disclosure(doc: dict, rel: str) -> "dict | None":
     """SEE-1631 §SPEC-005：目标文件上的 gherkin 臂命中披露。
 
@@ -667,22 +705,8 @@ def _gherkin_disclosure(doc: dict, rel: str) -> "dict | None":
         return None
     gh_state = ((doc.get("arms_state") or {}).get("gherkin") or {})
     if gh_state.get("state") != "valid":
-        return {"unavailable": True,
-                "state": gh_state.get("state"),
-                "invalid_reason": gh_state.get("invalid_reason"),
-                "lines": [], "feature_keys": [],
-                "consumption": ("not disclosed: invalid gherkin arm edges "
-                                "are not truth (state=%s)"
-                                % (gh_state.get("state"),))}
-    lines: set[int] = set()
-    idents: set[str] = set()
-    for ln_s, ids in (arm.get("line_to_tests") or {}).get(rel, {}).items():
-        lines.add(int(ln_s))
-        idents.update(ids)
-    for script, by_rel in (arm.get("script_to_lines") or {}).items():
-        for ln in ((by_rel or {}).get(rel) or []):
-            lines.add(int(ln))
-            idents.add(str(script))
+        return _gherkin_unavailable_payload(gh_state)
+    lines, idents = _gherkin_arm_hits(arm, rel)
     if not lines:
         return None
     from ..measurement.attribution import _gherkin_feature_of

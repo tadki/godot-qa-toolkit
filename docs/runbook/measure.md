@@ -315,7 +315,7 @@ document instead of mixing old and new rounds.
   uncertified-by-design, and MEASURED only proves acceptance-arm validity plus
   round completeness plus the speed gate.
 
-## Command reference (aligned with v0.4.0 `--help`)
+## Command reference (aligned with v0.4.1 `--help`)
 
 ### measure suite
 

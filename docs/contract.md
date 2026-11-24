@@ -90,7 +90,7 @@ gqt
 ### 4.2a `gqt gherkin compile <feature> --project-root <root> [--write] [--no-clean]`（SEE-1426 P2；SEE-1468 /2；SEE-1583 更名）
 
 - **严格单根与物理边界（SEE-1624）**：只从 `<root>/addons/gqt_gherkin/features/` 的直接子文件发现 `.feature`，harness 只取 `res://addons/gqt_gherkin/harness.gd`；旧 addon/acceptance 根无回退、无自动复制，根外显式 feature 同样拒绝。addon 根本身以及 schema/validator/harness 文件均不得为 symlink，`addons/` 父路径不得把物理位置带出项目，feature/manifest 的解析结果不得逃出严格单根；addon、suite-dir 与 replay 路径的 symlink loop 归具名领域错误并保持单 JSON / no-traceback。feature key 全链统一将非 `[A-Za-z0-9_]` 字符归一为 `_`（`my-demo` → `my_demo`）。
-- **schema 纯解析握手（compile_preflight，零 Godot / 零 validator）**：`schema.json` 必须声明 `schema` / `requires_gqt` / `testing_api`。最小形态为 `{"schema":"gqt-gherkin-addon/1.0","requires_gqt":"v0.4.0","testing_api":"see1468-gherkin/2"}`；major 必须为 1，minor 加法版本可接受，未知键忽略，`requires_gqt` 不得高于当前 GQT，testing-api token 必须完全一致。
+- **schema 纯解析握手（compile_preflight，零 Godot / 零 validator）**：`schema.json` 必须声明 `schema` / `requires_gqt` / `testing_api`。最小形态为 `{"schema":"gqt-gherkin-addon/1.0","requires_gqt":"v0.4.1","testing_api":"see1468-gherkin/2"}`；major 必须为 1，minor 加法版本可接受，未知键忽略，`requires_gqt` 不得高于当前 GQT，testing-api token 必须完全一致。
 - **run/mutate 的两级预检与次序**：已有产物的 run/mutate 先做 schema + 哈希 + source re-anchor 的纯域 replay，再于业务执行前恰好拉起一次 addon 自带 `validator.gd`；`--suite-dir` 额外先做项目 containment，早于任何 manifest 读取、replay、validator 或 Godot。validator 必须 exit 0、最后一份含 `supported_majors` 的可解析 JSON 满足 `ok=true` 且 `supported_majors=[1]`；非零退出、红 verdict、协议缺失或支持集漂移均拒绝。measure 直接 compile/replay/run/arms 核心路径复用同一实现，不在 CLI 单点守门。
 
 - `.feature` → 版本化 IR（`ops_version = "see1468-gherkin/2"`）→ 数据驱动 GUT 测试（运行时读 IR，逐 case 一个 GUT 测试方法）→ 归因 manifest（scenario→test_name，非 ASCII 场景名标识符化 + 序号保障唯一）。

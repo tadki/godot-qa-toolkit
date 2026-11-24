@@ -33,7 +33,7 @@ SECOND_FEATURE = """Feature: 纯场景
 # testing_api；未知键忽略（minor=加法）。
 VALID_SCHEMA: dict = {
     "schema": "gqt-gherkin-addon/1.0",
-    "requires_gqt": "v0.4.0",
+    "requires_gqt": "v0.4.1",
     "testing_api": "see1468-gherkin/2",
 }
 

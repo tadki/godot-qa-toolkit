@@ -168,6 +168,100 @@ def execute_rerun_scripts(root: Path, gut_dirs: list[str],
     return results, xdg_homes
 
 
+def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
+                               ) -> "tuple[Path, dict, str, object]":
+    """编译 rerun keys 进私有 suite 并做 validator 预检恰好一次
+    （§SPEC-003 契约：业务执行前同一 validator）。返回 (suite_dir,
+    identities, gen_res, identity_rewrite)；编译/预检失败具名抛出。"""
+    from ..gherkin.addon import AddonError, compile_preflight, \
+        run_validator_preflight
+    from ..gherkin.run import GherkinRunError, replay_check
+    from ..gherkin.suite import SuiteError, compile_keys_to_suite
+    from .attribution import _gherkin_identity_rewrite
+
+    try:
+        compile_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    suite_dir = root / "gherkin" / "generated" / f".gqt-run-{run_uuid[:12]}"
+    if suite_dir.exists():
+        raise SuiteError(
+            f"private suite dir already exists: {suite_dir}")
+    suite_dir.mkdir(parents=True)
+    out = compile_keys_to_suite(root, keys, suite_dir)
+    identities = {k: (out["manifests"].get(k) or {}).get("attribution")
+                  or [] for k in keys}
+    for k in keys:
+        replay_check(root, k, suite_dir=suite_dir)
+    try:
+        run_validator_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    gen_res = ("res://" + suite_dir.joinpath("generated")
+               .relative_to(root).as_posix())
+    rw = _gherkin_identity_rewrite(root, [{"suite_dir": str(suite_dir),
+                                           "keys": keys}], identities)
+    return suite_dir, identities, gen_res, rw
+
+
+def _gherkin_leg_texts(templates: dict, run_uuid: str,
+                       causal: bool) -> "tuple[dict, dict, list]":
+    """插桩文本与 ATTR 钩子清单：(started_files 原文, instrumented 插桩
+    后文本, hook_files)。"""
+    started_files: dict[str, str] = {}
+    instrumented: dict[str, str] = {}
+    for rel, item in templates.items():
+        if "template" not in item:
+            continue
+        inst = item["template"].replace(prepcache.SINK_UUID_PLACEHOLDER,
+                                        run_uuid)
+        started_files[item["abs"]] = item["src"]
+        instrumented[item["abs"]] = inst
+    hook_files = [(_FLUSHER_RELPATH, _ATTR_FLUSHER_GD),
+                  (_PRE_HOOK_RELPATH, _ATTR_PRE_HOOK_GD.replace(
+                      _ATTR_RUN_UUID_PLACEHOLDER, run_uuid))]
+    if causal:
+        hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
+    return started_files, instrumented, hook_files
+
+
+def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
+                         instrumented: dict, hook_files: list,
+                         run_uuid: str, timeout_s: int,
+                         xdg_homes: list[str]) -> list[dict]:
+    """写插桩文本与 ATTR 钩子 → `-gdir` 单进程跑 suite（XDG 隔离）→
+    finally 还原文树/清钩子。返回逐轮执行记录；xdg 目录只登记，由调用方
+    成功路径回收（与既有口径一致，错误路径不新增回收）。"""
+    import tempfile
+
+    executions: list[dict] = []
+    try:
+        for abs_path, inst in instrumented.items():
+            Path(abs_path).write_text(inst, encoding="utf-8")
+        for relpath, text in hook_files:
+            abs_p = root / relpath
+            abs_p.parent.mkdir(parents=True, exist_ok=True)
+            abs_p.write_text(text, encoding="utf-8")
+        xdg = tempfile.mkdtemp(prefix=f"gqt-incr-gh-{run_uuid[:8]}-")
+        xdg_homes.append(xdg)
+        argv = [f"-gdir={gen_res}",
+                "-gpre_run_script=res://" + _PRE_HOOK_RELPATH]
+        env = dict(os.environ)
+        env["XDG_DATA_HOME"] = xdg
+        r, _w = _run_one_gut(root, argv, timeout_s, env=env,
+                             gate_root=root)
+        executions.append({"shard": gen_res, "rc": r.returncode,
+                           "out": ((r.stdout or "") + "\n"
+                                   + (r.stderr or ""))[-4000:],
+                           "error": None})
+    finally:
+        for abs_path, original in started_files.items():
+            Path(abs_path).write_text(original, encoding="utf-8")
+        for relpath, _text in hook_files:
+            Path(root / relpath).unlink(missing_ok=True)
+    return executions
+
+
 def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
                               templates: dict, recipe: dict, causal: bool,
                               run_uuid: str, timeout_s: int
@@ -182,19 +276,10 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
     / GherkinRunError / AddonError），不得静默缩面。"""
     import shutil
     import sys
-    import tempfile
 
-    from ..gherkin.addon import AddonError
-    from ..gherkin.run import GherkinRunError, replay_check
-    from ..gherkin.suite import (
-        SuiteError,
-        compile_keys_to_suite,
-    )
-    from ..gherkin.addon import compile_preflight, run_validator_preflight
     from .arms import _cleanup_suite_dir
     from .attribution import (
         _fid_by_line_from_registry,
-        _gherkin_identity_rewrite,
         build_attribution_map,
     )
     from .orchestrator import _read_attr_merged, _read_registries
@@ -202,70 +287,15 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
     keys = sorted({str(k) for k in feature_keys})
     if not keys:
         return None, []
+    suite_dir, _identities, gen_res, rw = _gherkin_leg_compile_suite(
+        root, keys, run_uuid)
+    started_files, instrumented, hook_files = _gherkin_leg_texts(
+        templates, run_uuid, causal)
+    xdg_homes: list[str] = []
     try:
-        compile_preflight(root)
-    except AddonError as e:
-        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
-    suite_dir = root / "gherkin" / "generated" / f".gqt-run-{run_uuid[:12]}"
-    if suite_dir.exists():
-        raise SuiteError(
-            f"private suite dir already exists: {suite_dir}")
-    suite_dir.mkdir(parents=True)
-    try:
-        out = compile_keys_to_suite(root, keys, suite_dir)
-        identities = {k: (out["manifests"].get(k) or {}).get("attribution")
-                      or [] for k in keys}
-        for k in keys:
-            replay_check(root, k, suite_dir=suite_dir)
-        try:
-            run_validator_preflight(root)
-        except AddonError as e:
-            raise GherkinRunError(f"gherkin preflight failed: {e}") from e
-
-        gen_res = ("res://" + suite_dir.joinpath("generated")
-                   .relative_to(root).as_posix())
-        rw = _gherkin_identity_rewrite(root, [{"suite_dir": str(suite_dir),
-                                               "keys": keys}], identities)
-        started_files: dict[str, str] = {}
-        instrumented: dict[str, str] = {}
-        for rel, item in templates.items():
-            if "template" not in item:
-                continue
-            inst = item["template"].replace(prepcache.SINK_UUID_PLACEHOLDER,
-                                            run_uuid)
-            started_files[item["abs"]] = item["src"]
-            instrumented[item["abs"]] = inst
-        hook_files = [(_FLUSHER_RELPATH, _ATTR_FLUSHER_GD),
-                      (_PRE_HOOK_RELPATH, _ATTR_PRE_HOOK_GD.replace(
-                          _ATTR_RUN_UUID_PLACEHOLDER, run_uuid))]
-        if causal:
-            hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
-        executions: list[dict] = []
-        xdg_homes: list[str] = []
-        try:
-            for abs_path, inst in instrumented.items():
-                Path(abs_path).write_text(inst, encoding="utf-8")
-            for relpath, text in hook_files:
-                abs_p = root / relpath
-                abs_p.parent.mkdir(parents=True, exist_ok=True)
-                abs_p.write_text(text, encoding="utf-8")
-            xdg = tempfile.mkdtemp(prefix=f"gqt-incr-gh-{run_uuid[:8]}-")
-            xdg_homes.append(xdg)
-            argv = [f"-gdir={gen_res}",
-                    "-gpre_run_script=res://" + _PRE_HOOK_RELPATH]
-            env = dict(os.environ)
-            env["XDG_DATA_HOME"] = xdg
-            r, _w = _run_one_gut(root, argv, timeout_s, env=env,
-                                 gate_root=root)
-            executions.append({"shard": gen_res, "rc": r.returncode,
-                               "out": ((r.stdout or "") + "\n"
-                                       + (r.stderr or ""))[-4000:],
-                               "error": None})
-        finally:
-            for abs_path, original in started_files.items():
-                Path(abs_path).write_text(original, encoding="utf-8")
-            for relpath, _text in hook_files:
-                Path(root / relpath).unlink(missing_ok=True)
+        executions = _gherkin_leg_execute(root, gen_res, started_files,
+                                          instrumented, hook_files,
+                                          run_uuid, timeout_s, xdg_homes)
         attr_by_rel = {}
         for rel, item in templates.items():
             attr_by_rel[rel] = _read_attr_merged(root, run_uuid, rel,

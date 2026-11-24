@@ -756,6 +756,43 @@ def _group_fresh_edges(inc_arm: dict) -> dict:
                     for k, v in (inc_arm.get(key) or {}).items()}
     return out
 
+def _strip_lines_by_rel(by_ident: "dict | None",
+                        removed_rels: set[str]) -> dict:
+    """行事实剔除已删除生产文件的边（行列表 sorted 拷贝，身份原序保留）。"""
+    return {i: {r: sorted(ls) for r, ls in by_rel.items()
+                if r not in removed_rels}
+            for i, by_rel in (by_ident or {}).items()}
+
+
+def _strip_fids_by_rel(by_ident: "dict | None",
+                       removed_rels: set[str]) -> dict:
+    """fn 视图剔除已删除生产文件的 fid（fid 列表 sorted 拷贝）。"""
+    return {i: sorted(f for f in (fids or [])
+                      if _fid_file_of(f) not in removed_rels)
+            for i, fids in (by_ident or {}).items()}
+
+
+def _dropping_empty(mapping: dict) -> dict:
+    """丢弃空值条目（列表/字典视图共用的收尾过滤，顺序保留）。"""
+    return {k: v for k, v in mapping.items() if v}
+
+
+def _file_lists_dropping_empty(by_ident: "dict | None",
+                               removed_rels: set[str]) -> dict:
+    """file 列表剔除已删除生产文件并丢弃空列表身份（与既有全量口径一致）。"""
+    stripped = {i: sorted(f for f in (files or [])
+                          if f not in removed_rels)
+                for i, files in (by_ident or {}).items()}
+    return _dropping_empty(stripped)
+
+
+def _rel_keyed_dropping_removed(mapping: "dict | None",
+                                removed_rels: set[str]) -> dict:
+    """rel 键视图（file_to_* / line_to_*）剔除已删除生产文件的键。"""
+    return {r: v for r, v in (mapping or {}).items()
+            if r not in removed_rels}
+
+
 def _carried_gherkin_arm(baseline: dict,
                          removed_rels: set[str]) -> dict:
     """SEE-1631 §SPEC-004：增量产物的 gherkin 臂继承（无 feature 失效面）。
@@ -773,50 +810,28 @@ def _carried_gherkin_arm(baseline: dict,
                         "script_to_functions", "feature_to_lines",
                         "line_to_features")}
 
-    def strip_by_rel(by_ident: dict) -> dict:
-        return {i: {r: sorted(ls) for r, ls in by_rel.items()
-                    if r not in removed_rels}
-                for i, by_rel in (by_ident or {}).items()}
-
-    test_to_lines = strip_by_rel(garm.get("test_to_lines"))
-    script_to_lines = strip_by_rel(garm.get("script_to_lines"))
-
-    def strip_fn(by_ident: dict) -> dict:
-        return {i: sorted(f for f in (fids or [])
-                          if _fid_file_of(f) not in removed_rels)
-                for i, fids in (by_ident or {}).items()}
-
-    test_to_files = {i: sorted(f for f in (files or [])
-                               if f not in removed_rels)
-                     for i, files in (garm.get("test_to_files")
-                                      or {}).items()}
-    test_to_files = {i: f for i, f in test_to_files.items() if f}
-    script_to_files = {i: sorted(f for f in (files or [])
-                                 if f not in removed_rels)
-                       for i, files in (garm.get("script_to_files")
-                                        or {}).items()}
-    script_to_files = {i: f for i, f in script_to_files.items() if f}
-    file_to_tests = {r: v for r, v in (garm.get("file_to_tests")
-                                       or {}).items()
-                     if r not in removed_rels}
-    file_to_scripts = {r: v for r, v in (garm.get("file_to_scripts")
-                                         or {}).items()
-                       if r not in removed_rels}
-    test_to_functions = strip_fn(garm.get("test_to_functions"))
-    test_to_functions = {i: f for i, f in test_to_functions.items() if f}
-    script_to_functions = strip_fn(garm.get("script_to_functions"))
-    script_to_functions = {i: f for i, f in script_to_functions.items() if f}
-    line_to_tests = {r: v for r, v in (garm.get("line_to_tests")
-                                       or {}).items()
-                     if r not in removed_rels}
-    feature_to_lines = {k: {r: sorted(ls) for r, ls in by_rel.items()
-                            if r not in removed_rels}
-                        for k, by_rel in (garm.get("feature_to_lines")
-                                          or {}).items()}
-    feature_to_lines = {k: v for k, v in feature_to_lines.items() if v}
-    line_to_features = {r: v for r, v in (garm.get("line_to_features")
-                                          or {}).items()
-                        if r not in removed_rels}
+    test_to_lines = _strip_lines_by_rel(garm.get("test_to_lines"),
+                                        removed_rels)
+    script_to_lines = _strip_lines_by_rel(garm.get("script_to_lines"),
+                                          removed_rels)
+    test_to_files = _file_lists_dropping_empty(garm.get("test_to_files"),
+                                               removed_rels)
+    script_to_files = _file_lists_dropping_empty(garm.get("script_to_files"),
+                                                 removed_rels)
+    file_to_tests = _rel_keyed_dropping_removed(garm.get("file_to_tests"),
+                                                removed_rels)
+    file_to_scripts = _rel_keyed_dropping_removed(garm.get("file_to_scripts"),
+                                                  removed_rels)
+    test_to_functions = _dropping_empty(
+        _strip_fids_by_rel(garm.get("test_to_functions"), removed_rels))
+    script_to_functions = _dropping_empty(
+        _strip_fids_by_rel(garm.get("script_to_functions"), removed_rels))
+    line_to_tests = _rel_keyed_dropping_removed(garm.get("line_to_tests"),
+                                                removed_rels)
+    feature_to_lines = _dropping_empty(
+        _strip_lines_by_rel(garm.get("feature_to_lines"), removed_rels))
+    line_to_features = _rel_keyed_dropping_removed(
+        garm.get("line_to_features"), removed_rels)
     out.update({
         "test_to_lines": test_to_lines, "script_to_lines": script_to_lines,
         "line_to_tests": line_to_tests,

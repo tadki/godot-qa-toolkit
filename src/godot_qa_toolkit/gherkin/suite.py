@@ -38,7 +38,7 @@ from .addon import (SUITE_OWNER_MARKER, AddonError, compile_preflight,
                     features_root, is_owned_suite_dir, normalize_feature_key,
                     resolve_feature, run_validator_preflight)
 from .isolation import isolated_godot_env
-from .compile import compile_feature
+from .compile import compile_feature, out_dir_error
 from .run import GherkinRunError, _strip_ansi, replay_check
 from ..mutation.godot_gate import GlobalGodotGate
 from ..mutation.gutrun import _looks_like_godot_launch_failure
@@ -116,11 +116,17 @@ def compile_keys_to_suite(project_root: str | Path, keys: list[str],
     root = Path(project_root)
     suite_dir = Path(suite_dir)
     selected = sorted({normalize_feature_key(k) for k in keys})
+    # DEF-B：多 key 单次调用的 out_dir 校验**只做一次**（在写入任何 key 之前）
+    # ——逐 key 复检会被同批产物触发 "out_dir must be empty"。
+    reason = out_dir_error(suite_dir, root)
+    if reason is not None:
+        raise SuiteError(reason)
     manifests: dict[str, dict] = {}
     for key in selected:
         f = resolve_feature(root, key)
         suite, error = compile_feature(f, root, write=True,
-                                       out_dir=suite_dir)
+                                       out_dir=suite_dir,
+                                       prepared_out_dir=True)
         if error is not None:
             raise SuiteError(f"compile failed for {key}: {error['reason']}")
         manifests[key] = suite.manifest

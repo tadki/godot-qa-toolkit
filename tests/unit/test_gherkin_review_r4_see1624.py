@@ -28,7 +28,7 @@ from gherkin_fixtures import make_addon_project, write_feature
 
 VALID_R2_SCHEMA = {
     "schema": "gqt-gherkin-addon/1.0",
-    "requires_gqt": "v0.4.1",
+    "requires_gqt": "v0.4.2",
     "testing_api": "see1468-gherkin/2",
 }
 

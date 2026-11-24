@@ -107,7 +107,7 @@ gqt gherkin run --project-root . --gherkin-probe-keys save
 - Mutation here is **contract-level** (IR cell semantics), not source-level;
   source-level mutation uses `gqt mutation`.
 
-## Command reference (aligned with v0.4.1 `--help`)
+## Command reference (aligned with v0.4.2 `--help`)
 
 ### gherkin compile
 

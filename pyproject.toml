@@ -1,8 +1,8 @@
 [project]
 name = "godot-qa-toolkit"
 # 0.x minor carries breaking CLI/schema renames (SEE-1583 hierarchy;
-# package version must stay equal to the release tag, e.g. v0.4.1).
-version = "0.4.1"
+# package version must stay equal to the release tag, e.g. v0.4.2).
+version = "0.4.2"
 description = "Deterministic five-stage QA toolchain for Godot/GDScript: Gherkin runner, complexity gate, mutation and coverage (SEE-1256 plan, M1)."
 readme = "README.md"
 requires-python = ">=3.10"

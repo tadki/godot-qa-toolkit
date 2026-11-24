@@ -730,7 +730,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         print("mutation: verdict baseline sourced from attribution map "
               "(§SPEC-020; cold start skipped)", file=sys.stderr)
     else:
-        print(f"mutation: verdict baseline via legacy cold start "
+        print("mutation: verdict baseline via legacy cold start "
               "(GQT_MUTATION_BASELINE_SOURCE=cold, disclosed)",
               file=sys.stderr)
         baselines, baseline_failures = _precompute_baselines(

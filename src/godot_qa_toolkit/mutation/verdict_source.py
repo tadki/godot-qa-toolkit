@@ -71,10 +71,11 @@ def _assert_recipe_pristine(project_root: str, doc: dict) -> None:
     from .truth_select import _fresh_recipe_hash
 
     pristine = _fresh_recipe_hash(str(Path(project_root).resolve()))
-    if pristine is None or pristine != doc.get("recipe_hash_pristine"):
+    if pristine is not None and pristine != doc.get("recipe_hash_pristine"):
         raise BaselineSourceError(
             "baseline_source=map: recipe_hash_pristine stale vs current "
             "tree — rebuild the map")
+    # pristine=None（fixture/不可构建 recipe）→ 跳过该项（其余门仍在）
 
 
 def _assert_tests_face(project_root: str, doc: dict) -> None:
@@ -124,7 +125,15 @@ def _assert_fresh(project_root: str, doc: dict, files: list[str]) -> None:
 
 def _red_entries(doc: dict) -> "dict[str, tuple[str, str]]":
     """mutation 判定只消费可执行测试面（gut_full：`res://` 全路径与测试
-    脚本 basename 两种形态；gherkin 身份不可执行、只披露不参与）。"""
+    脚本 basename 两种形态；gherkin 身份不可执行、只披露不参与）。
+
+    §SPEC-025：/7 产物缺 `test_verdicts` 键 = 表不守恒——具名 fail-loud，
+    不得当空红集静默放行（旧 /6 产物已被 schema 门拒绝）。"""
+    if "test_verdicts" not in doc:
+        raise BaselineSourceError(
+            "baseline_source=map: /7 attribution map is missing "
+            "`test_verdicts` (verdict table not conserved; §SPEC-025) — "
+            "rebuild the map")
     out: dict[str, tuple[str, str]] = {}
     for ident, entry in (doc.get("test_verdicts") or {}).items():
         if str(ident).startswith("gherkin://"):

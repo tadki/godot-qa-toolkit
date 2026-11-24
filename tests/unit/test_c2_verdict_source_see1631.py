@@ -59,16 +59,19 @@ def test_verdict_table_classifies_three_lanes():
         ["gherkin://feature/alpha::test_s0",
          "gherkin://feature/alpha::test_s1"])
     table = _test_verdict_table((gher, gut))
-    assert table["res://tests/unit/test_a.gd::test_red1"] == {
-        "verdict": "red", "classification": "pre_existing"}
-    assert table["res://tests/unit/test_b.gd::test_intol"] == {
-        "verdict": "red", "classification": "suspected_intolerant"}
-    assert table["res://tests/unit/test_a.gd::test_red2"] == {
-        "verdict": "red", "classification": "new"}
+    # §SPEC-024：红条目附 script（基线合成/物理跳过用）——verdict 与
+    # classification 逐字段断言，dict 整体等值不再适用
+    assert table["res://tests/unit/test_a.gd::test_red1"]["verdict"] == "red"
+    assert table["res://tests/unit/test_a.gd::test_red1"][
+        "classification"] == "pre_existing"
+    assert table["res://tests/unit/test_b.gd::test_intol"][
+        "classification"] == "suspected_intolerant"
+    assert table["res://tests/unit/test_a.gd::test_red2"][
+        "classification"] == "new"
     assert table["res://tests/unit/test_a.gd::test_green"] == {
         "verdict": "green"}
-    assert table["gherkin://feature/alpha::test_s0"] == {
-        "verdict": "red", "classification": "pre_existing"}
+    assert table["gherkin://feature/alpha::test_s0"][
+        "classification"] == "pre_existing"
     assert table["gherkin://feature/alpha::test_s1"]["verdict"] == "green"
 
 

@@ -688,38 +688,117 @@ def _raw_red_idents(arms: tuple[dict, ...]) -> set[str]:
 
 
 def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
-    """SEE-1631 §SPEC-020：逐测试 verdict 表（GUT 测试与 gherkin scenario
-    同表）。
+    """SEE-1631 §SPEC-020/024：逐测试 verdict 表（GUT 测试与 gherkin
+    scenario 同表），身份与行事实宇宙归一。
 
-    每个测试身份（gut_full `res://script::test` / gherkin
-    `gherkin://feature/<key>::<test>`）记录本次测量形态下的判定：
-    - `{"verdict": "green"}`——行事实宇宙内且未出现在任何红集合；
+    行事实宇宙键（gut_full）为 GUT 注册表形态——真机为裸 basename
+    （`test_<file>.gd::<test>`），而红集来源（baseline_failures_meta
+    .pairs 等）为 `res://<path>::<test>` 全路径。两侧统一按
+    `basename(script)::test` 归一后再分类：
+    - `{"verdict": "green"}`——宇宙内且未命中任何红集合；
     - `{"verdict": "red", "classification": "pre_existing"}`——既有失败
-      （基线吸收）；
-    - `{"verdict": "red", "classification": "suspected_intolerant"}`——
-      疑似插桩不耐受车道；
+      （基线吸收，附 script 供基线合成/物理跳过）；
+    - `{"verdict": "red", "classification": "suspected_intolerant"}`；
     - `{"verdict": "red", "classification": "new"}`——未分类红（臂应
-      invalid、map 拒装；如实记录供消费方 fail-loud）。
+      invalid、map 拒装）。
+    归一失败（红对无法对齐宇宙）不落 green 兜底——按 raw 键如实记红。"""
+    import re as _re
 
-    gherkin 红对以 raw 生成路径形态记录（对照路由产出）；行事实宇宙是
-    规范身份——发射前按 manifest test_name 归一（`test_<key>.gd::<name>`
-    → `gherkin://feature/<key>::<name>`），同一测试两种形态不分裂。"""
-    red_by_class, universe = _collect_verdict_reds(arms)
-    classified: set[str] = set()
+    def _key_of(ident: str) -> "tuple[str, str]":
+        script, name = str(ident).split("::", 1)
+        return (script.rsplit("/", 1)[-1], name)
+
+    def _is_gherkin(ident: str) -> bool:
+        return str(ident).startswith("gherkin://")
+
+    def _norm_gherkin(pair: str) -> str:
+        script, name = str(pair).split("::", 1)
+        if "/gherkin/generated/" not in script.replace("\\", "/"):
+            return str(pair)
+        m = _re.search(r"test_(.+)\.gd$", script.replace("\\", "/"))
+        if not m:
+            return str(pair)
+        return f"{GHERKIN_IDENTITY_PREFIX}{m.group(1).split('/')[-1]}::{name}"
+
+    red_by_class: dict[str, set[str]] = {
+        "pre_existing": set(), "suspected_intolerant": set(), "new": set()}
+    universe: set[str] = set()
+    universe_script: dict[str, str] = {}
+    for arm in arms:
+        name = arm.get("arm")
+        tf = arm.get("test_failures") or {}
+        arm_universe = (arm.get("attribution") or {}).get("test_to_lines") \
+            or {}
+        for ident in arm_universe:
+            universe.add(ident)
+            if not _is_gherkin(ident):
+                universe_script.setdefault(_key_of(ident)[0] + "::"
+                                           + _key_of(ident)[1],
+                                           ident.split("::", 1)[0])
+        if name == "gut_full":
+            meta = arm.get("baseline_failures_meta") or {}
+            for s, t in (meta.get("pairs") or []):
+                red_by_class["pre_existing"].add(
+                    Path(str(s)).name + "::" + str(t))
+            for pair in tf.get("instrumentation_intolerant") or []:
+                sc, nm = str(pair).split("::", 1)
+                red_by_class["suspected_intolerant"].add(
+                    Path(sc).name + "::" + nm)
+            for pair in (tf.get("observed_pairs") or []) \
+                    + (tf.get("new_pairs") or []):
+                sc, nm = str(pair).split("::", 1)
+                red_by_class["new"].add(Path(sc).name + "::" + nm)
+        elif name == "gherkin":
+            red_by_class["pre_existing"] |= {
+                _norm_gherkin(p) for p in
+                (tf.get("pre_existing_failures") or [])}
+            red_by_class["suspected_intolerant"] |= {
+                _norm_gherkin(p) for p in
+                (tf.get("instrumentation_intolerant") or [])}
+            for pair in (tf.get("new_pairs") or []) \
+                    + (tf.get("observed_pairs") or []):
+                red_by_class["new"].add(_norm_gherkin(pair))
+    red_script: dict[str, str] = {}
+    for arm in arms:
+        tf = arm.get("test_failures") or {}
+        for pair in (tf.get("observed_pairs") or []) \
+                + (tf.get("new_pairs") or []) \
+                + (tf.get("pre_existing_failures") or []) \
+                + (tf.get("instrumentation_intolerant") or []):
+            sc, nm = str(pair).split("::", 1)
+            red_script.setdefault(Path(sc).name + "::" + nm, sc)
+            red_script.setdefault(_norm_gherkin(pair), sc)
     out: dict[str, dict] = {}
-    for cls in ("pre_existing", "suspected_intolerant"):
-        for ident in red_by_class[cls] & universe:
-            out[ident] = {"verdict": "red", "classification": cls}
-            classified.add(ident)
-    # 未分类红（不在行事实宇宙 = 臂 invalid 已拒装的产物面）：如实记录
-    for ident in _raw_red_idents(arms):
-        if ident in universe and ident not in out:
-            out[ident] = {"verdict": "red", "classification": "new"}
-            classified.add(ident)
+    # 归一键（basename::test）→ 行事实宇宙身份（red 命中宇宙即按宇宙
+    # 身份发射；未命中宇宙 = 归一失败，按 raw 键如实记红，不落 green）
+    universe_by_key: dict[str, str] = {}
     for ident in universe:
-        if ident not in classified:
+        if not _is_gherkin(ident):
+            sc, nm = ident.split("::", 1)
+            universe_by_key.setdefault(Path(sc).name + "::" + nm, ident)
+    # 车道优先级：pre_existing > suspected_intolerant > new（先到先得）；
+    # 发射键 = 行事实宇宙身份（归一后的规范键），未命中宇宙的红对按 raw
+    # 键如实记红（归一失败不落 green 兜底）。
+    for cls in ("pre_existing", "suspected_intolerant", "new"):
+        for key in red_by_class[cls]:
+            ident = universe_by_key.get(key)
+            if ident is None and key in universe:
+                ident = key
+            if ident is not None:
+                if ident in out:
+                    continue
+                script = red_script.get(key) \
+                    or universe_script.get(key) \
+                    or ident.split("::", 1)[0]
+                out[ident] = {"verdict": "red", "classification": cls,
+                              "script": script}
+            elif key not in out:
+                out[key] = {"verdict": "red", "classification": cls,
+                            "script": red_script.get(key)
+                            or key.split("::", 1)[0]}
+    for ident in universe:
+        if ident not in out:
             out[ident] = {"verdict": "green"}
-            classified.add(ident)
     return out
 
 

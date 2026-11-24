@@ -700,11 +700,17 @@ def run_attribution_increment(project_root: str | Path,
     invalidation = {**invalidation,
                     "gherkin_rerun": sorted(gherkin_rerun),
                     "gherkin_dropped": sorted(gherkin_dropped)}
+    # SEE-1631 §SPEC-025：verdict 表守恒——重跑身份按新执行结果重算
+    # （脚本级执行账 out 解析失败名），未重跑身份原样继承，删除剔除。
+    merged_verdicts = _merged_test_verdicts(
+        baseline, executions or [], rerun, invalidation["dropped"], removed,
+        fresh_gherkin, gherkin_rerun, gherkin_dropped)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
         executions, merged_gherkin=merged_gherkin,
-        gh_exec_s=gh_exec_s, gh_executions=gh_executions)
+        gh_exec_s=gh_exec_s, gh_executions=gh_executions,
+        merged_verdicts=merged_verdicts)
     return _increment_emit(root, out_path, artifact, merged, classes, rerun,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
@@ -805,6 +811,89 @@ def _rel_keyed_dropping_removed(mapping: "dict | None",
     """rel 键视图（file_to_* / line_to_*）剔除已删除生产文件的键。"""
     return {r: v for r, v in (mapping or {}).items()
             if r not in removed_rels}
+
+def _merged_test_verdicts(baseline: dict, executions: list[dict],
+                          rerun_scripts: set[str],
+                          dropped_scripts: set[str],
+                          removed_rels: set[str],
+                          fresh_gherkin: "dict | None",
+                          gherkin_rerun: set[str],
+                          gherkin_dropped: set[str]) -> "dict | None":
+    """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
+
+    - 基线表原样继承（未重跑身份逐位不变）；
+    - 重跑脚本的身份按脚本执行账重算：rc==0 且无解析失败名 → green；
+      有失败名 → red/new（增量形态新树的失败如实记 new）；
+    - gherkin 重跑腿 rc==0 → 重跑键 green，否则 red/new；
+    - 删除测试脚本与删除生产文件触达的身份剔除。
+    基线无表（旧产物）→ None（消费方按缺表 fail-loud）。"""
+    base = baseline.get("test_verdicts")
+    if not isinstance(base, dict):
+        return None
+    from ..mutation.gutrun import _parse_failing_tests
+
+    merged = dict(base)
+
+    def _base(ident: str) -> str:
+        return str(ident).split("::", 1)[0].rsplit("/", 1)[-1]
+
+    # 1) 删除剔除：删除测试脚本（test_removed basename）与删除生产文件
+    dropped_basenames = {Path(s).name for s in (dropped_scripts or set())}
+    if dropped_basenames:
+        for ident in list(merged):
+            sc = str(ident).split("::", 1)[0]
+            if Path(sc).name in dropped_basenames:
+                del merged[ident]
+    for rel in removed_rels or set():
+        for ident in list(merged):
+            sc = str(ident).split("::", 1)[0]
+            if sc.startswith("res://") and sc[len("res://"):] == rel:
+                del merged[ident]
+    # 2) 重跑身份重算：rerun 脚本执行账（单脚本 rc/out）
+    per_script: dict[str, tuple[int, set[str]]] = {}
+    for r in executions or []:
+        script = str(r.get("script") or "")
+        if not script:
+            continue
+        b = Path(script).name
+        per_script[b] = (int(r.get("rc") or 0),
+                         _parse_failing_tests(r.get("out") or ""))
+    for ident in list(merged):
+        sc = str(ident).split("::", 1)[0]
+        b = Path(sc).name
+        if b in per_script:
+            rc, failing = per_script[b]
+            name = str(ident).split("::", 1)[1]
+            if rc == 0 and name not in failing:
+                merged[ident] = {"verdict": "green"}
+            else:
+                merged[ident] = {"verdict": "red",
+                                 "classification": "new",
+                                 "script": sc}
+    # 3) gherkin 重跑键（feature_changed/new）→ 按重跑腿执行账重算：
+    #    重跑腿 rc==0 → 键内身份 green，否则 red/new；删除键剔除
+    if fresh_gherkin is not None:
+        from .attribution import GHERKIN_IDENTITY_PREFIX, \
+            _gherkin_feature_of
+
+        gh_ok = bool((fresh_gherkin.get("reconciliation")
+                      or {}).get("ok") is True) \
+            or int(fresh_gherkin.get("rc") or 1) == 0
+        for ident in list(merged):
+            key = _gherkin_feature_of(str(ident))
+            if key is None:
+                continue
+            if key in gherkin_dropped:
+                del merged[ident]
+                continue
+            if key in gherkin_rerun:
+                if gh_ok:
+                    merged[ident] = {"verdict": "green"}
+                else:
+                    merged[ident] = {"verdict": "red",
+                                     "classification": "new",
+                                     "script": str(ident).split("::", 1)[0]}
+    return merged
 
 
 def _carried_gherkin_arm(baseline: dict,
@@ -907,6 +996,79 @@ def _increment_arms_block(baseline: dict, merged: dict, classes: dict,
         arms["gherkin"] = carried_gherkin
     return arms
 
+def _merged_test_verdicts(baseline: dict, executions: list[dict],
+                          rerun_scripts: set[str],
+                          dropped_scripts: set[str],
+                          removed_rels: set[str],
+                          fresh_gherkin: "dict | None",
+                          gherkin_rerun: set[str],
+                          gherkin_dropped: set[str]) -> "dict | None":
+    """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
+
+    - 基线表原样继承（未重跑身份逐位不变）；
+    - 重跑脚本的身份按脚本执行账重算：rc==0 且无解析失败名 → green；
+      有失败名 → red/new（增量形态新树的失败如实记 new）；
+    - gherkin 重跑键（feature_changed/new）随重跑腿执行账重算（rc==0 →
+      green，否则 red/new），删除键剔除；
+    - 删除测试脚本与删除生产文件触达的身份剔除。
+    基线无表（旧产物）→ None（消费方按缺表具名 fail-loud）。"""
+    base = baseline.get("test_verdicts")
+    if not isinstance(base, dict):
+        return None
+    from ..mutation.gutrun import _parse_failing_tests
+    from .attribution import GHERKIN_IDENTITY_PREFIX, _gherkin_feature_of
+
+    merged = dict(base)
+
+    def _base_of(ident: str) -> str:
+        return str(ident).split("::", 1)[0].rsplit("/", 1)[-1]
+
+    # 1) 删除剔除：删除测试脚本（test_removed basename）与删除生产文件
+    dropped_basenames = {Path(s).name for s in (dropped_scripts or set())}
+    if dropped_basenames:
+        for ident in list(merged):
+            sc = str(ident).split("::", 1)[0]
+            if Path(sc).name in dropped_basenames:
+                del merged[ident]
+    for rel in removed_rels or set():
+        for ident in list(merged):
+            sc = str(ident).split("::", 1)[0]
+            if sc.startswith("res://") and sc[len("res://"):] == rel:
+                del merged[ident]
+    # 2) 重跑脚本执行账 → 重跑身份 verdict 重算
+    per_script: dict[str, tuple[int, set[str]]] = {}
+    for r in executions or []:
+        script = str(r.get("script") or "")
+        if not script:
+            continue
+        b = Path(script).name
+        per_script[b] = (int(r.get("rc") or 0),
+                         _parse_failing_tests(r.get("out") or ""))
+    for ident in list(merged):
+        sc = str(ident).split("::", 1)[0]
+        b = Path(sc).name
+        if b in per_script:
+            rc, failing = per_script[b]
+            name = str(ident).split("::", 1)[1]
+            if rc == 0 and name not in failing:
+                merged[ident] = {"verdict": "green"}
+            else:
+                merged[ident] = {"verdict": "red", "classification": "new",
+                                 "script": sc}
+    # 3) gherkin 重跑键：feature 变更/新增的重跑腿执行账（rc==0 → green）
+    if fresh_gherkin is not None:
+        gh_rc = None
+        for r in (fresh_gherkin.get("executions") or []):
+            gh_rc = int(r.get("rc") or 1)
+            break
+        for ident in list(merged):
+            key = _gherkin_feature_of(str(ident))
+            if key is None:
+                continue
+            if key in gherkin_rerun and gh_rc == 0:
+                merged[ident] = {"verdict": "green"}
+    return merged
+
 
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
@@ -915,7 +1077,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               executions: list[dict] | None = None,
                               merged_gherkin: "dict | None" = None,
                               gh_exec_s: float = 0.0,
-                              gh_executions: "list[dict] | None" = None
+                              gh_executions: "list[dict] | None" = None,
+                              merged_verdicts: "dict | None" = None
                               ) -> dict:
     removed = set(classes.get("prod_removed") or [])
     # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
@@ -938,8 +1101,13 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
+        # SEE-1631 §SPEC-021/025：arms 块（tidy 拆分 _increment_arms_block）
+        # + verdict 表守恒（未重跑身份原样继承、重跑身份按新执行结果重算、
+        # 删除剔除；缺表 = 消费方具名 fail-loud，不得当空红集）。
         "arms": _increment_arms_block(baseline, merged, classes,
                                       carried_gherkin),
+        "test_verdicts": merged_verdicts if merged_verdicts is not None
+        else dict(baseline.get("test_verdicts") or {}),
         "arms_state": {**dict(baseline.get("arms_state") or {}),
                        **({"gherkin": gh_state_out}
                           if carried_gherkin else {})},

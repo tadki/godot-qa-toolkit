@@ -987,6 +987,16 @@ def _arm_state_block(arm_valid: bool, run_error: bool, invalid_reason,
     }
 
 
+def _lazy_absorbed_names(baseline_meta: "dict | None") -> "list[str]":
+    """§SPEC-026：懒基线吸收的既有失败名（s::t 列表）；非 partial = []。"""
+    if not baseline_meta or baseline_meta.get("status") != "partial":
+        return []
+    out = []
+    for p in baseline_meta.get("excluded_tests") or []:
+        out.append(p if isinstance(p, str) else f"{p[0]}::{p[1]}")
+    return out
+
+
 def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
              timed_out: bool, arm_valid: bool, invalid_reason, run_error: bool,
              baseline_meta, arm_failures, arm_fail_pairs, new_pairs,
@@ -1002,7 +1012,14 @@ def _arm_doc(name: str, run_uuid: str, wall_s: float, gut_ok: bool,
         **_arm_state_block(arm_valid, run_error, invalid_reason, timed_out,
                            timeout_excluded, invalid_evidence),
         "invalid_evidence": invalid_evidence,
-        "excluded_tests": timeout_excluded or [],
+        # SEE-1631 §SPEC-026：懒基线吸收的 partial 披露与 stderr 一致地
+        # 落到臂文档（absorbed names 并入 excluded_tests，partial=true）
+        "excluded_tests": ((timeout_excluded or [])
+                           + _lazy_absorbed_names(baseline_meta)),
+        "partial": bool(_lazy_absorbed_names(baseline_meta))
+        if name == "gut_full" and baseline_meta
+        and baseline_meta.get("status") == "partial"
+        else bool(timeout_excluded or []),
         "baseline_failures_meta": baseline_meta,
         "test_failures": {"observed": sorted(arm_failures),
                           "observed_pairs": sorted(

@@ -869,6 +869,37 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
                                            scopes or {}, time.time()))
     return raw_pairs
 
+def _synthesized_map_baseline(path, project_root, tests_glob):
+    """SEE-1631 §SPEC-020：判定基线单一真源——map 源时由 verdict 表合成
+    既有形状的快照（下游解析/判定零改动）；非 map 源/显式 off 返回 None
+    （冷启动照旧）。
+
+    §SPEC-021：prepare 阶段（CLI）已自动续新；此处为库内直调兜底——
+    合成前再校验一致性，漂移即具名 fail-loud（不静默退化，续新由调用方
+    的 prepare 链承担）。"""
+    from .truth_select import mode as _map_mode
+    from .verdict_source import (
+        BaselineSourceError, baseline_source, map_baseline_snapshots,
+    )
+
+    if baseline_source() != "map" or _map_mode() == "off":
+        return None
+    try:
+        syn, _fail = map_baseline_snapshots(
+            [str(path)], project_root, tests_glob)
+    except BaselineSourceError as e:
+        raise BaselineSourceError(
+            f"loop baseline: {e}") from e
+    snap = syn.get(tests_glob) or syn.get(None)
+    if snap is None:
+        raise BaselineSourceError(
+            "loop baseline: map produced no baseline snapshot "
+            f"for glob {tests_glob!r}")
+    print("mutation: verdict baseline sourced from attribution "
+          "map (§SPEC-020; cold start skipped)", file=sys.stderr)
+    return snap
+
+
 def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
                    precomputed_baseline, timeout_factor,
                    break_on_baseline_failure: bool = False) -> tuple:
@@ -876,32 +907,9 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。"""
     backup_path = os.path.join(workdir, "original.gd")
     shutil.copy2(str(path), backup_path)
-    # SEE-1631 §SPEC-020：判定基线单一真源——map 源时此处不再冷启动
-    # GUT，直接由 verdict 表合成既有形状的快照（下游解析/判定零改动）。
     if precomputed_baseline is None:
-        from .truth_select import mode as _map_mode
-        from .verdict_source import (
-            BaselineSourceError, baseline_source, map_baseline_snapshots,
-        )
-
-        if baseline_source() == "map" and _map_mode() != "off":
-            # §SPEC-021：prepare 阶段（CLI）已自动续新；此处为库内直调
-            # 兜底——合成前再校验一致性，漂移即具名 fail-loud（不静默
-            # 退化，续新由调用方的 prepare 链承担）。
-            try:
-                syn, _fail = map_baseline_snapshots(
-                    [str(path)], project_root, tests_glob)
-            except BaselineSourceError as e:
-                raise BaselineSourceError(
-                    f"loop baseline: {e}") from e
-            precomputed_baseline = syn.get(tests_glob) \
-                or syn.get(None)
-            if precomputed_baseline is None:
-                raise BaselineSourceError(
-                    "loop baseline: map produced no baseline snapshot "
-                    f"for glob {tests_glob!r}")
-            print("mutation: verdict baseline sourced from attribution "
-                  "map (§SPEC-020; cold start skipped)", file=sys.stderr)
+        precomputed_baseline = _synthesized_map_baseline(
+            path, project_root, tests_glob)
     if precomputed_baseline is not None:
         baseline_rc = int(precomputed_baseline["rc"])
         baseline_tail = str(precomputed_baseline["tail"])
@@ -1014,6 +1022,48 @@ def _test_filter_disclosure(active_allow) -> dict:
         # SEE-1610 D1：闭包形态（file = 归因有损文件整文件面回退）。
         "scope": _ACTIVE_ALLOW_SCOPE if at else None}
 
+def _map_parity_gate(slot_info: dict, precomputed_baseline) -> None:
+    """SEE-1631 §SPEC-020：map 源判定基线下 parity 门失配 = "map 说绿
+    而执行红（或反之）"被实跑证伪——整批作废、具名 fail-loud（不得
+    降级继续产出批量假 kill）。冷源（legacy）维持原降级语义。"""
+    if not baseline_snapshot_from_map(precomputed_baseline):
+        return
+    for ev in slot_info.get("worker_fatal_events") or []:
+        if str(ev).startswith("mode parity gate"):
+            from .verdict_source import BaselineSourceError
+
+            raise BaselineSourceError(
+                "baseline_map_mismatch: attribution-map verdict "
+                "baseline diverged from real execution "
+                f"(parity gate) — batch invalidated: {ev}")
+
+
+def _mutant_slot_disclosures(slot_info: dict, idpack: dict, slot,
+                             baseline_dirty: bool, baseline_failures,
+                             break_on_baseline_failure: bool,
+                             bail_effective, bail_face, kill_bail,
+                             bail_scripts) -> None:
+    """slot_info 判定与披露字段登记（键序与既有产物形状逐项一致）。"""
+    slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
+    slot_info["slot_mode"] = slot.mode
+    slot_info["freshness"] = list(slot.freshness)
+    # SEE-1606 P2：基线失败登记披露（默认继续跑；失败测试不参与 kill
+    # 判定——判定侧 `- baseline_failures` 差集保证）。
+    slot_info["baseline_dirty"] = baseline_dirty
+    slot_info["baseline_failures"] = len(baseline_failures)
+    slot_info["baseline_failure_names"] = sorted(baseline_failures)
+    slot_info["break_on_baseline_failure"] = bool(
+        break_on_baseline_failure)
+    slot_info["kill_bail"] = bail_effective
+    slot_info["kill_bail_face"] = bail_face
+    slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
+    slot_info["kill_bail_scripts"] = (
+        len(bail_scripts) if bail_scripts is not None else None)
+    # SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
+    # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
+    slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
+
+
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
@@ -1072,36 +1122,11 @@ def _run_mutant_loop(
             reporter, store2, prior_entries, scopes, clock, slot_info, t_slot,
             bail_effective, bail_scripts, red_pairs,
             baseline_snapshot=precomputed_baseline)
-        # SEE-1631 §SPEC-020：map 源判定基线下 parity 门失配 = "map 说绿
-        # 而执行红（或反之）"被实跑证伪——整批作废、具名 fail-loud（不得
-        # 降级继续产出批量假 kill）。冷源（legacy）维持原降级语义。
-        if baseline_snapshot_from_map(precomputed_baseline):
-            for ev in slot_info.get("worker_fatal_events") or []:
-                if str(ev).startswith("mode parity gate"):
-                    from .verdict_source import BaselineSourceError
-
-                    raise BaselineSourceError(
-                        "baseline_map_mismatch: attribution-map verdict "
-                        "baseline diverged from real execution "
-                        f"(parity gate) — batch invalidated: {ev}")
-        slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
-        slot_info["slot_mode"] = slot.mode
-        slot_info["freshness"] = list(slot.freshness)
-        # SEE-1606 P2：基线失败登记披露（默认继续跑；失败测试不参与 kill
-        # 判定——判定侧 `- baseline_failures` 差集保证）。
-        slot_info["baseline_dirty"] = baseline_dirty
-        slot_info["baseline_failures"] = len(baseline_failures)
-        slot_info["baseline_failure_names"] = sorted(baseline_failures)
-        slot_info["break_on_baseline_failure"] = bool(
-            break_on_baseline_failure)
-        slot_info["kill_bail"] = bail_effective
-        slot_info["kill_bail_face"] = bail_face
-        slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
-        slot_info["kill_bail_scripts"] = (
-            len(bail_scripts) if bail_scripts is not None else None)
-        # SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
-        # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
-        slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
+        _map_parity_gate(slot_info, precomputed_baseline)
+        _mutant_slot_disclosures(
+            slot_info, idpack, slot, baseline_dirty, baseline_failures,
+            break_on_baseline_failure, bail_effective, bail_face, kill_bail,
+            bail_scripts)
         if dirty:
             slot_info["baseline_skip"] = _baseline_skip_slot_info(
                 slot_info, dirty=dirty, skip_applied=skip_applied,

@@ -12,9 +12,16 @@ from pathlib import Path
 from .shadowio import _read_attr_merged, _read_registries
 
 # SEE-1587：行级主真值 schema——行事实（per-test covered line sets）是唯一
-# 主数据，file/function 视图退为派生投影；旧 /5 产物 fail-loud 拒绝（无
-# 兼容别名，消费方 load 即报 schema 不符）。
-ATTRIBUTION_SCHEMA = "test-attribution/6"
+# 主数据，file/function 视图退为派生投影；旧产物 fail-loud 拒绝（无兼容
+# 别名，消费方 load 即报 schema 不符）。SEE-1631：/7——gherkin 臂归属
+# 接入，新增 `gherkin://feature/...` 身份形态与 feature/scenario 反查视图。
+ATTRIBUTION_SCHEMA = "test-attribution/7"
+# SEE-1631：gherkin 身份规范形态（稳定、无 per-run token；feature 与
+# scenario 两级身份均可反查行事实）。生成脚本路径（含 run token）只在
+# 运行期注册表出现，收集期经 identity rewrite 映射为规范形态。
+GHERKIN_IDENTITY_PREFIX = "gherkin://feature/"
+# 生成脚本识别锚（原始身份路径含此段才参与改写/未映射计数）
+_GHERKIN_GENERATED_ANCHOR = "/gherkin/generated/"
 # 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
 # 旧模板（缓存键含 algo 但不含探针文本本身）。SEE-1587：归属粒度进 algo
 # 键——全量与增量必须共用同一粒度键，fn 级旧条目（attr/6）与新 hit 级
@@ -40,10 +47,83 @@ def _hit_rate(value: int, total: int) -> float | None:
     return round(value / total, 6) if total else None
 
 
+def _gherkin_identity_rewrite(root: Path, groups: list,
+                              identities: dict) -> "dict | None":
+    """SEE-1631：gherkin 臂身份改写表（编译期 manifest → 稳定身份）。
+
+    groups：run_gherkin_flow 编译分组（suite_dir + keys）；identities：
+    {feature_key: [{test_name, scenario, scenario_line}, ...]}（编译期
+    捕获——suite 目录在归属读回前已被清理，manifest 不能届时再读）。
+    GUT 注册表身份的脚本段实测为裸 basename（`test_<key>.gd`，KOL 真机
+    锚定）——改写表同时收录 basename 与 res:// 全路径两种原始形态。
+    返回 {"test": {原始身份: 规范身份}, "script": {...}, "scenarios":
+    {规范身份: 明细}}；空 groups/identities 返回 None（零改写）。"""
+    if not groups or not identities:
+        return None
+    root = Path(root)
+    test_map: dict[str, str] = {}
+    script_map: dict[str, str] = {}
+    scenarios: dict[str, dict] = {}
+    for group in groups:
+        suite = Path(group["suite_dir"])
+        gen_res = None
+        try:
+            gen_res = f"res://{suite.joinpath('generated').relative_to(root).as_posix()}/test_{{key}}.gd"
+        except ValueError:
+            gen_res = None
+        for key in group.get("keys") or []:
+            entries = identities.get(key) or []
+            canon_script = f"{GHERKIN_IDENTITY_PREFIX}{key}"
+            # basename 形态（GUT 注册表实测口径）
+            script_map[f"test_{key}.gd"] = canon_script
+            if gen_res is not None:
+                script_map[gen_res.format(key=key)] = canon_script
+            for e in entries:
+                canon = f"{canon_script}::{e['test_name']}"
+                test_map[f"test_{key}.gd::{e['test_name']}"] = canon
+                if gen_res is not None:
+                    test_map[f"{gen_res.format(key=key)}::"
+                             f"{e['test_name']}"] = canon
+                scenarios[canon] = {
+                    "feature_key": key,
+                    "scenario": e["scenario"],
+                    "scenario_line": e["scenario_line"],
+                    "test_name": e["test_name"],
+                }
+    if not test_map and not script_map:
+        return None
+    return {"test": test_map, "script": script_map, "scenarios": scenarios}
+
+
+def _rewrite_ident(rw: "dict | None", ident: str) -> str:
+    """身份改写：命中改写表用规范形态；未命中保持原样（不猜不丢）。
+    未映射的 gherkin 生成脚本身份由调用方计数披露。"""
+    if rw is None:
+        return ident
+    return rw["test"].get(ident, rw["script"].get(ident, ident))
+
+
+def _is_unmapped_gherkin(rw: "dict | None", ident: str) -> bool:
+    """未映射 gherkin 生成身份（manifest 缺口的防御性披露——不猜测归属）。
+
+    识别口径：gherkin 臂的测试面全部是编译 suite 的 `test_*.gd`（GUT
+    注册表实测为裸 basename）——脚本段形如 `test_*.gd` 且不在改写表。
+    仅在改写表在场的臂（gherkin）启用；res:// 全路径含生成锚的同样计。"""
+    if rw is None:
+        return False
+    if rw["test"].get(ident) is not None or rw["script"].get(ident) is not None:
+        return False
+    script_part = str(ident).split("::", 1)[0]
+    name = script_part.rsplit("/", 1)[-1]
+    return name.startswith("test_") and name.endswith(".gd")
+
+
 def _file_lane_slots(rel: str, per_pid: dict, test_tables: dict,
-                     script_tables: dict) -> tuple:
+                     script_tables: dict,
+                     rw: "dict | None" = None) -> tuple:
     """单文件槽位归属：返回 (test 身份集, script 身份集, test 事件数,
-    script 事件数, 未归属槽位披露)。test 车道优先（窗口内身份）。"""
+    script 事件数, 未归属槽位披露)。test 车道优先（窗口内身份）。
+    SEE-1631：身份经 rw 改写为规范形态（gherkin 臂）。"""
     file_tests: set[str] = set()
     file_scripts: set[str] = set()
     test_events = 0
@@ -56,10 +136,10 @@ def _file_lane_slots(rel: str, per_pid: dict, test_tables: dict,
             tident = ttable.get(slot_idx)
             sident = stable.get(slot_idx)
             if tident is not None:
-                file_tests.add(tident)
+                file_tests.add(_rewrite_ident(rw, tident))
                 test_events += rec["cnt"].get(slot_idx, 0)
             elif sident is not None:
-                file_scripts.add(sident)
+                file_scripts.add(_rewrite_ident(rw, sident))
                 script_events += rec["cnt"].get(slot_idx, 0)
             else:
                 # 组合注册表缺失该槽位——单条披露，不按车道猜测
@@ -142,6 +222,42 @@ def _line_pair_counts(test_to_lines: dict,
                 for d in test_to_lines.values() for lines in d.values()),
             sum(len(lines)
                 for d in script_to_lines.values() for lines in d.values()))
+
+
+def _gherkin_feature_of(ident: str) -> "str | None":
+    """规范 gherkin 身份 → feature key；非规范形态返回 None。"""
+    if not str(ident).startswith(GHERKIN_IDENTITY_PREFIX):
+        return None
+    return str(ident)[len(GHERKIN_IDENTITY_PREFIX):].split("::", 1)[0]
+
+
+def _gherkin_views(test_to_lines: dict) -> dict:
+    """SEE-1631：feature/scenario 两级反查视图（行事实单源派生）。
+
+    - feature_to_lines：feature key → {rel: sorted union(scenario 行集)}
+    - line_to_features：rel → 行 → 触达 feature key（行级反查）"""
+    feature_to_lines: dict[str, dict[str, set]] = {}
+    for ident, by_rel in test_to_lines.items():
+        key = _gherkin_feature_of(ident)
+        if key is None:
+            continue
+        slot = feature_to_lines.setdefault(key, {})
+        for rel, lines in by_rel.items():
+            slot.setdefault(rel, set()).update(lines)
+    line_to_features: dict[str, dict[int, set]] = {}
+    for key, by_rel in feature_to_lines.items():
+        for rel, lines in by_rel.items():
+            lslot = line_to_features.setdefault(rel, {})
+            for ln in lines:
+                lslot.setdefault(ln, set()).add(key)
+    return {
+        "feature_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                             for k, v in sorted(feature_to_lines.items())},
+        "line_to_features": {rel: {str(ln): sorted(ks)
+                                   for ln, ks in sorted(by_line.items())}
+                             for rel, by_line in
+                             sorted(line_to_features.items())},
+    }
 
 
 def _line_facts_views(test_to_lines: dict, script_to_lines: dict,
@@ -322,10 +438,12 @@ def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
 def _fn_probe_line_facts(per_pid: dict, rel: str, probe_lines: list,
                          block_map: dict, test_tables: dict,
                          script_tables: dict, test_to_lines: dict,
-                         script_to_lines: dict) -> None:
+                         script_to_lines: dict,
+                         rw: "dict | None" = None) -> None:
     """单文件 `fn <probe> <slot>` 对 → 行事实（hit 级插桩下覆盖整个探针
     面）：probe → probe_lines → block_map 展开为 covered line set，slot
-    按注册表解析身份与车道（test 车道优先）。原地写入两个行事实 dict。"""
+    按注册表解析身份与车道（test 车道优先）。原地写入两个行事实 dict。
+    SEE-1631：身份经 rw 改写为规范形态（gherkin 臂）。"""
     for pid, rec in sorted(per_pid.items()):
         ttable = test_tables.get(pid, {})
         stable = script_tables.get(pid, {})
@@ -337,12 +455,14 @@ def _fn_probe_line_facts(per_pid: dict, rel: str, probe_lines: list,
             for slot_idx in sorted(slots):
                 tident = ttable.get(slot_idx)
                 if tident is not None:
-                    test_to_lines.setdefault(tident, {}).setdefault(
+                    test_to_lines.setdefault(
+                        _rewrite_ident(rw, tident), {}).setdefault(
                         rel, set()).update(lines)
                     continue
                 sident = stable.get(slot_idx)
                 if sident is not None:
-                    script_to_lines.setdefault(sident, {}).setdefault(
+                    script_to_lines.setdefault(
+                        _rewrite_ident(rw, sident), {}).setdefault(
                         rel, set()).update(lines)
 
 
@@ -351,9 +471,12 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
                           probe_lines_by_rel: "dict[str, list[int]] | None" = None,
                           block_map_by_rel: "dict[str, dict] | None" = None,
                           fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
-                          hotspot_limit: int = 20) -> dict:
+                          hotspot_limit: int = 20,
+                          identity_rewrite: "dict | None" = None) -> dict:
     """SEE-1587（line-primary）：per-file 归属证据 → 行事实 + 三条车道
-    （车道事件统计取自 per-slot cnt，量级口径披露见 notes）。"""
+    （车道事件统计取自 per-slot cnt，量级口径披露见 notes）。
+    SEE-1631：`identity_rewrite`（gherkin 臂）把生成脚本身份改写为稳定
+    feature/scenario 身份；未映射的生成身份保持原样并具名计数披露。"""
     test_tables, script_tables = registries
     test_to_lines: dict[str, dict[str, set[int]]] = {}
     script_to_lines: dict[str, dict[str, set[int]]] = {}
@@ -364,9 +487,10 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
     files_with_unattributed = 0
     unattributed_files: list[str] = []
     hotspot_counts: dict[str, dict[int, int]] = {}
+    gherkin_unmapped = 0
     for rel, per_pid in sorted(attr_by_rel.items()):
         _ft, _fs, te, se, um = _file_lane_slots(
-            rel, per_pid, test_tables, script_tables)
+            rel, per_pid, test_tables, script_tables, rw=identity_rewrite)
         test_events += te
         script_events += se
         unmapped.extend(um)
@@ -374,7 +498,12 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
         block_map = (block_map_by_rel or {}).get(rel) or {}
         _fn_probe_line_facts(per_pid, rel, probe_lines, block_map,
                              test_tables, script_tables,
-                             test_to_lines, script_to_lines)
+                             test_to_lines, script_to_lines,
+                             rw=identity_rewrite)
+        for lane in (test_to_lines, script_to_lines):
+            gherkin_unmapped += sum(
+                1 for ident in lane
+                if _is_unmapped_gherkin(identity_rewrite, ident))
         phases, counts = _file_unattributed(per_pid)
         for i, v in enumerate(phases):
             phases_total[i] += v
@@ -392,11 +521,17 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
                                fid_by_line_by_rel, hotspot_limit)
     derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
                                             fid_by_line_by_rel)
-    return _attribution_payload(
+    payload = _attribution_payload(
         arm, test_to_lines, script_to_lines, derived, unmapped,
         (test_events, script_events, unattributed_events), lane_total,
         phase_lane, hotspots, files_with_unattributed,
         sorted(unattributed_files))
+    if identity_rewrite is not None:
+        payload["gherkin_scenarios"] = dict(
+            identity_rewrite.get("scenarios") or {})
+        payload["gherkin_unmapped_identities"] = gherkin_unmapped
+        payload.update(_gherkin_views(test_to_lines))
+    return payload
 
 
 def _fid_by_line_from_registry(registry: dict) -> dict[int, str]:
@@ -413,10 +548,13 @@ def _fid_by_line_from_registry(registry: dict) -> dict[int, str]:
 
 def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
                          sink_by_rel, xdg_homes: list[str],
-                         prepared: "dict[str, dict] | None" = None) -> dict | None:
+                         prepared: "dict[str, dict] | None" = None,
+                         identity_rewrite: "dict | None" = None
+                         ) -> dict | None:
     """§SPEC-083：xdg 清理前读回归属证据与注册表，聚合成臂级映射；
     开关关闭时不读任何 sink、返回 None。prepared 提供探针 manifest、
-    func-registry 与块映射（行事实展开与派生视图的输入）。"""
+    func-registry 与块映射（行事实展开与派生视图的输入）。SEE-1631：
+    gherkin 臂经 identity_rewrite 把生成身份改写为稳定规范形态。"""
     if not enabled:
         return None
     attr_by_rel = {
@@ -434,7 +572,8 @@ def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
     return build_attribution_map(arm, attr_by_rel, registries,
                                  probe_lines_by_rel=probe_lines_by_rel,
                                  block_map_by_rel=block_map_by_rel,
-                                 fid_by_line_by_rel=fid_by_line_by_rel)
+                                 fid_by_line_by_rel=fid_by_line_by_rel,
+                                 identity_rewrite=identity_rewrite)
 
 
 def _tests_face_map(root: Path) -> dict[str, str]:
@@ -556,8 +695,14 @@ _ATTRIBUTION_NOTES = (
     "(test_to_lines / script_to_lines / line_to_tests), and file/"
     "function views are derived projections from line facts plus the "
     "source registry; lane event counts are all-probe events (not "
-    "comparable to the old fn-entry counts), and the gherkin arm "
-    "runs the plain template (attribution off by design)",
+    "comparable to the old fn-entry counts)",
+    "SEE-1631: both arms carry attribution (two-arm semantics restored "
+    "from SEE-1581 §SPEC-083); the gherkin arm rewrites its generated "
+    "suite identities to stable feature/scenario identities "
+    "(gherkin://feature/<key>::<test_name>) at collection time, with "
+    "feature_to_lines / line_to_features / gherkin_scenarios views for "
+    "reverse lookup; unmapped generated identities are kept raw and "
+    "counted in gherkin_unmapped_identities (never guessed away)",
     "every hit event is counted in exactly one lane/phase; rates use the "
     "three-lane sum as denominator — no hit is silently assigned",
     "unattributed_hotspots rank probe sites by unattributed hit events "

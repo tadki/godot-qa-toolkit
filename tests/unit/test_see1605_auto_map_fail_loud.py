@@ -21,7 +21,7 @@ from godot_qa_toolkit.mutation import truth_select as ts
 from godot_qa_toolkit.mutation.truth_select import (MutationSelectionError,
                                                     ensure_map)
 
-SCHEMA = "test-attribution/6"
+SCHEMA = "test-attribution/7"
 
 ELIGIBLE_A = "func a():\n\treturn 1\n"
 ELIGIBLE_B = "func b():\n\treturn 2\n"

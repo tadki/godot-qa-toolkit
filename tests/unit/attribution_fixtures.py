@@ -78,7 +78,7 @@ def write_map(project_root: Path,
             tests_face[str(gd.relative_to(project_root))] = hashlib.sha256(
                 gd.read_bytes()).hexdigest()
     doc = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": raw,
         "recipe_hash_pristine": raw,
         "project_root": str(project_root),
@@ -89,7 +89,7 @@ def write_map(project_root: Path,
         "tests_face": tests_face,
         "instrumentable_lines": instrumentable,
         "arms": {"gut_full": arm},
-        # SEE-1587 D3：真实 /6 产物携带执行完整性证据；零引用（pairs=0）
+        # SEE-1587 D3：真实产物携带执行完整性证据；零引用（pairs=0）
         # 属合法空面——probes_fired>0 证明测试确已执行。
         "arms_state": {"gut_full": {"state": "valid",
                                     "invalid_reason": None,
@@ -148,7 +148,7 @@ def line_facts_map(project_root: Path,
     arm["tests"] = len(arm["test_to_files"])
     arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     doc = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": raw, "recipe_hash_pristine": raw,
         "project_root": str(project_root),
         "identity": "res://script::test_name",

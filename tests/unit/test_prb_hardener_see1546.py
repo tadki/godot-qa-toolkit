@@ -142,7 +142,7 @@ def _write_raw_map(project_root, instrumentable, covered_lines, probes_fired):
            "script_to_lines": {},
            "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
     doc = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": raw, "recipe_hash_pristine": raw,
         "project_root": str(project_root), "identity": ident,
         "causal": {"enabled": False},

@@ -228,7 +228,13 @@ class TestS63LazyBaselineRunMeasurement:
         assert gut["test_failures"]["new"] == []
         assert "res://tests/unit/test_game.gd::test_font_row" \
             in gut["test_failures"]["instrumentation_intolerant"]
-        assert report["ok"] is False  # union 空（暂停契约），非臂门禁
+        # SEE-1631：默认双臂恢复——ok 跟随 gherkin 臂有效性（无 Godot
+        # 形态下 validator 预检缺二进制 → 臂具名 invalid → union 未认证；
+        # suspected 车道判定（上方断言）不依赖 union 结果）
+        gherkin_arm = next((a for a in report["arms"]
+                            if isinstance(a, dict)
+                            and a.get("arm") == "gherkin"), {})
+        assert report["ok"] is (gherkin_arm.get("state") == "valid")
 
     def test_acquisition_fail_fail_loud(self, project, tmp_path, capsys):
         """基线获取失败（无运行流）→ 具名 stderr、臂保持 invalid，

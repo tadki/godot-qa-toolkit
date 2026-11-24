@@ -108,6 +108,9 @@ def classify_changes(root: Path, changed: list[str],
     - prod：目标面内 .gd 且有基线边（file 边或 fn 边前缀）=changed，
       无基线边=new（触发全脸回退——不猜失效面），有基线边且不在盘上
       =prod_removed（SEE-1610 §SPEC-N1，清死边 + 触达面重跑）；
+    - feature（SEE-1631）：`addons/gqt_gherkin/features/*.feature` 按
+      normalize stem 对基线 gherkin 臂 feature key——在基线且在盘
+      =feature_changed、不在基线=feature_new、在基线不在盘=feature_removed；
     - 其余路径拒绝（unknown，fail-loud 不静默）。"""
     arm = baseline["arms"]["gut_full"]
     edge_files = (set(arm.get("file_to_tests") or {})
@@ -123,19 +126,42 @@ def classify_changes(root: Path, changed: list[str],
     # unknown 被 fail-loud 拒跑。
     test_identities |= set(arm.get("test_to_lines") or {})
     test_identities |= set(arm.get("script_to_lines") or {})
+    feature_keys = _baseline_gherkin_feature_keys(baseline)
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],
                                  "prod_new": [], "prod_removed": [],
+                                 "feature_changed": [], "feature_new": [],
+                                 "feature_removed": [],
                                  "unknown": []}
     for raw in changed:
         verdict = _classify_one(root, raw, edge_files, known_fids,
-                                test_identities)
+                                test_identities, feature_keys)
         out[verdict[0]].append(verdict[1])
     return out
 
+
+_FEATURES_REL_PREFIX = "addons/gqt_gherkin/features/"
+
+
+def _baseline_gherkin_feature_keys(baseline: dict) -> set[str]:
+    """基线 gherkin 臂的 feature key 全集（feature_to_lines 权威 + 行事实
+    身份前缀反推兜底——旧增量产物可能缺 feature 视图）。"""
+    from .attribution import GHERKIN_IDENTITY_PREFIX, _gherkin_feature_of
+
+    garm = ((baseline.get("arms") or {}).get("gherkin") or {})
+    keys = set(garm.get("feature_to_lines") or {})
+    for ident in (garm.get("test_to_lines") or {}):
+        k = _gherkin_feature_of(str(ident))
+        if k:
+            keys.add(k)
+    return keys
+
+
 def _classify_one(root: Path, raw: str, edge_files: set[str],
                   known_fids: set[str],
-                  test_identities: set[str]) -> tuple[str, str]:
+                  test_identities: set[str],
+                  feature_keys: "set[str] | None" = None
+                  ) -> tuple[str, str]:
     p = Path(raw)
     if not p.is_absolute():
         p = root / p
@@ -143,6 +169,17 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
     try:
         rel = str(p.relative_to(root))
     except ValueError:
+        return "unknown", raw
+    # SEE-1631：gherkin feature 单根（addons/gqt_gherkin/features/*.feature）
+    if rel.startswith(_FEATURES_REL_PREFIX) and p.suffix == ".feature":
+        from ..gherkin.addon import normalize_feature_key
+
+        key = normalize_feature_key(p.stem)
+        known = key in (feature_keys or set())
+        if p.is_file():
+            return ("feature_changed" if known else "feature_new"), rel
+        if known:
+            return "feature_removed", rel
         return "unknown", raw
     name = p.name
     if rel.startswith("tests/") and name.startswith("test_"):
@@ -202,7 +239,10 @@ def _line_fact_touchers(arm: dict, rel: str) -> set[str]:
 def compute_invalidation(root: Path, baseline: dict,
                          classes: dict[str, list[str]],
                          index: dict | None) -> dict:
-    """失效面 → {rerun, dropped, sources}（sources 记录每个候选的来源）。"""
+    """失效面 → {rerun, dropped, feature_rerun, sources}（sources 记录每个
+    候选的来源）。SEE-1631：feature_rerun = gherkin 臂失效面（feature
+    变更键 ∪ 行事实触达生产变更的 feature 键）——非空即触发具名全脸
+    回退（gherkin 行事实重绑，不交付半成品）。"""
     arm = baseline["arms"]["gut_full"]
     rerun: set[str] = set()
     dropped: set[str] = set()
@@ -241,8 +281,43 @@ def compute_invalidation(root: Path, baseline: dict,
         for name in static:
             sources.setdefault(name, []).append(f"static:{rel}")
         rerun |= static
+    feature_rerun = _gherkin_invalidation_surface(baseline, classes)
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
-            "explicit_rerun": explicit_rerun}
+            "explicit_rerun": explicit_rerun, "feature_rerun": feature_rerun}
+
+
+def _gherkin_invalidation_surface(baseline: dict,
+                                  classes: dict[str, list[str]]
+                                  ) -> set[str]:
+    """SEE-1631：gherkin 臂失效 feature 键集（增量续新的 gherkin 判据）。
+
+    feature 变更键（normalize stem）∪ 基线 gherkin 行事实触达
+    prod_changed/prod_removed 的 feature 键。非空 → 具名全脸回退（双臂
+    重跑、行事实重绑）；空 → gherkin 臂身份稳定、原样并入产物。"""
+    garm = (baseline.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict) or not garm:
+        return set()
+    from ..gherkin.addon import normalize_feature_key
+
+    out: set[str] = set()
+    for rel in classes.get("feature_changed", []):
+        out.add(normalize_feature_key(Path(rel).stem))
+    f2l = garm.get("feature_to_lines") or {}
+    changed_rels = set(classes.get("prod_changed") or []) | set(
+        classes.get("prod_removed") or [])
+    for key, by_rel in f2l.items():
+        if changed_rels & set(by_rel or {}):
+            out.add(key)
+    if not f2l:
+        # feature 视图缺席（旧产物兜底）：按行事实身份前缀反推
+        from .attribution import _gherkin_feature_of
+
+        for ident, by_rel in (garm.get("test_to_lines") or {}).items():
+            if changed_rels & set(by_rel or {}):
+                k = _gherkin_feature_of(str(ident))
+                if k:
+                    out.add(k)
+    return out
 
 def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
                        replace_names: set[str], name_of) -> dict:
@@ -355,7 +430,9 @@ def _increment_decision(root: Path, recipe: dict, baseline: dict,
     ratio = (len(rerun & known) / len(known)) if known else 0.0
     reason = _fallback_reason(hash_ok, classes, since_full,
                               calibration_every, ratio,
-                              rerun_full_face_ratio)
+                              rerun_full_face_ratio,
+                              feature_rerun=invalidation.get(
+                                  "feature_rerun") or set())
     return classes, invalidation, rerun, reason
 
 def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
@@ -431,11 +508,16 @@ def run_attribution_increment(project_root: str | Path,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
                      calibration_every: int, ratio: float,
-                     ratio_cap: float) -> str:
+                     ratio_cap: float,
+                     feature_rerun: "set | frozenset" = frozenset()) -> str:
     if not hash_ok:
         return "hash_mismatch_fallback"
     if classes["prod_new"]:
         return "new_prod_file_fallback"
+    if classes.get("feature_new"):
+        return "new_feature_fallback"
+    if feature_rerun:
+        return "gherkin_invalidation_fallback"
     if since_full >= calibration_every:
         return "calibration_due_fallback"
     if ratio > ratio_cap:
@@ -482,12 +564,96 @@ def _group_fresh_edges(inc_arm: dict) -> dict:
                     for k, v in (inc_arm.get(key) or {}).items()}
     return out
 
+def _carried_gherkin_arm(baseline: dict,
+                         removed_rels: set[str]) -> dict:
+    """SEE-1631 §SPEC-004：增量产物的 gherkin 臂继承（无 feature 失效面）。
+
+    身份稳定原样继承；已删除生产文件的边全视图剔除（行事实/file 反查/
+    fn 视图/feature 视图/计数），不残留死边。基线无 gherkin 臂 → 空
+    dict（arms.gherkin 键不出场）。"""
+    garm = (baseline.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict) or not garm:
+        return {}
+    out = {k: v for k, v in garm.items()
+           if k not in ("test_to_lines", "script_to_lines", "line_to_tests",
+                        "test_to_files", "script_to_files", "file_to_tests",
+                        "file_to_scripts", "test_to_functions",
+                        "script_to_functions", "feature_to_lines",
+                        "line_to_features")}
+
+    def strip_by_rel(by_ident: dict) -> dict:
+        return {i: {r: sorted(ls) for r, ls in by_rel.items()
+                    if r not in removed_rels}
+                for i, by_rel in (by_ident or {}).items()}
+
+    test_to_lines = strip_by_rel(garm.get("test_to_lines"))
+    script_to_lines = strip_by_rel(garm.get("script_to_lines"))
+
+    def strip_fn(by_ident: dict) -> dict:
+        return {i: sorted(f for f in (fids or [])
+                          if _fid_file_of(f) not in removed_rels)
+                for i, fids in (by_ident or {}).items()}
+
+    test_to_files = {i: sorted(f for f in (files or [])
+                               if f not in removed_rels)
+                     for i, files in (garm.get("test_to_files")
+                                      or {}).items()}
+    test_to_files = {i: f for i, f in test_to_files.items() if f}
+    script_to_files = {i: sorted(f for f in (files or [])
+                                 if f not in removed_rels)
+                       for i, files in (garm.get("script_to_files")
+                                        or {}).items()}
+    script_to_files = {i: f for i, f in script_to_files.items() if f}
+    file_to_tests = {r: v for r, v in (garm.get("file_to_tests")
+                                       or {}).items()
+                     if r not in removed_rels}
+    file_to_scripts = {r: v for r, v in (garm.get("file_to_scripts")
+                                         or {}).items()
+                       if r not in removed_rels}
+    test_to_functions = strip_fn(garm.get("test_to_functions"))
+    test_to_functions = {i: f for i, f in test_to_functions.items() if f}
+    script_to_functions = strip_fn(garm.get("script_to_functions"))
+    script_to_functions = {i: f for i, f in script_to_functions.items() if f}
+    line_to_tests = {r: v for r, v in (garm.get("line_to_tests")
+                                       or {}).items()
+                     if r not in removed_rels}
+    feature_to_lines = {k: {r: sorted(ls) for r, ls in by_rel.items()
+                            if r not in removed_rels}
+                        for k, by_rel in (garm.get("feature_to_lines")
+                                          or {}).items()}
+    feature_to_lines = {k: v for k, v in feature_to_lines.items() if v}
+    line_to_features = {r: v for r, v in (garm.get("line_to_features")
+                                          or {}).items()
+                        if r not in removed_rels}
+    out.update({
+        "test_to_lines": test_to_lines, "script_to_lines": script_to_lines,
+        "line_to_tests": line_to_tests,
+        "test_to_files": test_to_files, "script_to_files": script_to_files,
+        "file_to_tests": file_to_tests, "file_to_scripts": file_to_scripts,
+        "test_to_functions": test_to_functions,
+        "script_to_functions": script_to_functions,
+        "feature_to_lines": feature_to_lines,
+        "line_to_features": line_to_features,
+        "pairs": sum(len(v) for v in test_to_files.values()),
+        "script_pairs": sum(len(v) for v in script_to_files.values()),
+        "function_pairs": sum(len(v) for v in test_to_functions.values()),
+        "line_pairs": sum(len(ls) for by_rel in test_to_lines.values()
+                          for ls in by_rel.values()),
+        "script_line_pairs": sum(len(ls) for by_rel in script_to_lines.values()
+                                 for ls in by_rel.values()),
+    })
+    return out
+
+
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
                               invalidation: dict, since_full: int,
                               arm_exec_s: float,
                               executions: list[dict] | None = None) -> dict:
     removed = set(classes.get("prod_removed") or [])
+    # SEE-1631 §SPEC-004：gherkin 臂继承（空 dict = 基线无 gherkin 臂，
+    # arms.gherkin 键不出场）；删除生产文件触达的 gherkin 边同步 purge。
+    carried_gherkin = _carried_gherkin_arm(baseline, removed)
     # SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
     # target_files 存储格式随入口不同）。
     removed_abs = {str((root / r).resolve()) for r in removed}
@@ -506,15 +672,20 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
-        "arms": {"gut_full": {
-            **merged,
-            # SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
-            # ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
-            "unattributed_files": sorted(
-                set((baseline.get("arms", {}).get("gut_full") or {})
-                    .get("unattributed_files") or ())
-                | set(classes.get("prod_changed") or [])
-                | set(classes.get("prod_new") or []))}},
+        "arms": {
+            "gut_full": {
+                **merged,
+                # SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
+                # ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
+                "unattributed_files": sorted(
+                    set((baseline.get("arms", {}).get("gut_full") or {})
+                        .get("unattributed_files") or ())
+                    | set(classes.get("prod_changed") or [])
+                    | set(classes.get("prod_new") or []))},
+            # SEE-1631 §SPEC-004：gherkin 臂身份稳定——无 feature 失效面时
+            # 原样并入（不因增量被静默清空）。feature 失效面非空时走全脸
+            # 回退（行事实重绑），永不到达此处。
+            **({"gherkin": carried_gherkin} if carried_gherkin else {})},
         "arms_state": dict(baseline.get("arms_state") or {}),
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),

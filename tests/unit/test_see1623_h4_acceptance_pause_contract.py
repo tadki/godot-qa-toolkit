@@ -75,11 +75,12 @@ def _setup_env(monkeypatch, value: str | None):
 
 
 def test_plain_run_paused_no_gherkin_arm(monkeypatch):
-    """普通 measure run（无 env、无 --test-attribution）：acceptance 臂
-    不执行——单臂 gut_full + 占位 disabled 臂 + 0.0 计时 + 具名披露。"""
+    """显式诊断暂停（env=1，SEE-1631 起为非默认回退通道）：gherkin 臂
+    不执行——单臂 gut_full + 占位 disabled 臂 + 0.0 计时 + 具名披露。
+    （历史默认暂停语义由本测试以显式开关覆盖；默认已恢复双臂。）"""
     emit_capture: list = []
     _wire(monkeypatch, emit_capture=emit_capture)
-    _setup_env(monkeypatch, None)
+    _setup_env(monkeypatch, "1")
     report = mo.run_measurement("/p", ["a.gd"], _RECIPE,
                                 test_attribution=False)
     _args, _inp, _st, arm_a, arm_b = emit_capture[0][:5]

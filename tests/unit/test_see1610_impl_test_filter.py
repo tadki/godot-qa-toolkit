@@ -406,7 +406,7 @@ def _write_line_map_1610(proj, target):
                                 for ln, ids in line_to_tests.items()}},
         "unattributed_files": [rel],
     }
-    doc = {"schema_version": "test-attribution/6",
+    doc = {"schema_version": "test-attribution/7",
            "report_recipe_hash": raw, "recipe_hash_pristine": raw,
            "project_root": str(proj), "identity": "res://script::test_name",
            "causal": {"enabled": False},

@@ -145,7 +145,10 @@ def _auto_scan_tests_glob_meta(file_path: str,
     meta = {"source": sel["source"], "reason": sel["reason"],
             "mapping": sel.get("mapping"), "tests": sel.get("tests", []),
             "zero_ref": sel.get("zero_ref", False),
-            "ambiguous_names": sel.get("ambiguous_names", [])}
+            "ambiguous_names": sel.get("ambiguous_names", []),
+            # SEE-1631 §SPEC-005：gherkin 臂命中披露（消费方式具名，
+            # 选面可执行集保持 gut_full 口径不变）
+            "gherkin": sel.get("gherkin")}
     if sel["source"] == "runtime_mapping" and not sel.get("zero_ref"):
         print(f"mutation: runtime-mapping selection for {file_path} -> "
               f"{len(sel['tests'])} test script(s)", file=sys.stderr)

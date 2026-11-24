@@ -614,12 +614,12 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
     # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
     reps = max(1, int(gherkin_repeats)) if gherkin is not None else 1
     # P2（双臂并行）：gherkin 臂在 shadow 内插桩——钩子文本按本臂
-    # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）
-    flusher_gd, pre_hook_gd = _hook_templates(
-        test_attribution and name == "gut_full", run_uuid)
+    # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）。
+    # SEE-1631：双臂同权——归属开启时 gherkin 臂与 gut_full 同用 attr 钩子。
+    flusher_gd, pre_hook_gd = _hook_templates(test_attribution, run_uuid)
     shadow_hook_files = [(_FLUSHER_RELPATH, flusher_gd),
                          (_PRE_HOOK_RELPATH, pre_hook_gd)]
-    if attribution_causal and name == "gut_full":
+    if attribution_causal:
         shadow_hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
     return {"run_uuid": run_uuid, "backup_dir": backup_dir, "started": started,
             "sink_by_rel": sink_by_rel, "manifest_by_rel": manifest_by_rel,
@@ -946,10 +946,19 @@ def _arm_readback(name: str, *, root: Path, prepared: dict, gherkin,
             name, prepared, sink_by_rel, manifest_by_rel, xdg_homes,
             root, run_uuid, gut_ok, run_error, timed_out,
             evidence_dir, shard_log_dir)
-        # §SPEC-083：归属证据与注册表必须在 xdg 清理前读回（仅归属臂）
+        # §SPEC-083：归属证据与注册表必须在 xdg 清理前读回（归属臂）。
+        # SEE-1631：双臂同权收集；gherkin 臂按编译期 manifest 把生成脚本
+        # 身份改写为稳定 feature/scenario 身份。
+        identity_rewrite = None
+        if name == "gherkin" and gherkin is not None:
+            from .attribution import _gherkin_identity_rewrite
+            identity_rewrite = _gherkin_identity_rewrite(
+                root, gherkin.get("groups") or [],
+                gherkin.get("identities") or {})
         attribution = _collect_attribution(
-            test_attribution and name == "gut_full", root, run_uuid, name,
-            sink_by_rel, xdg_homes, prepared=prepared)
+            test_attribution, root, run_uuid, name,
+            sink_by_rel, xdg_homes, prepared=prepared,
+            identity_rewrite=identity_rewrite)
     finally:
         for xdg in xdg_homes:
             shutil.rmtree(xdg, ignore_errors=True)
@@ -1248,11 +1257,15 @@ def _fallback_disclosure(result: dict, fb_groups: list[dict]) -> list[dict]:
         key=lambda f: f["key"])
 
 
-def _compile_into(sd: Path, root: Path, chunk: list[str]) -> None:
-    """私有 suite 组编译 + 逐 key 重放校验（目录即选择集）。"""
-    compile_keys_to_suite(root, chunk, sd)
+def _compile_into(sd: Path, root: Path, chunk: list[str]) -> dict:
+    """私有 suite 组编译 + 逐 key 重放校验（目录即选择集）。SEE-1631：
+    返回 {feature_key: manifest scenario 归属条目}——suite 目录在读回段
+    前被清理，feature/scenario 身份必须在编译期捕获。"""
+    out = compile_keys_to_suite(root, chunk, sd)
     for k in chunk:
         replay_check(root, k, suite_dir=sd)
+    return {key: (out["manifests"].get(key) or {}).get("attribution") or []
+            for key in chunk}
 
 
 def _finish_gherkin_result(result: dict, fb_groups: list[dict]) -> dict:
@@ -1316,10 +1329,11 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
         # 同进程共享 suite 不再有跨 feature 残留（R1 槽位缝 + 零写入判据
         # 闭环）。shards = 共享组数，并发上限同步收敛到组数；扇出 =
         # len(groups) × reps（非 keys × reps）。
+        identities: dict[str, list] = {}
         for chunk in _gherkin_groups(keys, gherkin_shards):
             sd = create_suite_dir(root)
             groups.append({"suite_dir": sd, "keys": list(chunk)})
-            _compile_into(sd, root, chunk)
+            identities.update(_compile_into(sd, root, chunk))
 
         # 编译/重放（纯域）全过之后、业务扇出之前：validator 恰好一次。
         try:
@@ -1328,7 +1342,8 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
             raise GherkinRunError(f"gherkin preflight failed: {e}") from e
 
         result = run_arm("gherkin", root=root, recipe=recipe,
-                         gherkin={"groups": groups, "snapshot": snapshot},
+                         gherkin={"groups": groups, "snapshot": snapshot,
+                                  "identities": identities},
                          shadow_instrument=arms_parallel,
                          adaptive_reps=gherkin_adaptive,
                          concurrency=max(1, int(gherkin_shards or 1)),
@@ -1339,15 +1354,17 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
         # 红 = 保持红（不得包装为有效降级）。全原子时为空数组。
         failed = _failed_keys(result, groups)
         if failed:
+            fb_identities: dict[str, list] = {}
             for k in failed:
                 sd = create_suite_dir(root)
                 fb_groups.append({"suite_dir": sd, "keys": [k]})
-                _compile_into(sd, root, [k])
+                fb_identities.update(_compile_into(sd, root, [k]))
             # §SPEC-005/006（C2-R1）：降级轮与共享轮共用同一并发上限——
             # 多 key 失败时不得按失败数重新放开扇出（OOM 风险回潮）。
             fb_result = run_arm(
                 "gherkin", root=root, recipe=recipe,
-                gherkin={"groups": fb_groups, "snapshot": snapshot},
+                gherkin={"groups": fb_groups, "snapshot": snapshot,
+                         "identities": fb_identities},
                 shadow_instrument=arms_parallel,
                 adaptive_reps=gherkin_adaptive,
                 concurrency=max(1, int(gherkin_shards or 1)), **arm_kwargs)
@@ -1355,10 +1372,12 @@ def run_gherkin_flow(*, root: Path, recipe: dict,
 
         cleanup_done = True
         return _finish_gherkin_result(result, fb_groups)
-    except (SuiteError, GherkinRunError, MeasurementError) as e:
+    except (SuiteError, GherkinRunError, MeasurementError, AddonError) as e:
         # §SPEC-025：异常路径必须连 fallback singleton suite 一并回收
         # （旧实现只清 shared groups，cleanup_done=True 跳过 finally，
         # 第二个 singleton 编译失败时前一个 singleton 目录泄漏）。
+        # SEE-1631 §SPEC-007：AddonError（缺根/空 features/未知 key 在
+        # 编译期被发现）同样具名转 invalid——不得裸 traceback 逃逸。
         result = _gherkin_error_result(e, groups + fb_groups, root)
         cleanup_done = True
         return result

@@ -56,7 +56,7 @@ def _zero_test_arms() -> dict:
 
 
 def _map_doc(file_sha256: dict, arms_state: dict) -> dict:
-    return {"schema_version": "test-attribution/6",
+    return {"schema_version": "test-attribution/7",
             "file_sha256": dict(file_sha256),
             "arms": {"gut_full": {}}, "arms_state": arms_state}
 

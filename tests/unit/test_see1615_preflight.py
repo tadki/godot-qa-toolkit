@@ -28,7 +28,11 @@ def _run_measure(monkeypatch, *, pairs, allow_red=False,
     calls: list = []
 
     def spy_arms(**k):
-        calls.append({"arm_kwargs": k})
+        # SEE-1631 默认双臂：execute_arms 收 arm_kwargs 包装——展平后与
+        # run_arm 直调形态同构（断言只关心基线复用键）
+        inner = k.get("arm_kwargs") or {}
+        calls.append({"arm_kwargs": {**{x: y for x, y in k.items()
+                                        if x != "arm_kwargs"}, **inner}})
         raise _ArmsCalled()
 
     def spy_run_arm(*a, **k):

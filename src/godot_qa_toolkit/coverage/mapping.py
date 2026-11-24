@@ -118,12 +118,13 @@ def _mapping_project(root: Path, path: Path, rel: str, doc: dict,
 
 def _mapping_report(path: Path, covered: set, inst: set, scripts: list,
                     tests_glob: "str | None", face: "str | None",
-                    map_path) -> dict:
-    """投影结果聚合（total/pct/契约键集）。"""
+                    map_path, gherkin: "dict | None" = None) -> dict:
+    """投影结果聚合（total/pct/契约键集）。SEE-1631：gherkin 臂命中
+    披露块（不进 covered 行集——投影保持 gut_full 单源口径）。"""
     total = len(inst)
     cov = len(covered)
     pct = round(100.0 * cov / total, 2) if total else 100.0
-    return {
+    out = {
         "file": str(path), "covered_lines": covered,
         "instrumentable_lines": inst, "total_lines": total,
         "covered_count": cov, "coverage_percent": pct,
@@ -131,6 +132,31 @@ def _mapping_report(path: Path, covered: set, inst: set, scripts: list,
         "map_path": str(map_path),
         "source": "line_mapping_projection",
     }
+    if gherkin is not None:
+        out["gherkin"] = gherkin
+    return out
+
+
+def _gherkin_projection_disclosure(doc: dict, rel: str,
+                                   covered: set) -> "dict | None":
+    """SEE-1631 §SPEC-005：coverage 投影的 gherkin 命中披露（行集/百分比
+    parity 不变；仅披露 gherkin 覆盖行与 gut 投影的差集）。"""
+    garm = (doc.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict):
+        return None
+    if not (garm.get("test_to_lines") or garm.get("script_to_lines")):
+        return None
+    glines: set[int] = set()
+    for _ident, by_rel in (garm.get("test_to_lines") or {}).items():
+        glines |= set((by_rel or {}).get(rel) or [])
+    for _script, by_rel in (garm.get("script_to_lines") or {}).items():
+        glines |= set((by_rel or {}).get(rel) or [])
+    if not glines:
+        return None
+    return {"covered_lines": sorted(glines),
+            "gherkin_only_lines": sorted(glines - set(covered)),
+            "consumption": ("disclosed_only: projection stays gut_full "
+                            "(single-source caliber unchanged)")}
 
 
 def _mapping_target(project_root: Path, file_path: str) -> tuple:
@@ -208,4 +234,6 @@ def project_file_coverage(
                                binary_kind, identity, tests_face)
     inst = set(doc.get("instrumentable_lines", {}).get(rel, []))
     return _mapping_report(path, covered, inst, scripts, tests_glob, face,
-                           map_path)
+                           map_path,
+                           gherkin=_gherkin_projection_disclosure(
+                               doc, rel, covered))

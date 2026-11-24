@@ -160,8 +160,8 @@ class TestMachineContract:
 
         assert RECIPE_VERSION == "measurement-suite/3"
         assert REPORT_VERSION == "measurement-report/3"
-        assert ATTRIBUTION_SCHEMA == "test-attribution/6"
-        assert SCHEMA_VERSION == "test-attribution/6"
+        assert ATTRIBUTION_SCHEMA == "test-attribution/7"
+        assert SCHEMA_VERSION == "test-attribution/7"
 
 
 class TestStaleTextCleanup:

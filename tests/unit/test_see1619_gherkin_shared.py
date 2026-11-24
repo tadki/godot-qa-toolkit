@@ -80,7 +80,9 @@ def _wire(monkeypatch, tmp_path: Path, fake_run_arm) -> None:
     counter = {"n": 0}
 
     def fake_compile(project_root, keys, suite_dir):
-        pass
+        # SEE-1631 sync：_compile_into 读 manifests 捕获身份
+        return {"keys": list(keys), "suite_dir": str(suite_dir),
+                "manifests": {k: {"attribution": []} for k in keys}}
 
     def fake_replay(project_root, key, *, suite_dir=None):
         return {}
@@ -225,7 +227,9 @@ def test_flow_never_touches_harness_contract_position(
     counter = {"n": 0}
 
     def fake_compile(project_root, keys, suite_dir):
-        pass
+        # SEE-1631 sync：_compile_into 读 manifests 捕获身份
+        return {"keys": list(keys), "suite_dir": str(suite_dir),
+                "manifests": {k: {"attribution": []} for k in keys}}
 
     def fake_replay(project_root, key, *, suite_dir=None):
         return {}
@@ -485,6 +489,9 @@ def test_second_fallback_compile_failure_cleans_fb_suites(
     def fake_compile(project_root, keys, suite_dir):
         if list(keys) == ["k2"]:
             raise SuiteError("injected second fb compile failure")
+        # SEE-1631 sync：_compile_into 读 manifests 捕获身份
+        return {"keys": list(keys), "suite_dir": str(suite_dir),
+                "manifests": {k: {"attribution": []} for k in keys}}
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
     fake, _calls = _make_fake_run_arm({"k1", "k2"}, set())
@@ -516,6 +523,9 @@ def test_error_path_suite_cleanup_failure_not_valid(tmp_path, monkeypatch):
     def fake_compile(project_root, keys, suite_dir):
         if list(keys) == ["k2"]:
             raise SuiteError("injected second fb compile failure")
+        # SEE-1631 sync：_compile_into 读 manifests 捕获身份
+        return {"keys": list(keys), "suite_dir": str(suite_dir),
+                "manifests": {k: {"attribution": []} for k in keys}}
 
     monkeypatch.setattr(arms, "compile_keys_to_suite", fake_compile)
     real_cleanup = arms._cleanup_suite_dir

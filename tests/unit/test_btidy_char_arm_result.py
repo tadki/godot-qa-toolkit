@@ -24,7 +24,7 @@ def _wire(monkeypatch):
         return {"a.gd": {"bundle": 1}}
 
     def fake_attr(enabled, root, run_uuid, name, sink_by_rel, xdg_homes,
-                  prepared=None):
+                  prepared=None, identity_rewrite=None):
         seen["attr"] = enabled
         return {"arm_map": True} if enabled else None
 

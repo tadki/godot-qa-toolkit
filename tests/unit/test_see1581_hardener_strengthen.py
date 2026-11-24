@@ -301,7 +301,7 @@ def _increment_project(tmp_path: Path) -> tuple[Path, dict, list[str], Path]:
     recipe, error = build_recipe(root)
     assert error is None, error
     baseline = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": recipe["recipe_hash"],
         "recipe_hash_pristine": recipe["recipe_hash"],
         "arms": {"gut_full": {

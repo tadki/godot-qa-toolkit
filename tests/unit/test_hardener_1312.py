@@ -129,7 +129,7 @@ class TestH3BranchLineMapping:
         rel = "target.gd"  # _write_project 的目标名
         covered = [5]  # false 路径：else 头行 4 + else 体行 5 覆盖；行 3 未覆盖
         doc = {
-            "schema_version": "test-attribution/6",
+            "schema_version": "test-attribution/7",
             "report_recipe_hash": raw, "recipe_hash_pristine": raw,
             "project_root": str(proj), "identity": "test_x.gd::test_a",
             "causal": {"enabled": False},

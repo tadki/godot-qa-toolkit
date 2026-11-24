@@ -32,9 +32,10 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-# SEE-1587：行级主真值 schema。旧 /5 产物在 load_map / validate_refresh
-# 处 fail-loud（schema 不符即拒），无兼容别名。
-SCHEMA_VERSION = "test-attribution/6"
+# SEE-1587：行级主真值 schema。旧产物在 load_map / validate_refresh
+# 处 fail-loud（schema 不符即拒），无兼容别名。SEE-1631：/7——gherkin
+# 臂归属接入（gherkin:// 身份形态 + feature/scenario 反查视图）。
+SCHEMA_VERSION = "test-attribution/7"
 ENV_MAP = "GQT_ATTRIBUTION_MAP"
 ENV_MODE = "GQT_ATTRIBUTION_MAP_MODE"   # "auto"（默认）| "off"
 DEFAULT_MAP_REL = ".qa-cache/attribution-map.json"
@@ -618,6 +619,42 @@ def arms_valid(states: dict) -> bool:
     return bool(vacuous or probes > 0)
 
 
+def _gherkin_disclosure(doc: dict, rel: str) -> "dict | None":
+    """SEE-1631 §SPEC-005：目标文件上的 gherkin 臂命中披露。
+
+    语义（显式披露，不静默）：gherkin scenario 身份在 GUT-only 执行模型
+    下不是可执行测试面——选面/投影保持 gut_full 单源口径不变；gherkin
+    边只做披露（命中行、feature key、身份数）。"选中 gherkin 测试如何
+    执行"属框架级决策，经 Owner 裁决前不静默丢弃、不静默扩大选面。
+    无 gherkin 臂或目标文件无 gherkin 边 → None（报告形状零变化）。"""
+    arm = (doc.get("arms") or {}).get("gherkin")
+    if not isinstance(arm, dict):
+        return None
+    if not (arm.get("test_to_lines") or arm.get("script_to_lines")):
+        return None
+    lines: set[int] = set()
+    idents: set[str] = set()
+    for ln_s, ids in (arm.get("line_to_tests") or {}).get(rel, {}).items():
+        lines.add(int(ln_s))
+        idents.update(ids)
+    for script, by_rel in (arm.get("script_to_lines") or {}).items():
+        for ln in ((by_rel or {}).get(rel) or []):
+            lines.add(int(ln))
+            idents.add(str(script))
+    if not lines:
+        return None
+    from ..measurement.attribution import _gherkin_feature_of
+
+    keys = sorted({k for k in (_gherkin_feature_of(i) for i in idents)
+                   if k})
+    return {"lines": sorted(lines), "feature_keys": keys,
+            "identities": len(idents),
+            "consumption": ("disclosed_only: gherkin scenario identities "
+                            "are not executable test faces in the GUT-only "
+                            "mutation model; selection/coverage stay "
+                            "gut_full-based")}
+
+
 def _evaluate(root: str, rel: str, doc: dict) -> dict:
     """单次新鲜性判定 → {ok, reason, scripts, ambiguous, mapping}。"""
     mapping = {"path": None, "file_sha256_bound": False,
@@ -646,7 +683,8 @@ def _evaluate(root: str, rel: str, doc: dict) -> dict:
                 "scripts": [], "ambiguous": [], "mapping": mapping}
     scripts, ambiguous = _tests_for_target(root, doc["arms"]["gut_full"], rel)
     return {"ok": True, "reason": "fresh_runtime_mapping",
-            "scripts": scripts, "ambiguous": ambiguous, "mapping": mapping}
+            "scripts": scripts, "ambiguous": ambiguous, "mapping": mapping,
+            "gherkin": _gherkin_disclosure(doc, rel)}
 
 
 def _regenerate(project_root: str, path: str, rel: str,
@@ -852,6 +890,7 @@ def resolve_selection(project_root: str | Path, target_file: str,
         return terminal
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
+    base["gherkin"] = evaluation.get("gherkin")
     evaluation["mapping"]["path"] = path
     if _universe_target_gate(base, evaluation, doc, rel,
                              auto=auto, renew=renew, explicit=explicit):

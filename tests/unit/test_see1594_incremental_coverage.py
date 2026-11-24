@@ -89,7 +89,7 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
             gd.read_bytes()).hexdigest()
         for gd in sorted(proj.rglob("tests/**/*.gd"))
     }
-    doc = {"schema_version": "test-attribution/6",
+    doc = {"schema_version": "test-attribution/7",
            "report_recipe_hash": raw, "recipe_hash_pristine": raw,
            "project_root": str(proj), "identity": ident,
            "causal": {"enabled": False},
@@ -273,7 +273,7 @@ class TestMalformedArmsState:
                 gd.read_bytes()).hexdigest()
             for gd in sorted(proj.rglob("tests/**/*.gd"))
         }
-        doc = {"schema_version": "test-attribution/6",
+        doc = {"schema_version": "test-attribution/7",
                "report_recipe_hash": raw, "recipe_hash_pristine": raw,
                "project_root": str(proj), "identity": ident,
                "causal": {"enabled": False},

@@ -493,10 +493,24 @@ def test_attribution_run_emits_mapping_artifact(tmp_path: Path):
     assert gut["lanes"]["test"]["rate"] == round(20 / 24, 6)
     assert gut["lanes"]["unattributed"]["rate"] == round(4 / 24, 6)
     assert gut["unattributed_phases"]["bootstrap"]["hit_events"] == 4
-    # acceptance 臂不做归属（方向②③：plain 模板 + 默认钩子）
-    # §SPEC-PLANFIRST 任务 2：acceptance 占位臂（disabled）在场
+    # acceptance 臂不做归属的旧口径已退役（SEE-1581 方向②③注释保留于史）
     assert "gherkin" not in gut
-    assert set(summary["arms"].keys()) == {"gut_full", "gherkin"}
+    # SEE-1631：双臂恢复——gherkin 臂归属收集与臂有效性解耦（invalid 臂
+    # 仍可有载荷）；无 Godot 形态例外：validator 预检缺二进制 → 臂具名
+    # invalid、归属不产出（gut_full 载荷不受影响）
+    gherkin_arm = next((a for a in report["arms"]
+                        if isinstance(a, dict)
+                        and a.get("arm") == "gherkin"), None)
+    assert gherkin_arm is not None and gherkin_arm.get("state") in (
+        "valid", "invalid")
+    if "gherkin" in summary["arms"]:
+        # 双臂恢复：gherkin 归属载荷进 summary（report["arms"] 条目按契约
+        # 不携带 attribution 键——载荷只在产物与 summary）
+        pass
+    else:
+        assert gherkin_arm.get("state") == "invalid"
+        assert gherkin_arm.get("invalid_reason"), gherkin_arm
+        assert set(summary["arms"].keys()) == {"gut_full"}
     # 默认关闭的键不得出现
     assert all("attribution" not in arm for arm in report["arms"])
 

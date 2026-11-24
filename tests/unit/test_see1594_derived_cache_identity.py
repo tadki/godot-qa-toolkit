@@ -75,7 +75,7 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
     arm["tests"] = len(arm["test_to_files"])
     arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     return {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": raw, "recipe_hash_pristine": raw,
         "project_root": str(proj),
         "identity": "res://script::test_name",

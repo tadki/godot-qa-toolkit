@@ -593,11 +593,16 @@ def resolve_arm_timeout(requested_timeout_s: int,
     return requested_timeout_s, f"parameter timeout_s={requested_timeout_s}s"
 
 
+GHERKIN_PAUSED_DISCLOSURE = ("disabled_pending_atomization — "
+                             "restored after SEE-1619 (shared-"
+                             "process shards); env override "
+                             "GQT_MEASUREMENT_GHERKIN_DISABLED=0")
+
+
 def gherkin_arm_disabled() -> bool:
-    """gherkin 臂暂停（§SPEC-PLANFIRST 任务 2 / SEE-1624 D-n3 改名）——
-    映射构建与默认测量路径不执行 gherkin 臂；统一披露
-    disabled_pending_atomization。恢复：设 GQT_MEASUREMENT_GHERKIN_DISABLED=0。
-    默认暂停（缺省=1）。
+    """SEE-1631（Owner 命令）：默认双臂恢复——原子化已完成，暂停理由消失；
+    缺省（无 env）执行 gherkin 臂。显式 GQT_MEASUREMENT_GHERKIN_DISABLED=1
+    保留为诊断回退（披露语义不变）；=0 与缺省同义。
 
     旧 env 名（GQT_MEASUREMENT_ACCEPTANCE_DISABLED）已退役：若仍被设置
     → 具名 fail-loud（MeasurementError），不静默忽略也不继续按新名判定。"""
@@ -607,9 +612,9 @@ def gherkin_arm_disabled() -> bool:
     if ENV_ACCEPTANCE_DISABLED_RETIRED in _os.environ:
         raise MeasurementError(
             f"{ENV_ACCEPTANCE_DISABLED_RETIRED} is retired — use "
-            f"{ENV_GHERKIN_DISABLED}=0 to restore the gherkin arm "
+            f"{ENV_GHERKIN_DISABLED}=1 to pause the gherkin arm "
             f"(fail-loud: the retired name is never ignored silently)")
-    return _os.environ.get(ENV_GHERKIN_DISABLED, "1").strip() \
+    return _os.environ.get(ENV_GHERKIN_DISABLED, "0").strip() \
         not in ("", "0", "false")
 _BASELINE_TOP_N = 10
 
@@ -803,13 +808,10 @@ def run_measurement(project_root: str | Path, target_files: list[str],
             test_attribution, attribution_causal, evidence_out, scope_roots)
     with clock.stage("gut_full_arm"):
         if gherkin_arm_disabled():
-            # §SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——
-            # 占位臂 state=disabled；恢复条件 SEE-1619 原子化改造后共享
-            # 进程分片（env GQT_MEASUREMENT_GHERKIN_DISABLED=0）。
-            # SEE-1623 H4：暂停契约与归属模式解耦——此前写成
-            # `acceptance_disabled() and test_attribution`，普通路径落入
-            # 双臂执行（额外成本 + 无关失败劫持 exit + 披露缺位），显式
-            # env=1 亦被无视。
+            # SEE-1631：显式诊断暂停（GQT_MEASUREMENT_GHERKIN_DISABLED=1）
+            # ——占位臂 state=disabled；默认路径已恢复双臂（原子化完成）。
+            # SEE-1623 H4：暂停契约与归属模式解耦的历史保留——显式暂停
+            # 时无论归属开关如何都只跑 gut_full 单臂。
             from .arms import run_arm
             arm_a = run_arm(
                 "gut_full", root=Path(root), recipe=inp["recipe"],
@@ -872,10 +874,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     clock.add("total", time.monotonic() - t_total)
     report["stage_timings"] = clock.disclosure()
     if gherkin_arm_disabled():
-        report["gherkin_arm"] = ("disabled_pending_atomization — "
-                                    "restored after SEE-1619 (shared-"
-                                    "process shards); env override "
-                                    "GQT_MEASUREMENT_GHERKIN_DISABLED=0")
+        report["gherkin_arm"] = GHERKIN_PAUSED_DISCLOSURE
     return report
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")

@@ -190,7 +190,7 @@ def _map_doc(proj: Path, target: Path,
     }
     inst = sorted({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
     return {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": raw, "recipe_hash_pristine": raw,
         "project_root": str(proj), "identity": "res://script::test_name",
         "causal": {"enabled": False},
@@ -540,7 +540,7 @@ def test_projection_requires_full_res_identity():
     selection 精确匹配（选面侧 `_line_script_sets` 的名字解析含同名歧义
     披露，属另一机制，不受投影侧影响）。"""
     doc = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "recipe_hash_pristine": "pristine-1",
         "file_sha256": {}, "tests_face": {}, "instrumentable_lines": {},
         "arms_state": {"gut_full": {"state": "valid", "bundles": 1,

@@ -157,7 +157,7 @@ def _baseline_doc(recipe_hash_val: str) -> dict:
                   "test_b.gd::tb": {"src_game/cell.gd": [5, 7],
                                     "src_game/node.gd": [4]}}
     return {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": recipe_hash_val,
         "recipe_hash_pristine": "pristine-1",
         "project_root": "",
@@ -392,7 +392,7 @@ def test_increment_fallback_artifact_is_line_primary(tmp_path, monkeypatch):
         project, targets, recipe, base_path, ["src_game/brand_new.gd"], out)
     assert report["mode"] == "new_prod_file_fallback"
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["schema_version"] == "test-attribution/6"
+    assert doc["schema_version"] == "test-attribution/7"
     arm = doc["arms"]["gut_full"]
     assert arm["test_to_lines"]["res://tests/unit/test_game.gd::test_ok"]
     # SEE-1604 D1：new_prod_file_fallback 必须把 classes.prod_new 并入重建

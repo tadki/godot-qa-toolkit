@@ -19,8 +19,9 @@ from .shadowio import _shard_groups
 
 def _stage_arm_files(name: str, prepared: dict, run_uuid: str,
                      test_attribution: bool) -> tuple:
-    """臂内模板→sink/manifest/插桩文本装载（方向②③：归属只在 gut_full
-    臂启用）。返回 6 元组（started/sinks/manifests/instrumented/inst/vacuous）。"""
+    """臂内模板→sink/manifest/插桩文本装载（SEE-1631：双臂同权——归属
+    开启时 gherkin 臂与 gut_full 臂同用 attr 模板）。返回 6 元组
+    （started/sinks/manifests/instrumented/inst/vacuous）。"""
     started = {"run_uuid": run_uuid, "project_root": "",
                "files": {}}
     sink_by_rel: dict[str, str] = {}
@@ -31,7 +32,7 @@ def _stage_arm_files(name: str, prepared: dict, run_uuid: str,
 
     vacuous_rels: list[str] = []
     for rel, item in prepared.items():
-        use_attr = test_attribution and name == "gut_full"
+        use_attr = test_attribution
         template = item.get("template_attr") if use_attr else item.get("template")
         manifest = item.get("probe_lines") or []
         if template is None:
@@ -99,7 +100,7 @@ def _arm_stage_created(root: Path, started: dict, name: str,
             "cannot run measurement: project.godot missing")
     started["created"] = [str(root / _FLUSHER_RELPATH),
                           str(root / _PRE_HOOK_RELPATH)]
-    if attribution_causal and name == "gut_full":
+    if attribution_causal:
         started["created"].append(str(root / _ATTR_CTX_RELPATH))
     if not shadow_instrument:
         (backup_dir / "started.json").write_text(
@@ -113,8 +114,8 @@ def _arm_inject_root(root: Path, instrumented_files: dict[str, str],
     探针静默零命中），fail-loud 拒绝跑假数据。"""
     for abs_path, inst in instrumented_files.items():
         Path(abs_path).write_text(inst, encoding="utf-8")
-    # 方向②③：attr 钩子只在归属臂注入；gherkin 臂用默认钩子
-    if attribution_causal and name == "gut_full":
+    # SEE-1631：归属臂（双臂同权）注入；causal ctx 双臂一致
+    if attribution_causal:
         from gdtoolkit.parser import parser as _ctx_parser
         from .probe_templates import _ATTR_CTX_GD
         try:

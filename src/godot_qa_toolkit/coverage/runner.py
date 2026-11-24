@@ -340,6 +340,10 @@ def _cov_report_build(path, src, tests_glob, evidence_out, min_percent,
         "selection_scripts": len(proj.get("scripts") or []),
         "vacuous": total == 0,
     }
+    # SEE-1631 §SPEC-005：gherkin 臂命中披露（投影保持 gut_full 单源口径，
+    # 行集/百分比 parity 不变；gherkin-only 行具名在 uncovered 披露之外）
+    if isinstance(proj.get("gherkin"), dict):
+        summary["gherkin"] = proj["gherkin"]
     if total == 0:
         summary["note"] = "no executable lines"
     summary.update(explicit_timing_meta())

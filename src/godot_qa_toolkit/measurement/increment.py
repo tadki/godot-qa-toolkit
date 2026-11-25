@@ -1104,13 +1104,17 @@ def _verdict_add_new_identities(merged: dict, per_script: dict,
             continue
         full_paths = tests_by_base.get(script_base, [])
         full = full_paths[0] if full_paths else None
-        # 宇宙新身份：按执行账逐测试补绿/红（保守规则与
-        # _verdict_recompute_rerun 同口径：rc!=0 且失败名不可解析 → 整脚本红）
+        # 宇宙新身份：逐测试判定（与 _verdict_recompute_rerun 同口径——
+        # 失败名可解析时只看 name in failing，脚本内其余通过测试记 green；
+        # 全部不可解析（无失败名且 rc!=0）才整脚本保守红。C3-R8 退回2：
+        # 此前 rc!=0 把同脚本其余新身份全记红 → mutation 把可杀的 mutant
+        # 报成存活）
         for ident in idents_by_base.get(script_base, []):
             if ident in merged:
                 continue
             name = str(ident).partition("::")[2]
-            if rc == 0 and name not in failing:
+            failed = (name in failing) if failing else (rc != 0)
+            if not failed:
                 merged[ident] = {"verdict": "green"}
             else:
                 merged[ident] = {"verdict": "red",

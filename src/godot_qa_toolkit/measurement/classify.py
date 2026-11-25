@@ -145,7 +145,9 @@ def _glob_kind(root: Path, kind: str, value: str) -> "set[str]":
             raise ScopeError(
                 f"scope rules path does not exist (dir): {value}")
         return {p.relative_to(root).as_posix()
-                for p in d.rglob("*") if p.is_file()}
+                for p in d.rglob("*")
+                if p.is_file() and not _is_engine_artifact(
+                    p.relative_to(root).as_posix())}
     if kind == "file":
         f = root / value
         if not f.is_file():
@@ -158,7 +160,15 @@ def _glob_kind(root: Path, kind: str, value: str) -> "set[str]":
     return set()
 
 
+def _is_engine_artifact(rel: str) -> bool:
+    """引擎生成边车（Godot 4.4+ `.gd.uid` / `.import`）——不属于用户
+    配置的任何类（production/测试），恒归非生产。"""
+    return rel.endswith((".uid", ".import"))
+
+
 def _entry_matches(entry: dict, rel: str) -> bool:
+    if _is_engine_artifact(rel):
+        return False
     kind = entry.get("kind")
     value = _norm(str(entry.get("value") or ""))
     if kind == "file":
@@ -242,7 +252,9 @@ def discover_scope(root: "str | Path") -> dict:
     for pat in _DEFAULT_EXTS:
         for p in root.rglob(pat):
             if p.is_file():
-                all_files.add(p.relative_to(root).as_posix())
+                rel = p.relative_to(root).as_posix()
+                if not rel.endswith((".uid", ".import")):
+                    all_files.add(rel)
 
     # ---- 测试侧分类（tests.exclude 生效）+ features/测试根分支
     excluded_dirs, excluded_features = tests_exclude_entries(root)

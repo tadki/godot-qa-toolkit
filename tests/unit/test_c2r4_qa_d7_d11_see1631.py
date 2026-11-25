@@ -26,6 +26,16 @@ from godot_qa_toolkit.measurement.increment import (
     _verdict_recompute_rerun,
 )
 from godot_qa_toolkit.mutation.ops import Mutant
+
+
+@pytest.fixture(autouse=True)
+def _reset_runner_globals():
+    """d7 冷车道单测断言全局缺省——真机冒烟文件的残留会翻转判定。"""
+    yield
+    from godot_qa_toolkit.mutation import runner as _runner_mod
+
+    _runner_mod._BASELINE_RED_MAP = set()
+    _runner_mod._FACE_SCRIPT_BY_BASENAME = {}
 from godot_qa_toolkit.mutation.reporting import (
     _classify_mutant_run,
     _classify_worker_leg_impl,

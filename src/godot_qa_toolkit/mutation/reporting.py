@@ -885,7 +885,6 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
         # 结构化证据（无 tail/无选面规模）→ 失败 ⊆ 基线红保持 suspect
         # （Harti 语义：无法区分"没抓住"与"没跑到"）；跳过生效的升级走
         # 上方 skip_red_info 具名通道。
-        pass
         return _mutant_record(
             m, "suspect",
             f"dirty baseline ∧ empty diff after {tag} (worker leg)", src=src)

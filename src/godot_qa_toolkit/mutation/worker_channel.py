@@ -393,9 +393,12 @@ def _disclose_worker_skip(leg) -> None:
     同口径——机器可读 stderr 标记；零行为拆分）。"""
     if getattr(leg, "skip_red_info", None):
         import sys as _sys
+        info = leg.skip_red_info
+        # F6：与结构化证据同口径——marked/requested 任一缺席按 0 具名
         print(f"mutation: baseline skip-red marked="
-              f"{leg.skip_red_info.get('marked')}/"
-              f"{leg.skip_red_info.get('requested')}", file=_sys.stderr)
+              f"{info.get('marked', 0)}/{info.get('requested', 0)} "
+              f"names={','.join(info.get('names') or [])}",
+              file=_sys.stderr)
 
 def _legs_one(c: dict, seq, m, target_res: str, closure,
               prev_leg_gut_ran: bool) -> bool:

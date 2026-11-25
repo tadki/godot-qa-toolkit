@@ -5,6 +5,17 @@ from __future__ import annotations
 import json
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_runner_globals():
+    """真机冒烟会经 runner 填充模块级 _BASELINE_RED_MAP / face 映射——
+    用后清零，避免跨文件污染 d7 冷车道单测（其对全局缺省有断言）。"""
+    yield
+    from godot_qa_toolkit.mutation import runner as _runner_mod
+
+    _runner_mod._BASELINE_RED_MAP = set()
+    _runner_mod._FACE_SCRIPT_BY_BASENAME = {}
 import os
 import shutil
 from pathlib import Path

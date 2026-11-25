@@ -424,37 +424,13 @@ def _prepare_full_rebuild(project_root: str, files: list[str], path: str,
 
 def prepare_map_for_baseline(project_root: str, files: list[str],
                              timeout_s: int = 600) -> str:
-    """§SPEC-021：map 源判定基线的 prepare 自动续新（Owner 指导：静态探
-    测发现 → prepare 更新 → 成功后进入 run）。
+    """§SPEC-021/032：map 源判定基线的 prepare（薄适配器）——阶梯本体
+    已收口 `map_contract.refresh`（D1：create/increment/full 决策、锁内
+    复检、装填后校验单源）；本适配器只返回可用 map 路径。"""
+    from .map_contract import refresh
 
-    阶梯：map 缺失 → `ensure_map` 全脸自动建图（measure run 同形态）；
-    map 在场且漂移 → 优先增量续新（`run_attribution_increment`，只重跑
-    失效面）；recipe pristine 失配等不可增量形态 → 全脸重建。续新后
-    复检一致性（schema/臂证据/pristine/tests_face/目标 sha）——仍不一致
-    → `BaselineSourceError` 具名 fail-loud（消费方转结构化 JSON）。
-    返回可用 map 路径。"""
-    from .truth_select import MutationSelectionError, load_map, \
-        map_path
-
-    path = map_path(Path(project_root).resolve())
-    if not path or not Path(path).is_file():
-        return _prepare_build_missing(project_root, files, timeout_s)
-    try:
-        doc = load_map(path)
-    except MutationSelectionError as e:
-        raise BaselineSourceError(
-            f"prepare renewal failed (map unreadable): {e}") from e
-    changed, drift, pristine_ok = _prepare_drift_state(doc, project_root,
-                                                       files)
-    if not drift:
-        return path
-    print(f"mutation prepare: attribution map stale ({len(drift)} drift "
-          f"item(s)) — renewing (§SPEC-021 auto renewal)", file=sys.stderr)
-    if changed and pristine_ok:
-        _prepare_increment_renewal(doc, project_root, path, changed,
-                                   timeout_s)
-    else:
-        _prepare_full_rebuild(project_root, files, path, timeout_s)
+    refresh(project_root, files, timeout_s=timeout_s)
+    # 旧防线保留（与契约装填后校验同向——verify 具名口径沿用）
     return _verify_prepared(project_root, files)
 
 

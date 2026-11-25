@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from godot_qa_toolkit.mutation.map_contract import MapContractError
+
 from attribution_fixtures import install_recipe
 
 
@@ -79,6 +81,7 @@ def test_drift_detection_classifies_changed_files(tmp_path):
 
 def test_prepare_missing_map_uses_ensure_map(tmp_path, monkeypatch):
     import godot_qa_toolkit.mutation.verdict_source as vs
+    from godot_qa_toolkit.mutation import map_contract as _mc
 
     calls = []
     from godot_qa_toolkit.mutation import truth_select as _ts
@@ -89,6 +92,14 @@ def test_prepare_missing_map_uses_ensure_map(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    # C3 契约：refresh 装填后校验（assert_map_fresh）——路由测试以桩
+    # 放行校验步（路由断言语义不变；桩改动系行为变化必需的夹具更新）
+    monkeypatch.setattr(
+        _mc, "_load_map_doc",
+        lambda root: {"schema_version": "test-attribution/7",
+                      "arms_state": {"gut_full": {"state": "valid"}},
+                      "test_verdicts": {}})
+    monkeypatch.setattr(_mc, "assert_map_fresh", lambda *a, **k: None)
     (tmp_path / "systems").mkdir(parents=True, exist_ok=True)
     (tmp_path / "systems" / "calc.gd").write_text("extends Node\n")
     out = vs.prepare_map_for_baseline(str(tmp_path),
@@ -124,6 +135,14 @@ def test_prepare_drift_uses_increment(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    # C3 契约：装填后校验桩（同上，路由断言语义不变）
+    from godot_qa_toolkit.mutation import map_contract as _mc
+    monkeypatch.setattr(
+        _mc, "_load_map_doc",
+        lambda root: {"schema_version": "test-attribution/7",
+                      "arms_state": {"gut_full": {"state": "valid"}},
+                      "test_verdicts": {}})
+    monkeypatch.setattr(_mc, "assert_map_fresh", lambda *a, **k: None)
     out = vs.prepare_map_for_baseline(str(tmp_path),
                                       ["prod.gd", "tests/unit/test_a.gd"])
     assert out == str(tmp_path / ".qa-cache" / "attribution-map.json")
@@ -156,6 +175,14 @@ def test_prepare_recipe_mismatch_rebuilds(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    # C3 契约：装填后校验桩（路由断言语义不变）
+    from godot_qa_toolkit.mutation import map_contract as _mc
+    monkeypatch.setattr(
+        _mc, "_load_map_doc",
+        lambda root: {"schema_version": "test-attribution/7",
+                      "arms_state": {"gut_full": {"state": "valid"}},
+                      "test_verdicts": {}})
+    monkeypatch.setattr(_mc, "assert_map_fresh", lambda *a, **k: None)
     vs.prepare_map_for_baseline(str(tmp_path), ["tests/unit/test_a.gd"])
     assert any("attribution-map.json" in u for u in unlink_calls), \
         "recipe 失配须先移除 stale 旧图再重建"
@@ -173,10 +200,12 @@ def test_prepare_still_inconsistent_fail_loud(tmp_path, monkeypatch):
     doc = _fresh_map(tmp_path, files)
     doc["tests_face"]["tests/unit/test_a.gd"] = "deadbeef"
     _write_map(tmp_path, doc)
-    with pytest.raises(BaselineSourceError) as ei:
+    # C3 契约：续新后复检仍 stale → MapContractError 具名（旧图字节不变）；
+    # BaselineSourceError（§SPEC-021 老形态）同样保留为合法具名出口。
+    with pytest.raises((MapContractError, BaselineSourceError)) as ei:
         prepare_map_for_baseline(str(tmp_path), ["tests/unit/test_a.gd"])
-    assert "prepare renewal" in str(ei.value) or "still inconsistent" \
-        in str(ei.value)
+    assert ("still stale" in str(ei.value) or "prepare renewal" in
+            str(ei.value) or "still inconsistent" in str(ei.value))
 
 
 def test_p1_gate_map_blocker_auto_continues_under_map_source(

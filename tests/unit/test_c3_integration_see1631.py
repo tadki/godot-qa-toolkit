@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 import os
 import shutil
 from pathlib import Path
@@ -158,3 +160,97 @@ def test_d12_prepare_real_targets_exist(tmp_path, monkeypatch):
     states = {k: v.get("state")
               for k, v in (doc.get("arms_state") or {}).items()}
     assert states.get("gut_full") == "valid"
+
+
+def test_d13_red_fixture_map_source_smoke(tmp_path, monkeypatch, capsys):
+    """D13 真 Godot 冒烟：RED fixture（恒红测试 = verdict red/pre_existing）
+    上 map 源 mutation——红测物理跳过生效（marked>=1）、killer 正常 kill、
+    不得 16/16 全杀假 kill 回归。"""
+    import os
+    import shutil as _sh
+    from pathlib import Path as _P
+
+    gut_src = None
+    for cand in (os.environ.get("GQT_FORMS_GUT_DIR", ""),
+                 "/mnt/d/GodotProjects/king-of-likes/addons/gut",
+                 str(_P.home() / "tools" / "KingOfLikes-Godot" / "addons"
+                     / "gut")):
+        p = _P(cand) if cand else None
+        if p is not None and (p / "gut_cmdln.gd").is_file():
+            gut_src = p
+            break
+    if gut_src is None:
+        pytest.skip("real GUT addon unavailable")
+    real_godot = _sh.which("godot")
+    if real_godot is None:
+        pytest.skip("real godot binary unavailable")
+
+    from godot_qa_toolkit.mutation.verdict_source import (
+        prepare_map_for_baseline,
+    )
+    import hashlib
+    import sys as _sys
+
+    root = tmp_path / "proj"
+    shutil.copytree(FORMS_TEMPLATE, root)
+    shutil.copytree(gut_src, root / "addons" / "gut")
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+    install_recipe(root)
+    ensure_addon_metadata(root)
+    # killer 目标 + 绿杀手测试（建图前在场 → 归属边绑定 calc_sign 行）
+    target = root / "calc_sign.gd"
+    target.write_text(
+        "extends RefCounted\nfunc sign(x: int) -> int:\n"
+        "\tif x > 0:\n\t\treturn 1\n\treturn -1\n")
+    (root / "tests" / "unit").mkdir(parents=True, exist_ok=True)
+    killer = root / "tests" / "unit" / "test_kill.gd"
+    killer.write_text(
+        "extends GutTest\nconst C = preload(\"res://calc_sign.gd\")\n"
+        "func test_sign_pos():\n\tassert_eq(C.new().sign(5), 1)\n"
+        "func test_sign_neg():\n\tassert_eq(C.new().sign(-5), -1)\n")
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": [{"kind": "file", "value": "calc_sign.gd"}]}}))
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
+    monkeypatch.setenv("GQT_GODOT_BIN", real_godot)
+    monkeypatch.setenv("GQT_AUTO_IMPORT", "1")
+    import subprocess as _sp
+    _sp.run([real_godot, "--headless", "--import", "--path", str(root)],
+            capture_output=True, timeout=600)
+    out = prepare_map_for_baseline(
+        str(root), [str(target)], timeout_s=900)
+    doc = json.loads((root / ".qa-cache" / "attribution-map.json")
+                     .read_text(encoding="utf-8"))
+    # 建图后落盘恒红测试 + 注入判定（消费路径冒烟：pre_existing 红条目）
+    red_test = root / "tests" / "unit" / "test_red_always.gd"
+    red_test.write_text(
+        "extends GutTest\nfunc test_red_always():\n\tfail_test(\"red\")\n")
+    doc["tests_face"]["tests/unit/test_red_always.gd"] = hashlib.sha256(
+        red_test.read_bytes()).hexdigest()
+    doc["test_verdicts"]["test_red_always.gd::test_red_always"] = {
+        "verdict": "red", "classification": "pre_existing",
+        "script": "res://tests/unit/test_red_always.gd"}
+    # 红测同触达目标行 → 进入选面（face 含红测；物理跳过才可执行）
+    gut = doc["arms"]["gut_full"]
+    gut["test_to_lines"]["res://tests/unit/test_red_always.gd::test_red_always"] = {
+        "calc_sign.gd": [3, 4]}
+    Path(out).write_text(json.dumps(doc, ensure_ascii=False),
+                         encoding="utf-8")
+    from godot_qa_toolkit.mutation.runner import run_mutation
+
+    # worker_host 车道（skip_applied 条件之一：物理跳过需 worker host /
+    # bail 在场——与 §SPEC-P2-R1 语义一致）
+    r = run_mutation(str(target), str(root), budget=20, timeout_s=300,
+                     select_mode="line", select_lines=[3, 4],
+                     reuse_coverage=False, worker_channel=True)
+    err = capsys.readouterr().err
+    s = r["summary"]
+    # killer 正常 kill（≥1）；非全杀（等价/未覆盖位点 survive 合理）——
+    # D13 假 kill 回归面 = killed==mutants 全杀不得复发
+    assert s.get("killed", 0) >= 1
+    total = s.get("mutants", 0)
+    assert s.get("killed", 0) < total, "全杀 = D13 假 kill 回归"
+    assert s.get("killed", 0) + s.get("survived", 0) + \
+        s.get("suspect", 0) <= total

@@ -481,10 +481,14 @@ def _script_qualified_new(tail: str, bare: "set[str]",
     if not red_map:
         return bare - baseline_failures
     from .gutrun import parse_failures_with_scripts
+    from pathlib import Path as _P
+    # §SPEC-032/D13：比较键归一 basename（mutant 腿输出脚本 =
+    # 行选面 wrapper 路径；基线红集合 = basename 口径）
+    red_map = {(_P(s).name, n) for s, n in red_map}
     qualified = parse_failures_with_scripts(tail)
     if qualified:
-        return {n for _s, n in qualified
-                if _s != "*" and (_s, n) not in red_map}
+        return {n for s, n in qualified
+                if s != "*" and (_P(s).name, n) not in red_map}
     return bare - baseline_failures
 
 
@@ -750,13 +754,15 @@ def _script_aware_new(failing_names, failing_scripts, baseline_names,
     - map 为 None（旧路径/无脚本标题）或腿无脚本标题 → 回退裸名差集。"""
     if baseline_red_map is None or not failing_scripts:
         return failing_names - baseline_names
-    base_map = baseline_red_map or set()
+    # §SPEC-032/D13：比较键归一 basename（wrapper vs 基线）
+    from pathlib import Path as _P
+    base_map = {(_P(s).name, n) for s, n in (baseline_red_map or set())}
     new = set()
     for name in failing_names:
         # D2-R1：通配 ("*", name) 条目是 Run Summary 的重复回显，不授予
         # 豁免——只有「脚本归属 + 名」精确命中基线红的失败才是既有失败；
         # 其它（含同名绿脚本 killer 的失败）都是真新失败 → killed。
-        covered = any((scr, name) in base_map
+        covered = any((_P(scr).name, name) in base_map
                       for scr, n in failing_scripts
                       if n == name and scr != "*")
         if not covered:

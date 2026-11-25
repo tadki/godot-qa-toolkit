@@ -756,8 +756,11 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         for snap in baselines.values():
             qualified = parse_failures_with_scripts(str(snap.get("tail")
                                                         or ""))
+            # §SPEC-032/D13：红集合键归一 basename（与物理跳过 wanted
+            # basename 键、mutant 腿 wrapper 输出的 basename 同一口径）
+            from pathlib import Path as _P
             _runner_mod._BASELINE_RED_MAP |= {
-                (scr, name) for scr, name in qualified
+                (_P(scr).name, name) for scr, name in qualified
                 if scr and scr != "*"}
         print("mutation: verdict baseline sourced from attribution map "
               "(§SPEC-020; cold start skipped)", file=sys.stderr)

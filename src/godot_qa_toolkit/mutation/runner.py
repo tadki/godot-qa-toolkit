@@ -935,7 +935,10 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     global _BASELINE_RED_MAP
     from .gutrun import parse_failures_with_scripts
     qualified = parse_failures_with_scripts(baseline_tail)
-    _BASELINE_RED_MAP = {(scr, name) for scr, name in qualified
+    # §SPEC-032/D13：红集合键归一 basename（与物理跳过 wanted basename、
+    # 失败差集比较同口径）
+    from pathlib import Path as _P
+    _BASELINE_RED_MAP = {(_P(scr).name, name) for scr, name in qualified
                          if scr and scr != "*"}
     # SEE-1606 P2：开关关闭（默认）时继续跑并只做披露；打开时 fail-loud，
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。

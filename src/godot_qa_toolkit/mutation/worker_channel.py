@@ -427,6 +427,13 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
         _legs_record(c, m, verdict, elapsed)
         return prev_leg_gut_ran
     c["session_failures"] = 0
+    # §SPEC-032/D13：worker 车道 skip_red 披露（与 cold 车道 runhelp
+    # 同口径——机器可读 stderr 标记）
+    if getattr(leg, "skip_red_info", None):
+        import sys as _sys
+        print(f"mutation: baseline skip-red marked="
+              f"{leg.skip_red_info.get('marked')}/"
+              f"{leg.skip_red_info.get('requested')}", file=_sys.stderr)
     verdict = c["classify_fn"](m, leg)
     verdict, canary_event, mismatch = _apply_canary(
         canary_cold, verdict, seq, c["session"])

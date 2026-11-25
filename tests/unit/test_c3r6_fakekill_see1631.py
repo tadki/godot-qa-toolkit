@@ -65,7 +65,13 @@ def r6_project(tmp_path_factory):
            "TMPDIR": str(home), "PYTHONPATH": "src",
            "GQT_MEASUREMENT_GHERKIN_DISABLED": "1",
            "GQT_MUTATION_BASELINE_SOURCE": "map",
-           "GQT_ATTRIBUTION_MAP_MODE": "auto"}
+           "GQT_ATTRIBUTION_MAP_MODE": "auto",
+           # 进程内 ensure_map 会把 GQT_ATTRIBUTION_MAP 永久写入 os.environ
+           # （truth_select._auto_map_build）——同进程先跑的建图单测会把
+           # 泄漏值带进来，使本夹具的默认路径 map 被判成「显式 map」并触发
+           # D4 event_counts_stale 具名拒绝门（增量产物恒带该标志）。本模
+           # 块契约 = 项目默认路径 auto map，置空恢复默认语义。
+           "GQT_ATTRIBUTION_MAP": ""}
     proj = tmp_path_factory.mktemp("r6proj") / "proj"
     (proj / "src").mkdir(parents=True)
     (proj / "data").mkdir()

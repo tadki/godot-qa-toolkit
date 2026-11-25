@@ -48,13 +48,30 @@ def _counts(out: str) -> dict:
     return {k: s.get(k) for k in ("mutants", "killed", "survived", "suspect")}
 
 
+def _real_godot_bin() -> "str | None":
+    """C3-R7 退回2：GQT_GODOT_BIN 优先、其次 PATH；conftest 真空 stub
+    （--version 输出带 official.stub 标记）不算真引擎——真空形态照旧
+    skip，标准隔离环境（外部只设 GQT_GODOT_BIN）真跑。"""
+    cand = os.environ.get("GQT_GODOT_BIN") or shutil.which("godot")
+    if not cand or not Path(cand).is_file():
+        return None
+    try:
+        r = subprocess.run([str(cand), "--version"], capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if "stub" in (r.stdout or ""):
+        return None
+    return str(cand)
+
+
 @pytest.fixture(scope="module")
 def r6_project(tmp_path_factory):
     """Leader 式小夹具：目录型白名单（src/ + data/），单测试目录 =
     绿测脚本 + 恒红脚本 + 填充脚本。返回 (proj, env, baseline_counts)。"""
     # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot（C3-R7 退回2：
-    # 与 test_see1550_worker_battery 同款发现顺序）
-    godot = os.environ.get("GQT_GODOT_BIN") or shutil.which("godot")
+    # GQT_GODOT_BIN 优先；真空 stub 不算真引擎）
+    godot = _real_godot_bin()
     gut = _find_gut()
     if godot is None or gut is None:
         pytest.skip("real godot / GUT addon unavailable")

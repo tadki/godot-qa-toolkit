@@ -23,6 +23,25 @@ from pathlib import Path
 FORMS_TEMPLATE = Path(__file__).parent.parent / "fixtures" / "see1550_forms"
 
 
+def _real_godot_bin() -> "str | None":
+    """C3-R7 退回2：GQT_GODOT_BIN 优先、其次 PATH；conftest 真空 stub
+    （--version 输出带 official.stub 标记）不算真引擎——真空形态照旧
+    skip，标准隔离环境（外部只设 GQT_GODOT_BIN）真跑。"""
+    import subprocess as _sp
+
+    cand = os.environ.get("GQT_GODOT_BIN") or shutil.which("godot")
+    if not cand or not Path(cand).is_file():
+        return None
+    try:
+        r = _sp.run([str(cand), "--version"], capture_output=True,
+                    text=True, timeout=60)
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if "stub" in (r.stdout or ""):
+        return None
+    return str(cand)
+
+
 def test_run_side_resolve_selection_renew_false(monkeypatch, tmp_path):
     """run 路径（含 ownership_for）固定 renew=False——解析器收到的
     renew 关键字为 False。"""
@@ -157,9 +176,7 @@ def test_d12_prepare_real_targets_exist(tmp_path, monkeypatch):
     # ENV_MAP（显式）在 resolve 内以 override 参数表达；auto 门只看 mode
     monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
     import shutil as _sh
-    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot
-    # （C3-R7 退回2：GQT_GODOT_BIN 优先，与 worker battery 同款）
-    real_godot = os.environ.get("GQT_GODOT_BIN") or _sh.which("godot")
+    real_godot = _real_godot_bin()
     if real_godot is None:
         pytest.skip("real godot binary unavailable")
     monkeypatch.setenv("GQT_GODOT_BIN", real_godot)
@@ -204,9 +221,7 @@ def test_d13_red_fixture_map_source_smoke(tmp_path, monkeypatch, capsys):
             break
     if gut_src is None:
         pytest.skip("real GUT addon unavailable")
-    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot
-    # （C3-R7 退回2：GQT_GODOT_BIN 优先，与 worker battery 同款）
-    real_godot = os.environ.get("GQT_GODOT_BIN") or _sh.which("godot")
+    real_godot = _real_godot_bin()
     if real_godot is None:
         pytest.skip("real godot binary unavailable")
 
@@ -376,9 +391,7 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
             break
     if gut_src is None:
         pytest.skip("real GUT addon unavailable")
-    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot
-    # （C3-R7 退回2：GQT_GODOT_BIN 优先，与 worker battery 同款）
-    real_godot = os.environ.get("GQT_GODOT_BIN") or _sh.which("godot")
+    real_godot = _real_godot_bin()
     if real_godot is None:
         pytest.skip("real godot binary unavailable")
 

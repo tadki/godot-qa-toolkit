@@ -780,7 +780,8 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     if getattr(args, "dry_run", False):
         return None
     full_face = getattr(args, "select_mode", "line") == "full"
-    from .mutation.truth_select import MutationSelectionError
+    from .mutation.truth_select import MutationSelectionError, \
+        SelectionError
     from .mutation.verdict_source import (
         baseline_source, prepare_map_for_baseline,
     )
@@ -848,7 +849,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
     # 领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
-    from .mutation.truth_select import MutationSelectionError
+    from .mutation.truth_select import MutationSelectionError, \
+        SelectionError
     from .mutation.verdict_source import BaselineSourceError
     from .mutation import truth_select as _truth
     _truth.reset_ledger()
@@ -867,6 +869,8 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     try:
         result = _dispatch_mutation(args, binary_kind)
     except MutationSelectionError as e:
+        return _selection_error_payload(args, e)
+    except SelectionError as e:  # F4：基类兜底（含坏 JSON 具名转域）
         return _selection_error_payload(args, e)
     except BaselineSourceError as e:
         # SEE-1631 §SPEC-020：map 源判定基线不可用/与实跑失配——具名

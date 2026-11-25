@@ -32,7 +32,9 @@ def baseline_source() -> str:
 
 
 def _load_map_doc(project_root: str) -> dict:
-    from .truth_select import MutationSelectionError, load_map, map_path
+    from .truth_select import (
+        MutationSelectionError, SelectionError, load_map, map_path,
+    )
 
     path = map_path(Path(project_root).resolve())
     if not path:
@@ -43,7 +45,10 @@ def _load_map_doc(project_root: str) -> dict:
             "forbidden by §SPEC-020)")
     try:
         return load_map(path)
-    except MutationSelectionError as e:
+    except SelectionError as e:
+        # F4（C3-R1）：SelectionError（坏 JSON/解析失败）与
+        # MutationSelectionError 同样具名转 BaselineSourceError——
+        # CLI 全链零 traceback（消费方只消费具名形态）
         raise BaselineSourceError(
             f"baseline_source=map: attribution map unusable: {e}") from e
 
@@ -439,8 +444,14 @@ def prepare_map_for_baseline(project_root: str, files: list[str],
     已收口 `map_contract.refresh`（D1：create/increment/full 决策、锁内
     复检、装填后校验单源）；本适配器只返回可用 map 路径。"""
     from .map_contract import refresh
+    from .truth_select import SelectionError as _SelErr
 
-    refresh(project_root, files, timeout_s=timeout_s)
+    try:
+        refresh(project_root, files, timeout_s=timeout_s)
+    except _SelErr as e:
+        # F4：装/检阶段的 SelectionError（坏 JSON 等）→ 具名
+        # BaselineSourceError（CLI 零 traceback）
+        raise BaselineSourceError(str(e)) from e
     # 旧防线保留（与契约装填后校验同向——verify 具名口径沿用）
     return _verify_prepared(project_root, files)
 

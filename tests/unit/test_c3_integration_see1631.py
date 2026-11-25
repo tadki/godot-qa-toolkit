@@ -230,19 +230,23 @@ def test_d13_red_fixture_map_source_smoke(tmp_path, monkeypatch, capsys):
     import subprocess as _sp
     _sp.run([real_godot, "--headless", "--import", "--path", str(root)],
             capture_output=True, timeout=600)
+    # F5（C3-R1）：恒红测试在**建图时**就在（从零建图 RED 夹具 =
+    # Revy 失败场景）——红被懒基线吸收为 pre_existing（partial 臂）
+    red_test = root / "tests" / "unit" / "test_red_always.gd"
+    red_test.write_text(
+        "extends GutTest\nfunc test_red_always():\n\tfail_test(\"red\")\n")
     out = prepare_map_for_baseline(
         str(root), [str(target)], timeout_s=900)
     doc = json.loads((root / ".qa-cache" / "attribution-map.json")
                      .read_text(encoding="utf-8"))
-    # 建图后落盘恒红测试 + 注入判定（消费路径冒烟：pre_existing 红条目）
-    red_test = root / "tests" / "unit" / "test_red_always.gd"
-    red_test.write_text(
-        "extends GutTest\nfunc test_red_always():\n\tfail_test(\"red\")\n")
-    doc["tests_face"]["tests/unit/test_red_always.gd"] = hashlib.sha256(
-        red_test.read_bytes()).hexdigest()
-    doc["test_verdicts"]["test_red_always.gd::test_red_always"] = {
-        "verdict": "red", "classification": "pre_existing",
-        "script": "res://tests/unit/test_red_always.gd"}
+    red_key = next((k for k in doc.get("test_verdicts", {})
+                    if "test_red_always" in k), None)
+    assert red_key is not None, \
+        f"建图时在场的恒红测试必须进 verdict 表（red/pre_existing）: " \
+        f"{sorted(doc.get('test_verdicts', {}))[:6]}"
+    assert doc["test_verdicts"][red_key].get("verdict") == "red"
+    assert doc["test_verdicts"][red_key].get("classification") == \
+        "pre_existing"
     # 红测同触达目标行 → 进入选面（face 含红测；物理跳过才可执行）
     gut = doc["arms"]["gut_full"]
     gut["test_to_lines"]["res://tests/unit/test_red_always.gd::test_red_always"] = {
@@ -536,3 +540,66 @@ def test_f1_universe_exact_four_configs(tmp_path):
         "include": [{"kind": "dir", "value": "systems"},
                     {"kind": "ext", "value": "*.gd"}]}})
     assert "top.gd" in got
+
+
+def test_f4_default_map_unreadable_named_json(tmp_path, monkeypatch, capsys):
+    """F4：默认 map 不可读（坏 JSON）→ CLI 全链具名 JSON、零 traceback。"""
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    (tmp_path / "calc.gd").write_text(
+        "extends RefCounted\nfunc f(a):\n\treturn a\n")
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "unit" / "test_a.gd").write_text(
+        "extends GutTest\nfunc test_a():\n\tpass\n")
+    (tmp_path / ".gutconfig.json").write_text(json.dumps(
+        {"dirs": ["res://tests/unit"], "include_subdirs": True,
+         "prefix": "test_"}))
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+    install_recipe(tmp_path)
+    ensure_addon_metadata(tmp_path)
+    map_file = tmp_path / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    map_file.write_text("{ not a map", encoding="utf-8")
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    monkeypatch.delenv("GQT_MUTATION_BASELINE_SOURCE", raising=False)
+    from godot_qa_toolkit import cli as cli_mod
+    from godot_qa_toolkit.mutation import map_contract as mc
+
+    def fake_rm(root, targets, recipe, *, attribution_out, **_kw):
+        doc = {"schema_version": "test-attribution/7",
+               "report_recipe_hash": "r", "recipe_hash_pristine":
+               mc.__dict__.get("_x", None) or None,
+               "project_root": str(root), "identity": "i",
+               "causal": {"enabled": False},
+               "file_sha256": {Path(t).name: "x" for t in targets},
+               "target_files": [Path(t).name for t in targets],
+               "tests_face": {}, "instrumentable_lines": {},
+               "arms": {"gut_full": {"test_to_lines": {}}},
+               "arms_state": {"gut_full": {"state": "valid",
+                                           "bundles": 1, "pairs": 2,
+                                           "probes_fired": 2,
+                                           "vacuous": False}},
+               "test_verdicts": {}}
+        Path(attribution_out).write_text(json.dumps(doc))
+        return None
+    import godot_qa_toolkit.measurement.orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "run_measurement", fake_rm)
+    from godot_qa_toolkit import projectroot as pr_mod
+    monkeypatch.setattr(pr_mod, "ensure_import_cache",
+                        lambda project_root, **_kw: None)
+    args = cli_mod.build_parser().parse_args([
+        "mutation", str(tmp_path / "calc.gd"),
+        "--project-root", str(tmp_path),
+        "--budget", "2", "--auto-prepare"])
+    rc = cli_mod.cmd_mutation(args)
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, "零 traceback"
+    assert rc in (0, 1, 2)
+    if captured.out.strip():
+        payload = json.loads(captured.out)
+        assert payload.get("tool") == "mutation"
+        # 具名形态：要么 map 不可用重建成功，要么具名 JSON 失败——不得裸异常
+        summary = payload.get("summary") or {}
+        assert payload.get("ok") in (True, False)
+        if payload.get("ok") is False:
+            assert summary.get("error") or payload.get("failures")

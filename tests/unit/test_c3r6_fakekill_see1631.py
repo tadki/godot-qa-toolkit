@@ -52,7 +52,9 @@ def _counts(out: str) -> dict:
 def r6_project(tmp_path_factory):
     """Leader 式小夹具：目录型白名单（src/ + data/），单测试目录 =
     绿测脚本 + 恒红脚本 + 填充脚本。返回 (proj, env, baseline_counts)。"""
-    godot = shutil.which("godot")
+    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot（C3-R7 退回2：
+    # 与 test_see1550_worker_battery 同款发现顺序）
+    godot = os.environ.get("GQT_GODOT_BIN") or shutil.which("godot")
     gut = _find_gut()
     if godot is None or gut is None:
         pytest.skip("real godot / GUT addon unavailable")

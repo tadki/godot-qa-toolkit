@@ -157,7 +157,9 @@ def test_d12_prepare_real_targets_exist(tmp_path, monkeypatch):
     # ENV_MAP（显式）在 resolve 内以 override 参数表达；auto 门只看 mode
     monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
     import shutil as _sh
-    real_godot = _sh.which("godot")
+    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot
+    # （C3-R7 退回2：GQT_GODOT_BIN 优先，与 worker battery 同款）
+    real_godot = os.environ.get("GQT_GODOT_BIN") or _sh.which("godot")
     if real_godot is None:
         pytest.skip("real godot binary unavailable")
     monkeypatch.setenv("GQT_GODOT_BIN", real_godot)
@@ -202,7 +204,9 @@ def test_d13_red_fixture_map_source_smoke(tmp_path, monkeypatch, capsys):
             break
     if gut_src is None:
         pytest.skip("real GUT addon unavailable")
-    real_godot = _sh.which("godot")
+    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot
+    # （C3-R7 退回2：GQT_GODOT_BIN 优先，与 worker battery 同款）
+    real_godot = os.environ.get("GQT_GODOT_BIN") or _sh.which("godot")
     if real_godot is None:
         pytest.skip("real godot binary unavailable")
 
@@ -372,7 +376,9 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
             break
     if gut_src is None:
         pytest.skip("real GUT addon unavailable")
-    real_godot = _sh.which("godot")
+    # 标准隔离环境只设 GQT_GODOT_BIN、PATH 上没有 godot
+    # （C3-R7 退回2：GQT_GODOT_BIN 优先，与 worker battery 同款）
+    real_godot = os.environ.get("GQT_GODOT_BIN") or _sh.which("godot")
     if real_godot is None:
         pytest.skip("real godot binary unavailable")
 

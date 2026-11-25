@@ -591,3 +591,34 @@ def test_spec029_unattributable_falls_back_full(tmp_path, monkeypatch):
                                   str(tmp_path), "/x/map.json",
                                   ["some.bin"], 600)
     assert calls["full"] == 1
+
+
+def test_f2_gut_dir_order_independent(tmp_path):
+    """C3-R2 项4：gutconfig 同时列父目录与子目录、include_subdirs=false
+    ——归类与列举顺序无关（父目录在前不得把子目录 test_*.gd 短路）。"""
+    from godot_qa_toolkit.measurement.classify import discover_scope
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "project.godot").write_text("config_version=5\n")
+    (root / "prod.gd").write_text("extends Node\n")
+    (root / "tests" / "sub").mkdir(parents=True)
+    (root / "tests" / "sub" / "test_x.gd").write_text("extends GutTest\n")
+    (root / ".gutconfig.json").write_text(json.dumps({
+        "dirs": ["res://tests", "res://tests/sub"],
+        "include_subdirs": False, "prefix": "test_"}))
+    # 顺序一：父目录在前
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": [{"kind": "dir", "value": "tests/sub"},
+                                   {"kind": "file", "value": "prod.gd"}]}}))
+    u1 = discover_scope(root)
+    # include_subdirs=false + 父目录 res://tests → sub/test_x 非直属；
+    # 子目录 res://tests/sub 直属命中 → test（顺序无关）
+    assert "res://tests/sub/test_x.gd" in u1["test"], u1["test"]
+    assert "res://prod.gd" in u1["production"]
+    # 顺序二：子目录在前
+    (root / ".gutconfig.json").write_text(json.dumps({
+        "dirs": ["res://tests/sub", "res://tests"],
+        "include_subdirs": False, "prefix": "test_"}))
+    u2 = discover_scope(root)
+    assert "res://tests/sub/test_x.gd" in u2["test"]

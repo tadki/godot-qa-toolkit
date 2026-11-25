@@ -614,3 +614,147 @@ def test_f4_default_map_unreadable_named_json(tmp_path, monkeypatch, capsys):
         assert payload.get("ok") in (True, False)
         if payload.get("ok") is False:
             assert summary.get("error") or payload.get("failures")
+
+
+def test_r2_mapview_violation_named_json(tmp_path, monkeypatch, capsys):
+    """C3-R2 项1：MapView 构造期断言（§SPEC-015 invalid 臂边保留）触发时，
+    CLI 全链输出具名 JSON、零 traceback。"""
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    (tmp_path / "calc.gd").write_text("extends Node\nfunc f(a):\n\treturn a\n")
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "unit" / "test_a.gd").write_text(
+        "extends GutTest\nfunc test_a():\n\tpass\n")
+    (tmp_path / ".gutconfig.json").write_text(json.dumps(
+        {"dirs": ["res://tests/unit"], "include_subdirs": True,
+         "prefix": "test_"}))
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+    install_recipe(tmp_path)
+    ensure_addon_metadata(tmp_path)
+    map_file = tmp_path / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    # otherwise-fresh map，但保留 invalid gherkin 臂的边（§SPEC-015 拦截面）
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": None,
+           "project_root": str(tmp_path),
+           "file_sha256": {"calc.gd": "x"},
+           "target_files": ["calc.gd"],
+           "tests_face": {"tests/unit/test_a.gd": "x"},
+           "arms": {"gut_full": {"test_to_lines": {}},
+                    "gherkin": {"test_to_lines": {"x": {}}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False},
+                          "gherkin": {"state": "invalid"}},
+           "instrumentable_lines": {"calc.gd": [1]},
+           "test_verdicts": {}}
+    map_file.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    from godot_qa_toolkit import cli as cli_mod
+    from godot_qa_toolkit import projectroot as pr_mod
+    monkeypatch.setattr(pr_mod, "ensure_import_cache",
+                        lambda project_root, **_kw: None)
+    args = cli_mod.build_parser().parse_args([
+        "mutation", str(tmp_path / "calc.gd"),
+        "--project-root", str(tmp_path),
+        "--budget", "2", "--auto-prepare"])
+    rc = cli_mod.cmd_mutation(args)
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, "零 traceback"
+    assert captured.out.strip(), "stdout 必须有具名 JSON"
+    payload = json.loads(captured.out)
+    assert payload.get("ok") is False
+    summary = payload.get("summary") or {}
+    assert "§SPEC-015" in str(summary.get("error")) or payload.get(
+        "failures"), "MapView 断言触发必须具名"
+    assert rc in (1, 2)
+
+
+def test_r2_refresh_still_stale_named_json(tmp_path, monkeypatch, capsys):
+    """C3-R2 项1（续新后仍不新鲜形态）：refresh 装填后校验失败 → CLI
+    具名 JSON、零 traceback。"""
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    (tmp_path / "calc.gd").write_text("extends Node\nfunc f(a):\n\treturn a\n")
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "unit" / "test_a.gd").write_text(
+        "extends GutTest\nfunc test_a():\n\tpass\n")
+    (tmp_path / ".gutconfig.json").write_text(json.dumps(
+        {"dirs": ["res://tests/unit"], "include_subdirs": True,
+         "prefix": "test_"}))
+    map_file = tmp_path / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": "stale", "project_root": str(tmp_path),
+           "file_sha256": {"calc.gd": "x"}, "target_files": ["calc.gd"],
+           "tests_face": {}, "instrumentable_lines": {},
+           "arms": {"gut_full": {"test_to_lines": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False}},
+           "test_verdicts": {}}
+    map_file.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    from godot_qa_toolkit import cli as cli_mod
+    from godot_qa_toolkit.mutation import map_contract as mc
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    def boom(root, files, timeout_s=600):
+        from godot_qa_toolkit.mutation.map_contract import MapContractError
+        raise MapContractError(
+            "refresh still stale after renewal (old map bytes unchanged)")
+    # refresh 内延迟 import verdict_source 符号——patch 源模块属性
+    monkeypatch.setattr(vs, "_prepare_build_missing", boom)
+    from godot_qa_toolkit import projectroot as pr_mod
+    monkeypatch.setattr(pr_mod, "ensure_import_cache",
+                        lambda project_root, **_kw: None)
+    args = cli_mod.build_parser().parse_args([
+        "mutation", str(tmp_path / "calc.gd"),
+        "--project-root", str(tmp_path),
+        "--budget", "2", "--auto-prepare"])
+    rc = cli_mod.cmd_mutation(args)
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, "零 traceback"
+    assert captured.out.strip(), "stdout 必须有具名 JSON"
+    payload = json.loads(captured.out)
+    assert payload.get("ok") is False
+    assert rc in (1, 2)
+
+
+def test_r2_backup_root_no_residue_on_refresh_failure(tmp_path, monkeypatch):
+    """C3-R2 项2：refresh 失败（project.godot missing）→ 备份根无残留
+    （创建处自清）；他进程刚建的目录不被误删。"""
+    from godot_qa_toolkit.measurement.backup import _backup_base
+
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True)
+    (proj / "calc.gd").write_text("extends Node\nfunc f(a):\n\treturn a\n")
+    (proj / "tests" / "unit").mkdir(parents=True)
+    (proj / "tests" / "unit" / "test_a.gd").write_text(
+        "extends GutTest\nfunc test_a():\n\tpass\n")
+    (proj / ".gutconfig.json").write_text(json.dumps(
+        {"dirs": ["res://tests/unit"], "include_subdirs": True,
+         "prefix": "test_"}))
+    # 无 project.godot → refresh 阶梯内 run_measurement 具名失败
+    from godot_qa_toolkit.mutation.map_contract import refresh
+
+    base = _backup_base()
+    base.mkdir(parents=True, exist_ok=True)
+    other_dir = base / "other-process-dir"
+    other_dir.mkdir(exist_ok=True)
+    (other_dir / "started.json").write_text("{}")
+    try:
+        refresh(str(proj), [str(proj / "calc.gd")], timeout_s=60)
+        raised = False
+    except Exception:
+        raised = True
+    assert raised, "缺 project.godot 的 refresh 必须具名失败"
+    leftovers = [p.name for p in base.iterdir() if p.is_dir()
+                 and p.name != "other-process-dir"]
+    # 本进程的空备份目录自清；他进程目录不被误删
+    empty_left = [n for n in leftovers
+                  if not any((base / n).iterdir())]
+    assert not empty_left, f"refresh 失败不得残留空备份目录: {empty_left}"
+    assert other_dir.is_dir(), "他进程目录不得被误删"
+    # 测试自身清理他进程模拟目录（避免污染共享 TMPDIR 的后续断言）
+    import shutil as _sh
+    _sh.rmtree(other_dir, ignore_errors=True)

@@ -782,6 +782,7 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     full_face = getattr(args, "select_mode", "line") == "full"
     from .mutation.truth_select import MutationSelectionError, \
         SelectionError
+    from .mutation.map_contract import MapContractError
     from .mutation.verdict_source import (
         baseline_source, prepare_map_for_baseline,
     )
@@ -815,6 +816,7 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
 
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import detect_binary_kind
+    from .mutation.map_contract import MapContractError
 
     # SEE-1623 M4：数值参数校验前置（budget 0/负数此前静默假绿、负
     # timeout 瞬间超时、--lines 非法形态泄露 Python 异常）——dry-run 与
@@ -875,6 +877,12 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     except BaselineSourceError as e:
         # SEE-1631 §SPEC-020：map 源判定基线不可用/与实跑失配——具名
         # fail-loud（整批作废），零 traceback 泄漏。
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    except MapContractError as e:
+        # §SPEC-032/C3-R2 项1：MapView 构造期断言 / refresh 失败不装
+        # 半成品——CLI 具名 JSON（零 traceback）。
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})

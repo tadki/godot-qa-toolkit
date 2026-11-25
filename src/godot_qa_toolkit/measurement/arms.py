@@ -605,9 +605,15 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
     run_uuid = make_run_uuid()
     backup_dir = _backup_base() / run_uuid
     backup_dir.mkdir(mode=0o700)
-    (started, sink_by_rel, manifest_by_rel, instrumented_files,
-     inst_by_rel, vacuous_rels) = _stage_arm_files(
-        name, prepared, run_uuid, test_attribution)
+    try:
+        (started, sink_by_rel, manifest_by_rel, instrumented_files,
+         inst_by_rel, vacuous_rels) = _stage_arm_files(
+            name, prepared, run_uuid, test_attribution)
+    except Exception:
+        # C3-R2 项2：创建后若失败，由本进程清掉自己建的这个目录
+        # （备份目录是插桩还原的信任边界——不做全量扫描式清理）
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
     started["project_root"] = str(root)
     _arm_stage_created(root, started, name, attribution_causal,
                        shadow_instrument, backup_dir)

@@ -389,16 +389,18 @@ def _legs_drift_disqualify(c: dict, seq, leg) -> None:
 
 
 def _disclose_worker_skip(leg) -> None:
-    """§SPEC-032/D13：worker 车道 skip_red 披露（与 cold 车道 runhelp
-    同口径——机器可读 stderr 标记；零行为拆分）。"""
-    if getattr(leg, "skip_red_info", None):
-        import sys as _sys
-        info = leg.skip_red_info
-        # F6：与结构化证据同口径——marked/requested 任一缺席按 0 具名
-        print(f"mutation: baseline skip-red marked="
-              f"{info.get('marked', 0)}/{info.get('requested', 0)} "
-              f"names={','.join(info.get('names') or [])}",
-              file=_sys.stderr)
+    """§SPEC-032/D13 + C3-R2 项3：worker 车道 skip_red 披露与分类器
+    **同一口径**——复用 reporting._worker_leg_skip_removed 的
+    max(marked, removed, allow.removed)，stderr 数字与判定理由一致。"""
+    from .reporting import _worker_leg_skip_removed
+
+    removed = _worker_leg_skip_removed(leg)
+    info = getattr(leg, "skip_red_info", None) or {}
+    requested = info.get("requested", 0)
+    import sys as _sys
+    print(f"mutation: baseline skip-red marked={removed}/{requested} "
+          f"names={','.join(info.get('names') or [])}",
+          file=_sys.stderr)
 
 def _legs_one(c: dict, seq, m, target_res: str, closure,
               prev_leg_gut_ran: bool) -> bool:

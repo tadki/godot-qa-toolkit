@@ -54,27 +54,11 @@ def _mapping_ensure(project_root: Path, path: Path, timeout_s: int | None) -> No
     try:
         refresh(str(root), [str(path)], timeout_s=timeout_s or 600)
     except Exception as e:  # noqa: BLE001 — 单一委托失败具名转域
-        _cleanup_orphan_backup_dirs()
+        # C3-R2 项2：备份目录残留由创建处自清（arms/diagnose mkdir 后
+        # 失败自删）——此处不再做全量扫描式清理（会误删他进程刚建的目录）
         raise CoverageMappingError(
             "attribution_map_build_failed",
             f"{type(e).__name__}: {e}") from e
-
-
-def _cleanup_orphan_backup_dirs() -> None:
-    """F3：refresh 失败路径清掉本次创建但未走 finally 清理的空备份目录
-    （备份根下无残留——canonical_report 的零残留断言不被污染）。"""
-    import shutil as _shutil
-
-    try:
-        from ..measurement.backup import _backup_base
-        base = _backup_base()
-        if not base.is_dir():
-            return
-        for child in base.iterdir():
-            if child.is_dir() and not any(child.iterdir()):
-                _shutil.rmtree(child, ignore_errors=True)
-    except Exception:  # noqa: BLE001 — 清理失败不掩盖原始失败
-        pass
 
 
 def _mapping_select(root: Path, path: Path, timeout_s: int | None) -> dict:

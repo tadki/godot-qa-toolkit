@@ -141,21 +141,29 @@ def _diagnose_stage_flags(root: Path, sources: dict[str, str],
     sink_by_rel: dict[str, str] = {}
     manifest_by_rel: dict[str, list[int]] = {}
     instrumented: dict[str, str] = {}
-    for abs_path, src_text in sources.items():
-        rel = _rel_within_root(abs_path, root)
-        sink = batch_sink_name(run_uuid, rel)
-        inst, manifest = _instrument(src_text, sink, flags=True)
-        if not manifest:
-            continue
-        started["files"][abs_path] = src_text
-        sink_by_rel[rel] = sink
-        manifest_by_rel[rel] = manifest
-        instrumented[abs_path] = inst
-    pg_path = root / "project.godot"
-    started["project_godot"] = pg_path.read_text(encoding="utf-8")
-    started["created"] = [str(root / _FLUSHER_RELPATH)]
-    (backup_dir / "started.json").write_text(
-        json.dumps(started, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        for abs_path, src_text in sources.items():
+            rel = _rel_within_root(abs_path, root)
+            sink = batch_sink_name(run_uuid, rel)
+            inst, manifest = _instrument(src_text, sink, flags=True)
+            if not manifest:
+                continue
+            started["files"][abs_path] = src_text
+            sink_by_rel[rel] = sink
+            manifest_by_rel[rel] = manifest
+            instrumented[abs_path] = inst
+        pg_path = root / "project.godot"
+        started["project_godot"] = pg_path.read_text(encoding="utf-8")
+        started["created"] = [str(root / _FLUSHER_RELPATH)]
+        (backup_dir / "started.json").write_text(
+            json.dumps(started, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        # C3-R2 项2：本进程清掉自己建的目录（信任边界——无全量扫描）
+        import shutil as _sh
+
+        _sh.rmtree(backup_dir, ignore_errors=True)
+        raise
     return backup_dir, started, sink_by_rel, manifest_by_rel, instrumented
 
 

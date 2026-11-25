@@ -206,6 +206,11 @@ def _resolve_production(root: Path, rules: "dict | None",
     excluded, excluded_stats = _apply_production_exclude(
         production, prod_exclude, prod_include)
     production -= {e["path"][len("res://"):] for e in excluded}
+    # C3-R2 项4：测试面（gutconfig dirs + features）优先于生产 include
+    # ——include 目录与 GUT 目录重叠时，测试文件不得落生产（与 gutconfig
+    # 顺序无关；KOL 的 include 是 production 目录、与 tests 不相交，
+    # 语义不变）
+    production -= (test | non_test)
     return production, excluded, excluded_stats
 
 
@@ -334,11 +339,15 @@ def _classify_in_gut_dir(rel: str, face: dict,
                          excluded_dirs: "list[dict]") -> "str | None":
     """GUT 目录内判定（prefix/include_subdirs；被排除目录归非测试）。
     不在任何 gut dir → None。"""
+    matched_gut = False
     for d in face["dirs"]:
         if rel != d and not rel.startswith(d + "/"):
             continue
+        matched_gut = True
         if any(_norm(str(e.get("value") or "")) == d
                for e in excluded_dirs):
+            # 被 tests.exclude 显式排除的目录 → 非测试（排除语义与顺序
+            # 无关：排除即最终判定）
             return "non_test"
         matches = rel.rsplit("/", 1)[-1].startswith(face["prefix"])
         # C3-R1 F2：直属子级判定——d 之后的剩余路径不含 "/" 才是直接
@@ -348,7 +357,14 @@ def _classify_in_gut_dir(rel: str, face: dict,
         direct_child = remainder != "" and "/" not in remainder
         if face["include_subdirs"] or direct_child:
             return "test" if matches else "non_test"
-        return None
+        # C3-R2 项4：是本目录前缀但非直属（include_subdirs=false）→
+        # **继续看下一个 gut 目录**（GUT 语义与 gutconfig 列举顺序无关；
+        # 父目录在前不得把子目录文件短路成非生产）
+        continue
+    if matched_gut:
+        # 在某 gut 目录树内但不在任何"直属/递归命中"的目录 → 非测试侧
+        # 文件（mock/辅助）——**不落生产**（测试侧目录内的文件保持测试侧）
+        return "non_test"
     return None
 
 

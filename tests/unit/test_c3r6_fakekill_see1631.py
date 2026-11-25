@@ -78,15 +78,19 @@ _MODULE_ENV_KEYS = {
 }
 
 
-def _child_env(base: "dict[str, str]", home: Path) -> dict:
+def _child_env(base: "dict[str, str]", home: Path,
+               godot_bin: "str | None" = None) -> dict:
     """C3-R8 退回3：子进程 env 只带本模块需要的 GQT_* 键。进程内产品
     调用会把 GQT_* 开关写进 os.environ 不恢复（同批先跑的测试泄漏，如
     cli._run_mutation_serial 的 FAIL_ON_RED），继承会让本模块结果依赖
-    批内顺序。"""
+    批内顺序。godot 二进制由调用方以已解析路径显式注入（标准隔离环境
+    PATH 无 godot，需 GQT_GODOT_BIN 指向真引擎）。"""
     env = {k: v for k, v in base.items() if not k.startswith("GQT_")}
     env.update({"HOME": str(home), "XDG_DATA_HOME": str(home / ".xdg"),
                 "TMPDIR": str(home), "PYTHONPATH": "src"})
     env.update(_MODULE_ENV_KEYS)
+    if godot_bin:
+        env["GQT_GODOT_BIN"] = str(godot_bin)
     return env
 
 
@@ -104,6 +108,10 @@ def test_r8_child_env_isolated_from_leaked_switches():
     assert env["GQT_ATTRIBUTION_MAP"] == ""
     assert env["GQT_MUTATION_BASELINE_SOURCE"] == "map"
     assert env["PATH"] == "/usr/bin:/bin"
+    assert "GQT_GODOT_BIN" not in env  # 不在 base 里泄漏继承
+    # 已解析的真引擎由调用方显式注入（标准隔离环境 PATH 无 godot）
+    env2 = _child_env(base, Path("/tmp/x"), "/real/godot")
+    assert env2["GQT_GODOT_BIN"] == "/real/godot"
 
 
 @pytest.fixture(scope="module")
@@ -120,7 +128,7 @@ def r6_project(tmp_path_factory):
     if _here not in sys.path:
         sys.path.insert(0, _here)
     home = tmp_path_factory.mktemp("r6home")
-    env = _child_env(os.environ, home)
+    env = _child_env(os.environ, home, godot)
     proj = tmp_path_factory.mktemp("r6proj") / "proj"
     (proj / "src").mkdir(parents=True)
     (proj / "data").mkdir()

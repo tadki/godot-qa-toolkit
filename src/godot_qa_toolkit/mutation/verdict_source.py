@@ -410,6 +410,14 @@ def _content_drift(root: Path, doc: dict, changed: "set[str]",
         if have != fingerprint[rel]:
             changed.add(rel)
             drift.add(f"changed:{rel}")
+    # C3-R9 退回1：非脚本生产内容删除同属增量变更面（因素表第 3 行）——
+    # 只记 drift 会让 refresh 无变更可续或装填后复检永不过期（重复执行
+    # 也不自愈）。增量侧按 content_removed 剔除指纹，不重跑。
+    for rel in sorted(fingerprint):
+        if rel not in changed and rel not in drift and \
+                not (root / rel).is_file():
+            changed.add(rel)
+            drift.add(f"removed:{rel}")
 
 
 def _new_test_drift(root: Path, doc: dict, changed: "set[str]",

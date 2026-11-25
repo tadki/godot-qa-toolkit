@@ -150,12 +150,16 @@ def classify_changes(root: Path, changed: list[str],
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],
                                  "prod_new": [], "prod_removed": [],
+                                 "content_removed": [],
                                  "feature_changed": [], "feature_new": [],
                                  "feature_removed": [],
                                  "unknown": []}
+    content_fingerprints = set(baseline.get("production_content_sha256")
+                               or {})
     for raw in changed:
         verdict = _classify_one(root, raw, edge_files, known_fids,
-                                known_test_names, feature_keys)
+                                known_test_names, feature_keys,
+                                content_fingerprints)
         out[verdict[0]].append(verdict[1])
     return out
 
@@ -192,7 +196,8 @@ def _path_lifecycle(p: Path, rel: str, raw: str, known: bool,
 def _classify_one(root: Path, raw: str, edge_files: set[str],
                   known_fids: set[str],
                   known_test_names: set[str],
-                  feature_keys: "set[str] | None" = None
+                  feature_keys: "set[str] | None" = None,
+                  content_fingerprints: "set[str] | None" = None
                   ) -> tuple[str, str]:
     p = Path(raw)
     if not p.is_absolute():
@@ -216,6 +221,10 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
         known = name in known_test_names
         return _path_lifecycle(p, rel, raw, known,
                                "test_changed", "test_new", "test_removed")
+    # C3-R9 退回1：非脚本生产内容删除 = content_removed（因素表第 3 行：
+    # 剔除指纹与死边，不重跑）——此前落 unknown 触发全量重建兜底
+    if not p.is_file() and rel in (content_fingerprints or {}):
+        return "content_removed", rel
     prod = _classify_prod_entry(p, rel, edge_files, known_fids)
     if prod is not None:
         return prod
@@ -1277,6 +1286,12 @@ def _merged_production_content(root: Path, baseline: dict,
         face[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
     for rel in classes.get("prod_removed", []):
         face.pop(rel, None)
+    # C3-R9 退回1：已删除的非脚本内容文件不再在盘上（上面的重算循环扫
+    # 不到它们）——陈旧指纹条目必须剔除，否则装填后复检永不过期
+    on_disk = set(content)
+    for rel in list(face):
+        if rel not in on_disk:
+            face.pop(rel, None)
     return face
 
 

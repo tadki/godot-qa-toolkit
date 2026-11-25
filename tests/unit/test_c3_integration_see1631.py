@@ -1137,6 +1137,127 @@ def test_r8_deleted_test_enters_change_face(tmp_path):
     assert "removed:src/prod_gone.gd" in drift
 
 
+def test_r9_content_removal_classified_and_purged(tmp_path):
+    """C3-R9 退回1：非脚本生产内容删除 → content_removed（不落 unknown）；
+    增量合并把它的陈旧指纹条目剔除（否则装填后复检永不过期）。"""
+    from godot_qa_toolkit.measurement.increment import (
+        _merged_production_content,
+    )
+
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    baseline = {"arms": {"gut_full": {}},
+                "production_content_sha256": {"data/table.csv": "sha"},
+                "tests_face": {}}
+    classes = _merged = None
+    from godot_qa_toolkit.measurement.increment import classify_changes
+
+    classes = classify_changes(str(tmp_path), ["data/table.csv"], baseline)
+    assert classes["content_removed"] == ["data/table.csv"]
+    assert classes["unknown"] == []
+    merged = _merged_production_content(tmp_path, baseline, classes)
+    assert "data/table.csv" not in merged
+
+
+def test_r9_parity_expected_excludes_unobservable():
+    """C3-R9 退回2：parity 期望失败集 = 基线红集 ∩ 本腿运行脚本 − 物理
+    跳过名单。行选面闭包不含红测（或红测被 skip-red 移除）时不得把
+    "没跑"当"跑绿"比对（此前必然失配 → map 源整批作废）。"""
+    from godot_qa_toolkit.mutation.worker_channel import (
+        _parity_expected_failures,
+    )
+
+    reds = [("res://tests/b/test_red_always.gd", "test_red_always")]
+    baseline = ["test_red_always"]
+    # 行选面闭包只含绿测脚本 → 红测不可观察 → 期望集为空
+    got = _parity_expected_failures(
+        baseline, reds, ["res://.gqt-attr-select/x/test_green.gd"], {})
+    assert got == set()
+    # 红测脚本在腿清单里 → 期望含红测
+    got = _parity_expected_failures(
+        baseline, reds,
+        ["res://.gqt-attr-select/x/test_green.gd",
+         "res://.gqt-attr-select/x/test_red_always.gd"], {})
+    assert got == {"test_red_always"}
+    # 红测被物理跳过 → 从期望集排除
+    got = _parity_expected_failures(
+        baseline, reds,
+        ["res://.gqt-attr-select/x/test_red_always.gd"],
+        {"marked": 1, "requested": 1,
+         "names": ["test_red_always.gd::test_red_always"]})
+    assert got == set()
+    # tests_scripts 缺省 = 全脸腿 → 全部基线红集可观察，不按脚本裁剪
+    got = _parity_expected_failures(baseline, reds, None, {})
+    assert got == {"test_red_always"}
+    got = _parity_expected_failures(baseline, reds, [], {})
+    assert got == {"test_red_always"}
+    # 无 red_pairs（冷源形态）→ 回退全量基线集 − 跳过
+    got = _parity_expected_failures(
+        ["test_red_always"], [], [], {})
+    assert got == {"test_red_always"}
+
+
+def test_r9_planned_action_matches_refresh(tmp_path):
+    """C3-R9 退回3：_planned_action 镜像 refresh 决策——周期校准到点、
+    不可归因变更 → full；普通测试变更 → increment。"""
+    import json as _json
+
+    from godot_qa_toolkit.mutation.map_contract import _planned_action
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "project.godot").write_text("config_version=5\n")
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+    install_recipe(proj)
+    ensure_addon_metadata(proj)
+    (proj / "data").mkdir()
+    (proj / "data" / "table.csv").write_text("k,v\n")
+    (proj / "tests" / "unit").mkdir(parents=True)
+    (proj / "tests" / "unit" / "test_new.gd").write_text(
+        "extends GutTest\n")
+
+    from godot_qa_toolkit.measurement.increment import _inject_toolchain
+    from godot_qa_toolkit.measurement.recipe import build_recipe
+    from godot_qa_toolkit.mutation.truth_select import _fresh_recipe_hash
+
+    recipe, err = build_recipe(proj)
+    assert err is None, err
+    injected = _inject_toolchain(proj, dict(recipe))
+
+    import hashlib as _hl
+
+    csv_sha = _hl.sha256((proj / "data" / "table.csv")
+                         .read_bytes()).hexdigest()
+
+    def _doc(since_full: int) -> dict:
+        return {"schema_version": "test-attribution/7",
+                "arms": {"gut_full": {}},
+                "tests_face": {"tests/unit/test_old.gd": "sha"},
+                "production_content_sha256": {"data/table.csv": csv_sha},
+                "report_recipe_hash": injected["recipe_hash"],
+                "recipe_hash_pristine": _fresh_recipe_hash(str(proj)),
+                "increment": {"increments_since_full": since_full}}
+
+    # 周期校准到点（since_full>=5）→ full
+    assert _planned_action(str(proj), _doc(5),
+                           ["tests/unit/test_new.gd"]) == "full"
+    # 同一变更、计数未到期 → increment
+    assert _planned_action(str(proj), _doc(0),
+                           ["tests/unit/test_new.gd"]) == "increment"
+    # 新增非脚本内容文件 → 不可归因 → full（refresh 实际 = 具名全量重建）
+    (proj / "data" / "new.csv").write_text("a,b\n")
+    assert _planned_action(str(proj), _doc(0),
+                           ["data/new.csv"]) == "full"
+    (proj / "data" / "new.csv").unlink()
+    # 删除非脚本内容文件 → content_removed → increment（R9-1 修复）
+    (proj / "data" / "table.csv").unlink()
+    assert _planned_action(str(proj), _doc(0),
+                           ["data/table.csv"]) == "increment"
+
+
 def test_r5_increment_failure_keeps_old_bytes(tmp_path, monkeypatch):
     """C3-R5 项1 补充：增量产物校验不过 → 旧图字节不变（tmp 丢弃）。"""
     import hashlib as _hl

@@ -352,3 +352,42 @@ def test_r8_case_d_mixed_script_inc_vs_full_consistent(r6_project):
     full_counts = _run_counts()
     assert inc_counts == full_counts, (inc_counts, full_counts)
     assert inc_counts["killed"] and inc_counts["survived"], inc_counts
+
+
+def test_r9_delete_csv_content_renews(r6_project):
+    """C3-R9 退回1：删除非脚本生产内容（csv）→ 一次续新成功、指纹剔除
+    （此前删除只进 drift 不进变更面，续新永远失败）。"""
+    proj, env, _base, _godot = r6_project
+    (proj / "data" / "table.csv").unlink()
+    _renew(proj, env)  # 断言 exit 0——一次续新成功
+    doc = json.loads(
+        (proj / ".qa-cache" / "attribution-map.json").read_text(
+            encoding="utf-8"))
+    assert "data/table.csv" not in (doc.get("production_content_sha256")
+                                    or {})
+
+
+def test_r9_case_e_default_line_no_parity_invalidations(r6_project):
+    """C3-R9 退回2：默认行选面（闭包含既有红测）→ 照常出结果，无
+    baseline_map_mismatch 整批作废；判定与 --select full 同一棵树一致
+    （此前 worker parity 门拿物理跳过后的失败集比全量红集必然失配）。"""
+    proj, env, _base, _godot = r6_project
+
+    def _run(extra: list) -> tuple:
+        rc, out, err = _cli(
+            ["mutation", "src/calc_sign.gd", "--mutate-all", *extra,
+             "--budget", "60", "--timeout", "120"], env, proj)
+        assert rc in (0, 1), (rc, err[-300:])
+        assert "baseline_map_mismatch" not in err, err[-300:]
+        return _counts(out), err
+
+    line_counts, line_err = _run([])
+    full_counts, full_err = _run(["--select", "full", "--auto-prepare"])
+    # 行选面对零可执行引用的 mutant 做终态短路（⊆ 全量面）；可杀判定
+    # 与全量一致；无整批作废
+    assert line_counts["mutants"] <= full_counts["mutants"], \
+        (line_counts, full_counts)
+    assert line_counts["killed"] == full_counts["killed"], \
+        (line_counts, full_counts)
+    assert line_counts["killed"] > 0, line_counts
+    assert "baseline_map_mismatch" not in line_err

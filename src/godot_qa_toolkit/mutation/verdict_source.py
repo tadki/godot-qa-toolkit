@@ -100,17 +100,57 @@ def _assert_target_files(project_root: str, doc: dict,
                          files: list[str]) -> None:
     import hashlib
 
+    root = Path(project_root).resolve()
     shas = doc.get("file_sha256") or {}
+    # §SPEC-029：内容面 = file_sha256 **全集** 对账（不再只查被查询文件
+    # ——D11 盲区根因）+ 树内新增生产 .gd 检出（分类清单驱动）。
+    for rel, want in shas.items():
+        p = root / rel
+        if not p.is_file():
+            raise BaselineSourceError(
+                f"baseline_source=map: measured target removed — {rel}")
+        have = hashlib.sha256(p.read_bytes()).hexdigest()
+        if have != want:
+            raise BaselineSourceError(
+                f"baseline_source=map: target file drift — {rel}")
     for raw in files:
         p = Path(raw)
-        rel = str(p.resolve().relative_to(Path(project_root).resolve())) \
-            if p.is_absolute() else str(p)
+        rel = str(p.resolve().relative_to(root)) if p.is_absolute() \
+            else str(p)
         want = shas.get(rel)
         if want and p.is_file():
             have = hashlib.sha256(p.read_bytes()).hexdigest()
             if have != want:
                 raise BaselineSourceError(
                     f"baseline_source=map: target file drift — {rel}")
+    _assert_no_new_production(root, doc)
+
+
+def _assert_no_new_production(root: Path, doc: dict) -> None:
+    """§SPEC-029 表 #2：树内新增宇宙文件（范围规则发现、不在 map
+    file_sha256 全集）→ 判不新鲜。范围规则不闭合（路径拼错/白名单空）
+    → 具名 fail-loud。文本内容文件（.tscn/.tres/csv/translation）与
+    生产 .gd 同套逻辑（§SPEC-031 v8）。"""
+    from ..measurement.classify import ScopeError, discover_universe
+
+    try:
+        universe = discover_universe(root)["files"]
+    except ScopeError as e:
+        raise BaselineSourceError(
+            f"baseline_source=map: {e}") from e
+    shas = doc.get("file_sha256") or {}
+    known = {("res://" + rel) for rel in shas}
+    # 测试脚本由 tests_face 对账负责（表 #8）——不在宇宙新增判定内重复
+    # 计数（fixture 无 gutconfig 时 tests/ 测试文件不误报 stale）。
+    test_face = {("res://" + rel)
+                 for rel in (doc.get("tests_face") or {})}
+    new = [u for u in universe
+           if u not in known and u not in test_face]
+    if new:
+        raise BaselineSourceError(
+            f"baseline_source=map: {len(new)} new universe file(s) not in "
+            f"map (map freshness covers the scope universe, "
+            f"§SPEC-029/031) — {sorted(new)[:6]}")
 
 
 def _assert_fresh(project_root: str, doc: dict, files: list[str]) -> None:
@@ -134,12 +174,20 @@ def _red_entries(doc: dict) -> "dict[str, tuple[str, str]]":
             "baseline_source=map: /7 attribution map is missing "
             "`test_verdicts` (verdict table not conserved; §SPEC-025) — "
             "rebuild the map")
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str, str]] = {}
     for ident, entry in (doc.get("test_verdicts") or {}).items():
         if str(ident).startswith("gherkin://"):
             continue
         if entry.get("verdict") == "red":
-            out[ident] = (entry.get("classification") or "new", ident)
+            # §SPEC-030/D10：script 分量优先取表内完整路径（同名碰撞按
+            # 完整路径消歧——基线合成不得按 basename 把另一目录绿杀手
+            # 误跳过）；表内无 script 回退身份段（实机裸 basename 宇宙）。
+            script = str(entry.get("script") or "") \
+                or str(ident).split("::", 1)[0]
+            out[ident] = (entry.get("classification") or "new",
+                          script,
+                          str(ident).split("::", 1)[1]
+                          if "::" in str(ident) else "")
     return out
 
 
@@ -187,12 +235,11 @@ def map_baseline_snapshots(files: list[str], project_root: str,
         if ".gqt-attr-select/" not in base:
             prefix = base.rstrip("/") + "/"
     face_pairs: set[tuple[str, str]] = set()
-    for ident, (cls, _full) in reds.items():
-        script = ident.split("::", 1)[0]
+    for ident, (_cls, script, name) in reds.items():
         rel = script[len("res://"):] if script.startswith("res://") else script
         if prefix is not None and not rel.startswith(prefix):
             continue
-        face_pairs.add((script, ident.split("::", 1)[1]))
+        face_pairs.add((script, name))
     baselines: dict = {}
     tail = _synthesize_tail(face_pairs)
     key = tests_glob if tests_glob is not None else None
@@ -201,6 +248,23 @@ def map_baseline_snapshots(files: list[str], project_root: str,
                       "red_names": sorted(n for _s, n in face_pairs),
                       "red_pairs": sorted(face_pairs)}
     return baselines, {}
+
+
+
+
+def _sha_drift(root: Path, rel: str, want: "str | None",
+               changed: "set[str]", drift: "set[str]") -> None:
+    """单文件 sha 对账（缺失/漂移 → drift 分类；零行为拆分）。"""
+    import hashlib
+
+    p = root / rel
+    if not p.is_file():
+        drift.add(f"removed:{rel}")
+        return
+    have = hashlib.sha256(p.read_bytes()).hexdigest()
+    if have != want:
+        changed.add(rel)
+        drift.add(f"changed:{rel}")
 
 
 def _map_drift(doc: dict, project_root: str, files: list[str]
@@ -218,11 +282,6 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
     shas = doc.get("file_sha256") or {}
     face = doc.get("tests_face") or {}
 
-    def _sha(p: Path) -> "str | None":
-        if not p.is_file():
-            return None
-        return hashlib.sha256(p.read_bytes()).hexdigest()
-
     # 目标生产文件（显式 files 优先，其余取 map 记录面）
     targets = {rel: want for rel, want in shas.items()}
     for raw in files:
@@ -231,38 +290,60 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
             else str(p)
         targets[rel] = shas.get(rel)
     for rel, want in targets.items():
-        p = root / rel
-        have = _sha(p)
-        if have is None:
-            drift.add(f"removed:{rel}")
-        elif have != want:
-            changed.add(rel)
-            drift.add(f"changed:{rel}")
+        _sha_drift(root, rel, want, changed, drift)
     for rel, want in face.items():
-        p = root / rel
-        have = _sha(p)
-        if have is None:
-            drift.add(f"removed:{rel}")
-        elif have != want:
-            changed.add(rel)
-            drift.add(f"changed:{rel}")
+        _sha_drift(root, rel, want, changed, drift)
+    # §SPEC-029 表 #1/#2：全集对账——树内生产 .gd 全集（分类清单驱动）
+    # 与 map 记录面比对：新增生产 .gd → 判不新鲜（重建后走既有
+    # new_prod_file_fallback）；分类不闭合 → unclassified_source 具名
+    # fail-loud。
+    from ..measurement.classify import ScopeError, discover_universe
+
+    try:
+        universe = discover_universe(root)["files"]
+    except ScopeError as e:
+        raise BaselineSourceError(f"{e}") from e
+    known = {("res://" + rel) for rel in shas}
+    test_face = {("res://" + rel)
+                 for rel in (doc.get("tests_face") or {})}
+    for rp in universe:
+        if rp in known or rp in test_face:
+            continue
+        rel = rp[len("res://"):]
+        changed.add(rel)
+        drift.add(f"new:{rel}")
     return sorted(changed), sorted(drift)
+
+
+def _production_universe(project_root: str, files: list[str]) -> list[str]:
+    """§SPEC-029：默认建图宇宙 = 范围规则 `.gd` 子集（§SPEC-031 v8
+    白/黑名单驱动）；显式 roots 仅作窄宇宙诊断。规则不闭合 → 具名
+    fail-loud。"""
+    from ..measurement.classify import ScopeError, gd_universe
+
+    root = Path(project_root).resolve()
+    try:
+        return gd_universe(root)
+    except ScopeError as e:
+        raise BaselineSourceError(f"{e}") from e
 
 
 def _prepare_build_missing(project_root: str, files: list[str],
                            timeout_s: int) -> str:
     """阶梯第一级：map 缺失 → `ensure_map` 全脸自动建图（measure run
-    同形态）。"""
+    同形态；宇宙 = §SPEC-031 清单 production 全集）。"""
     from .truth_select import MutationSelectionError, ensure_map
 
+    build_files = _production_universe(project_root, files)
     print("mutation prepare: attribution map missing — building "
-          "(§SPEC-021 auto renewal)", file=sys.stderr)
+          f"(universe={len(build_files)} production .gd, §SPEC-021/029)",
+          file=sys.stderr)
     try:
-        ensure_map(project_root, files, timeout_s=timeout_s)
+        ensure_map(project_root, build_files, timeout_s=timeout_s)
     except MutationSelectionError as e:
         raise BaselineSourceError(
             f"prepare renewal failed (map build): {e}") from e
-    return _verify_prepared(project_root, files)
+    return _verify_prepared(project_root, build_files)
 
 
 def _prepare_drift_state(doc: dict, project_root: str,
@@ -283,7 +364,10 @@ def _prepare_drift_state(doc: dict, project_root: str,
 def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
                                changed: list[str], timeout_s: int) -> None:
     """增量续新（只重跑失效面）：目标面取自基线 target_files（建图时
-    的测量宇宙），recipe 由当前树现场构建（build_recipe 单源）。"""
+    的测量宇宙），recipe 由当前树现场构建（build_recipe 单源）。
+    §SPEC-029 表 #5：不可归因变更（`uid://`/动态 load/非 .gd——
+    increment 的 unknown_changed_paths 具名判定）→ 具名全量重建
+    （不作为用户可见错误）。"""
     from ..measurement.increment import (
         IncrementError, run_attribution_increment,
     )
@@ -304,6 +388,12 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
             project_root, targets, recipe, path, changed, path,
             timeout_s=timeout_s)
     except IncrementError as e:
+        if "unknown_changed_paths" in str(e):
+            print("mutation prepare: changed path(s) not attributable "
+                  "(non-.gd / uid:// / dynamic load) — named full "
+                  "rebuild (§SPEC-029 #5)", file=sys.stderr)
+            return _prepare_full_rebuild(project_root, targets, path,
+                                         timeout_s)
         raise BaselineSourceError(
             f"prepare renewal failed (increment): {e}") from e
 
@@ -312,12 +402,14 @@ def _prepare_full_rebuild(project_root: str, files: list[str], path: str,
                           timeout_s: int) -> None:
     """全脸重建（measure run 同形态；recipe pristine 失配/结构性漂移
     不可增量）——auto 管理的默认 map 允许安全重建，重建前移除旧
-    产物（ensure_map 仅在不可复用时重建，stale 旧图须显式移除）。"""
+    产物（ensure_map 仅在不可复用时重建，stale 旧图须显式移除）。
+    宇宙 = §SPEC-031 清单 production 全集（§SPEC-029）。"""
     from .truth_select import MutationSelectionError, ensure_map
 
+    build_files = _production_universe(project_root, files)
     try:
         Path(path).unlink(missing_ok=True)
-        ensure_map(project_root, files, timeout_s=timeout_s)
+        ensure_map(project_root, build_files, timeout_s=timeout_s)
     except MutationSelectionError as e:
         raise BaselineSourceError(
             f"prepare renewal failed (rebuild): {e}") from e

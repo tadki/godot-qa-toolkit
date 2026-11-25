@@ -465,6 +465,29 @@ def _worker_leg_skip_removed(leg) -> int:
         return 0
 
 
+def _script_qualified_new(tail: str, bare: "set[str]",
+                          baseline_failures: "set[str]") -> "set[str]":
+    """§SPEC-P2-R1-D2：同名脚本限定豁免（runner 每轮写入的脚本限定红
+    集合；空 = 无脚本标题 → 回退裸名差集语义）。Run Summary 段（脚本
+    上下文丢失，记作 ("*", n)）不计入新失败——同名基线红不得误判为
+    mutant 新失败（QA 假 kill 根因）。"""
+    lazy = None
+    try:
+        from . import runner as _runner_mod
+        lazy = getattr(_runner_mod, "_BASELINE_RED_MAP", None)
+    except Exception:
+        lazy = None
+    red_map = lazy if lazy else None
+    if not red_map:
+        return bare - baseline_failures
+    from .gutrun import parse_failures_with_scripts
+    qualified = parse_failures_with_scripts(tail)
+    if qualified:
+        return {n for _s, n in qualified
+                if _s != "*" and (_s, n) not in red_map}
+    return bare - baseline_failures
+
+
 def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                          baseline_failures: set[str], baseline_dirty: bool) -> dict:
     """单 mutant run 结果分类（killed/survived/suspect/run_error）。
@@ -485,29 +508,7 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                               f"tests passed after {m.kind} {m.original}→{m.mutated}",
                               src=None)
     bare = _parse_failing_tests(tail)
-    # §SPEC-P2-R1-D2：同名脚本限定豁免（runner 每轮写入的脚本限定红集合；
-    # 空 = 无脚本标题 → 回退裸名差集语义）。
-    lazy = None
-    try:
-        from . import runner as _runner_mod
-        lazy = getattr(_runner_mod, "_BASELINE_RED_MAP", None)
-    except Exception:
-        lazy = None
-    red_map = lazy if lazy else None
-    if red_map:
-        from .gutrun import parse_failures_with_scripts
-        qualified = parse_failures_with_scripts(tail)
-        if qualified:
-            # D2-R1：Run Summary 段（脚本上下文丢失，记作 ("*", n)）是运行
-            # 流同名失败的重复回显——不计入新失败，否则同名基线红被误判为
-            # mutant 新失败（QA 假 kill 根因）。
-            new_names = {n for _s, n in qualified
-                         if _s != "*" and (_s, n) not in red_map}
-        else:
-            new_names = bare - baseline_failures
-    else:
-        new_names = bare - baseline_failures
-    new_failures = new_names
+    new_failures = _script_qualified_new(tail, bare, baseline_failures)
     if new_failures:
         return _mutant_record(m, "killed",
                               f"new failures after {m.kind} {m.original}→{m.mutated}: "
@@ -526,6 +527,19 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                 f"baseline_skip applied (physically skipped {removed} red "
                 f"test(s)) with empty diff after {m.kind} "
                 f"{m.original}→{m.mutated} — real survival", src=None)
+        # SEE-1631 §SPEC-027/D7（R4）：无跳过原语的车道（beacon 兜底腿/
+        # 降级冷腿——宿主不下发 skip_red）失败集 ⊆ 基线红 → 真实存活
+        # （基线红在 mutant 前就失败，其失败对 mutant 无信息量）；新失败
+        # 仍 killed（kill 判定不削弱）。
+        if bare and bare.issubset(baseline_failures):
+            rec = _mutant_record(
+                m, "survived",
+                f"only pre-existing red failures after {m.kind} "
+                f"{m.original}→{m.mutated} (no skip primitive on this "
+                f"leg) — real survival", src=None)
+            # 差分复用标记：与旧 suspect 同信息量（重跑无增益）
+            rec["pre_existing_only"] = True
+            return rec
         return _mutant_record(m, "suspect",
                               f"dirty baseline ∧ empty diff after {m.kind} "
                               f"{m.original}→{m.mutated} — cannot distinguish "
@@ -841,6 +855,16 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
                 f"baseline_skip applied (physically skipped {removed} red "
                 f"test(s)) with empty diff after {tag} (worker leg) — "
                 f"real survival", src=src)
+        # §SPEC-027/D7（R4）：失败集 ⊆ 基线红 → 真实存活（同冷车道；
+        # 新失败仍 killed——kill 判定不削弱）。
+        leg_failing = set(getattr(leg, "failing_tests", None) or set())
+        if leg_failing and leg_failing.issubset(baseline_failures):
+            rec = _mutant_record(
+                m, "survived",
+                f"only pre-existing red failures after {tag} (worker "
+                f"leg) — real survival", src=src)
+            rec["pre_existing_only"] = True
+            return rec
         return _mutant_record(
             m, "suspect",
             f"dirty baseline ∧ empty diff after {tag} (worker leg)", src=src)

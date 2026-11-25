@@ -699,10 +699,18 @@ def _verdict_collect_arm(arm: dict, red_by_class: dict, universe: set,
 
 
 def _verdict_red_scripts(arms: tuple[dict, ...]) -> dict:
-    """红键 → 原始脚本路径映射（四源红对并集；归一键与规范身份双键）。"""
+    """红键 → 原始脚本路径映射（五源红对并集：基线 meta pairs +
+    四 test_failures 源；归一键与规范身份双键）。§SPEC-030 同名碰撞
+    消歧依赖这里的完整路径。"""
     red_script: dict[str, str] = {}
     for arm in arms:
         tf = arm.get("test_failures") or {}
+        meta_pairs = [(s, t) for s, t in
+                      (arm.get("baseline_failures_meta") or {})
+                      .get("pairs") or []]
+        for sc, nm in meta_pairs:
+            key = Path(str(sc)).name + "::" + str(nm)
+            red_script.setdefault(key, str(sc))
         for pair in (tf.get("observed_pairs") or []) \
                 + (tf.get("new_pairs") or []) \
                 + (tf.get("pre_existing_failures") or []) \
@@ -713,41 +721,144 @@ def _verdict_red_scripts(arms: tuple[dict, ...]) -> dict:
     return red_script
 
 
-def _verdict_universe_by_key(universe: set) -> dict:
-    """归一键（basename::test）→ 行事实宇宙身份（gut 身份限定）。"""
-    by_key: dict[str, str] = {}
+def _verdict_universe_by_key(universe: set) -> "dict[str, list[str]]":
+    """归一键（basename::test）→ 行事实宇宙候选身份列表（gut 身份限定）。
+
+    同名 basename 碰撞（两目录同名脚本同名测试）→ 同键多候选——红集
+    发射按红对完整脚本路径消歧（§SPEC-030），不再 setdefault 静默吞并
+    （D10：绿测身份被红测分类污染的根因）。"""
+    by_key: dict[str, list[str]] = {}
     for ident in universe:
         if not _verdict_is_gherkin(ident):
             sc, nm = ident.split("::", 1)
-            by_key.setdefault(Path(sc).name + "::" + nm, ident)
+            by_key.setdefault(Path(sc).name + "::" + nm, []).append(ident)
     return by_key
 
 
 def _verdict_emit_reds(red_by_class: dict, universe: set,
                        universe_by_key: dict, red_script: dict,
-                       universe_script: dict, out: dict) -> None:
+                       universe_script: dict, out: dict,
+                       collisions: "list[dict] | None" = None) -> None:
     """按车道优先级（pre_existing > suspected_intolerant > new，先到先得）
-    发射红条目：命中共宇宙按宇宙身份、未命中宇宙按 raw 键如实记红。"""
+    发射红条目：命中共宇宙按宇宙身份、未命中宇宙按 raw 键如实记红。
+
+    §SPEC-030/D10：同键多候选（同名 basename 碰撞）按红对完整脚本路径
+    消歧——只命中路径匹配的候选身份，其余候选保持绿（另一目录的绿测
+    不得并入红身份）；无路径匹配 → 按完整路径 raw 键记红并具名披露。
+    空 script 红键（解析碎片）不入表、只披露（不得默认记 new）。"""
     for cls in ("pre_existing", "suspected_intolerant", "new"):
-        for key in red_by_class[cls]:
-            ident = universe_by_key.get(key)
-            if ident is None and key in universe:
-                ident = key
-            if ident is not None:
-                if ident in out:
-                    continue
-                script = red_script.get(key) \
-                    or universe_script.get(key) \
-                    or ident.split("::", 1)[0]
-                out[ident] = {"verdict": "red", "classification": cls,
-                              "script": script}
-            elif key not in out:
-                out[key] = {"verdict": "red", "classification": cls,
-                            "script": red_script.get(key)
-                            or key.split("::", 1)[0]}
+        for key in sorted(red_by_class[cls]):
+            sc_full = red_script.get(key) or ""
+            candidates = universe_by_key.get(key) or []
+            if len(candidates) > 1:
+                _emit_collided(key, cls, sc_full, candidates,
+                               universe_script, out, collisions)
+                continue
+            _emit_unambiguous(key, cls, sc_full, candidates, universe,
+                              universe_script, out, collisions)
+
+
+def _emit_collided(key: str, cls: str, sc_full: str,
+                   candidates: "list[str]", universe_script: dict,
+                   out: dict, collisions: "list[dict] | None") -> None:
+    """同名碰撞（同键多候选）：按完整脚本路径消歧（§SPEC-030）——
+    命中路径匹配候选；无匹配保守全候选红 + 具名披露。"""
+    matched = _verdict_match_candidate(candidates, sc_full)
+    if matched is not None:
+        if matched not in out:
+            out[matched] = {"verdict": "red",
+                            "classification": cls,
+                            "script": sc_full
+                            or universe_script.get(key)
+                            or matched.split("::", 1)[0]}
+        return
+    resolved = ""
+    if sc_full:
+        raw_key = f"{sc_full}::{key.split('::', 1)[1]}"
+        if raw_key not in out:
+            out[raw_key] = {"verdict": "red",
+                            "classification": cls,
+                            "script": sc_full}
+        resolved = raw_key
+    else:
+        # 无法消歧 → 保守全候选红（不得静默放绿）
+        for cand in candidates:
+            if cand in out:
+                continue
+            out[cand] = {"verdict": "red", "classification": cls,
+                         "script": universe_script.get(key)
+                         or cand.split("::", 1)[0]}
+    if collisions is not None:
+        collisions.append({
+            "basename_key": key,
+            "candidates": sorted(candidates),
+            "resolved": resolved,
+            "reason": "same_basename_no_path_match",
+        })
+
+
+def _emit_unambiguous(key: str, cls: str, sc_full: str,
+                      candidates: "list[str]", universe: set,
+                      universe_script: dict, out: dict,
+                      collisions: "list[dict] | None") -> None:
+    """单候选主链：命中宇宙按宇宙身份、未命中按 raw 键如实记红；空
+    script 红键（解析碎片）不入表、只披露（不得默认记 new）。"""
+    ident = candidates[0] if candidates else None
+    if ident is None and key in universe:
+        ident = key
+    if ident is not None:
+        if ident in out:
+            return
+        script = sc_full \
+            or universe_script.get(key) \
+            or ident.split("::", 1)[0]
+        out[ident] = {"verdict": "red", "classification": cls,
+                      "script": script}
+    elif "::" in key and key.split("::", 1)[0]:
+        if key not in out:
+            out[key] = {"verdict": "red", "classification": cls,
+                        "script": sc_full or key.split("::", 1)[0]}
+    elif collisions is not None:
+        collisions.append({
+            "basename_key": key,
+            "candidates": [],
+            "resolved": "",
+            "reason": "empty_script_red_key_disclosed_not_emitted",
+        })
+
+
+def _verdict_match_candidate(candidates: "list[str]",
+                             sc_full: str) -> "str | None":
+    """同名碰撞候选消歧：红对完整脚本路径与候选身份脚本段**精确**匹配
+    （res:// 归一后相等；basename 形态候选仅在 sc_full 以其目录前缀
+    结尾时命中——绝不按裸 basename 回退，D10 同名污染根因）。"""
+    if not sc_full:
+        return None
+    sc_norm = sc_full.removeprefix("res://")
+    for ident in candidates:
+        part_norm = str(ident).split("::", 1)[0].removeprefix("res://")
+        if part_norm == sc_norm:
+            return ident
+    # basename 宇宙形态候选：目录前缀精确后缀（/basename 结尾且更短）
+    for ident in candidates:
+        part_norm = str(ident).split("::", 1)[0].removeprefix("res://")
+        if "/" not in part_norm and sc_norm.endswith("/" + part_norm):
+            return ident
+    return None
 
 
 def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
+    """verdict 表（兼容外壳）；碰撞披露走 `_verdict_identity_collisions`。"""
+    return _verdict_build_table(arms)[0]
+
+
+def _verdict_identity_collisions(arms: tuple[dict, ...]) -> "list[dict]":
+    """§SPEC-030：同名碰撞/空 script 红键具名披露（产物
+    `identity_collisions` 键）。"""
+    return _verdict_build_table(arms)[1]
+
+
+def _verdict_build_table(arms: tuple[dict, ...]) -> "tuple[dict, list]":
     """SEE-1631 §SPEC-020/024：逐测试 verdict 表（GUT 测试与 gherkin
     scenario 同表），身份与行事实宇宙归一。
 
@@ -770,6 +881,7 @@ def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
         _verdict_collect_arm(arm, red_by_class, universe, universe_script)
     red_script = _verdict_red_scripts(arms)
     out: dict[str, dict] = {}
+    collisions: list[dict] = []
     # 归一键（basename::test）→ 行事实宇宙身份（red 命中宇宙即按宇宙
     # 身份发射；未命中宇宙 = 归一失败，按 raw 键如实记红，不落 green）
     universe_by_key = _verdict_universe_by_key(universe)
@@ -777,11 +889,11 @@ def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
     # 发射键 = 行事实宇宙身份（归一后的规范键），未命中宇宙的红对按 raw
     # 键如实记红（归一失败不落 green 兜底）。
     _verdict_emit_reds(red_by_class, universe, universe_by_key, red_script,
-                       universe_script, out)
+                       universe_script, out, collisions)
     for ident in universe:
         if ident not in out:
             out[ident] = {"verdict": "green"}
-    return out
+    return out, collisions
 
 
 def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
@@ -832,6 +944,8 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         "arms_state": _arms_state(arms),
         # SEE-1631 §SPEC-020：逐测试 verdict 表（mutation 判定原图）
         "test_verdicts": _test_verdict_table(arms),
+        # §SPEC-030：同名碰撞/空 script 红键具名披露（空列表常态键在场）
+        "identity_collisions": _verdict_identity_collisions(arms),
         "notes": notes,
     }
     if baseline_meta is not None:

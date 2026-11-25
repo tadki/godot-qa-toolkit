@@ -29,7 +29,8 @@ FIXTURES = REPO / "tests" / "fixtures"
 TOP_LEVEL = ("gherkin", "mutation", "measure", "doctor")
 GHERKIN_LEAVES = ("compile", "run", "mutate")
 MEASURE_LEAVES = ("suite", "run", "diagnose", "map-update", "coverage",
-                  "complexity", "arch", "parity", "registry-diff", "risk")
+                  "complexity", "arch", "parity", "registry-diff", "risk",
+                  "scope")
 OLD_TOP_LEVEL = ("accept", "arch", "attr-update", "canonical",
                  "canonical-diagnose", "complexity", "coverage", "parity",
                  "recipe", "registry", "risk")

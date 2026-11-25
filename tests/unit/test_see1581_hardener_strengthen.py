@@ -89,7 +89,10 @@ def test_removed_test_script_marks_tests_face_stale(tmp_path):
     (proj / "tests" / "unit" / "test_hit.gd").unlink()
     with pytest.raises(truth_select.MutationSelectionError) as ei:
         truth_select.resolve_selection(proj, str(proj / "calc.gd"))
-    assert "tests_face_drift" in ei.value.reason
+    # §SPEC-031（R4）：测试脚本进分类清单（recipe 面）——删除同时触发
+    # recipe 失配（primary reason；tests_face 漂移同轮具名，诊断位随
+    # 失败披露流）。fail-loud 行为不变。
+    assert ei.value.reason.startswith(("tests_face_drift", "recipe_hash_stale"))
 
 
 def test_ambiguous_test_names_fail_loud(tmp_path):

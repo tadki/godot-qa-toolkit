@@ -98,12 +98,15 @@ def test_d1_map_source_synthesis_carries_red_for_skip():
     }
     import godot_qa_toolkit.mutation.verdict_source as vs
     orig_load = vs._load_map_doc
+    orig_fresh = vs._assert_fresh
     vs._load_map_doc = lambda root: doc
+    vs._assert_fresh = lambda *a, **k: None
     try:
         baselines, failures = vs.map_baseline_snapshots(
             ["src/calc.gd"], "/p", None)
     finally:
         vs._load_map_doc = orig_load
+        vs._assert_fresh = orig_fresh
     snap = baselines[None]
     assert snap["rc"] == 1
     names = {n for _s, n in snap["red_pairs"]}

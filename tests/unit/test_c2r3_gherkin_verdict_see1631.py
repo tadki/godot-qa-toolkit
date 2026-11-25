@@ -25,13 +25,18 @@ def _gh(ident: str) -> "str | None":
 # --------------------------------------------------------------------------
 
 def test_gherkin_dropped_features_removed_from_table():
-    merged = {
+    """§SPEC-028/D9（R4）：gherkin_dropped 无条件消费——只删不重跑的
+    轮次（fresh_gherkin=None）同样必须剔除。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+
+    baseline = {"test_verdicts": {
         "gherkin://feature/alpha::s0_01": {"verdict": "green"},
         "gherkin://feature/beta::s0_01": {"verdict": "green"},
-    }
-    _verdict_gherkin_rerun(merged, {"executions": []},
-                           gherkin_rerun=set(),
-                           gherkin_dropped={"alpha"})
+    }}
+    merged = _merged_test_verdicts(
+        baseline, [], rerun_scripts=set(), dropped_scripts=set(),
+        removed_rels=set(), fresh_gherkin=None, gherkin_rerun=set(),
+        gherkin_dropped={"alpha"})
     assert "gherkin://feature/alpha::s0_01" not in merged
     assert "gherkin://feature/beta::s0_01" in merged
 
@@ -44,8 +49,7 @@ def test_gherkin_rerun_all_executions_pass_green():
     }
     fresh = {"executions": [{"rc": 0, "out": "ok"},
                             {"rc": 0, "out": "ok"}]}
-    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"},
-                           gherkin_dropped=set())
+    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"})
     assert merged["gherkin://feature/beta::s0_01"]["verdict"] == "green"
 
 
@@ -56,8 +60,7 @@ def test_gherkin_rerun_any_execution_failure_not_green():
     }
     fresh = {"executions": [{"rc": 0, "out": "ok"},
                             {"rc": 1, "out": "fail"}]}
-    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"},
-                           gherkin_dropped=set())
+    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"})
     assert merged["gherkin://feature/beta::s0_01"]["verdict"] == "red"
 
 
@@ -68,8 +71,7 @@ def test_gherkin_rerun_baseline_pre_existing_keeps_classification():
             "script": "res://x/test_beta.gd"},
     }
     fresh = {"executions": [{"rc": 1, "out": "fail"}]}
-    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"},
-                           gherkin_dropped=set())
+    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"})
     entry = merged["gherkin://feature/beta::s0_01"]
     assert entry["verdict"] == "red"
     assert entry["classification"] == "pre_existing"
@@ -82,8 +84,7 @@ def test_gherkin_rerun_baseline_suspected_intolerant_keeps_classification():
             "script": "res://x/test_beta.gd"},
     }
     fresh = {"executions": [{"rc": 1, "out": "fail"}]}
-    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"},
-                           gherkin_dropped=set())
+    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"})
     entry = merged["gherkin://feature/beta::s0_01"]
     assert entry["verdict"] == "red"
     assert entry["classification"] == "suspected_intolerant"
@@ -94,8 +95,7 @@ def test_gherkin_rerun_baseline_green_failure_classified_new():
         "gherkin://feature/beta::s0_01": {"verdict": "green"},
     }
     fresh = {"executions": [{"rc": 1, "out": "fail"}]}
-    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"},
-                           gherkin_dropped=set())
+    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"beta"})
     entry = merged["gherkin://feature/beta::s0_01"]
     assert entry["verdict"] == "red"
     assert entry["classification"] == "new"

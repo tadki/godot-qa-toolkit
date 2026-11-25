@@ -51,6 +51,8 @@ def _write_project(tmp_path, src=SRC):
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "addons" / "gut").mkdir(parents=True)
+    # §SPEC-031（R4）：插件标记（真实 gut addon 形态；范围默认排除②）
+    (proj / "addons" / "gut" / "plugin.cfg").write_text("[plugin]\n")
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
     target = proj / "calc.gd"
     target.write_text(src)

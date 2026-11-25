@@ -200,7 +200,9 @@ def test_cmd_recipe_success_writes_recipe_and_summary(tmp_path, kol_like, capsys
     assert rc == 0 and out["ok"] is True and out["tool"] == "measure.suite"
     assert out["summary"]["exclusions"] == 2
     assert out["summary"]["gut_dirs"] == 2
-    assert out["summary"]["gherkin_features"] == 3
+    # §SPEC-031（R4）：gherkin_feature 黑名单在 face 级执行——被排除
+    # feature 不再计数（此前只进哈希无人消费）。
+    assert out["summary"]["gherkin_features"] == 2
     recipe = json.loads(out_path.read_text(encoding="utf-8"))
     assert recipe["recipe_hash"] == out["summary"]["recipe_hash"]
     assert len(recipe["exclusions"]) == 2

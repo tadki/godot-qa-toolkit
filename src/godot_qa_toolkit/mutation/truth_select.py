@@ -422,20 +422,59 @@ def _ensure_generate(root: str, out: str, files: list[str],
     return out
 
 
+def _explicit_map_stale(path: str, project_root: str) -> bool:
+    """§SPEC-029：显式 map 新鲜度判定（只读探测；解析失败 = stale，
+    走重建）。判据 = schema + recipe pristine + 测试面漂移（与消费侧
+    `_assert_fresh` 同源面）。"""
+    try:
+        doc = load_map(path)
+    except Exception:  # noqa: BLE001 — 不可用 → 重建（具名于调用方）
+        return True
+    root = project_root
+    try:
+        from ..measurement.attribution import ATTRIBUTION_SCHEMA
+        if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
+            return True
+    except Exception:  # noqa: BLE001
+        return True
+    # recipe pristine 对账（不依赖查询方传入 roots）
+    pristine = _fresh_recipe_hash(root)
+    if pristine is not None \
+            and pristine != doc.get("recipe_hash_pristine"):
+        return True
+    # 测试面漂移
+    import hashlib as _hl
+
+    for rel, want in (doc.get("tests_face") or {}).items():
+        p = Path(root) / rel
+        if not p.is_file():
+            return True
+        if _hl.sha256(p.read_bytes()).hexdigest() != want:
+            return True
+    return False
+
+
 def ensure_map(project_root: str | Path, files: list[str],
                timeout_s: int | None = None) -> str | None:
-    """默认自动生成/重建（mode=auto，原子写 + `<map>.lock` 串行化）；
-    显式 `--attribution-map` 只读透传绝不重建；失败台账记录后
-    fail-loud（全脸仅显式 `--select full` 审计开关）。"""
+    """map 自判自刷（§SPEC-029：每个项目唯一一份 map，不设显式只读
+    例外——显式 `--attribution-map` 过期同样原地自刷新，原子写 +
+    `<map>.lock` 串行化）；不可用（旧 schema/解析失败）→ 原子重建；
+    失败台账记录后 fail-loud（全脸仅显式 `--select full` 审计开关）。"""
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
     explicit = bool(os.environ.get(ENV_MAP))
     existing, rebuild_reason = _default_map_reuse(map_path(root), explicit)
     if existing:
-        # 可用直接复用；显式产物不可用同样原样透传（绝不重建/删除用户
-        # 指定文件——fail-loud 由 resolve_selection）。
-        return existing
+        # §SPEC-029：显式 map 不再只读透传——过期同样自判自刷（原地
+        # 原子重建，宇宙 = 分类清单 production 全集）。
+        if _explicit_map_stale(existing, root):
+            print("measure: explicit attribution map is stale — "
+                  "refreshing in place (§SPEC-029: no read-only "
+                  "exception)", file=sys.stderr)
+            existing = None
+        else:
+            return existing
     # §SPEC-012 HIGH-2：默认位置旧 schema/无效状态 → 原子重建。
     out = default_map_path(root)
     Path(out).parent.mkdir(parents=True, exist_ok=True)

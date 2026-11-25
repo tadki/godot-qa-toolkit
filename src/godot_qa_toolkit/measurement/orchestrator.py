@@ -849,8 +849,15 @@ def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
 
 def _gutconfig_face_args(recipe: dict) -> list[str]:
     """gut_full 臂的同面无插桩参数：与分片计划同源（recipe gut_face
-    dirs 的并集）；空 dirs = GUT 读 .gutconfig 缺省面（不传 -gdir）。"""
+    dirs 的并集）；空 dirs = GUT 读 .gutconfig 缺省面（不传 -gdir）。
+    §SPEC-031（R4）：recipe exclusions 的 gut_dir 黑名单在此**真正执行**
+    （此前只进哈希无人消费）——被排除目录不进 -gdir 面。"""
     dirs = list((recipe.get("gut_face") or {}).get("dirs") or [])
+    excluded = {str(x.get("entry") or "").strip("/")
+                for x in (recipe.get("exclusions") or [])
+                if x.get("scope") == "gut_dir"}
+    if excluded:
+        dirs = [d for d in dirs if d.strip("/") not in excluded]
     return [("-gdir=" + ",".join(dirs))] if dirs else []
 
 def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],

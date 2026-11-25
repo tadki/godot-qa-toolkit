@@ -289,8 +289,10 @@ class TestH5SuspectGatesOk:
         )
         glob = _materialize_selection(proj, ["test_a.gd"])
         result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
-        assert result["summary"].get("suspect", 0) > 0
-        assert result["ok"] is False, "suspect must gate ok (cannot prove killed)"
+        # SEE-1631 §SPEC-027/D7（QA 裁决）：无跳过原语车道失败 ⊆ 基线红
+        # → survived（pre_existing_only）；非 kill 不给 ok=true。
+        assert result["summary"].get("survived", 0) > 0
+        assert result["ok"] is False, "survived still gates ok (not killed)"
 
 
 class TestH6BudgetZeroNoBaseline:

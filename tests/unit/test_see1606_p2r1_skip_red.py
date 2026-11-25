@@ -96,9 +96,12 @@ class TestClassifyCleanBatch:
         assert rec["verdict"] == "killed"
         assert rec["skip_red"]["marked"] == 1
 
-    def test_no_marker_keeps_suspect(self):
+    def test_no_marker_preexisting_red_survived(self):
+        # SEE-1631 §SPEC-027/D7（QA 裁决）：无 skip marker 但失败 ⊆ 基线红
+        # → survived（pre_existing_only）；skip_red 披露键仍缺席。
         rec = self._classify("* test_red\n[Failed]\n", ["test_red"])
-        assert rec["verdict"] == "suspect"
+        assert rec["verdict"] == "survived"
+        assert rec.get("pre_existing_only") is True
         assert "skip_red" not in rec
 
 

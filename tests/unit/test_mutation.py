@@ -560,8 +560,9 @@ class TestLaunchFailureGuard:
                               tests_glob=glob)
         s = result["summary"]
         assert s.get("run_error") is not True, "脏 baseline + 告警不得中止"
-        # 失败集合与 baseline 相同（差集空）→ 保守 suspect（不可证杀）
-        assert s["suspect"] == s["mutants"] > 0
+        # SEE-1631 §SPEC-027/D7：失败 ⊆ 基线红 → survived
+        # （pre_existing_only）；非 kill 仍不给 ok。
+        assert s["survived"] == s["mutants"] > 0
         assert s["run_errors"] == 0
 
 

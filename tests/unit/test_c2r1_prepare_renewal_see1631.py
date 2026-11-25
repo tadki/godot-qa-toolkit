@@ -89,6 +89,8 @@ def test_prepare_missing_map_uses_ensure_map(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    (tmp_path / "systems").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "systems" / "calc.gd").write_text("extends Node\n")
     out = vs.prepare_map_for_baseline(str(tmp_path),
                                       ["tests/unit/test_a.gd"])
     assert out.endswith("attribution-map.json")

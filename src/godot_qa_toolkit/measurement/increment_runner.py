@@ -168,11 +168,25 @@ def execute_rerun_scripts(root: Path, gut_dirs: list[str],
     return results, xdg_homes
 
 
+def _scenario_map_from_manifests(out: dict, keys: "list[str]"
+                                 ) -> "dict[str, str]":
+    """编译 manifests → test_name → scenario 映射（零行为拆分）。"""
+    mapping: dict[str, str] = {}
+    for k in keys:
+        for case in ((out["manifests"].get(k) or {}).get("cases") or []):
+            tn = str(case.get("test_name") or "")
+            sc = str(case.get("scenario") or "")
+            if tn and sc:
+                mapping[tn] = sc
+    return mapping
+
+
 def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
-                               ) -> "tuple[Path, dict, str, object]":
+                               ) -> "tuple[Path, dict, str, object, dict]":
     """编译 rerun keys 进私有 suite 并做 validator 预检恰好一次
     （§SPEC-003 契约：业务执行前同一 validator）。返回 (suite_dir,
-    identities, gen_res, identity_rewrite)；编译/预检失败具名抛出。"""
+    identities, gen_res, identity_rewrite, scenario_of_test)；编译/预检
+    失败具名抛出。"""
     from ..gherkin.addon import AddonError, compile_preflight, \
         run_validator_preflight
     from ..gherkin.run import GherkinRunError, replay_check
@@ -191,6 +205,9 @@ def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
     out = compile_keys_to_suite(root, keys, suite_dir)
     identities = {k: (out["manifests"].get(k) or {}).get("attribution")
                   or [] for k in keys}
+    # §SPEC-025/D8（R4）：test_name → scenario 映射（执行账失败名回写
+    # scenario 名用；manifest 在 suite 回收后仍可判定逐 scenario 红绿）。
+    scenario_of_test = _scenario_map_from_manifests(out, keys)
     for k in keys:
         replay_check(root, k, suite_dir=suite_dir)
     try:
@@ -201,7 +218,7 @@ def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
                .relative_to(root).as_posix())
     rw = _gherkin_identity_rewrite(root, [{"suite_dir": str(suite_dir),
                                            "keys": keys}], identities)
-    return suite_dir, identities, gen_res, rw
+    return suite_dir, identities, gen_res, rw, scenario_of_test
 
 
 def _gherkin_leg_texts(templates: dict, run_uuid: str,
@@ -287,8 +304,8 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
     keys = sorted({str(k) for k in feature_keys})
     if not keys:
         return None, []
-    suite_dir, _identities, gen_res, rw = _gherkin_leg_compile_suite(
-        root, keys, run_uuid)
+    suite_dir, _identities, gen_res, rw, scenario_of_test = \
+        _gherkin_leg_compile_suite(root, keys, run_uuid)
     started_files, instrumented, hook_files = _gherkin_leg_texts(
         templates, run_uuid, causal)
     xdg_homes: list[str] = []
@@ -315,6 +332,15 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
             identity_rewrite=rw)
         for xdg in xdg_homes:
             shutil.rmtree(xdg, ignore_errors=True)
+        # §SPEC-025/D8（R4）：执行账失败名（编译 test_name）回写为
+        # scenario 名（failing_scenarios）——verdict 重算按 scenario 粒度。
+        if scenario_of_test:
+            from .gutrun import _parse_failing_tests
+            for ex in executions:
+                failing = _parse_failing_tests(str(ex.get("out") or ""))
+                ex["failing_scenarios"] = sorted(
+                    {scenario_of_test[t] for t in failing
+                     if t in scenario_of_test})
         return fresh, executions
     finally:
         try:

@@ -946,16 +946,19 @@ def _verdict_per_script(executions: list[dict]) -> dict:
 
 
 def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
-    """重跑身份按脚本执行账重算：rc==0 且无解析失败名 → green；
-    仍失败 → red，分类沿基线（基线 pre_existing 不被无依据改写为
-    new）；基线绿而本轮失败 → red/new（新增失败才 new）。"""
+    """重跑身份按脚本执行账**逐测试**重算（§SPEC-025/D8，R4）：
+    失败名可解析时按名判定——通过的测试不得随脚本级 rc 整体标红；
+    失败名空且 rc!=0 = 不可归因（输出不可解析/崩溃）保守整脚本红
+    （不得无证据放绿）；red 分类沿基线（pre_existing 不被无依据改写
+    为 new）；基线绿而本轮失败 = new。"""
     for ident in list(merged):
         sc = str(ident).split("::", 1)[0]
         b = Path(sc).name
         if b in per_script:
             rc, failing = per_script[b]
             name = str(ident).split("::", 1)[1]
-            if rc == 0 and name not in failing:
+            failed = (name in failing) if failing else (rc != 0)
+            if not failed:
                 merged[ident] = {"verdict": "green"}
                 continue
             prior = merged.get(ident) or {}
@@ -987,23 +990,48 @@ def _gherkin_rerun_all_passed(fresh_gherkin: dict) -> bool:
         for r in execs)
 
 
+def _gherkin_failing_scenarios(fresh_gherkin: dict) -> "set[str] | None":
+    """§SPEC-025/D8（R4）：重跑腿逐 scenario 失败名集合（全部执行账并集
+    ——多分片/多 rep 任一失败都算）。执行账带 `failing_scenarios`（编译
+    manifest test_name → scenario 回写）时返回该集合；缺席（旧形态账）
+    返回 None = 无法归因，调用方保守整键处理。"""
+    failing: set[str] = set()
+    seen = False
+    for r in (fresh_gherkin.get("executions") or []):
+        fs = r.get("failing_scenarios")
+        if fs is None:
+            continue
+        seen = True
+        failing |= {str(x) for x in fs}
+    return failing if seen else None
+
+
 def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
-                           gherkin_rerun: set,
-                           gherkin_dropped: set) -> None:
-    """gherkin 重跑键（feature_changed/new）：按重跑腿**全部**执行账判定
-    （多分片/多 rep 任一 rc!=0 都算失败）——全过 → 键内身份 green；
-    失败或不一致 → red，分类沿基线（pre_existing/suspected_intolerant
-    保持 §SPEC-017 车道，基线绿而失败 = new）。`gherkin_dropped` 的
-    feature 身份从表剔除。"""
+                           gherkin_rerun: set) -> None:
+    """gherkin 重跑键（feature_changed/new）：**逐 scenario** 按重跑腿
+    **全部**执行账判定（多分片/多 rep 任一失败都算失败）——通过身份
+    green（不得随 feature 级 rc 整体标红）；失败或不一致 → red，分类沿
+    基线（pre_existing/suspected_intolerant 保持 §SPEC-017 车道，基线绿
+    而失败 = new）。`gherkin_dropped` 的剔除由 `_merged_test_verdicts`
+    无条件消费（D9）。"""
     from .attribution import _gherkin_feature_of
 
-    _drop_gherkin_dropped(merged, gherkin_dropped)
     gh_ok = _gherkin_rerun_all_passed(fresh_gherkin)
+    failing_scenarios = _gherkin_failing_scenarios(fresh_gherkin)
     for ident in list(merged):
         key = _gherkin_feature_of(str(ident))
         if key is None or key not in gherkin_rerun:
             continue
         if gh_ok:
+            merged[ident] = {"verdict": "green"}
+            continue
+        # 失败腿：scenario 名可归因时逐名判定（通过 scenario 不标红）；
+        # 不可归因（旧形态账/零失败名解析）保守整键红。
+        scenario = str(ident).split("::", 1)[1] \
+            if "::" in str(ident) else ""
+        failed = True if failing_scenarios is None \
+            else scenario in failing_scenarios
+        if not failed:
             merged[ident] = {"verdict": "green"}
             continue
         prior = merged.get(ident) or {}
@@ -1035,11 +1063,14 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
         return None
     merged = dict(base)
     _verdict_drop_removed(merged, dropped_scripts, removed_rels)
+    # §SPEC-028/D9（R4）：gherkin_dropped 剔除无条件消费——只删不重跑的
+    # 轮次（fresh_gherkin=None）同样必须剔除（C2-R3 曾把它锁在
+    # fresh_gherkin 门内，真实 map-update 端到端未生效）。
+    _drop_gherkin_dropped(merged, gherkin_dropped)
     per_script = _verdict_per_script(executions)
     _verdict_recompute_rerun(merged, per_script)
     if fresh_gherkin is not None:
-        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun,
-                               gherkin_dropped)
+        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
     return merged
 
 

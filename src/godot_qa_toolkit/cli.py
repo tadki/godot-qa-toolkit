@@ -1267,6 +1267,40 @@ def cmd_measure_registry_diff(args: argparse.Namespace) -> int:
     return _emit(diff)
 
 
+def cmd_measure_scope(args: argparse.Namespace) -> int:
+    """§SPEC-031（R4）只读命令：范围解析结果打印（逐目录计数 + 带理由
+    排除清单 + 引用警告）——QA 在真副本上逐目录对账用（零写入零 GUT）。"""
+    from .measurement.classify import ScopeError, discover_universe
+
+    root = Path(args.project_root).resolve() if args.project_root \
+        else Path.cwd()
+    try:
+        u = discover_universe(root)
+    except ScopeError as e:
+        print(json.dumps({"tool": "measure.scope", "ok": False,
+                          "summary": {"error": str(e)}}))
+        return 1
+    d = u["disclosure"]
+    payload = {"tool": "measure.scope", "ok": True,
+               "summary": {
+                   "project_root": str(root),
+                   "rules_file_present": d["rules_file_present"],
+                   "rules_sha256": d["rules_sha256"],
+                   "defaults_used": d["defaults_used"],
+                   "universe_count": d["universe_count"],
+                   "gd_count": len(u["gd"]),
+                   "per_dir_counts": d["per_dir_counts"],
+                   "test_roots": d["test_roots"],
+                   "plugin_addon_roots": d["plugin_addon_roots"],
+                   "excluded_stats": d["excluded_stats"],
+                   "excluded_list": d["excluded_list"],
+                   "excluded_reference_warnings":
+                       d["excluded_reference_warnings"],
+               }}
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_measure_suite(args: argparse.Namespace) -> int:
     from .measurement.recipe import build_recipe
 
@@ -2023,6 +2057,13 @@ def build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--exclude", action="append", default=[],
                     help="exclusion as scope:entry:reason (repeatable; reason required)")
     cr.set_defaults(func=cmd_measure_suite)
+
+    scp = mssub.add_parser("scope", help="§SPEC-031 read-only scope "
+                           "resolution print (per-dir counts + excluded "
+                           "list with reasons; zero write)")
+    scp.add_argument("--project-root", default=None,
+                     help="Godot project root; omitted = discover from CWD")
+    scp.set_defaults(func=cmd_measure_scope)
 
     can = mssub.add_parser("run", help="dual-arm batch coverage orchestration (SEE-1546 WP3 PR-C)")
     can.add_argument("roots", nargs="+",

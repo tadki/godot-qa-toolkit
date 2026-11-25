@@ -17,6 +17,7 @@ major bump /2 → /3，旧 recipe verify fail-loud）；wiring 改指单根
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -177,6 +178,16 @@ def _recipe_gherkin_face(features: list, feature_count: int,
         "ops_version": ops_version,
         "wiring_sha256": _sha256_file(harness_path),
     }
+    # §SPEC-031（R4）：gherkin_feature 黑名单在 face 级**真正执行**——
+    # 被排除 feature 从 features 列表剔除（下游编译/计数单源继承）；
+    # excluded 块保留具名披露（key+reason）。
+    excluded_keys = {x["entry"] for x in normalized_exclusions
+                     if x["scope"] == "gherkin_feature"}
+    if excluded_keys:
+        features = [f for f in features
+                    if str(f.get("key") or f.get("name") or "")
+                    not in excluded_keys]
+        feature_count = len(features)
     return {
         "features": features,
         "count": feature_count,
@@ -224,6 +235,92 @@ def _recipe_inputs(root: Path, exclusions: "list[dict] | None"
     return normalized_exclusions, gutconfig, dirs, features, feature_count, None
 
 
+_TOOLCHAIN_CACHE: "dict[str, str] | None" = None
+
+
+def _probe_toolchain(project_root: Path) -> "dict[str, str]":
+    """§SPEC-029：工具链四版本探测（Godot / GUT / GQT / 插桩 ops）。
+
+    进程内缓存——首个查询起一次 Godot 子进程（`--version`），常规查询
+    零额外进程。探测失败逐项回落 "unknown"（与既有缺省一致，不致命）。"""
+    import hashlib
+    import shutil as _shutil
+    import subprocess
+
+    global _TOOLCHAIN_CACHE
+    if _TOOLCHAIN_CACHE is not None:
+        return dict(_TOOLCHAIN_CACHE)
+    out: dict[str, str] = {}
+    godot = os.environ.get("GQT_GODOT_BIN") or _shutil.which("godot")
+    if godot:
+        try:
+            r = subprocess.run([str(godot), "--version"], capture_output=True,
+                               text=True, timeout=30)
+            out["godot_version"] = (r.stdout or r.stderr).strip().splitlines()[
+                0].strip() if (r.stdout or r.stderr).strip() else "unknown"
+        except (OSError, subprocess.SubprocessError):
+            out["godot_version"] = "unknown"
+    else:
+        out["godot_version"] = "unknown"
+    gut_addon = project_root / "addons" / "gut"
+    gut_ver = "unknown"
+    for marker in ("version.cfg", "plugin.cfg"):
+        f = gut_addon / marker
+        if f.is_file():
+            gut_ver = "sha256:" + hashlib.sha256(
+                f.read_bytes()).hexdigest()[:16]
+            break
+    out["gut_version"] = gut_ver
+    try:
+        from .. import __version__ as _gqt_ver
+    except Exception:
+        _gqt_ver = None
+    out["gqt_version"] = str(_gqt_ver) if _gqt_ver else \
+        "sha256:" + hashlib.sha256(
+            Path(__file__).read_bytes()).hexdigest()[:16]
+    try:
+        from ..gherkin import OPS_VERSION as _ops
+    except Exception:
+        _ops = "unknown"
+    out["ops_version"] = str(_ops)
+    _TOOLCHAIN_CACHE = dict(out)
+    return dict(out)
+
+
+def _project_face(project_root: Path) -> dict:
+    """§SPEC-029：`project_face` —— `project.godot` 内容绑定（文件 sha +
+    autoload 规范化清单）。autoload 声明影响全局运行时行为（测试行为
+    随之变化），单变量变更即 recipe 失配 → 具名全量重建。"""
+    import hashlib
+
+    pg = project_root / "project.godot"
+    face: dict = {"present": pg.is_file()}
+    if not pg.is_file():
+        face["sha256"] = None
+        face["autoloads"] = []
+        return face
+    face["sha256"] = hashlib.sha256(pg.read_bytes()).hexdigest()
+    autoloads: list[str] = []
+    in_section = False
+    for raw in pg.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            in_section = line == "[autoload]"
+            continue
+        if in_section and "=" in line:
+            autoloads.append(line.split("=", 1)[0].strip())
+    face["autoloads"] = sorted(autoloads)
+    return face
+
+
+def _source_classification_summary(root: Path) -> dict:
+    """§SPEC-031（v8）范围摘要进 recipe：规则文件 sha/默认发现披露/
+    宇宙计数/排除统计——规则文件进 recipe（内容变更 → 失配全量）。"""
+    from .classify import scope_summary
+
+    return scope_summary(root)
+
+
 def build_recipe(
     project_root: str | Path,
     exclusions: list[dict] | None = None,
@@ -236,10 +333,29 @@ def build_recipe(
     """Build the measurement-suite/3 dict; returns (recipe, None) or
     (None, reason) on illegal layout/exclusion."""
     root = Path(project_root)
+    # §SPEC-029：缺省 "unknown" 的版本参数由进程内缓存探测补齐（build 与
+    # 新鲜度对账同源同值，工具链单变量变更即 recipe 失配）。
+    _tc = _probe_toolchain(root)
+    gqt_version = gqt_version if gqt_version != "unknown" \
+        else _tc["gqt_version"]
+    ops_version = ops_version if ops_version != "unknown" \
+        else _tc["ops_version"]
+    godot_version = godot_version if godot_version != "unknown" \
+        else _tc["godot_version"]
+    gut_version = gut_version if gut_version != "unknown" \
+        else _tc["gut_version"]
     (normalized_exclusions, gutconfig, dirs, features, feature_count,
      error) = _recipe_inputs(root, exclusions)
     if error is not None:
         return None, error
+    # §SPEC-031（v8）：范围规则先行——路径拼错/白名单为空 → 具名失败
+    # （清单必须闭合才可建图）。
+    from .classify import ScopeError, scope_summary
+
+    try:
+        scope_summary(root)
+    except ScopeError as e:
+        return None, str(e)
     try:
         gherkin_face = _recipe_gherkin_face(
             features, feature_count, normalized_exclusions, root, ops_version)
@@ -260,6 +376,10 @@ def build_recipe(
             "gut_version": gut_version,
         },
         "exclusions": normalized_exclusions,
+        # §SPEC-029：project.godot 绑定（autoload 影响全局运行时测试行为）
+        "project_face": _project_face(root),
+        # §SPEC-031：生产/测试分类清单摘要（清单变更 → 失配全量；#16）
+        "source_classification": _source_classification_summary(root),
     }
     # normalized JSON minus recipe_hash itself → sha256; sort_keys + compact
     # separators give "same input, same hash, any byte change changes it"
@@ -341,7 +461,8 @@ def _verify_exclusions(recipe: dict) -> "tuple[bool, str | None]":
 # 旧面"后重算 hash 即通过（Final Review #9）。
 ALLOWED_RECIPE_KEYS = frozenset({
     "recipe_version", "project_root", "gut_face", "gherkin_face",
-    "toolchain", "exclusions", "recipe_hash",
+    "toolchain", "exclusions", "recipe_hash", "project_face",
+    "source_classification",
 })
 REQUIRED_GHERKIN_FACE_KEYS = ("features", "count", "excluded", "harness",
                               "adapter_source_sha256", "adapter_source_files")

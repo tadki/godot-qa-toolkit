@@ -727,6 +727,19 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     if baseline_source() == "map":
         baselines, baseline_failures = map_baseline_snapshots(
             files, project_root, tests_glob, select_mode=select_mode)
+        # §SPEC-027/D7（R4）：map 源 chunk 基线同步填充脚本限定红集合
+        # （runner._BASELINE_RED_MAP）——worker 腿 skip_red_tests 与
+        # 同名豁免判定都消费它；此前只有 _loop_baseline 实测路径填充，
+        # worker 分支红测不跳过 → 红测失败被计 kill（canary 兜底整批
+        # 作废）。合成 tail 带 res:// 脚本头，qualified 解析逐位可用。
+        from . import runner as _runner_mod
+        from .gutrun import parse_failures_with_scripts
+        for snap in baselines.values():
+            qualified = parse_failures_with_scripts(str(snap.get("tail")
+                                                        or ""))
+            _runner_mod._BASELINE_RED_MAP |= {
+                (scr, name) for scr, name in qualified
+                if scr and scr != "*"}
         print("mutation: verdict baseline sourced from attribution map "
               "(§SPEC-020; cold start skipped)", file=sys.stderr)
     else:

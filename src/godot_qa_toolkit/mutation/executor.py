@@ -692,6 +692,17 @@ def _settled_all_uncovered(file: str, records: list[dict],
         "failures": records,
     }
 
+def _red_map_from_snapshots(baselines: dict) -> "set[tuple[str, str]]":
+    """map 源 chunk 基线 → 脚本限定红集合（零行为拆分）。"""
+    from .gutrun import parse_failures_with_scripts
+
+    out: set[tuple[str, str]] = set()
+    for snap in baselines.values():
+        out |= {(scr, name) for scr, name in
+                parse_failures_with_scripts(str(snap.get("tail") or ""))
+                if scr and scr != "*"}
+    return out
+
 def _build_chunks(files: list[str], project_root: str, budget: int,
                   timeout_s: int, tests_glob: str | None, jobs: int,
                   binary_kind: str | None = None,
@@ -752,16 +763,7 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
         # worker 分支红测不跳过 → 红测失败被计 kill（canary 兜底整批
         # 作废）。合成 tail 带 res:// 脚本头，qualified 解析逐位可用。
         from . import runner as _runner_mod
-        from .gutrun import parse_failures_with_scripts
-        for snap in baselines.values():
-            qualified = parse_failures_with_scripts(str(snap.get("tail")
-                                                        or ""))
-            # §SPEC-032/D13：红集合键归一 basename（与物理跳过 wanted
-            # basename 键、mutant 腿 wrapper 输出的 basename 同一口径）
-            from pathlib import Path as _P
-            _runner_mod._BASELINE_RED_MAP |= {
-                (_P(scr).name, name) for scr, name in qualified
-                if scr and scr != "*"}
+        _runner_mod._BASELINE_RED_MAP |= _red_map_from_snapshots(baselines)
         print("mutation: verdict baseline sourced from attribution map "
               "(§SPEC-020; cold start skipped)", file=sys.stderr)
     else:

@@ -704,7 +704,8 @@ def run_attribution_increment(project_root: str | Path,
     # （脚本级执行账 out 解析失败名），未重跑身份原样继承，删除剔除。
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
-        fresh_gherkin, gherkin_rerun, gherkin_dropped)
+        _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
+        gherkin_rerun, gherkin_dropped)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
@@ -1005,6 +1006,19 @@ def _gherkin_failing_scenarios(fresh_gherkin: dict) -> "set[str] | None":
         failing |= {str(x) for x in fs}
     return failing if seen else None
 
+
+def _gherkin_leg_exec_source(fresh_gherkin: "dict | None",
+                             gh_executions: "list[dict] | None"
+                             ) -> "dict | None":
+    """§SPEC-028/D14（R5）：gherkin 腿执行账来源（failing_scenarios 所在
+    ——fresh_gherkin 臂字典无 executions 键，真实 map-update 路径此前整
+    腿保守红）。"""
+    gh_leg_execs = list(gh_executions or [])
+    if fresh_gherkin is not None and not gh_leg_execs:
+        gh_leg_execs = list(fresh_gherkin.get("executions") or [])
+    if gh_leg_execs or fresh_gherkin is not None:
+        return {"executions": gh_leg_execs}
+    return None
 
 def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
                            gherkin_rerun: set) -> None:

@@ -193,7 +193,7 @@ class TestColdAbortOnUnsupportedFace:
                                           "face": "selection_dir",
                                           "requested": 1}
         cfg = captured["cfg"]
-        assert cfg["skip_red_tests"] == [["res://.gqt-attr-select/sel/test_a.gd", "test_red"]]
+        assert cfg["skip_red_tests"] == [["res://.gqt-attr-select/testsel/test_a.gd", "test_red"]]
         assert cfg["bail_enabled"] is True
 
 

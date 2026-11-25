@@ -388,6 +388,15 @@ def _legs_drift_disqualify(c: dict, seq, leg) -> None:
     c["degrade_all"] = True
 
 
+def _disclose_worker_skip(leg) -> None:
+    """§SPEC-032/D13：worker 车道 skip_red 披露（与 cold 车道 runhelp
+    同口径——机器可读 stderr 标记；零行为拆分）。"""
+    if getattr(leg, "skip_red_info", None):
+        import sys as _sys
+        print(f"mutation: baseline skip-red marked="
+              f"{leg.skip_red_info.get('marked')}/"
+              f"{leg.skip_red_info.get('requested')}", file=_sys.stderr)
+
 def _legs_one(c: dict, seq, m, target_res: str, closure,
               prev_leg_gut_ran: bool) -> bool:
     """单腿状态迁移（inject → canary 决策 → 致命处置 → 判定记录）。
@@ -427,13 +436,7 @@ def _legs_one(c: dict, seq, m, target_res: str, closure,
         _legs_record(c, m, verdict, elapsed)
         return prev_leg_gut_ran
     c["session_failures"] = 0
-    # §SPEC-032/D13：worker 车道 skip_red 披露（与 cold 车道 runhelp
-    # 同口径——机器可读 stderr 标记）
-    if getattr(leg, "skip_red_info", None):
-        import sys as _sys
-        print(f"mutation: baseline skip-red marked="
-              f"{leg.skip_red_info.get('marked')}/"
-              f"{leg.skip_red_info.get('requested')}", file=_sys.stderr)
+    _disclose_worker_skip(leg)
     verdict = c["classify_fn"](m, leg)
     verdict, canary_event, mismatch = _apply_canary(
         canary_cold, verdict, seq, c["session"])

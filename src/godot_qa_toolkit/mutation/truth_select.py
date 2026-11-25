@@ -937,10 +937,11 @@ def _explicit_stale_gate(explicit: bool, doc: dict, base: dict,
 
 def _auto_renew_step(root, path, doc, rel, evaluation, *, explicit, auto,
                      renew, timeout_s, base, strict) -> "tuple[dict, dict | None]":
-    """过期映射的 auto 续新一步（D2/D5 语义固定于此）：显式产物绝不续新
-    （只读透传），renew=False（dry-run）抑制全部续新——零 GUT；续新成功
-    返回刷新后的 evaluation，续新后装载失败返回终态 base。"""
-    if evaluation["ok"] or not (auto and renew and not explicit):
+    """过期映射的 auto 续新一步（D2 语义；§SPEC-029 覆盖 D5 只读透传：
+    显式 `--attribution-map` 不设只读例外——过期同走 prepare 阶梯原地
+    自刷）。renew=False（dry-run）抑制全部续新——零 GUT；续新成功返回
+    刷新后的 evaluation，续新后装载失败返回终态 base。"""
+    if evaluation["ok"] or not (auto and renew):
         return evaluation, None
     if not _resolve_renew(root, path, doc, rel, timeout_s):
         return evaluation, None
@@ -955,11 +956,12 @@ def _auto_renew_step(root, path, doc, rel, evaluation, *, explicit, auto,
 
 def _stale_decision_reason(evaluation_reason: str, *, explicit: bool,
                            auto: bool) -> str:
-    """过期终态 reason 合成：显式产物只读透传契约要求具名 explicit_map_stale
-    （绝不原地重建）；auto 管理的默认映射标注 still_stale（续新已试无效）。"""
-    if explicit:
-        return f"explicit_map_stale:{evaluation_reason}"
-    return ("auto_update_still_stale:" if auto else "") + evaluation_reason
+    """过期终态 reason 合成（§SPEC-029 覆盖 D5）：续新已试仍 stale 统一
+    标注 still_stale；显式映射前缀 explicit_map_stale 保留作来源披露
+    （不再表示"绝不续新"）。"""
+    prefix = "explicit_map_stale:" if explicit else ""
+    return prefix + ("auto_update_still_stale:" if auto else "") \
+        + evaluation_reason
 
 
 def _universe_target_gate(base: dict, evaluation: dict, doc: dict, rel: str,

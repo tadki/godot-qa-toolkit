@@ -169,9 +169,7 @@ def test_map_source_synthesizes_snapshot_with_red_tail(
     # 合成 tail 与既有解析器逐位兼容
     assert _parse_failing_tests(snap["tail"]) == {"test_red1"}
     qualified = parse_failures_with_scripts(snap["tail"])
-    # §SPEC-032/D13：合成 header 归一 basename（res://<basename>——
-    # 与行选面 wrapper / 失败差集同口径）
-    assert ("res://test_a.gd", "test_red1") in qualified
+    assert ("res://tests/unit/test_a.gd", "test_red1") in qualified
     assert snap["rc"] == 1
     assert snap["elapsed"] == 0.0
 

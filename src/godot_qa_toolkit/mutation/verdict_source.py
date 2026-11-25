@@ -208,9 +208,10 @@ def _synthesize_tail(red_pairs: "set[tuple[str, str]]") -> str:
         # §SPEC-032/D13：header 用 res://<basename>——合成身份与行选面
         # wrapper / 失败差集三处按 basename 对齐（header 需 res:// + .gd
         # 才被 parse_failures_with_scripts 识别为脚本标题行）
-        by_script.setdefault(f"res://{script}", []).append(name)
+        by_script.setdefault(script if script.startswith("res://")
+                             else f"res://{script}", []).append(name)
     for script, names in sorted(by_script.items()):
-        lines.append(script)
+        lines.append(script)  # script 已是 res://<original>（完整路径）
         for name in names:
             lines.append(f"* {name}")
             lines.append(f"[Failed] {name}")
@@ -249,12 +250,10 @@ def map_baseline_snapshots(files: list[str], project_root: str,
         rel = script[len("res://"):] if script.startswith("res://") else script
         if prefix is not None and not rel.startswith(prefix):
             continue
-        # §SPEC-032/D13：脚本身份三处归一（verdict 表/物理跳过/失败差
-        # 集）= basename 形态——行选面 wrapper（.gqt-attr-select/<id>/<原
-        # 名>）的 basename 与原脚本一致，collecter 匹配与 mutant 腿输出
-        # 解析（wrapper 路径）都按 basename 命中；完整路径保留在表条目
-        # script 字段供精确跳过（D10 不退化）
-        face_pairs.add((Path(script).name, name))
+        # §SPEC-032/D13（Leader 修正）：脚本身份 = 完整路径；行选面
+        # wrapper 由 skip 下发前按 basename 映射回原脚本完整路径（见
+        # runhelp 直驱 cfg 组装；同名歧义由选择目录具名拒绝）
+        face_pairs.add((script, name))
     baselines: dict = {}
     tail = _synthesize_tail(face_pairs)
     key = tests_glob if tests_glob is not None else None

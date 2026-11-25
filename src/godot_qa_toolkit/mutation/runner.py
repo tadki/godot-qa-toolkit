@@ -262,6 +262,9 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
         tests_glob, selection_meta = _resolve_auto_glob(
             tests_glob, str(path), project_root, selection_meta,
             select_mode=select_mode, allow_renew=False)
+    global _FACE_SCRIPT_BY_BASENAME
+    _FACE_SCRIPT_BY_BASENAME = {
+        Path(t).name: t for t in (selection_meta.get("tests") or [])}
     original_src = path.read_text(encoding="utf-8")
     kind = binary_kind or detect_binary_kind()
     target_res_early = _res_path_of(str(path), str(project_root))
@@ -756,6 +759,9 @@ _LEG_TIMEOUT_FLOOR = 120
 # 由 _loop_baseline 每轮重置；供（1）宿主红测跳过配对（2）同名列 kill 判
 # 定的保守豁免。空集 = 基线流无脚本标题可解析 → 回退裸名语义。
 _BASELINE_RED_MAP: set[tuple[str, str]] = set()
+# §SPEC-032/D13：行选面 wrapper basename → 原脚本 res:// 完整路径
+# （选择目录物化保名；同名歧义由选择目录具名拒绝——see1581）
+_FACE_SCRIPT_BY_BASENAME: dict[str, str] = {}
 
 # SEE-1610 §SPEC-IMPL：本 run 的 test 级 allowlist（selection_meta.tests_allow
 # 解析产物：[script, name] / [script, "*"]）。None = 本腿不启用过滤（开关
@@ -935,10 +941,7 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     global _BASELINE_RED_MAP
     from .gutrun import parse_failures_with_scripts
     qualified = parse_failures_with_scripts(baseline_tail)
-    # §SPEC-032/D13：红集合键归一 basename（与物理跳过 wanted basename、
-    # 失败差集比较同口径）
-    from pathlib import Path as _P
-    _BASELINE_RED_MAP = {(_P(scr).name, name) for scr, name in qualified
+    _BASELINE_RED_MAP = {(scr, name) for scr, name in qualified
                          if scr and scr != "*"}
     # SEE-1606 P2：开关关闭（默认）时继续跑并只做披露；打开时 fail-loud，
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。

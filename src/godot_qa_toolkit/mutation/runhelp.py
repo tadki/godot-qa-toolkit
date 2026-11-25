@@ -246,10 +246,18 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
         # SEE-1610 §SPEC-IMPL：test 级 allowlist 从 runner per-run 上下文
         # 取（_ACTIVE_ALLOW_TESTS；beacon 兜底腿不下发——宿主无该原语）。
         allow = getattr(_runner_mod, "_ACTIVE_ALLOW_TESTS", None)
+        # §SPEC-032/D13（Leader 修正）：skip 对脚本身份映射到 wrapper
+        # 完整路径（collector 只见 wrapper；basename 相同的另一个目录
+        # 同名脚本不会被误跳——D10 语义保持）
+        from pathlib import Path as _P
+        wrapper_by_base = {_P(w).name: w for w in (direct_scripts or [])}
+        skip_pairs = []
+        for scr, nm in (red_pairs or []):
+            skip_pairs.append((wrapper_by_base.get(_P(scr).name, scr), nm))
         cfg_path = directdrive.write_direct_cfg(
             slot.root, target_res, mutant_sha, auto_name, direct_scripts,
             sorted(baseline_failures or ()), bail_enabled=bail_enabled,
-            skip_red_tests=list(red_pairs or ()), allow_tests=allow)
+            skip_red_tests=skip_pairs, allow_tests=allow)
     else:
         cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
                                            auto_name)

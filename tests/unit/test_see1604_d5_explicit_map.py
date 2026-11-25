@@ -26,7 +26,10 @@ def _project(tmp_path: Path) -> Path:
     return proj
 
 
-def test_explicit_stale_map_is_not_rewritten(tmp_path, monkeypatch):
+def test_explicit_stale_map_enters_renewal(tmp_path, monkeypatch):
+    """§SPEC-029（Owner 裁决，覆盖 D5 只读透传）：显式 `--attribution-map`
+    不设只读例外——过期同走 prepare 阶梯（续新被调用；续新拒绝时仍具名
+    explicit_map_stale 且产物字节不变）。"""
     monkeypatch.setenv(truth_select.ENV_MODE, "auto")
     proj = _project(tmp_path)
     map_path = write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
@@ -40,8 +43,8 @@ def test_explicit_stale_map_is_not_rewritten(tmp_path, monkeypatch):
         lambda *a, **k: calls.append("renew") or False)
     with pytest.raises(truth_select.MutationSelectionError) as ei:
         truth_select.resolve_selection(proj, str(proj / "calc.gd"))
-    # 显式路径过期 → 具名 fail-loud，且绝不续新（零 GUT）
+    # 续新被调用（被测桩拒绝续新）→ 终态仍具名 stale；显式来源披露保留
+    assert calls == ["renew"]
     assert "explicit_map_stale" in ei.value.reason
-    assert calls == []
-    # 用户显式证据产物字节不变（provenance 不被销毁重建）
+    # 桩拒绝续新 → 用户显式证据产物字节不变（provenance 保护语义不变）
     assert Path(map_path).read_bytes() == before

@@ -481,15 +481,27 @@ def _script_qualified_new(tail: str, bare: "set[str]",
     if not red_map:
         return bare - baseline_failures
     from .gutrun import parse_failures_with_scripts
-    from pathlib import Path as _P
-    # §SPEC-032/D13：比较键归一 basename（mutant 腿输出脚本 =
-    # 行选面 wrapper 路径；基线红集合 = basename 口径）
-    red_map = {(_P(s).name, n) for s, n in red_map}
+    # §SPEC-032/D13（Leader 修正）：观测脚本 wrapper→original 经 runner
+    # face 映射还原完整路径后与基线红集合（完整路径）精确比较
+    try:
+        from . import runner as _rm
+        face_map = getattr(_rm, "_FACE_SCRIPT_BY_BASENAME", {}) or {}
+    except Exception:
+        face_map = {}
     qualified = parse_failures_with_scripts(tail)
     if qualified:
         return {n for s, n in qualified
-                if s != "*" and (_P(s).name, n) not in red_map}
+                if s != "*" and (_face_resolve(s, face_map), n)
+                not in red_map}
     return bare - baseline_failures
+
+
+def _face_resolve(observed: str, face_map: "dict[str, str]") -> str:
+    """观测脚本 → 原脚本完整路径（wrapper basename 映射；无命中原样）。"""
+    from pathlib import Path as _P
+    if not face_map:
+        return observed
+    return face_map.get(_P(observed).name, observed)
 
 
 def _classify_mutant_run(m: Mutant, rc: int, tail: str,
@@ -754,17 +766,23 @@ def _script_aware_new(failing_names, failing_scripts, baseline_names,
     - map 为 None（旧路径/无脚本标题）或腿无脚本标题 → 回退裸名差集。"""
     if baseline_red_map is None or not failing_scripts:
         return failing_names - baseline_names
-    # §SPEC-032/D13：比较键归一 basename（wrapper vs 基线）
-    from pathlib import Path as _P
-    base_map = {(_P(s).name, n) for s, n in (baseline_red_map or set())}
+    try:
+        from . import runner as _rm
+        face_map = getattr(_rm, "_FACE_SCRIPT_BY_BASENAME", {}) or {}
+    except Exception:
+        face_map = {}
     new = set()
     for name in failing_names:
         # D2-R1：通配 ("*", name) 条目是 Run Summary 的重复回显，不授予
         # 豁免——只有「脚本归属 + 名」精确命中基线红的失败才是既有失败；
         # 其它（含同名绿脚本 killer 的失败）都是真新失败 → killed。
-        covered = any((_P(scr).name, name) in base_map
-                      for scr, n in failing_scripts
-                      if n == name and scr != "*")
+        # §SPEC-032/D13（Leader 修正）：观测 wrapper→original 映射后按
+        # 完整路径精确豁免（D10：同名绿测不得被 basename 豁免误伤）。
+        covered = any(
+            (_face_resolve(scr, face_map), name) in
+            {(s2, n2) for s2, n2 in (baseline_red_map or set())}
+            for scr, n in failing_scripts
+            if n == name and scr != "*")
         if not covered:
             new.add(name)
     return new

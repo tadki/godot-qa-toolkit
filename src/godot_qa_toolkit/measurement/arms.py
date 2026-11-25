@@ -609,25 +609,26 @@ def _arm_stage(name: str, *, root: Path, prepared: dict, recipe: dict,
         (started, sink_by_rel, manifest_by_rel, instrumented_files,
          inst_by_rel, vacuous_rels) = _stage_arm_files(
             name, prepared, run_uuid, test_attribution)
+        started["project_root"] = str(root)
+        _arm_stage_created(root, started, name, attribution_causal,
+                           shadow_instrument, backup_dir)
+        plans = _arm_plans(root, recipe, gherkin, shard_width)
+        # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
+        reps = max(1, int(gherkin_repeats)) if gherkin is not None else 1
+        # P2（双臂并行）：gherkin 臂在 shadow 内插桩——钩子文本按本臂
+        # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）。
+        # SEE-1631：双臂同权——归属开启时 gherkin 臂与 gut_full 同用 attr 钩子。
+        flusher_gd, pre_hook_gd = _hook_templates(test_attribution, run_uuid)
+        shadow_hook_files = [(_FLUSHER_RELPATH, flusher_gd),
+                             (_PRE_HOOK_RELPATH, pre_hook_gd)]
+        if attribution_causal:
+            shadow_hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
     except Exception:
-        # C3-R2 项2：创建后若失败，由本进程清掉自己建的这个目录
-        # （备份目录是插桩还原的信任边界——不做全量扫描式清理）
+        # C3-R2 项2 + C3-R7：创建后到返回前的任何一步失败，由本进程清掉
+        # 自己建的这个目录（备份目录是插桩还原的信任边界——不做全量
+        # 扫描式清理；空运行目录也是残留）
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
-    started["project_root"] = str(root)
-    _arm_stage_created(root, started, name, attribution_causal,
-                       shadow_instrument, backup_dir)
-    plans = _arm_plans(root, recipe, gherkin, shard_width)
-    # §SPEC-062C：仅验收臂 N 次重复；gut_full 面单轮（确定性面）
-    reps = max(1, int(gherkin_repeats)) if gherkin is not None else 1
-    # P2（双臂并行）：gherkin 臂在 shadow 内插桩——钩子文本按本臂
-    # uuid 生成，写入每个 shadow 的 addons/（根树不被本臂触碰）。
-    # SEE-1631：双臂同权——归属开启时 gherkin 臂与 gut_full 同用 attr 钩子。
-    flusher_gd, pre_hook_gd = _hook_templates(test_attribution, run_uuid)
-    shadow_hook_files = [(_FLUSHER_RELPATH, flusher_gd),
-                         (_PRE_HOOK_RELPATH, pre_hook_gd)]
-    if attribution_causal:
-        shadow_hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
     return {"run_uuid": run_uuid, "backup_dir": backup_dir, "started": started,
             "sink_by_rel": sink_by_rel, "manifest_by_rel": manifest_by_rel,
             "instrumented_files": instrumented_files, "inst_by_rel": inst_by_rel,

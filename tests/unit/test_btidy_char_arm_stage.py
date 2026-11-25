@@ -142,3 +142,18 @@ def test_arm_stage_missing_project_godot_fails_loud(tmp_path, iso_backup):
             recipe={"gut_face": {"dirs": []}}, test_attribution=False,
             attribution_causal=False, shadow_instrument=False, shard_width=1,
             gherkin=None, gherkin_repeats=1)
+
+
+def test_arm_stage_failure_leaves_no_backup_dir(tmp_path, iso_backup):
+    """C3-R7 退回3：_arm_stage 创建备份目录后的任何一步抛错都不留运行
+    目录——C3-R2 的清理只包住 _stage_arm_files，其后的
+    _arm_stage_created 抛错时空目录残留在备份根下（空目录也是残留）。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()  # 无 project.godot → _arm_stage_created 具名失败
+    with pytest.raises(MeasurementError):
+        arms._arm_stage(
+            "gut_full", root=proj, prepared=_prepared(proj),
+            recipe={"gut_face": {"dirs": []}}, test_attribution=False,
+            attribution_causal=False, shadow_instrument=False, shard_width=1,
+            gherkin=None, gherkin_repeats=1)
+    assert list(iso_backup.iterdir()) == []

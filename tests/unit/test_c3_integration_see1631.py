@@ -1008,6 +1008,35 @@ def test_r4_new_test_identity_enters_verdict_table():
     assert merged["test_old.gd::test_ok"] == {"verdict": "green"}
 
 
+def test_r7_new_passing_universe_identity_green():
+    """C3-R7 退回1：重跑脚本里新出现、执行通过的宇宙身份必须以 green 进
+    判定表（§SPEC-025：判定表覆盖行事实宇宙）——C3-R6 修法曾把 51de7e3
+    的补绿去掉，触达产品代码的新通过测试从增量产物里消失。"""
+    from godot_qa_toolkit.measurement.increment import (
+        _merged_test_verdicts,
+    )
+
+    baseline = {"test_verdicts": {
+        "test_old.gd::test_ok": {"verdict": "green"}}}
+    executions = [{"script": "tests/unit/test_new_green.gd", "rc": 0,
+                   "out": "ok"}]
+    baseline["tests_face"] = {
+        "tests/unit/test_new_green.gd": "sha",
+        "tests/unit/test_old.gd": "sha"}
+    merged = _merged_test_verdicts(
+        baseline, executions, rerun_scripts={"test_new_green.gd"},
+        dropped_scripts=set(), removed_rels=set(), fresh_gherkin=None,
+        gherkin_rerun=set(), gherkin_dropped=set(),
+        tests_face=baseline["tests_face"],
+        arm_identities=["test_new_green.gd::test_cov_a",
+                        "test_new_green.gd::test_cov_b"])
+    assert merged is not None
+    assert merged["test_new_green.gd::test_cov_a"] == {"verdict": "green"}
+    assert merged["test_new_green.gd::test_cov_b"] == {"verdict": "green"}
+    # 基线身份逐位继承
+    assert merged["test_old.gd::test_ok"] == {"verdict": "green"}
+
+
 def test_r5_increment_failure_keeps_old_bytes(tmp_path, monkeypatch):
     """C3-R5 项1 补充：增量产物校验不过 → 旧图字节不变（tmp 丢弃）。"""
     import hashlib as _hl

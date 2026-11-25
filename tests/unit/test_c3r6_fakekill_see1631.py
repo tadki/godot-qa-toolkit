@@ -190,3 +190,27 @@ def test_r6_removal_updates_table(r6_project):
     _renew(proj, env)
     assert _verdict_entry(proj, "test_new_red_nocov") is None
     assert _verdict_entry(proj, "test_new_red_cov") is None
+
+
+def test_r7_case_g_passing_test_green_in_table(r6_project):
+    """C3-R7 退回1：新增会通过、触达产品代码的测试——判定表覆盖行事实
+    宇宙（§SPEC-025）：arms.gut_full.test_to_lines 里它的身份都要在
+    test_verdicts 里且为 green（C3-R6 修法曾漏记，产物 4 条对宇宙 5 条）。"""
+    proj, env, _base, _godot = r6_project
+    (proj / "tests" / "test_new_green_cov.gd").write_text(
+        'extends GutTest\nconst C = preload("res://src/calc_sign.gd")\n'
+        "func test_gate_true():\n\tassert_eq(C.new().gate(11), true)\n"
+        "func test_sign_pos():\n\tassert_eq(C.new().sign(9), 1)\n")
+    _renew(proj, env)
+    doc = json.loads(
+        (proj / ".qa-cache" / "attribution-map.json").read_text(
+            encoding="utf-8"))
+    tv = doc.get("test_verdicts") or {}
+    universe = ((doc.get("arms") or {}).get("gut_full")
+                or {}).get("test_to_lines") or {}
+    idents = [k for k in universe
+              if k.split("::", 1)[0] == "test_new_green_cov.gd"]
+    assert idents, "触达产品代码的新通过测试必须有归属身份（行事实宇宙）"
+    missing = {k: tv.get(k) for k in idents
+               if k not in tv or tv[k].get("verdict") != "green"}
+    assert not missing, ("判定表未覆盖宇宙身份", idents, missing)

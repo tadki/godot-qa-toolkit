@@ -78,6 +78,46 @@ def _refresh_scope(factors: "list[str]") -> str:
     return "increment"
 
 
+def _planned_action(root: str, doc: dict, files: "list[str]") -> str:
+    """C3-R9 退回3：镜像 `refresh` 的真实决策树预测动作（increment/full）。
+
+    status.would_refresh 必须与 refresh 实际执行的动作一致——周期校准
+    （calibration_due_fallback）、新增生产文件（new_prod_file_fallback）、
+    不可归因变更（unknown_changed_paths → 具名全量）、报告哈希失配都落
+    全量，其余走增量。决策面直接复用 `_increment_decision`（与增量续新
+    同一实现，预测即所见）。只读：零 GUT、零 import、零写盘。"""
+    from pathlib import Path as _P
+
+    from .verdict_source import _prepare_drift_state
+
+    root_path = _P(root)
+    changed, _drift, pristine_ok = _prepare_drift_state(doc, root, files)
+    if not pristine_ok:
+        return "full"
+    from ..measurement.increment import (
+        DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO,
+        DEFAULT_RERUN_FULL_FACE_RATIO,
+        _increment_decision, _inject_toolchain,
+    )
+    from ..measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(root_path)
+    if error is not None:
+        return "full"
+    try:
+        _classes, _inv, _rerun, reason = _increment_decision(
+            root_path, _inject_toolchain(root_path, dict(recipe)), doc,
+            changed,
+            int((doc.get("increment") or {})
+                .get("increments_since_full") or 0),
+            calibration_every=5,
+            rerun_full_face_ratio=DEFAULT_RERUN_FULL_FACE_RATIO,
+            gherkin_rerun_full_face_ratio=DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO)
+    except Exception:  # noqa: BLE001 — unknown_changed_paths 等具名拒绝
+        return "full"   # 在 refresh 里对应 unknown → 具名全量重建
+    return "increment" if reason == "incremental" else "full"
+
+
 def _last_measured_cost(doc: dict) -> "str | float":
     """最近一次实测成本（增量/建图墙钟；无记录 = "unknown"）。"""
     inc = doc.get("increment") or {}
@@ -106,9 +146,22 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
                 "last_cost": "unknown",
                 "error": msg, "missing": missing}
     fresh, factors = _factor_report(root, doc, files)
-    scope = None if fresh else _refresh_scope(factors)
-    return {"present": True, "fresh": fresh, "factors": factors,
-            "would_refresh": None if fresh else scope,
+    if fresh:
+        return {"present": True, "fresh": True, "factors": [],
+                "would_refresh": None, "scope": [],
+                "last_cost": _last_measured_cost(doc)}
+    # C3-R9 退回3：would_refresh 如实预测 refresh 将执行的动作（含周期
+    # 校准、新增生产文件、不可归因变更三类具名全量）；结构性失配
+    # （schema/arms/recipe）直接全量，其余走决策镜像。
+    if any(f.startswith(("schema:", "arms:")) for f in factors):
+        scope = "full"
+    else:
+        try:
+            scope = _planned_action(root, doc, files)
+        except Exception:  # noqa: BLE001 — 预测失败按因素面口径兜底
+            scope = _refresh_scope(factors)
+    return {"present": True, "fresh": False, "factors": factors,
+            "would_refresh": scope,
             "scope": [f.split(":", 1)[0] for f in factors] if factors
             else [],
             "last_cost": _last_measured_cost(doc)}

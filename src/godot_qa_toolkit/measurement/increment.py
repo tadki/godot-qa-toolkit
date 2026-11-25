@@ -947,7 +947,8 @@ def _verdict_per_script(executions: list[dict]) -> dict:
 
 def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
     """重跑身份按脚本执行账重算：rc==0 且无解析失败名 → green；
-    否则 red/new（增量形态新树的失败如实记 new）。"""
+    仍失败 → red，分类沿基线（基线 pre_existing 不被无依据改写为
+    new）；基线绿而本轮失败 → red/new（新增失败才 new）。"""
     for ident in list(merged):
         sc = str(ident).split("::", 1)[0]
         b = Path(sc).name
@@ -956,27 +957,48 @@ def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
             name = str(ident).split("::", 1)[1]
             if rc == 0 and name not in failing:
                 merged[ident] = {"verdict": "green"}
-            else:
-                merged[ident] = {"verdict": "red", "classification": "new",
-                                 "script": sc}
+                continue
+            prior = merged.get(ident) or {}
+            cls = (prior.get("classification")
+                   if prior.get("verdict") == "red" else None) \
+                or "new"
+            merged[ident] = {"verdict": "red", "classification": cls,
+                             "script": prior.get("script") or sc}
 
 
 def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
-                           gherkin_rerun: set) -> None:
-    """gherkin 重跑键（feature_changed/new）：重跑腿首条执行账 rc==0 →
-    键内身份 green（否则维持基线值）。"""
+                           gherkin_rerun: set,
+                           gherkin_dropped: set) -> None:
+    """gherkin 重跑键（feature_changed/new）：按重跑腿**全部**执行账判定
+    （多分片/多 rep 任一 rc!=0 都算失败）——全过 → 键内身份 green；
+    失败或不一致 → red，分类沿基线（pre_existing/suspected_intolerant
+    保持 §SPEC-017 车道，基线绿而失败 = new）。`gherkin_dropped` 的
+    feature 身份从表剔除。"""
     from .attribution import _gherkin_feature_of
 
-    gh_rc = None
-    for r in (fresh_gherkin.get("executions") or []):
-        gh_rc = int(r.get("rc") or 1)
-        break
+    if gherkin_dropped:
+        for ident in list(merged):
+            key = _gherkin_feature_of(str(ident))
+            if key in gherkin_dropped:
+                del merged[ident]
+    execs = fresh_gherkin.get("executions") or []
+    # rc=0 是合法成功值——falsy 陷阱（`0 or 1`）会把成功当失败
+    gh_ok = bool(execs) and all(
+        int(r.get("rc") if r.get("rc") is not None else 1) == 0
+        for r in execs)
     for ident in list(merged):
         key = _gherkin_feature_of(str(ident))
-        if key is None:
+        if key is None or key not in gherkin_rerun:
             continue
-        if key in gherkin_rerun and gh_rc == 0:
+        if gh_ok:
             merged[ident] = {"verdict": "green"}
+            continue
+        prior = merged.get(ident) or {}
+        cls = (prior.get("classification")
+               if prior.get("verdict") == "red" else None) or "new"
+        merged[ident] = {"verdict": "red", "classification": cls,
+                         "script": prior.get("script")
+                         or str(ident).split("::", 1)[0]}
 
 
 def _merged_test_verdicts(baseline: dict, executions: list[dict],
@@ -1003,7 +1025,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     per_script = _verdict_per_script(executions)
     _verdict_recompute_rerun(merged, per_script)
     if fresh_gherkin is not None:
-        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
+        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun,
+                               gherkin_dropped)
     return merged
 
 

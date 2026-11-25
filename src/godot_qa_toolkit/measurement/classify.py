@@ -100,13 +100,27 @@ def load_scope_rules(root: "str | Path") -> "tuple[dict | None, str | None]":
     prod = raw.get("production") or {}
     tests = raw.get("tests") or {}
     include = prod.get("include") if isinstance(prod, dict) else None
+    _validate_include(include)
+    _validate_excludes(prod, tests)
+    return raw, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _validate_include(include) -> None:
     if not isinstance(include, list) or not include:
         raise ScopeError(
             f"scope rules production.include must be a non-empty list: "
             f"{SCOPE_RULES_FILENAME}")
-    for section, key in ((prod, "exclude"), (tests, "exclude")):
-        for entry in (section.get(key) or []) if isinstance(section, dict) \
-                else []:
+    for entry in include:
+        if not isinstance(entry, dict) or entry.get("kind") not in (
+                "dir", "file", "ext"):
+            raise ScopeError(
+                f"scope rules include entry kind must be dir|file|ext: "
+                f"{entry!r}")
+
+
+def _validate_excludes(prod: dict, tests: dict) -> None:
+    for section in (prod, tests):
+        for entry in (section.get("exclude") or []):
             if not isinstance(entry, dict) or not entry.get("reason"):
                 raise ScopeError(
                     f"scope rules exclude entry missing reason "
@@ -115,13 +129,6 @@ def load_scope_rules(root: "str | Path") -> "tuple[dict | None, str | None]":
                 raise ScopeError(
                     f"scope rules entry kind must be dir|file|ext|feature: "
                     f"{entry!r}")
-    for entry in include:
-        if not isinstance(entry, dict) or entry.get("kind") not in (
-                "dir", "file", "ext"):
-            raise ScopeError(
-                f"scope rules include entry kind must be dir|file|ext: "
-                f"{entry!r}")
-    return raw, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _glob_kind(root: Path, kind: str, value: str) -> "set[str]":
@@ -160,6 +167,49 @@ def _entry_matches(entry: dict, rel: str) -> bool:
     return False
 
 
+def _resolve_production(root: Path, rules: "dict | None",
+                        test: "set[str]", non_test: "set[str]",
+                        all_files: "set[str]"
+                        ) -> "tuple[set[str], list[dict], dict[str, int]]":
+    """生产类解析：include − exclude（三粒度，exclude 必带 reason）；
+    未配规则 → 通用默认（全部非隐藏为生产；addons/gut 与
+    addons/gqt_gherkin 是 GQT 自身插件面，不算生产）。"""
+    if rules is None:
+        production = {rel for rel in all_files
+                      if rel not in test and rel not in non_test
+                      and not _is_hidden(rel)
+                      and not rel.startswith("addons/gut/")
+                      and not rel.startswith("addons/gqt_gherkin/")}
+        return production, [], {}
+    prod_include = rules["production"]["include"]
+    prod_exclude = rules["production"].get("exclude") or []
+    production: set[str] = set()
+    for entry in prod_include:
+        production |= _glob_kind(root, entry.get("kind"),
+                                 _norm(str(entry.get("value") or "")))
+    production = {rel for rel in production if not _is_hidden(rel)}
+    excluded, excluded_stats = _apply_production_exclude(production,
+                                                         prod_exclude)
+    production -= {e["path"][len("res://"):] for e in excluded}
+    return production, excluded, excluded_stats
+
+
+def _apply_production_exclude(production: "set[str]",
+                              prod_exclude: "list[dict]"
+                              ) -> "tuple[list[dict], dict[str, int]]":
+    """黑名单相减（reason 必带；统计随排除清单披露）。"""
+    excluded: list[dict] = []
+    stats: dict[str, int] = {}
+    for rel in sorted(production):
+        hit = next((e for e in prod_exclude if _entry_matches(e, rel)), None)
+        if hit is None:
+            continue
+        reason = f"{hit.get('reason')} (rule)"
+        stats[reason] = stats.get(reason, 0) + 1
+        excluded.append({"path": "res://" + rel, "reason": reason})
+    return excluded, stats
+
+
 def discover_scope(root: "str | Path") -> dict:
     """范围规则 → 四类清单（生产/非生产/测试/非测试）。
 
@@ -180,95 +230,107 @@ def discover_scope(root: "str | Path") -> dict:
             if p.is_file():
                 all_files.add(p.relative_to(root).as_posix())
 
-    # ---- 测试类：gutconfig dirs（prefix/include_subdirs）+ features
-    excluded_dirs = [e for e in ((rules or {}).get("tests") or {})
-                     .get("exclude", []) if e.get("kind") == "dir"] \
-        if rules else []
-    excluded_features = [e for e in ((rules or {}).get("tests") or {})
-                         .get("exclude", []) if e.get("kind") == "feature"] \
-        if rules else []
-    active_dirs = [d for d in face["dirs"]
-                   if not any(_entry_matches(e, d) for e in excluded_dirs)]
-    excluded_dir_names = {e.get("value") for e in excluded_dirs}
+    # ---- 测试侧分类（tests.exclude 生效）+ features/测试根分支
+    excluded_dirs, excluded_features = tests_exclude_entries(root)
+    test, non_test = _classify_test_side(all_files, face, excluded_dirs,
+                                         excluded_features)
 
-    test: set[str] = set()
-    non_test: set[str] = set()
-    for rel in sorted(all_files):
-        in_gut = False
-        for d in face["dirs"]:
-            if rel == d or rel.startswith(d + "/"):
-                in_gut = True
-                is_excluded_dir = any(
-                    (_norm(str(e.get("value") or "")) == d)
-                    for e in excluded_dirs)
-                if is_excluded_dir:
-                    non_test.add(rel)
-                    break
-                matches = rel.rsplit("/", 1)[-1].startswith(face["prefix"])
-                if face["include_subdirs"] or rel.count("/") == d.count("/"):
-                    if matches:
-                        test.add(rel)
-                    else:
-                        non_test.add(rel)
-                    break
-        if in_gut:
-            continue
-        if rel.startswith(features_rel + "/") and rel.endswith(".feature"):
-            key = _feature_key_of(rel)
-            if any(str(e.get("value") or "") == key
-                   for e in excluded_features):
-                non_test.add(rel)
-            else:
-                test.add(rel)
-            continue
-        # 测试根（gut dirs 的公共父目录）下不在任何 gut dir 的文件
-        # （KOL tests/scripts）→ 非测试
-        if _under_test_area(rel, face["dirs"]):
-            non_test.add(rel)
-
-    # ---- 生产类：include − exclude（三粒度）；未配规则 → 通用默认
-    if rules is not None:
-        prod_include = rules["production"]["include"]
-        prod_exclude = rules["production"].get("exclude") or []
-        production: set[str] = set()
-        for entry in prod_include:
-            production |= _glob_kind(root, entry.get("kind"),
-                                     _norm(str(entry.get("value") or "")))
-        production = {rel for rel in production if not _is_hidden(rel)}
-        excluded_stats_prod: dict[str, int] = {}
-        excluded_prod: list[dict] = []
-        for rel in sorted(production):
-            hit = next((e for e in prod_exclude if _entry_matches(e, rel)),
-                       None)
-            if hit is not None:
-                reason = f"{hit.get('reason')} (rule)"
-                excluded_stats_prod[reason] = \
-                    excluded_stats_prod.get(reason, 0) + 1
-                excluded_prod.append({"path": "res://" + rel,
-                                      "reason": reason})
-        production -= {e["path"][len("res://"):] for e in excluded_prod}
-    else:
-        # 通用默认：项目根下全部（隐藏目录除外）为生产；addons/gut 与
-        # addons/gqt_gherkin 是 GQT 自身插件面，不算生产（→ 非生产类）
-        production = {rel for rel in all_files
-                      if rel not in test and rel not in non_test
-                      and not _is_hidden(rel)
-                      and not rel.startswith("addons/gut/")
-                      and not rel.startswith("addons/gqt_gherkin/")}
-        excluded_stats_prod = {}
-        excluded_prod = []
-
+    # ---- 生产类 + 引用警告
+    production, excluded_prod, excluded_stats_prod = _resolve_production(
+        root, rules, test, non_test, all_files)
     test_res = sorted("res://" + rel for rel in test)
     non_test_res = sorted("res://" + rel for rel in non_test)
     prod_res = sorted("res://" + rel for rel in production)
     non_prod_res = sorted("res://" + rel for rel in sorted(
         all_files - production - test - non_test))
-
-    # ---- 引用警告：被排除生产文件被保留生产内容引用
     warnings = _excluded_reference_warnings(root, sorted(production),
                                             excluded_prod)
+    counts = {
+        "production": len(prod_res),
+        "non_production": len(non_prod_res),
+        "test": len(test_res),
+        "non_test": len(non_test_res),
+    }
+    return {
+        "production": prod_res,
+        "non_production": non_prod_res,
+        "test": test_res,
+        "non_test": non_test_res,
+        "gd": [p for p in prod_res if p.endswith(".gd")],
+        "disclosure": _scope_disclosure(root, rules, rules_sha, face,
+                                        excluded_dirs, excluded_features,
+                                        counts, prod_res, non_prod_res,
+                                        test_res, non_test_res,
+                                        excluded_prod, excluded_stats_prod,
+                                        warnings),
+    }
 
-    disclosure = {
+
+def _classify_test_side(all_files: "set[str]", face: dict,
+                        excluded_dirs: "list[dict]",
+                        excluded_features: "list[dict]"
+                        ) -> "tuple[set[str], set[str]]":
+    """测试侧分类 → (test, non_test)：gutconfig dirs（prefix/
+    include_subdirs 判据）+ features 面 + 测试根；tests.exclude 剔除者
+    与不满足判据者归非测试。"""
+    features_rel = _features_dir(Path("."))
+    test: set[str] = set()
+    non_test: set[str] = set()
+    for rel in sorted(all_files):
+        bucket = _classify_test_file(rel, face, excluded_dirs,
+                                     excluded_features, features_rel)
+        if bucket == "test":
+            test.add(rel)
+        elif bucket == "non_test":
+            non_test.add(rel)
+    return test, non_test
+
+
+def _classify_test_file(rel: str, face: dict, excluded_dirs:
+                        "list[dict]", excluded_features: "list[dict]",
+                        features_rel: str) -> "str | None":
+    """单文件测试侧判定 → "test" | "non_test" | None（非测试侧文件）。"""
+    gut_verdict = _classify_in_gut_dir(rel, face, excluded_dirs)
+    if gut_verdict is not None:
+        return gut_verdict
+    if rel.startswith(features_rel + "/") and rel.endswith(".feature"):
+        key = _feature_key_of(rel)
+        if any(str(e.get("value") or "") == key
+               for e in excluded_features):
+            return "non_test"
+        return "test"
+    if _under_test_area(rel, face["dirs"]):
+        return "non_test"
+    return None
+
+
+def _classify_in_gut_dir(rel: str, face: dict,
+                         excluded_dirs: "list[dict]") -> "str | None":
+    """GUT 目录内判定（prefix/include_subdirs；被排除目录归非测试）。
+    不在任何 gut dir → None。"""
+    for d in face["dirs"]:
+        if rel != d and not rel.startswith(d + "/"):
+            continue
+        if any(_norm(str(e.get("value") or "")) == d
+               for e in excluded_dirs):
+            return "non_test"
+        matches = rel.rsplit("/", 1)[-1].startswith(face["prefix"])
+        if face["include_subdirs"] or rel.count("/") == d.count("/"):
+            return "test" if matches else "non_test"
+        return None
+    return None
+
+
+def _scope_disclosure(root: Path, rules: "dict | None", rules_sha:
+                      "str | None", face: dict, excluded_dirs:
+                      "list[dict]", excluded_features: "list[dict]",
+                      counts: dict, prod_res: "list[str]",
+                      non_prod_res: "list[str]", test_res: "list[str]",
+                      non_test_res: "list[str]", excluded_prod:
+                      "list[dict]", excluded_stats_prod: dict,
+                      warnings: "list[str]") -> dict:
+    """四类解析披露块组装（逐目录计数/排除统计/排除清单/引用警告）。"""
+    return {
         "rules_file_present": rules_sha is not None,
         "rules_sha256": rules_sha,
         "defaults_used": rules is None,
@@ -278,16 +340,14 @@ def discover_scope(root: "str | Path") -> dict:
                               "default in effect: everything non-hidden "
                               "is production, gutconfig dirs + features "
                               "are tests"),
-        "universe_count": len(prod_res) + len(non_prod_res) + len(test_res)
-        + len(non_test_res),
-        "counts": {
-            "production": len(prod_res),
-            "non_production": len(non_prod_res),
-            "test": len(test_res),
-            "non_test": len(non_test_res),
-        },
-        "gut_dirs_effective": active_dirs,
-        "gut_dirs_excluded": sorted(excluded_dir_names),
+        "universe_count": sum(counts.values()),
+        "counts": counts,
+        "gut_dirs_effective": [d for d in face["dirs"]
+                               if not any(_norm(str(e.get("value")
+                                                    or "")) == d
+                                          for e in excluded_dirs)],
+        "gut_dirs_excluded": sorted({str(e.get("value") or "")
+                                     for e in excluded_dirs}),
         "features_excluded": [str(e.get("value") or "")
                               for e in excluded_features],
         "excluded_production": excluded_prod,
@@ -296,14 +356,6 @@ def discover_scope(root: "str | Path") -> dict:
         "excluded_reference_warnings": warnings,
         "per_dir_counts": _per_dir_counts(prod_res, non_prod_res,
                                           test_res, non_test_res),
-    }
-    return {
-        "production": prod_res,
-        "non_production": non_prod_res,
-        "test": test_res,
-        "non_test": non_test_res,
-        "gd": [p for p in prod_res if p.endswith(".gd")],
-        "disclosure": disclosure,
     }
 
 
@@ -359,23 +411,30 @@ def _excluded_reference_warnings(root: Path, kept: "list[str]",
                                           errors="replace")
         except OSError:
             continue
-        import re as _re
-
-        for erep in excluded_paths:
-            if erep == rel:
-                continue
-            stem = Path(erep).stem
-            hit = (f'"{erep}"' in text or f'"{stem}.gd"' in text
-                   or f"res://{erep}" in text
-                   or (rel.endswith(".gd") and f"class_name {stem}" in text)
-                   or (rel.endswith(".tscn")
-                       and _re.search(rf"ext_resource[^\n]*{stem}",
-                                      text) is not None))
-            if hit:
-                warnings.append(
-                    f"excluded {erep} referenced by kept {rel} — check "
-                    f"scope exclusion (production reference)")
+        warnings.extend(_reference_hits(text, rel, excluded_paths))
     return warnings[:12]
+
+
+def _reference_hits(text: str, rel: str,
+                    excluded_paths: "list[str]") -> "list[str]":
+    import re as _re
+
+    out: list[str] = []
+    for erep in excluded_paths:
+        if erep == rel:
+            continue
+        stem = Path(erep).stem
+        hit = (f'"{erep}"' in text or f'"{stem}.gd"' in text
+               or f"res://{erep}" in text
+               or (rel.endswith(".gd") and f"class_name {stem}" in text)
+               or (rel.endswith(".tscn")
+                   and _re.search(rf"ext_resource[^\n]*{stem}",
+                                  text) is not None))
+        if hit:
+            out.append(
+                f"excluded {erep} referenced by kept {rel} — check "
+                f"scope exclusion (production reference)")
+    return out
 
 
 def gd_universe(root: "str | Path") -> "list[str]":

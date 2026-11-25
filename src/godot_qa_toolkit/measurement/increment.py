@@ -702,11 +702,14 @@ def run_attribution_increment(project_root: str | Path,
                     "gherkin_dropped": sorted(gherkin_dropped)}
     # SEE-1631 §SPEC-025：verdict 表守恒——重跑身份按新执行结果重算
     # （脚本级执行账 out 解析失败名），未重跑身份原样继承，删除剔除。
+    # C3-R6：新测试身份补表需要**合并后**的 tests_face（新文件的完整
+    # 路径只在合并面里——基线面没有新文件）
+    face_after = _merged_tests_face(root, baseline, classes)
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
         gherkin_rerun, gherkin_dropped,
-        arm_identities=sorted((merged.get("test_to_lines") or {}).keys()))
+        tests_face=face_after)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
@@ -1059,29 +1062,35 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
 
 def _verdict_add_new_identities(merged: dict, per_script: dict,
                                 rerun_scripts: "set[str]",
-                                arm_identities: "list[str] | None") -> None:
-    """重跑脚本里**基线表没有**的新身份 → 按执行账补绿/红。
+                                tests_face: "dict[str, str] | None") -> None:
+    """重跑脚本里的失败测试 → red 进判定表（C3-R4 项1 / C3-R6 修正）。
 
-    C3-R4 项1：新增测试脚本被续新跑过后，其身份必须进 verdict 表
-    （红则进基线红集 → mutation 判定时物理跳过，不再把它当新失败造成
-    假 kill）。身份键形态与表内一致（脚本 basename::测试名）。"""
-    if not arm_identities:
-        return
-    for ident in arm_identities:
-        if ident in merged:
+    身份来源 = **执行账**（per_script 解析的失败名），不只归属注册表——
+    不触达产品代码的测试没有归属事实（Case A），但仍须进表。
+    `script` 字段 = `res://` 完整路径（从 `tests_face` 按脚本 basename
+    反查——与全量建图条目同一形态，物理跳过按完整路径或 basename
+    双键命中）。"""
+    tests_by_base: dict[str, list[str]] = {}
+    for rel in (tests_face or {}):
+        base = Path(rel).name
+        tests_by_base.setdefault(base, []).append("res://" + rel)
+
+    for script_base, (rc, failing) in per_script.items():
+        if script_base not in rerun_scripts:
             continue
-        script, _, name = str(ident).partition("::")
-        if not name:
-            continue
-        base = Path(script).name
-        if base not in rerun_scripts:
-            continue
-        rc, failing = per_script.get(base, (0, set()))
-        if rc == 0 and name not in failing:
-            merged[ident] = {"verdict": "green"}
-        else:
-            merged[ident] = {"verdict": "red", "classification": "new",
-                             "script": script}
+        full_paths = tests_by_base.get(script_base, [])
+        for full in full_paths:
+            if rc == 0 and not failing:
+                # 全绿——已有条目由 _verdict_recompute_rerun 处理，
+                # 新身份不在基线表 → 无需补 green（缺 = 非 red = 非 skip）
+                continue
+            base = Path(full).name
+            for name in failing:
+                ident = f"{base}::{name}"
+                if ident not in merged:
+                    merged[ident] = {"verdict": "red",
+                                     "classification": "new",
+                                     "script": full}
 
 
 def _merged_test_verdicts(baseline: dict, executions: list[dict],
@@ -1091,7 +1100,7 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
                           fresh_gherkin: "dict | None",
                           gherkin_rerun: set[str],
                           gherkin_dropped: set[str],
-                          arm_identities: "list[str] | None" = None
+                          tests_face: "dict[str, str] | None" = None
                           ) -> "dict | None":
     """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
 
@@ -1114,7 +1123,7 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     per_script = _verdict_per_script(executions)
     _verdict_recompute_rerun(merged, per_script)
     _verdict_add_new_identities(merged, per_script, rerun_scripts,
-                               arm_identities)
+                               tests_face)
     if fresh_gherkin is not None:
         _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
     return merged

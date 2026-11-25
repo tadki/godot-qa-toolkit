@@ -994,12 +994,14 @@ def test_r4_new_test_identity_enters_verdict_table():
         "test_old.gd::test_ok": {"verdict": "green"}}}
     executions = [{"script": "tests/unit/test_new_red.gd", "rc": 1,
                    "out": "* test_new_red\n[Failed] test_new_red\n"}]
+    baseline["tests_face"] = {
+        "tests/unit/test_new_red.gd": "sha",
+        "tests/unit/test_old.gd": "sha"}
     merged = _merged_test_verdicts(
         baseline, executions, rerun_scripts={"test_new_red.gd"},
         dropped_scripts=set(), removed_rels=set(), fresh_gherkin=None,
         gherkin_rerun=set(), gherkin_dropped=set(),
-        arm_identities=["test_new_red.gd::test_new_red",
-                       "test_old.gd::test_ok"])
+        tests_face=baseline["tests_face"])
     assert merged is not None
     assert merged["test_new_red.gd::test_new_red"]["verdict"] == "red"
     # 基线身份逐位继承

@@ -906,6 +906,25 @@ def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
     return out
 
 
+def _production_content_fingerprint(root: Path) -> "dict[str, str]":
+    """生产内容类文件指纹（rel→sha256；§SPEC-029 表 #5/#6）。
+
+    生产 `.gd` 之外的场景/资源/数据文本与生产 `.gd` 同类——内容变更、
+    新增、删除都判过期；二进制资产与引擎边车不纳入（表 #7）。"""
+    import hashlib
+
+    from .classify import production_content_files
+
+    out: dict[str, str] = {}
+    for rel in production_content_files(root):
+        p = Path(root) / rel
+        try:
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
 def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
                           project_root: Path, causal_meta: dict,
                           file_sha256: "dict[str, str] | None",
@@ -933,6 +952,11 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         "causal": causal_meta,
         # SEE-1581：文件级新鲜绑定（mutation 真值选面的 file hash 判据）
         "file_sha256": dict(file_sha256 or {}),
+        # §SPEC-029 表 #5/#6：生产**内容类**文件（场景/资源/数据文本）
+        # 的内容指纹——建图不插桩它们，但内容变更/新增/删除必须判过期
+        # （与生产 .gd 同一套 prod_changed/new/removed 逻辑）
+        "production_content_sha256": _production_content_fingerprint(
+            project_root),
         "target_files": list(target_files or []),
         # 测试面内容绑定：测试脚本内容变化同样使映射过期（recipe 不含
         # 测试内容；覆盖边却依赖它）

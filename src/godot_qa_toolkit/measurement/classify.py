@@ -484,6 +484,26 @@ def _reference_hits(text: str, rel: str,
     return out
 
 
+_BINARY_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".ttf", ".otf",
+                ".woff", ".woff2", ".mp3", ".wav", ".ogg", ".mp4", ".webm",
+                ".aseprite", ".ase", ".exr", ".fbx", ".blend", ".import",
+                ".uid")
+
+
+def production_content_files(root: "str | Path") -> "list[str]":
+    """生产**内容类**文件（rel 形态）——场景/资源/数据文本与生产 `.gd`
+    同类（§SPEC-029 表第 5/6 行：修改/新增/删除同一套逻辑）；二进制资产
+    与引擎边车不纳入内容指纹（表第 7 行）。"""
+    scope = discover_scope(root)
+    out: list[str] = []
+    for rp in scope["production"]:
+        rel = rp.removeprefix("res://")
+        if rel.lower().endswith(_BINARY_EXTS):
+            continue
+        out.append(rel)
+    return sorted(out)
+
+
 def gd_universe(root: "str | Path") -> "list[str]":
     """建图测量宇宙 = 生产 `.gd`（§SPEC-031；不含测试/场景——插桩目标）。"""
     return discover_scope(root)["gd"]

@@ -705,7 +705,8 @@ def run_attribution_increment(project_root: str | Path,
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
-        gherkin_rerun, gherkin_dropped)
+        gherkin_rerun, gherkin_dropped,
+        arm_identities=sorted((merged.get("test_to_lines") or {}).keys()))
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
@@ -1056,13 +1057,42 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
                          or str(ident).split("::", 1)[0]}
 
 
+def _verdict_add_new_identities(merged: dict, per_script: dict,
+                                rerun_scripts: "set[str]",
+                                arm_identities: "list[str] | None") -> None:
+    """重跑脚本里**基线表没有**的新身份 → 按执行账补绿/红。
+
+    C3-R4 项1：新增测试脚本被续新跑过后，其身份必须进 verdict 表
+    （红则进基线红集 → mutation 判定时物理跳过，不再把它当新失败造成
+    假 kill）。身份键形态与表内一致（脚本 basename::测试名）。"""
+    if not arm_identities:
+        return
+    for ident in arm_identities:
+        if ident in merged:
+            continue
+        script, _, name = str(ident).partition("::")
+        if not name:
+            continue
+        base = Path(script).name
+        if base not in rerun_scripts:
+            continue
+        rc, failing = per_script.get(base, (0, set()))
+        if rc == 0 and name not in failing:
+            merged[ident] = {"verdict": "green"}
+        else:
+            merged[ident] = {"verdict": "red", "classification": "new",
+                             "script": script}
+
+
 def _merged_test_verdicts(baseline: dict, executions: list[dict],
                           rerun_scripts: set[str],
                           dropped_scripts: set[str],
                           removed_rels: set[str],
                           fresh_gherkin: "dict | None",
                           gherkin_rerun: set[str],
-                          gherkin_dropped: set[str]) -> "dict | None":
+                          gherkin_dropped: set[str],
+                          arm_identities: "list[str] | None" = None
+                          ) -> "dict | None":
     """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
 
     - 基线表原样继承（未重跑身份逐位不变）；
@@ -1083,6 +1113,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     _drop_gherkin_dropped(merged, gherkin_dropped)
     per_script = _verdict_per_script(executions)
     _verdict_recompute_rerun(merged, per_script)
+    _verdict_add_new_identities(merged, per_script, rerun_scripts,
+                               arm_identities)
     if fresh_gherkin is not None:
         _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
     return merged

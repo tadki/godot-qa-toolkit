@@ -416,6 +416,7 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
     # 同名红测会使建图 arms 门具名拒装（gut 臂零归属边证据）——D10 反例
     # 以合成判定面直接落盘（消费路径端到端：map 源 mutation 读判定面）
     import hashlib as _hl
+    from godot_qa_toolkit.mutation.coverlink import current_tests_face
     from godot_qa_toolkit.mutation.truth_select import (
         _fresh_recipe_hash as _fresh_recipe_hash,
     )
@@ -434,7 +435,9 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
             "tests/unit/test_dup.gd": _hl.sha256(
                 unit_dup.read_bytes()).hexdigest(),
             "tests/nested/test_dup.gd": _hl.sha256(
-                nested_dup.read_bytes()).hexdigest()},
+                nested_dup.read_bytes()).hexdigest(),
+            # C3-R4 项1：测试面集合双向对账——map 记录当前 GUT 测试面全集
+            **current_tests_face(str(root))},
         "instrumentable_lines": {"calc_sign.gd": [3, 4, 5]},
         "arms": {"gut_full": {"test_to_lines": {
             "res://tests/unit/test_dup.gd::test_same": {"calc_sign.gd": [3, 4]},
@@ -909,3 +912,162 @@ def test_r2_mapview_violation_named_json_all_entries(
             assert payload.get("summary", {}).get("error") or payload.get(
                 "failures"), "失败必须具名"
     assert rc in (0, 1, 2)
+
+
+def test_r4_new_test_file_makes_map_stale(tmp_path, monkeypatch):
+    """C3-R4 项1：新增测试文件（当前 GUT 面多出）→ map 判过期（新增
+    必须续新跑进去，否则 full 面把新测失败当新失败 → 假 kill）。"""
+    from godot_qa_toolkit.mutation import verdict_source as vs
+    from godot_qa_toolkit.mutation.coverlink import current_tests_face
+
+    proj = _r2_project(tmp_path)
+    map_file = proj / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": None, "project_root": str(proj),
+           "file_sha256": {}, "target_files": [], "tests_face": {},
+           "instrumentable_lines": {},
+           "arms": {"gut_full": {"test_to_lines": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False}},
+           "test_verdicts": {}}
+    map_file.write_text(json.dumps(doc), encoding="utf-8")
+    # 新增一个测试文件 → 面集合变大
+    (proj / "tests" / "unit" / "test_new_red.gd").write_text(
+        "extends GutTest\nfunc test_new():\n\tfail_test(\"new red\")\n")
+    with pytest.raises(vs.BaselineSourceError) as ei:
+        vs.assert_map_fresh(str(proj), doc, [])
+    assert "tests_face drift" in str(ei.value)
+    assert "added:tests/unit/test_new_red.gd" in str(ei.value)
+
+
+def test_r4_production_content_drift_makes_map_stale(tmp_path, monkeypatch):
+    """C3-R4 项2：生产内容（场景/资源/数据文本）内容变更/新增 → map 判
+    过期（与生产 .gd 同一套逻辑；§SPEC-029 表第 5/6 行）。"""
+    import hashlib as _hl
+
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    proj = _r2_project(tmp_path)
+    (proj / "resources").mkdir(exist_ok=True)
+    (proj / "resources" / "data.csv").write_text("a,b\n")
+    (proj / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": [{"kind": "dir", "value": "resources"},
+                                   {"kind": "file", "value": "calc.gd"}]}}))
+    from godot_qa_toolkit.mutation.coverlink import current_tests_face
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": None, "project_root": str(proj),
+           "file_sha256": {}, "target_files": [],
+           "tests_face": current_tests_face(str(proj)),
+           "instrumentable_lines": {},
+           "arms": {"gut_full": {"test_to_lines": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False}},
+           "production_content_sha256": {
+               "resources/data.csv": _hl.sha256(b"a,b\n").hexdigest()},
+           "test_verdicts": {}}
+    # 内容变更 → 过期
+    (proj / "resources" / "data.csv").write_text("a,c\n")
+    with pytest.raises(vs.BaselineSourceError) as ei:
+        vs.assert_map_fresh(str(proj), doc, [])
+    assert "production content drift" in str(ei.value)
+    # 新增生产内容 → 过期
+    doc["production_content_sha256"]["resources/data.csv"] = _hl.sha256(
+        (proj / "resources" / "data.csv").read_bytes()).hexdigest()
+    (proj / "resources" / "more.csv").write_text("x\n")
+    with pytest.raises(vs.BaselineSourceError) as ei:
+        vs.assert_map_fresh(str(proj), doc, [])
+    assert "production content drift" in str(ei.value)
+
+
+def test_r4_new_test_identity_enters_verdict_table():
+    """C3-R4 项1：新增测试脚本被续新跑过后，其身份必须进 verdict 表
+    （红 → 进基线红集 → mutation 判定物理跳过，不再当新失败假 kill）。"""
+    from godot_qa_toolkit.measurement.increment import (
+        _merged_test_verdicts,
+    )
+
+    baseline = {"test_verdicts": {
+        "test_old.gd::test_ok": {"verdict": "green"}}}
+    executions = [{"script": "tests/unit/test_new_red.gd", "rc": 1,
+                   "out": "* test_new_red\n[Failed] test_new_red\n"}]
+    merged = _merged_test_verdicts(
+        baseline, executions, rerun_scripts={"test_new_red.gd"},
+        dropped_scripts=set(), removed_rels=set(), fresh_gherkin=None,
+        gherkin_rerun=set(), gherkin_dropped=set(),
+        arm_identities=["test_new_red.gd::test_new_red",
+                       "test_old.gd::test_ok"])
+    assert merged is not None
+    assert merged["test_new_red.gd::test_new_red"]["verdict"] == "red"
+    # 基线身份逐位继承
+    assert merged["test_old.gd::test_ok"] == {"verdict": "green"}
+
+
+def test_r4_new_test_file_makes_map_stale(tmp_path, monkeypatch):
+    """C3-R4 项1：新增测试文件（当前 GUT 面多出）→ map 判过期（新增
+    必须续新跑进去，否则 full 面把新测失败当新失败 → 假 kill）。"""
+    from godot_qa_toolkit.mutation import verdict_source as vs
+    from godot_qa_toolkit.mutation.coverlink import current_tests_face
+
+    proj = _r2_project(tmp_path)
+    map_file = proj / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": None, "project_root": str(proj),
+           "file_sha256": {}, "target_files": [], "tests_face": {},
+           "instrumentable_lines": {},
+           "arms": {"gut_full": {"test_to_lines": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False}},
+           "test_verdicts": {}}
+    map_file.write_text(json.dumps(doc), encoding="utf-8")
+    # 新增一个测试文件 → 面集合变大
+    (proj / "tests" / "unit" / "test_new_red.gd").write_text(
+        "extends GutTest\nfunc test_new():\n\tfail_test(\"new red\")\n")
+    with pytest.raises(vs.BaselineSourceError) as ei:
+        vs.assert_map_fresh(str(proj), doc, [])
+    assert "tests_face drift" in str(ei.value)
+    assert "added:tests/unit/test_new_red.gd" in str(ei.value)
+
+
+def test_r4_production_content_drift_makes_map_stale(tmp_path, monkeypatch):
+    """C3-R4 项2：生产内容（场景/资源/数据文本）内容变更/新增 → map 判
+    过期（与生产 .gd 同一套逻辑；§SPEC-029 表第 5/6 行）。"""
+    import hashlib as _hl
+
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    proj = _r2_project(tmp_path)
+    (proj / "resources").mkdir(exist_ok=True)
+    (proj / "resources" / "data.csv").write_text("a,b\n")
+    (proj / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": [{"kind": "dir", "value": "resources"},
+                                   {"kind": "file", "value": "calc.gd"}]}}))
+    from godot_qa_toolkit.mutation.coverlink import current_tests_face
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": None, "project_root": str(proj),
+           "file_sha256": {}, "target_files": [],
+           "tests_face": current_tests_face(str(proj)),
+           "instrumentable_lines": {},
+           "arms": {"gut_full": {"test_to_lines": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False}},
+           "production_content_sha256": {
+               "resources/data.csv": _hl.sha256(b"a,b\n").hexdigest()},
+           "test_verdicts": {}}
+    # 内容变更 → 过期
+    (proj / "resources" / "data.csv").write_text("a,c\n")
+    with pytest.raises(vs.BaselineSourceError) as ei:
+        vs.assert_map_fresh(str(proj), doc, [])
+    assert "production content drift" in str(ei.value)
+    # 新增生产内容 → 过期
+    doc["production_content_sha256"]["resources/data.csv"] = _hl.sha256(
+        (proj / "resources" / "data.csv").read_bytes()).hexdigest()
+    (proj / "resources" / "more.csv").write_text("x\n")
+    with pytest.raises(vs.BaselineSourceError) as ei:
+        vs.assert_map_fresh(str(proj), doc, [])
+    assert "production content drift" in str(ei.value)

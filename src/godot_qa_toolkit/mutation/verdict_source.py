@@ -84,7 +84,12 @@ def _assert_recipe_pristine(project_root: str, doc: dict) -> None:
 
 
 def _assert_tests_face(project_root: str, doc: dict) -> None:
+    """测试面集合对账：map 记录的测试文件与**当前** GUT 测试面**双向**
+    比对——多了（新增测试文件）或少了（删除）都判过期（C3-R4 项1：新增
+    红测必须被续新跑进去，否则 full 面把新测失败当新失败 → 假 kill）。"""
     import hashlib
+
+    from ..mutation.coverlink import current_tests_face
 
     face = doc.get("tests_face") or {}
     drift = []
@@ -96,6 +101,12 @@ def _assert_tests_face(project_root: str, doc: dict) -> None:
         have = hashlib.sha256(p.read_bytes()).hexdigest()
         if have != want:
             drift.append(f"changed:{rel}")
+    try:
+        current = current_tests_face(project_root)
+    except Exception:  # noqa: BLE001 — 探测失败按无新增处理（不误报）
+        current = {}
+    for rel in sorted(set(current) - set(face)):
+        drift.append(f"added:{rel}")
     if drift:
         raise BaselineSourceError(
             f"baseline_source=map: tests_face drift — {sorted(drift)[:6]}")
@@ -132,31 +143,64 @@ def _assert_target_files(project_root: str, doc: dict,
 
 
 def _assert_no_new_production(root: Path, doc: dict) -> None:
-    """§SPEC-029 表 #2：树内新增宇宙文件（范围规则发现、不在 map
-    file_sha256 全集）→ 判不新鲜。范围规则不闭合（路径拼错/白名单空）
-    → 具名 fail-loud。文本内容文件（.tscn/.tres/csv/translation）与
-    生产 .gd 同套逻辑（§SPEC-031 v8）。"""
-    from ..measurement.classify import ScopeError, discover_scope
+    """§SPEC-029 表 #2/#5/#6：生产内容指纹对账——生产 `.gd` 之外的
+    场景/资源/数据文本与生产 `.gd` 同类（内容变更/新增/删除都判过期）；
+    指纹缺失（旧产物无 `production_content_sha256`）→ 回落按
+    `file_sha256` 的 `.gd` 目标面比对（不误报）。
+
+    §SPEC-029 表 #4：非生产文件不触发刷新。"""
+    from ..measurement.classify import (
+        ScopeError, production_content_files,
+    )
 
     try:
-        # §SPEC-029 表 #4：新增检出只看生产类（非生产 .gd 不触发刷新）
-        universe = discover_scope(root)["production"]
+        content_files = production_content_files(root)
     except ScopeError as e:
         raise BaselineSourceError(
             f"baseline_source=map: {e}") from e
+    fingerprint = doc.get("production_content_sha256")
+    if isinstance(fingerprint, dict) and fingerprint:
+        drift = _content_fingerprint_drift(root, fingerprint, content_files)
+        if drift:
+            raise BaselineSourceError(
+                f"baseline_source=map: production content drift — "
+                f"{sorted(drift)[:6]}")
+        return
+    # 旧产物（无内容指纹）→ 仅按目标 .gd 面比对，避免误报
     shas = doc.get("file_sha256") or {}
     known = {("res://" + rel) for rel in shas}
-    # 测试脚本由 tests_face 对账负责（表 #8）——不在宇宙新增判定内重复
-    # 计数（fixture 无 gutconfig 时 tests/ 测试文件不误报 stale）。
     test_face = {("res://" + rel)
                  for rel in (doc.get("tests_face") or {})}
-    new = [u for u in universe
-           if u not in known and u not in test_face]
+    new = [u for u in content_files
+           if ("res://" + u) not in known
+           and ("res://" + u) not in test_face]
     if new:
         raise BaselineSourceError(
             f"baseline_source=map: {len(new)} new universe file(s) not in "
             f"map (map freshness covers the scope universe, "
             f"§SPEC-029/031) — {sorted(new)[:6]}")
+
+
+def _content_fingerprint_drift(root: Path, fingerprint: dict,
+                               content_files: "list[str]") -> "list[str]":
+    """内容指纹漂移清单（内容变 / 文件被删 / 新增未登记）。"""
+    import hashlib
+
+    drift: list[str] = []
+    for rel, want in fingerprint.items():
+        p = root / rel
+        if not p.is_file():
+            drift.append(f"removed:{rel}")
+            continue
+        try:
+            have = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if have != want:
+            drift.append(f"changed:{rel}")
+    drift.extend(f"added:{rel}" for rel in sorted(content_files)
+                 if rel not in fingerprint)
+    return drift
 
 
 def assert_map_fresh(project_root: str, doc: dict, files: list[str]) -> None:
@@ -291,8 +335,10 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
     """map 与当前树的漂移分类 → (增量可续新的变更路径, 全部漂移描述)。
 
     增量可续新 = 目标生产文件 sha 漂移 + tests_face（测试脚本）sha 漂移
-    （map-update 的增量语义覆盖）；recipe pristine 失配 / 结构性缺失
-    → 只能全脸重建（增量列表为空但漂移描述在场）。"""
+    + **新增**测试脚本与**新增/变更**生产内容文件（§SPEC-029 表 #1/#2/#5/#6：
+    新增测试必须跑、生产内容与生产 .gd 同一套逻辑）；
+    recipe pristine 失配 / 结构性缺失 → 只能全脸重建（增量列表为空但
+    漂移描述在场）。"""
     import hashlib
 
     root = Path(project_root).resolve()
@@ -312,26 +358,68 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
         _sha_drift(root, rel, want, changed, drift)
     for rel, want in face.items():
         _sha_drift(root, rel, want, changed, drift)
-    # §SPEC-029 表 #1/#2：全集对账——树内生产 .gd 全集（分类清单驱动）
-    # 与 map 记录面比对：新增生产 .gd → 判不新鲜（重建后走既有
-    # new_prod_file_fallback）；分类不闭合 → unclassified_source 具名
-    # fail-loud。
-    from ..measurement.classify import ScopeError, discover_scope
+
+    # §SPEC-029 表 #1/#2/#5/#6：生产内容全集对账（场景/资源/数据文本
+    # 与生产 .gd 同类；新增 → 变更面；内容变 → 变更面）
+    _content_drift(root, doc, changed, drift)
+    # §SPEC-029 表 #8：新增测试脚本 → 变更面（必须被续新跑进去）
+    _new_test_drift(root, doc, changed, drift)
+    return sorted(changed), sorted(drift)
+
+
+def _content_drift(root: Path, doc: dict, changed: "set[str]",
+                   drift: "set[str]") -> None:
+    """生产内容全集对账（§SPEC-029 表 #1/#2/#5/#6）：新增 → 变更面；
+    内容变更 → 变更面。旧产物（无内容指纹）按目标面比对不误报。"""
+    import hashlib
+
+    from ..measurement.classify import (
+        ScopeError, production_content_files,
+    )
 
     try:
-        universe = discover_scope(root)["production"]
+        content_files = production_content_files(root)
     except ScopeError as e:
         raise BaselineSourceError(f"{e}") from e
-    known = {("res://" + rel) for rel in shas}
-    test_face = {("res://" + rel)
-                 for rel in (doc.get("tests_face") or {})}
-    for rp in universe:
-        if rp in known or rp in test_face:
+    fingerprint = doc.get("production_content_sha256")
+    if not (isinstance(fingerprint, dict) and fingerprint):
+        shas = doc.get("file_sha256") or {}
+        face = doc.get("tests_face") or {}
+        for rel in content_files:
+            if rel in shas or rel in face:
+                continue
+            changed.add(rel)
+            drift.add(f"new:{rel}")
+        return
+    for rel in sorted(content_files):
+        if rel not in fingerprint:
+            changed.add(rel)
+            drift.add(f"new:{rel}")
             continue
-        rel = rp[len("res://"):]
+        p = root / rel
+        if not p.is_file():
+            continue
+        try:
+            have = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if have != fingerprint[rel]:
+            changed.add(rel)
+            drift.add(f"changed:{rel}")
+
+
+def _new_test_drift(root: Path, doc: dict, changed: "set[str]",
+                    drift: "set[str]") -> None:
+    """新增测试脚本 → 变更面（§SPEC-029 表 #8：新增测试必须跑）。"""
+    try:
+        from ..mutation.coverlink import current_tests_face
+        current_face = current_tests_face(root)
+    except Exception:  # noqa: BLE001 — 探测失败按无新增处理
+        current_face = {}
+    face = doc.get("tests_face") or {}
+    for rel in sorted(set(current_face) - set(face)):
         changed.add(rel)
-        drift.add(f"new:{rel}")
-    return sorted(changed), sorted(drift)
+        drift.add(f"new_test:{rel}")
 
 
 def _production_universe(project_root: str, files: list[str]) -> list[str]:

@@ -1061,6 +1061,23 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
                          or str(ident).split("::", 1)[0]}
 
 
+def _verdict_identity_index(
+        tests_face: "dict[str, str] | None",
+        arm_identities: "list[str] | None") -> "tuple[dict, dict]":
+    """脚本 basename → res:// 完整路径表 与 basename → 宇宙身份表。"""
+    tests_by_base: dict[str, list[str]] = {}
+    for rel in (tests_face or {}):
+        base = Path(rel).name
+        tests_by_base.setdefault(base, []).append("res://" + rel)
+    idents_by_base: dict[str, list[str]] = {}
+    for ident in arm_identities or []:
+        sc, _, nm = str(ident).partition("::")
+        if nm:
+            idents_by_base.setdefault(Path(sc).name,
+                                      []).append(str(ident))
+    return tests_by_base, idents_by_base
+
+
 def _verdict_add_new_identities(merged: dict, per_script: dict,
                                 rerun_scripts: "set[str]",
                                 tests_face: "dict[str, str] | None",
@@ -1073,16 +1090,8 @@ def _verdict_add_new_identities(merged: dict, per_script: dict,
     失败名）→ red——不触达产品代码的测试没有归属事实（Case A）也要进表；
     `script` 字段 = `res://` 完整路径（`tests_face` 按 basename 反查——
     与全量建图条目同形态，物理跳过按完整路径命中；C3-R6 Case B）。"""
-    tests_by_base: dict[str, list[str]] = {}
-    for rel in (tests_face or {}):
-        base = Path(rel).name
-        tests_by_base.setdefault(base, []).append("res://" + rel)
-    idents_by_base: dict[str, list[str]] = {}
-    for ident in arm_identities or []:
-        sc, _, nm = str(ident).partition("::")
-        if nm:
-            idents_by_base.setdefault(Path(sc).name,
-                                      []).append(str(ident))
+    tests_by_base, idents_by_base = _verdict_identity_index(
+        tests_face, arm_identities)
 
     for script_base, (rc, failing) in per_script.items():
         if script_base not in rerun_scripts:

@@ -102,6 +102,34 @@ def _baseline_script_names(baseline: dict) -> set[str]:
 def _fid_file_of(fid: str) -> str:
     return fid.split("::", 1)[0]
 
+def _prod_classify_index(arm: dict) -> tuple:
+    """生产文件分类索引（SEE-1610 §SPEC-N1）：file/fn 边全集。"""
+    edge_files = (set(arm.get("file_to_tests") or {})
+                  | set(arm.get("file_to_scripts") or {}))
+    known_fids = {fid for ids in (arm.get("test_to_functions") or {}).values()
+                  for fid in ids}
+    known_fids |= {fid for ids in (arm.get("script_to_functions") or {})
+                   .values() for fid in ids}
+    return edge_files, known_fids
+
+
+def _known_test_names(arm: dict, baseline: dict) -> "set[str]":
+    """测试删除的 known 判定：身份全集 ∪ 基线测试面脚本名。
+
+    SEE-1610：行事实是主真值，身份全集须并入行事实身份；C3-R8：还须认
+    基线测试面（tests_face）——零归属边的测试（只 assert 自足的填充脚本）
+    删除时无身份可查，此前被判 unknown 触发全量重建；因素表第 6 行要求
+    按 test_removed 增量剔除。"""
+    idents = set(arm.get("test_to_functions") or {}) | set(
+        arm.get("script_to_functions") or {})
+    idents |= set(arm.get("test_to_lines") or {})
+    idents |= set(arm.get("script_to_lines") or {})
+    names = {_script_name_of(i) for i in idents}
+    names |= {Path(rel).name
+              for rel in (baseline.get("tests_face") or {})}
+    return names
+
+
 def classify_changes(root: Path, changed: list[str],
                      baseline: dict) -> dict[str, list[str]]:
     """变更分类（各类返回相对 root 的路径列表）。
@@ -116,25 +144,8 @@ def classify_changes(root: Path, changed: list[str],
       =feature_changed、不在基线=feature_new、在基线不在盘=feature_removed；
     - 其余路径拒绝（unknown，fail-loud 不静默）。"""
     arm = baseline["arms"]["gut_full"]
-    edge_files = (set(arm.get("file_to_tests") or {})
-                  | set(arm.get("file_to_scripts") or {}))
-    known_fids = {fid for ids in (arm.get("test_to_functions") or {}).values()
-                  for fid in ids}
-    known_fids |= {fid for ids in (arm.get("script_to_functions") or {})
-                   .values() for fid in ids}
-    test_identities = set(arm.get("test_to_functions") or {}) | set(
-        arm.get("script_to_functions") or {})
-    # SEE-1610 §SPEC-N1：行事实是主真值（SEE-1587）——身份全集并入行事实
-    # 身份；否则行级基线（fn 边缺席）会把 test_changed/removed 误判
-    # unknown 被 fail-loud 拒跑。
-    test_identities |= set(arm.get("test_to_lines") or {})
-    test_identities |= set(arm.get("script_to_lines") or {})
-    # C3-R8：删除判定还须认基线测试面（tests_face）——零归属边的测试
-    # （只 assert 自足的填充脚本）删除时无身份可查，此前被判 unknown 触发
-    # 全量重建；因素表第 6 行要求按 test_removed 增量剔除
-    known_test_names = {_script_name_of(i) for i in test_identities}
-    known_test_names |= {Path(rel).name
-                         for rel in (baseline.get("tests_face") or {})}
+    edge_files, known_fids = _prod_classify_index(arm)
+    known_test_names = _known_test_names(arm, baseline)
     feature_keys = _baseline_gherkin_feature_keys(baseline)
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],

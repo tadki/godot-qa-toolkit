@@ -265,11 +265,23 @@ def test_r7_case_g_passing_test_green_in_table(r6_project):
     assert not missing, ("判定表未覆盖宇宙身份", idents, missing)
 
 
+def _reset_increment_counter(proj: Path) -> None:
+    """删除类语义测试对周期性全量校准（since_full>=calibration_every，
+    默认 5）确定化——本模块夹具被前面用例多次续新，计数器可能已到期。"""
+    p = proj / ".qa-cache" / "attribution-map.json"
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    inc = doc.get("increment")
+    if isinstance(inc, dict):
+        inc["increments_since_full"] = 0
+    p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+
 def test_r8_delete_plus_add_same_batch_renews(r6_project):
     """C3-R8 退回1：同一批里删除一个测试文件、又新增一个测试文件 → 一次
     续新成功（此前删除只进 drift 不进变更面，装填后复检仍过期、永不自愈）；
     被删身份出表、新增通过身份以 green 进表、动作为增量。"""
     proj, env, _base, _godot = r6_project
+    _reset_increment_counter(proj)
     (proj / "tests" / "test_fill_00.gd").unlink()
     (proj / "tests" / "test_r8_new_pass.gd").write_text(
         'extends GutTest\nconst C = preload("res://src/calc_sign.gd")\n'
@@ -288,6 +300,7 @@ def test_r8_delete_only_incremental_no_full_rebuild(r6_project):
     """C3-R8 退回1：只删除一个测试文件 → 续新走增量（因素表第 6 行：
     剔除边与 verdict、不重跑），不做全量重建；被删身份不在表里。"""
     proj, env, _base, _godot = r6_project
+    _reset_increment_counter(proj)
     (proj / "tests" / "test_fill_01.gd").unlink()
     _renew(proj, env)
     doc = json.loads(

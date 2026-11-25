@@ -870,23 +870,11 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
-    except MutationSelectionError as e:
+    except (MutationSelectionError, SelectionError) as e:
         return _selection_error_payload(args, e)
-    except SelectionError as e:  # F4：基类兜底（含坏 JSON 具名转域）
-        return _selection_error_payload(args, e)
-    except BaselineSourceError as e:
-        # SEE-1631 §SPEC-020：map 源判定基线不可用/与实跑失配——具名
-        # fail-loud（整批作废），零 traceback 泄漏。
-        return _emit({"tool": "mutation", "ok": False,
-                      "summary": {"error": str(e)},
-                      "failures": [{"reason": str(e)}]})
-    except MapContractError as e:
-        # §SPEC-032/C3-R2 项1：MapView 构造期断言 / refresh 失败不装
-        # 半成品——CLI 具名 JSON（零 traceback）。
-        return _emit({"tool": "mutation", "ok": False,
-                      "summary": {"error": str(e)},
-                      "failures": [{"reason": str(e)}]})
-    except BinaryConfigError as e:
+    except (BaselineSourceError, MapContractError, BinaryConfigError) as e:
+        # §SPEC-020/032/C3-R2 项1：map 判定基线不可用/MapView 构造期
+        # 断言/refresh 失败不装半成品/二进制契约——具名 JSON 零 traceback
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})

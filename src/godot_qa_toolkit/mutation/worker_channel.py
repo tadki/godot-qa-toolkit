@@ -225,10 +225,35 @@ def canary_due(leg_index: int, every: int | None = None) -> bool:
 
 
 
+def _parity_expected_failures(baseline_failures, red_pairs, tests_scripts,
+                              skip_red_info) -> "set[str]":
+    """C3-R9 退回2：parity 腿可观察的期望失败集。
+
+    - tests_scripts 缺省（None/空）= tests_glob 全脸腿：全部基线红集
+      可观察，不裁剪；
+    - 显式脚本清单（行选面闭包 / kill-bail 面）：期望 = 基线红集 ∩ 腿
+      脚本（闭包不含红测时"没跑"不得当"跑绿"）；
+    - 再减物理跳过名单（skip-red 已移除的测试不再出现在失败集）。
+    此前直接比全量基线红集：闭包不含红测或红测被跳过时必然失配，map 源
+    整批作废成假阳性。"""
+    expected = {str(n) for n in (baseline_failures or ())}
+    if red_pairs and (tests_scripts or []):
+        ran_bases = {Path(str(w)).name for w in tests_scripts}
+        expected = {str(n) for scr, n in red_pairs
+                    if Path(str(scr)).name in ran_bases}
+    skipped = {str(n).split("::", 1)[-1]
+               for n in (skip_red_info.get("names") or [])}
+    return expected - skipped
+
+
 def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
                      baseline_failures, parity_inject_fn,
-                     tests_scripts: list[str] | None = None):
-    """会话前置 parity 门（D-W2）：直驱失败集必须逐位等于冷 baseline 失败集。
+                     tests_scripts: list[str] | None = None,
+                     red_pairs: "list[tuple[str, str]] | None" = None):
+    """会话前置 parity 门（D-W2）：直驱失败集必须逐位等于冷 baseline 失败集
+    在本腿可观察范围内的投影（C3-R9 退回2：行选面闭包不含红测、或红测被
+    skip-red 物理移除时，从期望集排除——此前直接比全量基线红集必然失配，
+    map 源整批作废成假阳性）。真分歧（跑了的测试判定与基线不一致）仍失配。
 
     返回 (degrade_all, fatal_event)；披露（stderr）在本函数内完成，事件串
     由调用方汇入 fatal_events。门未启用（参数缺省）直接放行。"""
@@ -249,7 +274,10 @@ def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
               f"{pleg.fatal_reason}; degrading this file to the "
               f"cold channel (disclosed, not silently)", file=sys.stderr)
         return True, f"parity leg fatal: {pleg.fatal_reason}"
-    if pleg.gut_ran and pleg.failing_tests != baseline_failures:
+    expected = _parity_expected_failures(
+        baseline_failures or (), red_pairs or [], tests_scripts or [],
+        getattr(pleg, "skip_red_info", None) or {})
+    if pleg.gut_ran and pleg.failing_tests != expected:
         print("mutation worker: PARITY MISMATCH — direct-drive "
               "failing set differs from cold baseline on this "
               "suite; degrading this file to the cold channel "
@@ -257,7 +285,7 @@ def _parity_gate_leg(session, slot, target_res, closure, tests_glob,
         return True, ("mode parity gate: direct-drive failing set diverges "
                       f"from cold baseline (worker="
                       f"{sorted(pleg.failing_tests)[:4]} "
-                      f"cold={sorted(baseline_failures)[:4]})")
+                      f"expected={sorted(expected)[:4]})")
     return False, None
 
 
@@ -362,7 +390,8 @@ def _legs_parity(c: dict, target_res: str, closure, parity_inject_fn) -> None:
         degrade_all, parity_event = _parity_gate_leg(
             c["session"], c["slot"], target_res, closure, c["tests_glob"],
             c["baseline_failures"], parity_inject_fn,
-            tests_scripts=(c["tests_scripts"] if c["kill_bail"] else None))
+            tests_scripts=(c["tests_scripts"] if c["kill_bail"] else None),
+            red_pairs=c["red_pairs"])
         if parity_event is not None:
             c["fatal_events"].append(parity_event)
         c["degrade_all"] = degrade_all

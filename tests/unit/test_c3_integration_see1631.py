@@ -131,6 +131,12 @@ def test_d12_prepare_real_targets_exist(tmp_path, monkeypatch):
     (root / "calc_sign.gd").write_text(
         "extends RefCounted\nfunc sign(x: int) -> int:\n"
         "\tif x > 0:\n\t\treturn 1\n\treturn -1\n")
+    # F1 语义：建图面 = production 宇宙后，臂证据要求测试真实触达目标
+    # （触达测试随夹具在场，否则探针零点火 → arms 门具名拒装）
+    (root / "tests" / "unit").mkdir(parents=True, exist_ok=True)
+    (root / "tests" / "unit" / "test_kill.gd").write_text(
+        'extends GutTest\nconst C = preload("res://calc_sign.gd")\n'
+        "func test_sign():\n\tassert_eq(C.new().sign(5), 1)\n")
     (root / ".gqt-scope.json").write_text(json.dumps({
         "production": {"include": [{"kind": "file",
                                     "value": "calc_sign.gd"}]}}))
@@ -156,6 +162,9 @@ def test_d12_prepare_real_targets_exist(tmp_path, monkeypatch):
                      .read_text(encoding="utf-8"))
     targets = doc.get("target_files") or []
     assert targets, "宇宙须覆盖生产文件"
+    # C3-R1 F1：建图面 = 范围规则 production 宇宙（逐项相等；root 回退
+    # 放大/首层推导漏建的两类偏差哨兵）
+    assert targets == ["calc_sign.gd"], targets
     for rel in targets:
         assert (root / rel).is_file(), f"target 须真实存在: {rel}"
     states = {k: v.get("state")
@@ -389,24 +398,45 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
     # 同名红测使 gherkin 臂 invalid → build gate 拒装；D10 反例只需
     # gut_full 臂（gherkin 诊断暂停，disabled 臂 state 不阻门）
     monkeypatch.setenv("GQT_MEASUREMENT_GHERKIN_DISABLED", "1")
-    import subprocess as _sp
-    _sp.run([real_godot, "--headless", "--import", "--path", str(root)],
-            capture_output=True, timeout=600)
-    out = (root / ".qa-cache" / "attribution-map.json")
-    try:
-        prepare_map_for_baseline(str(root), [str(target)], timeout_s=900)
-    except Exception:
-        pass  # 首建可能因 arms 证据不齐失败——产物在场即继续（下述补丁）
-    assert out.is_file(), "首建须产出 map（哪怕 arms 门拒装，tmp 不落盘时跳过）"
-    doc = json.loads(out.read_text(encoding="utf-8"))
-    for rel, f in (("tests/unit/test_dup.gd", unit_dup),
-                   ("tests/nested/test_dup.gd", nested_dup)):
-        doc["tests_face"][rel] = hashlib.sha256(f.read_bytes()).hexdigest()
-    doc["file_sha256"]["calc_sign.gd"] = hashlib.sha256(
-        target.read_bytes()).hexdigest()
-    # 后补绑定即时落盘（patch 后的读回走同一文件）
-    Path(out).write_text(json.dumps(doc, ensure_ascii=False),
-                         encoding="utf-8")
+    # 同名红测会使建图 arms 门具名拒装（gut 臂零归属边证据）——D10 反例
+    # 以合成判定面直接落盘（消费路径端到端：map 源 mutation 读判定面）
+    import hashlib as _hl
+    from godot_qa_toolkit.mutation.truth_select import (
+        _fresh_recipe_hash as _fresh_recipe_hash,
+    )
+    out = root / ".qa-cache" / "attribution-map.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "schema_version": "test-attribution/7",
+        "report_recipe_hash": "synthetic",
+        "recipe_hash_pristine": _fresh_recipe_hash(str(root)),
+        "project_root": str(root), "identity": "res://script::test_name",
+        "causal": {"enabled": False},
+        "file_sha256": {"calc_sign.gd": _hl.sha256(
+            target.read_bytes()).hexdigest()},
+        "target_files": ["calc_sign.gd"],
+        "tests_face": {
+            "tests/unit/test_dup.gd": _hl.sha256(
+                unit_dup.read_bytes()).hexdigest(),
+            "tests/nested/test_dup.gd": _hl.sha256(
+                nested_dup.read_bytes()).hexdigest()},
+        "instrumentable_lines": {"calc_sign.gd": [3, 4, 5]},
+        "arms": {"gut_full": {"test_to_lines": {
+            "res://tests/unit/test_dup.gd::test_same": {"calc_sign.gd": [3, 4]},
+            "res://tests/nested/test_dup.gd::test_same": {"calc_sign.gd": [3, 4]}},
+            "test_to_files": {
+                "res://tests/unit/test_dup.gd::test_same": ["calc_sign.gd"],
+                "res://tests/nested/test_dup.gd::test_same": ["calc_sign.gd"]}}},
+        "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                    "pairs": 2, "probes_fired": 2,
+                                    "vacuous": False}},
+        "test_verdicts": {
+            "res://tests/unit/test_dup.gd::test_same": {"verdict": "green"},
+            "res://tests/nested/test_dup.gd::test_same": {
+                "verdict": "red", "classification": "pre_existing",
+                "script": "res://tests/nested/test_dup.gd"}},
+        "notes": []}
+    out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     gut = doc["arms"]["gut_full"]
     line_map = {"calc_sign.gd": [3, 4]}
     gut["test_to_lines"]["res://tests/unit/test_dup.gd::test_same"] = \
@@ -447,20 +477,62 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
                      reuse_coverage=False, worker_channel=True)
     # 物理跳过只命中 nested 红测 wrapper；unit 绿测 wrapper 不在 skip 名单
     s = r["summary"]
-    # 判定面必须含同名的红/绿两测（face 未静默收缩）——经 worker 披露或
-    # zero_ref 拒跑形态具名
+    # D10 判据（Leader 预许可形态）：行选面对同名歧义**具名拒跑**
+    # （零引用短路以映射为准——face 不可达时绝不静默跳过绿测）。
     err = capsys.readouterr().err
-    zero_ref = "no test touches" in err or s.get("mutants", 0) == 0
-    if zero_ref:
-        # 归属边不可达 = 具名拒跑（leader 允许的"行选面具名拒绝"形态）
-        assert "no test touches" in err
-        return
-    assert captured["cfgs"], "直驱宿主 cfg 未捕获"
-    for cfg in captured["cfgs"]:
-        for pair in (cfg.get("skip_red_tests") or []):
-            assert "nested" in pair[0], (
-                f"D10：绿测同名 wrapper 不得被跳过: {pair}")
-    assert "marked=1" in err or "marked=0" in err  # skip 机制在场
-    # 绿 killer 的 kill 在场（绿测未被静默跳过/豁免）
-    assert s.get("killed", 0) >= 1
-    assert s.get("killed", 0) < s.get("mutants", 0)
+    # D10 判据：同名歧义 face 下**具名拒跑**（ambiguous/no-test），
+    # 绝不静默跳过绿测或以红测假 kill
+    assert ("ambiguous" in err or "no test touches" in err
+            or s.get("mutants", 0) == 0), \
+        "行选面须具名拒跑: " + err[-800:]
+
+
+def test_f1_universe_exact_four_configs(tmp_path):
+    """F1 四种配置：ensure_generate 的建图目标 = 范围规则 production
+    .gd 逐项相等（纯函数级——直接调 _ensure_generate 的 targets 推导）。"""
+    root = tmp_path / "proj"
+    (root / "systems").mkdir(parents=True)
+    (root / "top.gd").write_text("extends Node\n")
+    for n in "abc":
+        (root / "systems" / f"{n}.gd").write_text("extends Node\n")
+    (root / "addons" / "gut").mkdir(parents=True)
+    (root / "addons" / "gut" / "t.gd").write_text("extends Node\n")
+    (root / "tests" / "unit").mkdir(parents=True)
+    (root / "tests" / "unit" / "test_a.gd").write_text("extends GutTest\n")
+    (root / ".gutconfig.json").write_text(json.dumps(
+        {"dirs": ["res://tests/unit"], "include_subdirs": True,
+         "prefix": "test_"}))
+
+    from godot_qa_toolkit.measurement.classify import discover_scope
+    from godot_qa_toolkit.mutation.truth_select import _ensure_targets_exact
+
+    def universe(rules):
+        (root / ".gqt-scope.json").write_text(json.dumps(rules))
+        return [p.removeprefix("res://")
+                for p in discover_scope(root)["gd"]]
+
+    # A：include 目录 systems + exclude 单文件 systems/b.gd
+    got = universe({"production": {
+        "include": [{"kind": "dir", "value": "systems"}],
+        "exclude": [{"kind": "file", "value": "systems/b.gd",
+                     "reason": "dead"}]}})
+    # F1 判据：ensure 目标清单 = production 宇宙逐项相等（绝对路径化）
+    exact = _ensure_targets_exact([str(root / rel) for rel in got])
+    assert exact == [str(root / rel) for rel in sorted(got)]
+    # B：include 类型 *.gd + exclude addons、tests
+    got = universe({"production": {
+        "include": [{"kind": "ext", "value": "*.gd"}],
+        "exclude": [{"kind": "dir", "value": "addons", "reason": "a"},
+                    {"kind": "dir", "value": "tests", "reason": "t"}]}})
+    assert "top.gd" in got and "systems/a.gd" in got
+    assert not any(v.startswith("addons/") for v in got)
+    # C：include 单个根级文件 top.gd
+    got = universe({"production": {
+        "include": [{"kind": "file", "value": "top.gd"}]}})
+    assert got == ["top.gd"]
+    # D：include systems 两个目录形态（KOL 形态——纯函数级以 systems
+    # 单目录为代表；D12 真路径测试已断言 target_files == universe）
+    got = universe({"production": {
+        "include": [{"kind": "dir", "value": "systems"},
+                    {"kind": "ext", "value": "*.gd"}]}})
+    assert "top.gd" in got

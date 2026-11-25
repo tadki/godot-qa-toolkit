@@ -151,6 +151,13 @@ def test_incremental_refresh_used_on_stale(tmp_path, monkeypatch):
 
     monkeypatch.setenv(truth.ENV_MODE, "auto")
     monkeypatch.setattr(truth, "_auto_increment", fake_increment)
+    # C3-R1 F3：coverage ensure 单一委托契约 refresh——最小夹具打桩为
+    # no-op（map 已在场且本测主体是 resolve 侧续新）
+    from godot_qa_toolkit.mutation import map_contract as _mc
+    monkeypatch.setattr(_mc, "refresh",
+                        lambda root, files, timeout_s=600: {
+                            "fresh": True, "already_fresh": True,
+                            "view": None})
 
     out = project_file_coverage(str(proj), str(target), binary_kind="linux")
     assert calls["n"] == 1, "stale map must go through incremental refresh, not re-GUT"

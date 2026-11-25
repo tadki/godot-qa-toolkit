@@ -356,6 +356,15 @@ def _fail_on_red_bits(doc: dict) -> list:
     return red_bits
 
 
+def _ensure_targets_exact(files: "list[str]") -> "list[str]":
+    """§SPEC-031/032（C3-R1 F1）：建图面 = 范围规则 production 宇宙——
+    直接使用绝对路径目标清单，不经 _roots_of 首层目录推导，也不落
+    targets_root_fallback 的"放大到工程根"回退（黑名单失效/根级白名单
+    漏建/单文件白名单放大三类偏差的根因）。"""
+    return sorted({str(Path(f).resolve()) if not str(f).startswith("/")
+                   else str(Path(f)) for f in files})
+
+
 def _ensure_generate(root: str, out: str, files: list[str],
                      timeout_s: int | None, action: str,
                      rebuild_reason: str | None, t0: float) -> str:
@@ -369,7 +378,12 @@ def _ensure_generate(root: str, out: str, files: list[str],
     recipe, error = build_recipe(Path(root))
     if error is not None:
         raise SelectionError(f"recipe unavailable: {error}")
-    targets = _targets_under(_roots_of(files, root))
+    targets = _ensure_targets_exact(files)
+    missing = [t for t in targets if not Path(t).is_file()]
+    if missing:
+        raise SelectionError(
+            f"attribution_generate_failed: target files do not exist: "
+            f"{sorted(missing)[:6]}")
     tmp = _unique_tmp(out)
     try:
         it_cfg = _intolerant_tests_config()

@@ -329,7 +329,12 @@ def _classify_in_gut_dir(rel: str, face: dict,
                for e in excluded_dirs):
             return "non_test"
         matches = rel.rsplit("/", 1)[-1].startswith(face["prefix"])
-        if face["include_subdirs"] or rel.count("/") == d.count("/"):
+        # C3-R1 F2：直属子级判定——d 之后的剩余路径不含 "/" 才是直接
+        # 放置（rel.count("/") == d.count("/") 少算一层，直属 test_*.gd
+        # 被漏归类）
+        remainder = rel[len(d) + 1:] if rel.startswith(d + "/") else ""
+        direct_child = remainder != "" and "/" not in remainder
+        if face["include_subdirs"] or direct_child:
             return "test" if matches else "non_test"
         return None
     return None

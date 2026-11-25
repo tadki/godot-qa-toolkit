@@ -966,6 +966,27 @@ def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
                              "script": prior.get("script") or sc}
 
 
+def _drop_gherkin_dropped(merged: dict, gherkin_dropped: set) -> None:
+    """§SPEC-028：gherkin_dropped 的 feature 身份从表剔除（零行为拆分）。"""
+    if not gherkin_dropped:
+        return
+    from .attribution import _gherkin_feature_of
+
+    for ident in list(merged):
+        if _gherkin_feature_of(str(ident)) in gherkin_dropped:
+            del merged[ident]
+
+
+def _gherkin_rerun_all_passed(fresh_gherkin: dict) -> bool:
+    """§SPEC-028：重跑腿**全部**执行账判定——任一 rc!=0 都算失败
+    （多分片/多 rep 各算一账）；零执行账 = 失败（不落 green）。"""
+    execs = fresh_gherkin.get("executions") or []
+    # rc=0 是合法成功值——falsy 陷阱（`0 or 1`）会把成功当失败
+    return bool(execs) and all(
+        int(r.get("rc") if r.get("rc") is not None else 1) == 0
+        for r in execs)
+
+
 def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
                            gherkin_rerun: set,
                            gherkin_dropped: set) -> None:
@@ -976,16 +997,8 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
     feature 身份从表剔除。"""
     from .attribution import _gherkin_feature_of
 
-    if gherkin_dropped:
-        for ident in list(merged):
-            key = _gherkin_feature_of(str(ident))
-            if key in gherkin_dropped:
-                del merged[ident]
-    execs = fresh_gherkin.get("executions") or []
-    # rc=0 是合法成功值——falsy 陷阱（`0 or 1`）会把成功当失败
-    gh_ok = bool(execs) and all(
-        int(r.get("rc") if r.get("rc") is not None else 1) == 0
-        for r in execs)
+    _drop_gherkin_dropped(merged, gherkin_dropped)
+    gh_ok = _gherkin_rerun_all_passed(fresh_gherkin)
     for ident in list(merged):
         key = _gherkin_feature_of(str(ident))
         if key is None or key not in gherkin_rerun:

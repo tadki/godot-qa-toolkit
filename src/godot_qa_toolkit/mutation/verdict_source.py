@@ -479,6 +479,7 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
     §SPEC-029 表 #5：不可归因变更（`uid://`/动态 load/非 .gd——
     increment 的 unknown_changed_paths 具名判定）→ 具名全量重建
     （不作为用户可见错误）。"""
+    from .truth_select import load_map
     from ..measurement.increment import (
         IncrementError, run_attribution_increment,
     )
@@ -494,14 +495,17 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
     if not targets:
         raise BaselineSourceError(
             "prepare renewal failed: no measurable targets in map")
-    # C3-R3 项2：增量产物先写唯一 tmp → 校验通过后原子替换目标（旧 map
-    # 字节在任一失败路径下不变；此前直接写目标路径，中途失败即损坏）
+    # C3-R3/R5 项2：增量产物先写唯一 tmp → **校验通过后**原子替换目标
+    # （旧 map 字节在任一失败路径下不变；此前"先替换后校验"，校验失败
+    # 时目标已被换成不新鲜产物——与报错文字矛盾）
     tmp = path + ".renew-tmp"
     try:
         run_attribution_increment(
             project_root, targets, recipe, path, changed, tmp,
             timeout_s=timeout_s)
         import os as _os
+        tmp_doc = load_map(tmp)
+        assert_map_fresh(project_root, tmp_doc, targets)
         _os.replace(tmp, path)
     except IncrementError as e:
         if "unknown_changed_paths" in str(e):

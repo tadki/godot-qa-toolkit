@@ -1077,8 +1077,11 @@ def _arm_result(name: str, *, root: Path, prepared: dict, gherkin,
         manifest_by_rel=manifest_by_rel, xdg_homes=xdg_homes, gut_ok=gut_ok,
         run_error=run_error, timed_out=timed_out, vacuous_rels=vacuous_rels,
         evidence_dir=evidence_dir, shard_log_dir=shard_log_dir)
+    # C3-R5 项3：本行为臂阶段中间态（对账/吸收前的初步分类）——最终
+    # 态以产物 arms_state 为准（红可经懒基线吸收/车道化翻 valid）
     print(f"measure: arm={name} done state="
-          f"{'valid' if arm_valid else 'invalid'} "
+          f"{'valid' if arm_valid else 'invalid'} (pre-reconciliation "
+          f"intermediate; final state in artifact arms_state) "
           f"wall_s={round(wall_s, 1)}", file=sys.stderr)
     adaptive_rounds_used = max(
         (len(r["reps"]) for r in results), default=0) if adaptive_reps else None

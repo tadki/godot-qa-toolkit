@@ -1151,6 +1151,12 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
+        # §SPEC-029 表 #5/#6（C3-R5 项1）：生产内容指纹——场景/资源/数据
+        # 文本与生产 .gd 同类，增量产物必须携带（否则续新后第一条命令即
+        # 报"116 new universe files"）。按当前树现算（内容变更/新增/删除
+        # 同一套逻辑）。
+        "production_content_sha256": _merged_production_content(
+            root, baseline, classes),
         # SEE-1631 §SPEC-021/025：arms 块（tidy 拆分 _increment_arms_block）
         # + verdict 表守恒（未重跑身份原样继承、重跑身份按新执行结果重算、
         # 删除剔除；缺表 = 消费方具名 fail-loud，不得当空红集）。
@@ -1190,6 +1196,30 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
             "rerun_executions": executions or [],
         },
     }
+
+def _merged_production_content(root: Path, baseline: dict,
+                               classes: dict) -> "dict[str, str]":
+    """生产内容指纹继承（§SPEC-029 表 #5/#6）：基线指纹 + 变更/新增
+    重算 + 删除剔除；范围不可闭合时继承基线（不归零）。"""
+    import hashlib
+
+    from .classify import production_content_files, ScopeError
+
+    face = dict(baseline.get("production_content_sha256") or {})
+    try:
+        content = production_content_files(root)
+    except ScopeError:
+        return face
+    for rel in content:
+        p = Path(root) / rel
+        if not p.is_file():
+            face.pop(rel, None)
+            continue
+        face[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    for rel in classes.get("prod_removed", []):
+        face.pop(rel, None)
+    return face
+
 
 def _merged_tests_face(root: Path, baseline: dict,
                        classes: dict) -> dict:

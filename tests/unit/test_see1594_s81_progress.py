@@ -56,7 +56,8 @@ def test_progress_lines_shape(tmp_path, capsys):
     assert re.search(
         r"measure: arm=gut_full shard=\d+/\d+ done s=[0-9.]+", err), err
     assert re.search(
-        r"measure: arm=gut_full done state=(valid|invalid) "
+        r"measure: arm=gut_full done state=(valid|invalid)"
+        r"( \(pre-reconciliation intermediate[^)]*\))? "
         r"wall_s=[0-9.]+", err), err
         # SEE-1631：默认双臂恢复——gherkin 臂分片行与 done 行在场
     # （历史暂停语义：显式 GQT_MEASUREMENT_GHERKIN_DISABLED=1 时无分片

@@ -92,6 +92,9 @@ def test_prepare_missing_map_uses_ensure_map(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    # C3-R5 项1：装填后校验桩——路由测试不验新鲜度
+    monkeypatch.setattr(
+        vs, "assert_map_fresh", lambda *a, **k: None)
     # C3 契约：refresh 装填后校验（assert_map_fresh）——路由测试以桩
     # 放行校验步（路由断言语义不变；桩改动系行为变化必需的夹具更新）
     monkeypatch.setattr(
@@ -129,8 +132,12 @@ def test_prepare_drift_uses_increment(tmp_path, monkeypatch):
         # 产物（否则 os.replace 无源）
         import json as _json
         from pathlib import Path as _P
-        _P(out).write_text(_json.dumps({"mode": "incremental"}),
-                            encoding="utf-8")
+        # C3-R5 项1：增量产物携带 schema + production_content_sha256
+        # （validate-before-replace 需要）
+        doc = _json.loads(_P(baseline).read_text(encoding="utf-8"))
+        doc["production_content_sha256"] = {
+            rel: "sha" for rel in (doc.get("file_sha256") or {})}
+        _P(out).write_text(_json.dumps(doc), encoding="utf-8")
         return {"mode": "incremental"}
 
     monkeypatch.setattr(
@@ -141,6 +148,9 @@ def test_prepare_drift_uses_increment(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    # C3-R5 项1：装填后校验桩——路由测试不验新鲜度
+    monkeypatch.setattr(
+        vs, "assert_map_fresh", lambda *a, **k: None)
     # C3 契约：装填后校验桩（同上，路由断言语义不变）
     from godot_qa_toolkit.mutation import map_contract as _mc
     monkeypatch.setattr(
@@ -182,6 +192,9 @@ def test_prepare_recipe_mismatch_rebuilds(tmp_path, monkeypatch):
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
                                 / "attribution-map.json"))
+    # C3-R5 项1：装填后校验桩——路由测试不验新鲜度
+    monkeypatch.setattr(
+        vs, "assert_map_fresh", lambda *a, **k: None)
     # C3 契约：装填后校验桩（路由断言语义不变）
     from godot_qa_toolkit.mutation import map_contract as _mc
     monkeypatch.setattr(

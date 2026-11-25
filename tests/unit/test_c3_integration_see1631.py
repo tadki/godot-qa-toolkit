@@ -770,7 +770,8 @@ def _r2_project(tmp_path) -> "object":
     (proj / "calc.gd").write_text("extends Node\nfunc f(a):\n\treturn a\n")
     (proj / "tests" / "unit").mkdir(parents=True)
     (proj / "tests" / "unit" / "test_a.gd").write_text(
-        "extends GutTest\nfunc test_a():\n\tpass\n")
+        'extends GutTest\nconst C = preload("res://calc.gd")\n'
+        "func test_a():\n\tassert_eq(C.new().f(1), 1)\n")
     (proj / ".gutconfig.json").write_text(json.dumps(
         {"dirs": ["res://tests/unit"], "include_subdirs": True,
          "prefix": "test_"}))
@@ -1005,3 +1006,26 @@ def test_r4_new_test_identity_enters_verdict_table():
     assert merged["test_old.gd::test_ok"] == {"verdict": "green"}
 
 
+def test_r5_increment_failure_keeps_old_bytes(tmp_path, monkeypatch):
+    """C3-R5 项1 补充：增量产物校验不过 → 旧图字节不变（tmp 丢弃）。"""
+    import hashlib as _hl
+
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    proj = _r2_project(tmp_path)
+    map_file = proj / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    map_file.write_text('{"schema_version": "test-attribution/7"}',
+                        encoding="utf-8")
+    before = _hl.sha256(map_file.read_bytes()).hexdigest()
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    from godot_qa_toolkit.measurement import increment as _inc
+    monkeypatch.setattr(_inc, "run_attribution_increment",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            _inc.IncrementError("increment failed: boom")))
+    with pytest.raises(Exception):
+        vs._prepare_increment_renewal(
+            {"target_files": ["calc.gd"]}, str(proj),
+            str(map_file), ["calc.gd"], timeout_s=60)
+    assert _hl.sha256(map_file.read_bytes()).hexdigest() == before
+    assert not list(map_file.parent.glob("*.renew-tmp")), "tmp 须清理"

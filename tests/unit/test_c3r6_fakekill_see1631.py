@@ -65,6 +65,47 @@ def _real_godot_bin() -> "str | None":
     return str(cand)
 
 
+_MODULE_ENV_KEYS = {
+    "GQT_MEASUREMENT_GHERKIN_DISABLED": "1",
+    "GQT_MUTATION_BASELINE_SOURCE": "map",
+    "GQT_ATTRIBUTION_MAP_MODE": "auto",
+    # 进程内 ensure_map 会把 GQT_ATTRIBUTION_MAP 永久写入 os.environ
+    # （truth_select._auto_map_build）——同进程先跑的建图单测会把泄漏值
+    # 带进来，使本夹具的默认路径 map 被判成「显式 map」并触发 D4
+    # event_counts_stale 具名拒绝门（增量产物恒带该标志）。本模块契约 =
+    # 项目默认路径 auto map，置空恢复默认语义。
+    "GQT_ATTRIBUTION_MAP": "",
+}
+
+
+def _child_env(base: "dict[str, str]", home: Path) -> dict:
+    """C3-R8 退回3：子进程 env 只带本模块需要的 GQT_* 键。进程内产品
+    调用会把 GQT_* 开关写进 os.environ 不恢复（同批先跑的测试泄漏，如
+    cli._run_mutation_serial 的 FAIL_ON_RED），继承会让本模块结果依赖
+    批内顺序。"""
+    env = {k: v for k, v in base.items() if not k.startswith("GQT_")}
+    env.update({"HOME": str(home), "XDG_DATA_HOME": str(home / ".xdg"),
+                "TMPDIR": str(home), "PYTHONPATH": "src"})
+    env.update(_MODULE_ENV_KEYS)
+    return env
+
+
+def test_r8_child_env_isolated_from_leaked_switches():
+    """C3-R8 退回3：泄漏进进程的 GQT_* 开关不得进入本模块子进程 env
+    （只保留本模块自己声明的键）。"""
+    base = {**os.environ,
+            "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE": "1",
+            "GQT_ATTRIBUTION_MAP": "/leaked/map.json",
+            "GQT_MUTATION_CHECK_BASELINE": "1",
+            "PATH": "/usr/bin:/bin"}
+    env = _child_env(base, Path("/tmp/x"))
+    assert "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE" not in env
+    assert "GQT_MUTATION_CHECK_BASELINE" not in env
+    assert env["GQT_ATTRIBUTION_MAP"] == ""
+    assert env["GQT_MUTATION_BASELINE_SOURCE"] == "map"
+    assert env["PATH"] == "/usr/bin:/bin"
+
+
 @pytest.fixture(scope="module")
 def r6_project(tmp_path_factory):
     """Leader 式小夹具：目录型白名单（src/ + data/），单测试目录 =
@@ -79,18 +120,7 @@ def r6_project(tmp_path_factory):
     if _here not in sys.path:
         sys.path.insert(0, _here)
     home = tmp_path_factory.mktemp("r6home")
-    env = {**os.environ,
-           "HOME": str(home), "XDG_DATA_HOME": str(home / ".xdg"),
-           "TMPDIR": str(home), "PYTHONPATH": "src",
-           "GQT_MEASUREMENT_GHERKIN_DISABLED": "1",
-           "GQT_MUTATION_BASELINE_SOURCE": "map",
-           "GQT_ATTRIBUTION_MAP_MODE": "auto",
-           # 进程内 ensure_map 会把 GQT_ATTRIBUTION_MAP 永久写入 os.environ
-           # （truth_select._auto_map_build）——同进程先跑的建图单测会把
-           # 泄漏值带进来，使本夹具的默认路径 map 被判成「显式 map」并触发
-           # D4 event_counts_stale 具名拒绝门（增量产物恒带该标志）。本模
-           # 块契约 = 项目默认路径 auto map，置空恢复默认语义。
-           "GQT_ATTRIBUTION_MAP": ""}
+    env = _child_env(os.environ, home)
     proj = tmp_path_factory.mktemp("r6proj") / "proj"
     (proj / "src").mkdir(parents=True)
     (proj / "data").mkdir()

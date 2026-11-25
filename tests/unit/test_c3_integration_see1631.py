@@ -22,6 +22,28 @@ from pathlib import Path
 
 FORMS_TEMPLATE = Path(__file__).parent.parent / "fixtures" / "see1550_forms"
 
+# C3-R8 退回3：进程内 CLI 调用会把 GQT_* 开关写进 os.environ 不恢复
+# （_run_mutation_serial 的 FAIL_ON_RED / CHECK_BASELINE / INTOLERANT /
+# AUTO_PREPARE）——同批先跑的测试会把这些泄漏值带给本模块，使结果依赖
+# 批内顺序。逐测试剔除（conftest 自有键由 conftest 的 autouse 管理）。
+_PROCESS_LEAKED_GQT_SWITCHES = (
+    "GQT_MEASUREMENT_FAIL_ON_RED_BASELINE",
+    "GQT_MUTATION_CHECK_BASELINE",
+    "GQT_MEASUREMENT_INTOLERANT_TESTS",
+    "GQT_MUTATION_AUTO_PREPARE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_process_leaked_gqt_switches(monkeypatch):
+    for _key in _PROCESS_LEAKED_GQT_SWITCHES:
+        monkeypatch.delenv(_key, raising=False)
+
+
+def _godot_subprocess_env() -> "dict[str, str]":
+    """C3-R8 退回3：godot 子进程不继承进程里的 GQT_* 开关。"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GQT_")}
+
 
 def _real_godot_bin() -> "str | None":
     """C3-R7 退回2：GQT_GODOT_BIN 优先、其次 PATH；conftest 真空 stub
@@ -185,7 +207,8 @@ def test_d12_prepare_real_targets_exist(tmp_path, monkeypatch):
     monkeypatch.setenv("GQT_AUTO_IMPORT", "1")
     import subprocess as _sp
     _sp.run([real_godot, "--headless", "--import", "--path", str(root)],
-            capture_output=True, timeout=600)
+            capture_output=True, timeout=600,
+            env=_godot_subprocess_env())
     out = prepare_map_for_baseline(
         str(root), [str(root / "calc_sign.gd")], timeout_s=900)
     doc = json.loads((root / ".qa-cache" / "attribution-map.json")
@@ -259,7 +282,8 @@ def test_d13_red_fixture_map_source_smoke(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GQT_AUTO_IMPORT", "1")
     import subprocess as _sp
     _sp.run([real_godot, "--headless", "--import", "--path", str(root)],
-            capture_output=True, timeout=600)
+            capture_output=True, timeout=600,
+            env=_godot_subprocess_env())
     # F5（C3-R1）：恒红测试在**建图时**就在（从零建图 RED 夹具 =
     # Revy 失败场景）——红被懒基线吸收为 pre_existing（partial 臂）
     red_test = root / "tests" / "unit" / "test_red_always.gd"

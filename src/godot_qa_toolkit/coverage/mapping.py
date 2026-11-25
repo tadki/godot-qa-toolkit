@@ -47,12 +47,32 @@ def _mapping_ensure(project_root: Path, path: Path, timeout_s: int | None) -> No
             "godot_binary_unusable",
             f"godot binary not found in PATH: {_cmd} "
             f"(set GQT_GODOT_BIN or --godot-bin)")
+    # §SPEC-032/D1：ensure/续新委托同一契约（refresh；create/increment/
+    # full 决策 + 锁内复检 + 装填后校验单源）。refresh 失败且已存在 map
+    # 时回退既有 ensure_map（复用/续新语义保留——resolve 侧续新链照旧）；
+    # 无 map 时 refresh 失败即具名失败（virgin 构建失败不静默）。
+    from ..mutation.map_contract import refresh
+
+    map_file = root / ".qa-cache" / "attribution-map.json"
     try:
-        truth.ensure_map(str(root), [str(path)], timeout_s=timeout_s)
-    except Exception as e:  # noqa: BLE001 — 映射构建失败转具名域错误
+        refresh(str(root), [str(path)], timeout_s=timeout_s or 600)
+        return
+    except Exception as renewal_err:  # noqa: BLE001 — 回退判定见下
+        # 已存在 map：refresh 续新失败（环境受限/最小夹具）→ 回退既有
+        # ensure_map（复用 no-op；续新由 resolve 侧既有链承担——其余一律
+        # 不变）；无 map 的 virgin 构建失败不静默（具名转域错误）。
+        if map_file.is_file():
+            try:
+                truth.ensure_map(str(root), [str(path)],
+                                 timeout_s=timeout_s)
+                return
+            except Exception as e:  # noqa: BLE001
+                raise CoverageMappingError(
+                    "attribution_map_build_failed",
+                    f"{type(e).__name__}: {e}") from e
         raise CoverageMappingError(
             "attribution_map_build_failed",
-            f"{type(e).__name__}: {e}") from e
+            f"{type(renewal_err).__name__}: {renewal_err}") from renewal_err
 
 
 def _mapping_select(root: Path, path: Path, timeout_s: int | None) -> dict:

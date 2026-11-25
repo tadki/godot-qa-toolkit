@@ -257,9 +257,11 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
     # SEE-1604 D2：dry-run 抑制映射续新（allow_renew=False）——清点操作
     # 绝不拉起全链 GUT；陈旧/自锁映射降级未圈定清点。
     with clock.stage("test_scan"):
+        # §SPEC-032/D1：run 阶段不再自己续新 map（prepare 后再漂移 →
+        # 既有具名失败、零 mutant）——renew 固定 False
         tests_glob, selection_meta = _resolve_auto_glob(
             tests_glob, str(path), project_root, selection_meta,
-            select_mode=select_mode, allow_renew=not dry_run)
+            select_mode=select_mode, allow_renew=False)
     original_src = path.read_text(encoding="utf-8")
     kind = binary_kind or detect_binary_kind()
     target_res_early = _res_path_of(str(path), str(project_root))

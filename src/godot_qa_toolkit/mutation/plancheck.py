@@ -187,8 +187,10 @@ def _map_problem(root: Path, target_file: str | None) -> list[dict]:
     if not target_file:
         return []
     try:
-        from .truth_select import map_preview_state
-        st = map_preview_state(str(root), str(target_file))
+        # §SPEC-032/D1：plan 的 map 段改调契约 status（只读、全集判、
+        # would_refresh 含范围与成本）——其余探测面逐位不动
+        from .map_contract import status
+        st = status(str(root), [])
     except Exception as e:  # noqa: BLE001 — 探测失败如实落 warning
         return [_problem("warning", "map_state_unknown",
                          {"error": f"{type(e).__name__}: {e}"},
@@ -199,7 +201,9 @@ def _map_problem(root: Path, target_file: str | None) -> list[dict]:
     return [_problem(
         "warning", "attribution_map_missing_or_stale",
         {"present": st.get("present"), "fresh": st.get("fresh"),
-         "reason": st.get("reason"),
+         "reason": "; ".join(st.get("factors") or [])[:200],
+         "would_refresh": st.get("would_refresh"),
+         "last_cost": st.get("last_cost"),
          "estimated_cost": "map build/renew: baseline preflight + "
                            "instrumented GUT, ~2m15s (KOL 实测 135-137s)"},
         "gqt measure map-update --project-root .  (~2m15s) — or rerun "

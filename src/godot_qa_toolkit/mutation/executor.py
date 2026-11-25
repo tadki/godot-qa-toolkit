@@ -215,6 +215,7 @@ def _guard_baseline(root: str, project_root: str) -> tuple[bool, str]:
 def run_mutation_files(
     files: list[str],
     project_root: str,
+    precomputed_plan: "dict | None" = None,
     budget: int = 50,
     timeout_s: int = 600,
     dry_run: bool = False,
@@ -240,8 +241,12 @@ def run_mutation_files(
     """
     # §SPEC-PLANFIRST：默认 run 的第一步 = plan（静态穷查 ≤10s）——
     # error 级问题即停并列问题（不跑任何重活）；无问题自动进入 prepare。
-    from .plancheck import static_plan
-    plan = static_plan(project_root, files[0] if files else None, tests_glob)
+    # §SPEC-032/D1：CLI 已跑过 plan 时直接复用（收敛重复 static_plan）
+    plan = precomputed_plan
+    if plan is None:
+        from .plancheck import static_plan
+        plan = static_plan(project_root, files[0] if files else None,
+                           tests_glob)
     plan_errors = [p for p in plan["problems"] if p["severity"] == "error"]
     print(f"mutation: plan {len(plan['problems'])} problem(s) "
           f"({len(plan_errors)} error) in {plan['elapsed_s']}s"
@@ -722,11 +727,25 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     # 快照（零冷启动）；`GQT_MUTATION_BASELINE_SOURCE=cold` 显式回退旧
     # 冷启动路径。map 缺失/过期/与树不一致 → BaselineSourceError 具名
     # fail-loud（不静默退化全脸）。
-    from .verdict_source import baseline_source, map_baseline_snapshots
+    from .verdict_source import baseline_source
+    from .runner import _synthesized_map_baseline
 
     if baseline_source() == "map":
-        baselines, baseline_failures = map_baseline_snapshots(
-            files, project_root, tests_glob, select_mode=select_mode)
+        # §SPEC-032/D1：基线合成单点（runner._synthesized_map_baseline；
+        # 防线保留：chunk 红集合填充仍在此处）——按目标文件逐个合成
+        # 同源快照池（files 多文件 = 多 glob 键共享同一 map）
+        baselines: dict = {}
+        for f in files:
+            syn = _synthesized_map_baseline(
+                Path(project_root) / f, project_root,
+                tests_glob if tests_glob else f)
+            if syn is not None:
+                baselines[tests_glob if tests_glob else f] = syn
+        if not baselines:
+            from .verdict_source import map_baseline_snapshots
+            baselines, _ = map_baseline_snapshots(
+                files, project_root, tests_glob, select_mode=select_mode)
+        baseline_failures = {}
         # §SPEC-027/D7（R4）：map 源 chunk 基线同步填充脚本限定红集合
         # （runner._BASELINE_RED_MAP）——worker 腿 skip_red_tests 与
         # 同名豁免判定都消费它；此前只有 _loop_baseline 实测路径填充，

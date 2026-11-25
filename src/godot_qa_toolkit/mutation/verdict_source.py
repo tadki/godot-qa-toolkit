@@ -330,7 +330,11 @@ def _production_universe(project_root: str, files: list[str]) -> list[str]:
 
     root = Path(project_root).resolve()
     try:
-        return gd_universe(root)
+        # §SPEC-032/D12：map 模块对外路径单一口径 = 绝对路径（classify
+        # 的 res:// 形态只在 classify API 内部；此前 res:// 漏转换导致
+        # ensure_map 锚出 <root>/res:/... → 宇宙为空 → 建图必败）
+        return [str(root / rel.removeprefix("res://"))
+                for rel in gd_universe(root)]
     except ScopeError as e:
         raise BaselineSourceError(f"{e}") from e
 

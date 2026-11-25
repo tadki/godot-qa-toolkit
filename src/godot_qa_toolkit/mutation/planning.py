@@ -84,10 +84,12 @@ def _plan_resolve_gate(tests_glob, f, project_root, selection_meta,
     attention = _warn_site_scale(f, raw_total, mutation_warning)
     selection_meta = dict(selection_meta or {})
     with clock.stage("test_scan"):
+        # §SPEC-032/D1：run 阶段零续新（prepare 专用）
         glob, selection_meta = _resolve_auto_glob(tests_glob, f,
                                                   project_root,
                                                   selection_meta,
-                                                  select_mode=select_mode)
+                                                  select_mode=select_mode,
+                                                  allow_renew=False)
     # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:

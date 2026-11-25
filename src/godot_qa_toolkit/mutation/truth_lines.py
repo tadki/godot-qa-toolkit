@@ -209,7 +209,9 @@ def ownership_for(project_root: str, target_file: str,
     （结构性兜底已退役——静态归属会给 stale 索引签发 kill 证书）。"""
     import sys
     try:
-        sel = _ts().resolve_selection(project_root, target_file, map_path_override)
+        # §SPEC-032/D1：证书归属路径只读（run 侧零续新）
+        sel = _ts().resolve_selection(project_root, target_file,
+                                      map_path_override, renew=False)
         mp = sel.get("mapping") or {}
         # §SPEC-029 谓词单一实现：新鲜判定 = resolve 判 fresh（共享
         # assert_map_fresh 谓词；source=runtime_mapping 仅在新鲜路径赋值；

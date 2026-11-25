@@ -542,6 +542,14 @@ def _auto_increment(project_root: str, path: str, doc: dict,
     t0 = time.monotonic()
     with _refresh_lock(path):
         current = load_map(path)            # 锁内重读（并发写者可能已更新）
+        # §SPEC-032/D1 锁内新鲜度复检：并发对端已把 map 刷到新鲜 → 直接
+        # 合并返回（后到者不重复增量腿——多余增量腿消除）
+        from .verdict_source import assert_map_fresh
+        try:
+            assert_map_fresh(root, current, [rel])
+            return True, None
+        except Exception:  # noqa: BLE001 — 仍 stale → 继续本方增量
+            pass
         changed = sorted({rel, *(changed_extra or [])})
         drift = _tests_face_drift(root, current)
         changed = sorted(set(changed) | set(drift["changed"])

@@ -614,12 +614,14 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
 def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
     """§SPEC-PLANFIRST：默认 run 的 plan 段（静态穷查 ≤10s）。
 
-    返回早退 payload（plan_blocked / dry-run plan-only）；None = 继续。
-    """
+    返回早退 payload（plan_blocked / dry-run plan-only）；None = 继续
+    （§SPEC-032/D1：plan 落 `args._mutation_plan` 供 dispatch 复用——
+    CLI 与 executor 的重复 static_plan 收敛一处）。"""
     from .mutation.plancheck import static_plan
 
     plan = static_plan(args.project_root,
                        args.files[0] if args.files else None, args.tests)
+    args._mutation_plan = plan
     errors = [p for p in plan["problems"] if p["severity"] == "error"]
     print(f"mutation: plan {len(plan['problems'])} problem(s) "
           f"({len(errors)} error) in {plan['elapsed_s']}s",
@@ -975,7 +977,9 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
                                    "mutation", args.tests,
                                    binary_kind=binary_kind)
     result = run_mutation_files(
-        files, args.project_root, budget=args.budget,
+        files, args.project_root,
+        precomputed_plan=getattr(args, "_mutation_plan", None),
+        budget=args.budget,
         timeout_s=args.timeout, dry_run=args.dry_run,
         tests_glob=args.tests, jobs=args.jobs,
         binary_kind=binary_kind, timing_store=timing_store,

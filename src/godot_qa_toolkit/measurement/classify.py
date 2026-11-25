@@ -119,16 +119,21 @@ def _validate_include(include) -> None:
 
 
 def _validate_excludes(prod: dict, tests: dict) -> None:
-    for section in (prod, tests):
+    for section_name, section in (("production", prod), ("tests", tests)):
         for entry in (section.get("exclude") or []):
             if not isinstance(entry, dict) or not entry.get("reason"):
                 raise ScopeError(
                     f"scope rules exclude entry missing reason "
                     f"(every exclude must carry a reason): {entry!r}")
-            if entry.get("kind") not in ("dir", "file", "ext", "feature"):
+            kinds = ("dir", "feature") if section_name == "tests" \
+                else ("dir", "file", "ext")
+            if entry.get("kind") not in kinds:
+                # §SPEC-031（C3）：tests.exclude 只支持 dir|feature——
+                # file/ext 条目此前通过校验却不执行，改为具名拒绝
                 raise ScopeError(
-                    f"scope rules entry kind must be dir|file|ext|feature: "
-                    f"{entry!r}")
+                    f"scope rules tests.exclude entry kind must be "
+                    f"dir|feature (file/ext granularity is not executed "
+                    f"for the test face — named rejection): {entry!r}")
 
 
 def _glob_kind(root: Path, kind: str, value: str) -> "set[str]":
@@ -188,19 +193,28 @@ def _resolve_production(root: Path, rules: "dict | None",
         production |= _glob_kind(root, entry.get("kind"),
                                  _norm(str(entry.get("value") or "")))
     production = {rel for rel in production if not _is_hidden(rel)}
-    excluded, excluded_stats = _apply_production_exclude(production,
-                                                         prod_exclude)
+    excluded, excluded_stats = _apply_production_exclude(
+        production, prod_exclude, prod_include)
     production -= {e["path"][len("res://"):] for e in excluded}
     return production, excluded, excluded_stats
 
 
 def _apply_production_exclude(production: "set[str]",
-                              prod_exclude: "list[dict]"
+                              prod_exclude: "list[dict]",
+                              prod_include: "list[dict]"
                               ) -> "tuple[list[dict], dict[str, int]]":
-    """黑名单相减（reason 必带；统计随排除清单披露）。"""
+    """黑名单相减（reason 必带；统计随排除清单披露）。
+
+    §SPEC-031（C3）更具体者优先：单文件（file 粒度）白名单条目可放行
+    黑名单目录内的文件——被 file 白名单显式点名的路径不受 dir/ext
+    黑名单影响。"""
+    file_admitted = {_norm(str(e.get("value") or ""))
+                     for e in prod_include if e.get("kind") == "file"}
     excluded: list[dict] = []
     stats: dict[str, int] = {}
     for rel in sorted(production):
+        if rel in file_admitted:
+            continue
         hit = next((e for e in prod_exclude if _entry_matches(e, rel)), None)
         if hit is None:
             continue

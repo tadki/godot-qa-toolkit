@@ -1056,6 +1056,63 @@ def test_r7_new_passing_universe_identity_green():
     assert merged["test_old.gd::test_ok"] == {"verdict": "green"}
 
 
+def test_r8_mixed_new_identities_per_test_verdict():
+    """C3-R8 退回2：新脚本里通过与失败并存 → 逐测试判定（失败名可解析
+    时 name in failing），通过记 green；全部不可解析（rc!=0 无失败名）才
+    整脚本保守红。此前 rc!=0 把同脚本其余新身份全记 red。"""
+    from godot_qa_toolkit.measurement.increment import (
+        _merged_test_verdicts,
+    )
+
+    baseline = {"test_verdicts": {
+                    "test_old.gd::test_ok": {"verdict": "green"}},
+                "tests_face": {
+                    "tests/unit/test_mixed.gd": "sha",
+                    "tests/unit/test_old.gd": "sha"}}
+    executions = [{"script": "tests/unit/test_mixed.gd", "rc": 1,
+                   "out": "* test_mixed_pass\n* test_mixed_fail\n"
+                          "[Failed] test_mixed_fail\n"}]
+    merged = _merged_test_verdicts(
+        baseline, executions, rerun_scripts={"test_mixed.gd"},
+        dropped_scripts=set(), removed_rels=set(), fresh_gherkin=None,
+        gherkin_rerun=set(), gherkin_dropped=set(),
+        tests_face=baseline["tests_face"],
+        arm_identities=["test_mixed.gd::test_mixed_pass",
+                        "test_mixed.gd::test_mixed_fail"])
+    assert merged["test_mixed.gd::test_mixed_pass"] == {"verdict": "green"}
+    assert merged["test_mixed.gd::test_mixed_fail"]["verdict"] == "red"
+    assert merged["test_mixed.gd::test_mixed_fail"]["classification"] == "new"
+    # 全部不可解析（无失败名、rc!=0）→ 整脚本保守红（不得无证据放绿）
+    execs2 = [{"script": "tests/unit/test_mixed.gd", "rc": 1,
+               "out": "boom"}]
+    merged2 = _merged_test_verdicts(
+        baseline, execs2, rerun_scripts={"test_mixed.gd"},
+        dropped_scripts=set(), removed_rels=set(), fresh_gherkin=None,
+        gherkin_rerun=set(), gherkin_dropped=set(),
+        tests_face=baseline["tests_face"],
+        arm_identities=["test_mixed.gd::test_mixed_pass",
+                        "test_mixed.gd::test_mixed_fail"])
+    assert merged2["test_mixed.gd::test_mixed_pass"]["verdict"] == "red"
+    assert merged2["test_mixed.gd::test_mixed_fail"]["verdict"] == "red"
+
+
+def test_r8_deleted_test_enters_change_face(tmp_path):
+    """C3-R8 退回1：tests_face 里记录、盘上已删的测试文件必须进增量变更
+    面（只记 drift 会让 refresh 走全量重建或增量后复检仍过期）；生产
+    .gd 删除同走该面（因素表第 3 行 → prod_removed）。"""
+    from godot_qa_toolkit.mutation.verdict_source import _map_drift
+
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    doc = {"tests_face": {"tests/unit/test_gone.gd": "sha"},
+           "file_sha256": {"src/prod_gone.gd": "sha"},
+           "production_content_sha256": {}}
+    changed, drift = _map_drift(doc, str(tmp_path), [])
+    assert "tests/unit/test_gone.gd" in changed
+    assert "removed:tests/unit/test_gone.gd" in drift
+    assert "src/prod_gone.gd" in changed
+    assert "removed:src/prod_gone.gd" in drift
+
+
 def test_r5_increment_failure_keeps_old_bytes(tmp_path, monkeypatch):
     """C3-R5 项1 补充：增量产物校验不过 → 旧图字节不变（tmp 丢弃）。"""
     import hashlib as _hl

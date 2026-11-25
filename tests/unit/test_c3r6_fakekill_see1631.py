@@ -233,3 +233,71 @@ def test_r7_case_g_passing_test_green_in_table(r6_project):
     missing = {k: tv.get(k) for k in idents
                if k not in tv or tv[k].get("verdict") != "green"}
     assert not missing, ("判定表未覆盖宇宙身份", idents, missing)
+
+
+def test_r8_delete_plus_add_same_batch_renews(r6_project):
+    """C3-R8 退回1：同一批里删除一个测试文件、又新增一个测试文件 → 一次
+    续新成功（此前删除只进 drift 不进变更面，装填后复检仍过期、永不自愈）；
+    被删身份出表、新增通过身份以 green 进表、动作为增量。"""
+    proj, env, _base, _godot = r6_project
+    (proj / "tests" / "test_fill_00.gd").unlink()
+    (proj / "tests" / "test_r8_new_pass.gd").write_text(
+        'extends GutTest\nconst C = preload("res://src/calc_sign.gd")\n'
+        "func test_pass():\n\tassert_eq(C.new().gate(11), true)\n")
+    _renew(proj, env)  # 断言 exit 0——删除+新增同批一次续新成功
+    doc = json.loads(
+        (proj / ".qa-cache" / "attribution-map.json").read_text(
+            encoding="utf-8"))
+    tv = doc.get("test_verdicts") or {}
+    assert (doc.get("increment") or {}).get("mode") == "incremental"
+    assert "test_fill_00.gd::test_fill" not in tv
+    assert tv.get("test_r8_new_pass.gd::test_pass") == {"verdict": "green"}
+
+
+def test_r8_delete_only_incremental_no_full_rebuild(r6_project):
+    """C3-R8 退回1：只删除一个测试文件 → 续新走增量（因素表第 6 行：
+    剔除边与 verdict、不重跑），不做全量重建；被删身份不在表里。"""
+    proj, env, _base, _godot = r6_project
+    (proj / "tests" / "test_fill_01.gd").unlink()
+    _renew(proj, env)
+    doc = json.loads(
+        (proj / ".qa-cache" / "attribution-map.json").read_text(
+            encoding="utf-8"))
+    # 全量重建产物无 increment 块——据此判定未走全量
+    assert (doc.get("increment") or {}).get("mode") == "incremental"
+    tv = doc.get("test_verdicts") or {}
+    assert "test_fill_01.gd::test_fill" not in tv
+
+
+def test_r8_case_d_mixed_script_inc_vs_full_consistent(r6_project):
+    """C3-R8 退回2：新增脚本里通过与失败并存 → 逐测试落表（pass=green、
+    fail=red）；带 --mutate-all 的 mutation 在增量 map 与全量重建 map 上
+    判定一致（此前增量把通过的也记红，mutation 假存活）。"""
+    proj, env, _base, _godot = r6_project
+    (proj / "tests" / "test_r8_mixed.gd").write_text(
+        'extends GutTest\nconst C = preload("res://src/calc_sign.gd")\n'
+        "func test_mixed_pass():\n\tassert_eq(C.new().gate(11), true)\n"
+        "func test_mixed_fail():\n\tfail_test(\"mixed fail\")\n")
+    _renew(proj, env)
+    doc = json.loads(
+        (proj / ".qa-cache" / "attribution-map.json").read_text(
+            encoding="utf-8"))
+    tv = doc.get("test_verdicts") or {}
+    assert tv.get("test_r8_mixed.gd::test_mixed_pass") == {"verdict": "green"}
+    fail_entry = tv.get("test_r8_mixed.gd::test_mixed_fail") or {}
+    assert fail_entry.get("verdict") == "red", fail_entry
+
+    def _run_counts() -> dict:
+        rc, out, err = _cli(
+            ["mutation", "src/calc_sign.gd", "--select", "full",
+             "--auto-prepare", "--mutate-all", "--budget", "60",
+             "--timeout", "120"], env, proj)
+        assert rc in (0, 1), err[-400:]
+        return _counts(out)
+
+    inc_counts = _run_counts()
+    # 同一棵树全量重建 map 后重跑同一 mutation——判定必须一致
+    (proj / ".qa-cache" / "attribution-map.json").unlink()
+    full_counts = _run_counts()
+    assert inc_counts == full_counts, (inc_counts, full_counts)
+    assert inc_counts["killed"] and inc_counts["survived"], inc_counts

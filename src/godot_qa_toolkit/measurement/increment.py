@@ -129,6 +129,12 @@ def classify_changes(root: Path, changed: list[str],
     # unknown 被 fail-loud 拒跑。
     test_identities |= set(arm.get("test_to_lines") or {})
     test_identities |= set(arm.get("script_to_lines") or {})
+    # C3-R8：删除判定还须认基线测试面（tests_face）——零归属边的测试
+    # （只 assert 自足的填充脚本）删除时无身份可查，此前被判 unknown 触发
+    # 全量重建；因素表第 6 行要求按 test_removed 增量剔除
+    known_test_names = {_script_name_of(i) for i in test_identities}
+    known_test_names |= {Path(rel).name
+                         for rel in (baseline.get("tests_face") or {})}
     feature_keys = _baseline_gherkin_feature_keys(baseline)
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],
@@ -138,7 +144,7 @@ def classify_changes(root: Path, changed: list[str],
                                  "unknown": []}
     for raw in changed:
         verdict = _classify_one(root, raw, edge_files, known_fids,
-                                test_identities, feature_keys)
+                                known_test_names, feature_keys)
         out[verdict[0]].append(verdict[1])
     return out
 
@@ -174,7 +180,7 @@ def _path_lifecycle(p: Path, rel: str, raw: str, known: bool,
 
 def _classify_one(root: Path, raw: str, edge_files: set[str],
                   known_fids: set[str],
-                  test_identities: set[str],
+                  known_test_names: set[str],
                   feature_keys: "set[str] | None" = None
                   ) -> tuple[str, str]:
     p = Path(raw)
@@ -196,7 +202,7 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
                                "feature_removed")
     name = p.name
     if rel.startswith("tests/") and name.startswith("test_"):
-        known = any(_script_name_of(i) == name for i in test_identities)
+        known = name in known_test_names
         return _path_lifecycle(p, rel, raw, known,
                                "test_changed", "test_new", "test_removed")
     prod = _classify_prod_entry(p, rel, edge_files, known_fids)

@@ -322,6 +322,10 @@ def _sha_drift(root: Path, rel: str, want: "str | None",
 
     p = root / rel
     if not p.is_file():
+        # C3-R8：删除类漂移同属增量变更面（因素表第 3/6 行）——只记 drift
+        # 会让 refresh 无变更可续（删除+新增同批永不自愈），或删除单独
+        # 触发全量重建；进变更面后由增量按 test_removed/prod_removed 剔除
+        changed.add(rel)
         drift.add(f"removed:{rel}")
         return
     have = hashlib.sha256(p.read_bytes()).hexdigest()

@@ -711,6 +711,7 @@ def _map_source_prepare_early(args: argparse.Namespace,
     """SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
     --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
     入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。"""
+    from .mutation.map_contract import MapContractError
     from .mutation.verdict_source import BaselineSourceError, \
         prepare_map_for_baseline
 
@@ -718,7 +719,9 @@ def _map_source_prepare_early(args: argparse.Namespace,
         prepare_map_for_baseline(
             str(Path(args.project_root)), files_all,
             timeout_s=int(getattr(args, "timeout", 600) or 600))
-    except BaselineSourceError as e:
+    except (BaselineSourceError, MapContractError) as e:
+        # §SPEC-032/C3-R3 项1：MapView 构造期断言/refresh 失败 → 具名
+        # JSON（此前 MapContractError 在此裸逸出 traceback）
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})
@@ -811,6 +814,15 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
                               [str(f) for f in args.files])
     except MutationSelectionError as e:
         return _selection_error_payload(args, e)
+    except MapContractError as e:
+        # §SPEC-032/C3-R3 项1：MapView 断言/refresh 失败 → 具名 JSON
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    except BaselineSourceError as e:
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     return None
 
 

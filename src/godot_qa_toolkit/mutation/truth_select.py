@@ -469,17 +469,24 @@ def _explicit_map_stale(path: str, project_root: str) -> bool:
 
 
 def ensure_map(project_root: str | Path, files: list[str],
-               timeout_s: int | None = None) -> str | None:
+               timeout_s: int | None = None, *,
+               force: bool = False,
+               out_path: str | None = None) -> str | None:
     """map 自判自刷（§SPEC-029：每个项目唯一一份 map，不设显式只读
     例外——显式 `--attribution-map` 过期同样原地自刷新，原子写 +
     `<map>.lock` 串行化）；不可用（旧 schema/解析失败）→ 原子重建；
-    失败台账记录后 fail-loud（全脸仅显式 `--select full` 审计开关）。"""
+    失败台账记录后 fail-loud（全脸仅显式 `--select full` 审计开关）。
+
+    C3-R3 项2：`force=True` + `out_path` = 续新全量重建——**不删旧
+    map**，直接原子替换目标路径（失败路径旧 map 字节不变；显式 map 的
+    用户文件同样不被销毁）。"""
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
     explicit = bool(os.environ.get(ENV_MAP))
-    existing, rebuild_reason = _default_map_reuse(map_path(root), explicit)
-    if existing:
+    existing, rebuild_reason = (None, "forced_rebuild") if force else \
+        _default_map_reuse(map_path(root), explicit)
+    if existing and not force:
         # §SPEC-029：显式 map 不再只读透传——过期同样自判自刷（原地
         # 原子重建，宇宙 = 分类清单 production 全集）。
         if _explicit_map_stale(existing, root):
@@ -490,12 +497,13 @@ def ensure_map(project_root: str | Path, files: list[str],
         else:
             return existing
     # §SPEC-012 HIGH-2：默认位置旧 schema/无效状态 → 原子重建。
-    out = default_map_path(root)
+    out = out_path or default_map_path(root)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     with _refresh_lock(out):
-        existing, reason = _default_map_reuse(map_path(root), explicit)
-        if existing:
+        existing, reason = (None, "forced_rebuild") if force else \
+            _default_map_reuse(map_path(root), explicit)
+        if existing and not force:
             return existing                # 双检：等锁期间可能已被生成/重建
         rebuild_reason = rebuild_reason or reason
         action = "rebuild" if rebuild_reason else "generate"

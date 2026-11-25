@@ -758,3 +758,154 @@ def test_r2_backup_root_no_residue_on_refresh_failure(tmp_path, monkeypatch):
     # 测试自身清理他进程模拟目录（避免污染共享 TMPDIR 的后续断言）
     import shutil as _sh
     _sh.rmtree(other_dir, ignore_errors=True)
+
+
+def _r2_project(tmp_path) -> "object":
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.godot").write_text("config_version=5\n")
+    (proj / "calc.gd").write_text("extends Node\nfunc f(a):\n\treturn a\n")
+    (proj / "tests" / "unit").mkdir(parents=True)
+    (proj / "tests" / "unit" / "test_a.gd").write_text(
+        "extends GutTest\nfunc test_a():\n\tpass\n")
+    (proj / ".gutconfig.json").write_text(json.dumps(
+        {"dirs": ["res://tests/unit"], "include_subdirs": True,
+         "prefix": "test_"}))
+    return proj
+
+
+def test_r2_full_rebuild_failure_keeps_old_map(tmp_path, monkeypatch):
+    """C3-R3 项2：全量重建中途失败 → 旧 map 字节不变（默认路径）。"""
+    import hashlib as _hl
+
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    proj = _r2_project(tmp_path)
+    map_file = proj / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    map_file.write_text('{"schema_version": "test-attribution/7"}',
+                        encoding="utf-8")
+    before = _hl.sha256(map_file.read_bytes()).hexdigest()
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    from godot_qa_toolkit.mutation import truth_select as ts
+    monkeypatch.setattr(ts, "_ensure_generate",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            ts.MutationSelectionError(
+                                "attribution_generate_failed: boom")))
+    with pytest.raises(Exception):
+        vs.prepare_map_for_baseline(str(proj), ["calc.gd"], timeout_s=60)
+    assert map_file.is_file(), "旧 map 不得被销毁"
+    assert _hl.sha256(map_file.read_bytes()).hexdigest() == before
+
+
+def test_r2_increment_failure_keeps_old_map(tmp_path, monkeypatch):
+    """C3-R3 项2：增量中途失败 → 旧 map 字节不变（默认路径）。"""
+    import hashlib as _hl
+
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    proj = _r2_project(tmp_path)
+    map_file = proj / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    map_file.write_text('{"schema_version": "test-attribution/7"}',
+                        encoding="utf-8")
+    before = _hl.sha256(map_file.read_bytes()).hexdigest()
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    from godot_qa_toolkit.measurement import increment as _inc
+    monkeypatch.setattr(_inc, "run_attribution_increment",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            _inc.IncrementError("increment failed: boom")))
+    with pytest.raises(Exception):
+        vs.prepare_map_for_baseline(str(proj), ["calc.gd"], timeout_s=60)
+    assert map_file.is_file(), "旧 map 不得被销毁"
+    assert _hl.sha256(map_file.read_bytes()).hexdigest() == before
+
+
+def test_r2_explicit_map_failure_keeps_user_file(tmp_path, monkeypatch):
+    """C3-R3 项2：显式 map 续新失败 → 用户那份文件字节不变。"""
+    import hashlib as _hl
+
+    from godot_qa_toolkit.mutation import verdict_source as vs
+
+    proj = _r2_project(tmp_path)
+    user_map = tmp_path / "my-map.json"
+    user_map.write_text('{"schema_version": "test-attribution/7"}',
+                        encoding="utf-8")
+    before = _hl.sha256(user_map.read_bytes()).hexdigest()
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP", str(user_map))
+    from godot_qa_toolkit.mutation import truth_select as ts
+    monkeypatch.setattr(ts, "_ensure_generate",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            ts.MutationSelectionError(
+                                "attribution_generate_failed: boom")))
+    with pytest.raises(Exception):
+        vs.prepare_map_for_baseline(str(proj), ["calc.gd"], timeout_s=60)
+    assert user_map.is_file(), "用户显式 map 不得被销毁"
+    assert _hl.sha256(user_map.read_bytes()).hexdigest() == before
+
+
+def _r2_stale_invalid_arm_map(tmp_path):
+    """构造 otherwise-fresh 但保留 invalid gherkin 臂边的 map（§SPEC-015
+    视图断言触发面）。"""
+    import hashlib as _hl
+
+    proj = _r2_project(tmp_path)
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+    install_recipe(proj)
+    ensure_addon_metadata(proj)
+    from godot_qa_toolkit.mutation.truth_select import _fresh_recipe_hash
+    map_file = proj / ".qa-cache" / "attribution-map.json"
+    map_file.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": "test-attribution/7",
+           "recipe_hash_pristine": _fresh_recipe_hash(str(proj)),
+           "project_root": str(proj),
+           "file_sha256": {"calc.gd": _hl.sha256(
+               (proj / "calc.gd").read_bytes()).hexdigest()},
+           "target_files": ["calc.gd"],
+           "tests_face": {"tests/unit/test_a.gd": _hl.sha256(
+               (proj / "tests" / "unit" / "test_a.gd")
+               .read_bytes()).hexdigest()},
+           "arms": {"gut_full": {"test_to_lines": {}},
+                    "gherkin": {"test_to_lines": {"x": {}}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 1, "probes_fired": 1,
+                                       "vacuous": False},
+                          "gherkin": {"state": "invalid"}},
+           "instrumentable_lines": {"calc.gd": [1]},
+           "test_verdicts": {}}
+    map_file.write_text(json.dumps(doc), encoding="utf-8")
+    return proj, map_file
+
+
+@pytest.mark.parametrize("extra", [
+    [],
+    ["--select", "fn"],
+    ["--select", "full"],
+    ["--tests", "res://tests/unit/"],
+], ids=["line", "fn", "full", "tests"])
+def test_r2_mapview_violation_named_json_all_entries(
+        tmp_path, monkeypatch, capsys, extra):
+    """C3-R3 项1：四种 mutation 入口下 MapView 断言触发 → 具名 JSON
+    （零 traceback）——不打桩 _prepare_mapping_face 真实路径。"""
+    proj, _map_file = _r2_stale_invalid_arm_map(tmp_path)
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+    from godot_qa_toolkit import cli as cli_mod
+    from godot_qa_toolkit import projectroot as pr_mod
+    monkeypatch.setattr(pr_mod, "ensure_import_cache",
+                        lambda project_root, **_kw: None)
+    args = cli_mod.build_parser().parse_args([
+        "mutation", str(proj / "calc.gd"),
+        "--project-root", str(proj),
+        "--budget", "2", "--auto-prepare"] + extra)
+    rc = cli_mod.cmd_mutation(args)
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, captured.err[-600:]
+    if captured.out.strip():
+        payload = json.loads(captured.out)
+        assert payload.get("tool") == "mutation"
+        if payload.get("ok") is False:
+            assert payload.get("summary", {}).get("error") or payload.get(
+                "failures"), "失败必须具名"
+    assert rc in (0, 1, 2)

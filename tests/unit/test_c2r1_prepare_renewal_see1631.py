@@ -87,7 +87,7 @@ def test_prepare_missing_map_uses_ensure_map(tmp_path, monkeypatch):
     from godot_qa_toolkit.mutation import truth_select as _ts
     monkeypatch.setattr(
         _ts, "ensure_map",
-        lambda root, files, timeout_s=600: calls.append(("ensure", root)))
+        lambda root, files, timeout_s=600, **kw: calls.append(("ensure", root)))
     monkeypatch.setattr(
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
@@ -125,6 +125,12 @@ def test_prepare_drift_uses_increment(tmp_path, monkeypatch):
     def fake_increment(root, targets, recipe, baseline, changed, out,
                        **kw):
         calls["changed"] = list(changed)
+        # C3-R3 项2：增量产物写唯一 tmp 后原子替换——桩须在 out 落一份
+        # 产物（否则 os.replace 无源）
+        import json as _json
+        from pathlib import Path as _P
+        _P(out).write_text(_json.dumps({"mode": "incremental"}),
+                            encoding="utf-8")
         return {"mode": "incremental"}
 
     monkeypatch.setattr(
@@ -170,7 +176,8 @@ def test_prepare_recipe_mismatch_rebuilds(tmp_path, monkeypatch):
     from godot_qa_toolkit.mutation import truth_select as _ts
     monkeypatch.setattr(
         _ts, "ensure_map",
-        lambda root, files, timeout_s=600: unlink_calls.append("ensure"))
+        lambda root, files, timeout_s=600, **kw: unlink_calls.append(
+            "ensure"))
     monkeypatch.setattr(
         vs, "_verify_prepared",
         lambda root, files: str(Path(root) / ".qa-cache"
@@ -184,8 +191,12 @@ def test_prepare_recipe_mismatch_rebuilds(tmp_path, monkeypatch):
                       "test_verdicts": {}})
     monkeypatch.setattr(_mc, "assert_map_fresh", lambda *a, **k: None)
     vs.prepare_map_for_baseline(str(tmp_path), ["tests/unit/test_a.gd"])
-    assert any("attribution-map.json" in u for u in unlink_calls), \
-        "recipe 失配须先移除 stale 旧图再重建"
+    # C3-R3 项2：recipe 失配 → 原子重建（force + out_path），**不再移除
+    # 旧图**（旧图字节在失败路径下必须不变）
+    assert any("ensure" == u for u in unlink_calls), \
+        "recipe 失配须走全量重建"
+    assert not any("attribution-map.json" in u for u in unlink_calls), \
+        "重建不得先删除旧图（旧图字节须在失败路径下不变）"
 
 
 def test_prepare_still_inconsistent_fail_loud(tmp_path, monkeypatch):

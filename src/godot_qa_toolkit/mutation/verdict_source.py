@@ -406,10 +406,15 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
     if not targets:
         raise BaselineSourceError(
             "prepare renewal failed: no measurable targets in map")
+    # C3-R3 项2：增量产物先写唯一 tmp → 校验通过后原子替换目标（旧 map
+    # 字节在任一失败路径下不变；此前直接写目标路径，中途失败即损坏）
+    tmp = path + ".renew-tmp"
     try:
         run_attribution_increment(
-            project_root, targets, recipe, path, changed, path,
+            project_root, targets, recipe, path, changed, tmp,
             timeout_s=timeout_s)
+        import os as _os
+        _os.replace(tmp, path)
     except IncrementError as e:
         if "unknown_changed_paths" in str(e):
             print("mutation prepare: changed path(s) not attributable "
@@ -419,20 +424,24 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
                                          timeout_s)
         raise BaselineSourceError(
             f"prepare renewal failed (increment): {e}") from e
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _prepare_full_rebuild(project_root: str, files: list[str], path: str,
                           timeout_s: int) -> None:
     """全脸重建（measure run 同形态；recipe pristine 失配/结构性漂移
-    不可增量）——auto 管理的默认 map 允许安全重建，重建前移除旧
-    产物（ensure_map 仅在不可复用时重建，stale 旧图须显式移除）。
-    宇宙 = §SPEC-031 清单 production 全集（§SPEC-029）。"""
+    不可增量）——宇宙 = §SPEC-031 清单 production 全集（§SPEC-029）。
+
+    C3-R3 项2：**不删旧 map**——ensure_map(force=True, out_path=path)
+    直接原子替换目标路径；生成/校验失败时旧 map 字节不变（此前先
+    unlink 再重建，中途失败即销毁用户地图——显式 map 同样受害）。"""
     from .truth_select import MutationSelectionError, ensure_map
 
     build_files = _production_universe(project_root, files)
     try:
-        Path(path).unlink(missing_ok=True)
-        ensure_map(project_root, build_files, timeout_s=timeout_s)
+        ensure_map(project_root, build_files, timeout_s=timeout_s,
+                   force=True, out_path=path)
     except MutationSelectionError as e:
         raise BaselineSourceError(
             f"prepare renewal failed (rebuild): {e}") from e

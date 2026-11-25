@@ -761,30 +761,42 @@ def _gherkin_disclosure(doc: dict, rel: str) -> "dict | None":
 
 
 def _evaluate(root: str, rel: str, doc: dict) -> dict:
-    """单次新鲜性判定 → {ok, reason, scripts, ambiguous, mapping}。"""
+    """单次新鲜性判定 → {ok, reason, scripts, ambiguous, mapping}。
+
+    §SPEC-029（Leader 复核修正）：谓词单一实现——共享
+    `verdict_source.assert_map_fresh`（recipe pristine/project_face/
+    工具链 + file_sha256 全集 + tests_face + 宇宙新增生产检出），本处
+    只保留"该文件在宇宙内且已绑定"的结构门与选面产出。"""
     mapping = {"path": None, "file_sha256_bound": False,
                "recipe_hash_ok": False, "arms_valid": arms_valid(
                    doc.get("arms_state") or {})}
     want_hash = (doc.get("file_sha256") or {}).get(rel)
     have_hash = _sha256(Path(root) / rel)
     mapping["file_sha256_bound"] = bool(want_hash) and want_hash == have_hash
-    mapping["recipe_hash_ok"] = (
-        _fresh_recipe_hash(root) is not None
-        and _fresh_recipe_hash(root) == doc.get("recipe_hash_pristine"))
-    drift = _tests_face_drift(root, doc)
-    mapping["tests_face_ok"] = not (drift["changed"] or drift["removed"])
-    mapping["tests_face_drift"] = drift
     if not mapping["arms_valid"]:
         return {"ok": False, "reason": "measurement_invalid",
                 "scripts": [], "ambiguous": [], "mapping": mapping}
     if not mapping["file_sha256_bound"]:
         return {"ok": False, "reason": "file_binding_missing_or_stale",
                 "scripts": [], "ambiguous": [], "mapping": mapping}
-    if not mapping["recipe_hash_ok"]:
-        return {"ok": False, "reason": "recipe_hash_stale",
-                "scripts": [], "ambiguous": [], "mapping": mapping}
-    if not mapping["tests_face_ok"]:
-        return {"ok": False, "reason": "tests_face_drift",
+    from .verdict_source import BaselineSourceError, assert_map_fresh
+
+    try:
+        assert_map_fresh(root, doc, [rel])
+    except BaselineSourceError as e:
+        mapping["freshness_reason"] = str(e)
+        # 既有 granular reason 契约名保持稳定（调度/契约测试单源）——
+        # 共享谓词消息 → 首因 reason 映射
+        msg = str(e)
+        if "tests_face drift" in msg:
+            reason = "tests_face_drift"
+        elif "recipe_hash_pristine stale" in msg:
+            reason = "recipe_hash_stale"
+        elif "new universe file" in msg:
+            reason = "production_new_file"
+        else:
+            reason = "file_binding_missing_or_stale"
+        return {"ok": False, "reason": reason, "detail": msg,
                 "scripts": [], "ambiguous": [], "mapping": mapping}
     scripts, ambiguous = _tests_for_target(root, doc["arms"]["gut_full"], rel)
     return {"ok": True, "reason": "fresh_runtime_mapping",
@@ -846,9 +858,10 @@ def _detail_of(base: dict) -> str | None:
     bits = []
     if mp:
         bits.append(f"file_sha256_bound={mp.get('file_sha256_bound')}")
-        bits.append(f"recipe_ok={mp.get('recipe_hash_ok')}")
-        bits.append(f"tests_face_ok={mp.get('tests_face_ok')}")
+        # §SPEC-029 谓词单一实现：新鲜原因随共享谓词消息具名
         bits.append(f"arms_valid={mp.get('arms_valid')}")
+        if mp.get("freshness_reason"):
+            bits.append(f"freshness={mp['freshness_reason'][:160]}")
     if base.get("ambiguous_names"):
         bits.append(f"ambiguous={base['ambiguous_names'][:3]}")
     if base.get("universe_guidance"):

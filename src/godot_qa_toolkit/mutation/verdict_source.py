@@ -131,10 +131,11 @@ def _assert_no_new_production(root: Path, doc: dict) -> None:
     file_sha256 全集）→ 判不新鲜。范围规则不闭合（路径拼错/白名单空）
     → 具名 fail-loud。文本内容文件（.tscn/.tres/csv/translation）与
     生产 .gd 同套逻辑（§SPEC-031 v8）。"""
-    from ..measurement.classify import ScopeError, discover_universe
+    from ..measurement.classify import ScopeError, discover_scope
 
     try:
-        universe = discover_universe(root)["files"]
+        # §SPEC-029 表 #4：新增检出只看生产类（非生产 .gd 不触发刷新）
+        universe = discover_scope(root)["production"]
     except ScopeError as e:
         raise BaselineSourceError(
             f"baseline_source=map: {e}") from e
@@ -153,14 +154,20 @@ def _assert_no_new_production(root: Path, doc: dict) -> None:
             f"§SPEC-029/031) — {sorted(new)[:6]}")
 
 
-def _assert_fresh(project_root: str, doc: dict, files: list[str]) -> None:
-    """map 与当前树一致性门：schema/臂执行证据/recipe pristine/目标文件
-    sha/测试面漂移——任一失配即具名 fail-loud。"""
+def assert_map_fresh(project_root: str, doc: dict, files: list[str]) -> None:
+    """map 与当前树一致性门（§SPEC-029 谓词单一实现；mutation 基线路径
+    与 truth_select._evaluate/coverage 选面同源调用）：schema/臂执行证据/
+    recipe pristine（含 project_face/工具链）/file_sha256 全集/tests_face
+    /宇宙新增生产检出——任一失配即具名 fail-loud。"""
     _assert_map_schema(doc)
     _assert_map_arm_valid(doc)
     _assert_recipe_pristine(project_root, doc)
     _assert_tests_face(project_root, doc)
     _assert_target_files(project_root, doc, files)
+
+
+# 兼容别名（模块内历史调用点）
+_assert_fresh = assert_map_fresh
 
 
 def _red_entries(doc: dict) -> "dict[str, tuple[str, str]]":
@@ -297,10 +304,10 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
     # 与 map 记录面比对：新增生产 .gd → 判不新鲜（重建后走既有
     # new_prod_file_fallback）；分类不闭合 → unclassified_source 具名
     # fail-loud。
-    from ..measurement.classify import ScopeError, discover_universe
+    from ..measurement.classify import ScopeError, discover_scope
 
     try:
-        universe = discover_universe(root)["files"]
+        universe = discover_scope(root)["production"]
     except ScopeError as e:
         raise BaselineSourceError(f"{e}") from e
     known = {("res://" + rel) for rel in shas}

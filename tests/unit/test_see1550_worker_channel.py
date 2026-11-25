@@ -186,9 +186,11 @@ class TestClassifyWorkerLeg:
             _mutant(), leg, {"test_old"}, False, None, FIXTURE,
             "src")["verdict"] == "survived"
         # SEE-1631 §SPEC-027/D7：dirty + 失败 ⊆ 基线红 → survived
+        # SEE-1631 §SPEC-027/D7（Leader 复核修正）：worker 腿无整面证据
+        # → 失败 ⊆ 基线红保持 suspect（Harti 语义）。
         assert classify_worker_leg(
             _mutant(), leg, {"test_old"}, True, None, FIXTURE,
-            "src")["verdict"] == "survived"
+            "src")["verdict"] == "suspect"
 
 
 def _run_legs(script, mutants=None, cold_verdicts=None, classify=None):

@@ -99,7 +99,8 @@ class TestClassifyCleanBatch:
     def test_no_marker_preexisting_red_survived(self):
         # SEE-1631 §SPEC-027/D7（QA 裁决）：无 skip marker 但失败 ⊆ 基线红
         # → survived（pre_existing_only）；skip_red 披露键仍缺席。
-        rec = self._classify("* test_red\n[Failed]\n", ["test_red"])
+        rec = self._classify("* test_red\n[Failed]\nRun Summary\n",
+                             ["test_red"])
         assert rec["verdict"] == "survived"
         assert rec.get("pre_existing_only") is True
         assert "skip_red" not in rec

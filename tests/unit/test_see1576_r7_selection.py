@@ -73,7 +73,10 @@ def test_runner_mapping_selection_line(tmp_path, capsys):
     """SEE-1581：新鲜映射 → 选择目录 + stderr 一行运行面披露。"""
     from attribution_fixtures import write_map
     root = _dilution_project(tmp_path)
-    write_map(root, {"svc/aux.gd": ["test_svc_clock.gd::test_0"]})
+    # §SPEC-029：宇宙全集绑定（svc 其余生产文件进 file_sha256）
+    write_map(root, {"svc/aux.gd": ["test_svc_clock.gd::test_0"],
+                     "svc/svc_clock.gd": [], "svc/orphan.gd": [],
+                     "autoload/hub_state.gd": []})
     glob, meta = runner_mod._auto_scan_tests_glob_meta(
         str(root / "svc" / "aux.gd"), str(root), select_mode="file")
     assert glob is not None
@@ -121,7 +124,10 @@ def test_summary_carries_test_selection(tmp_path, monkeypatch):
     target.write_text("func add(a, b):\n\tif a > b:\n\t\treturn a - b\n"
                       "\treturn a + b\n", encoding="utf-8")
     from attribution_fixtures import write_map
-    write_map(root, {"calc.gd": ["test_save.gd::test_ok"]})
+    # §SPEC-029：宇宙全集绑定
+    write_map(root, {"calc.gd": ["test_save.gd::test_ok"],
+                     "svc/svc_clock.gd": [], "svc/orphan.gd": [],
+                     "svc/aux.gd": [], "autoload/hub_state.gd": []})
 
     monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
     monkeypatch.setattr(executor, "_run_baseline_snapshot",

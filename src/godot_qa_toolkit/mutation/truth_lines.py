@@ -211,7 +211,11 @@ def ownership_for(project_root: str, target_file: str,
     try:
         sel = _ts().resolve_selection(project_root, target_file, map_path_override)
         mp = sel.get("mapping") or {}
-        if mp.get("file_sha256_bound") and mp.get("recipe_hash_ok"):
+        # §SPEC-029 谓词单一实现：新鲜判定 = resolve 判 fresh（共享
+        # assert_map_fresh 谓词；source=runtime_mapping 仅在新鲜路径赋值；
+        # recipe_hash_ok 旧字段已退役）。
+        if mp.get("file_sha256_bound") \
+                and sel.get("source") == "runtime_mapping":
             doc = _ts().load_map(mp["path"])
             owner = RuntimeOwnership(project_root, doc)
             owner.source = "runtime_mapping"

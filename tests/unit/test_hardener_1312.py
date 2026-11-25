@@ -282,17 +282,36 @@ class TestH5SuspectGatesOk:
         from godot_qa_toolkit.mutation.runner import run_mutation
 
         proj, target = _write_project(tmp_path)
-        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
+        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n"
+                    "    [Failed]: boom\nRan 2 tests.\nRun Summary\n")
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: dirty,
         )
         glob = _materialize_selection(proj, ["test_a.gd"])
         result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
-        # SEE-1631 §SPEC-027/D7（QA 裁决）：无跳过原语车道失败 ⊆ 基线红
-        # → survived（pre_existing_only）；非 kill 不给 ok=true。
+        # SEE-1631 §SPEC-027/D7（QA 裁决 + Leader 复核修正）：无跳过原语
+        # 车道失败 ⊆ 基线红且整面执行完（Run Summary 在场）→ survived；
+        # 非 kill 不给 ok=true。
         assert result["summary"].get("survived", 0) > 0
         assert result["ok"] is False, "survived still gates ok (not killed)"
+
+    def test_no_full_face_evidence_stays_suspect(self, tmp_path, monkeypatch):
+        """反例：失败 ⊆ 基线红但无收尾汇总（腿中止）→ 保持 suspect
+        （绿杀手可能根本没执行——不可判真实存活）。"""
+        from godot_qa_toolkit.mutation.runner import run_mutation
+
+        proj, target = _write_project(tmp_path)
+        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n"
+                    "    [Failed]: boom\n")  # 无 Run Summary
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: dirty,
+        )
+        glob = _materialize_selection(proj, ["test_a.gd"])
+        result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
+        assert result["summary"].get("suspect", 0) > 0
+        assert result["summary"].get("survived", 0) == 0
 
 
 class TestH6BudgetZeroNoBaseline:

@@ -211,7 +211,8 @@ def test_map_preview_fresh_with_cwd_relative_target(tmp_path, monkeypatch):
     root = _healthy_project(tmp_path, monkeypatch)
     target = _write(root, "utils/calc.gd", "extends RefCounted\n")
     from attribution_fixtures import write_map
-    write_map(root, {"utils/calc.gd": []})
+    # §SPEC-029：宇宙全集绑定（autoload/game.gd 为生产文件）
+    write_map(root, {"utils/calc.gd": [], "autoload/game.gd": []})
     monkeypatch.chdir(tmp_path)  # CWD≠root
     st = map_preview_state(str(root), "utils/calc.gd")
     assert st["present"] is True and st["fresh"] is True

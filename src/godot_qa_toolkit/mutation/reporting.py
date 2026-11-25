@@ -527,16 +527,18 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                 f"baseline_skip applied (physically skipped {removed} red "
                 f"test(s)) with empty diff after {m.kind} "
                 f"{m.original}→{m.mutated} — real survival", src=None)
-        # SEE-1631 §SPEC-027/D7（R4）：无跳过原语的车道（beacon 兜底腿/
-        # 降级冷腿——宿主不下发 skip_red）失败集 ⊆ 基线红 → 真实存活
-        # （基线红在 mutant 前就失败，其失败对 mutant 无信息量）；新失败
-        # 仍 killed（kill 判定不削弱）。
-        if bare and bare.issubset(baseline_failures):
+        # SEE-1631 §SPEC-027/D7（Leader 复核修正）：无跳过原语的车道
+        # （beacon 兜底腿/降级冷腿——宿主不下发 skip_red）失败集 ⊆ 基线
+        # 红 **且整面执行完**（GUT 收尾汇总在场）→ 真实存活；拿不到整面
+        # 证据（引擎崩溃/看门狗杀/提前退出——绿杀手可能根本没执行）保持
+        # suspect（Harti 加固语义不变）。新失败仍 killed（判定不削弱）。
+        if bare and bare.issubset(baseline_failures) \
+                and "Run Summary" in tail:
             rec = _mutant_record(
                 m, "survived",
                 f"only pre-existing red failures after {m.kind} "
                 f"{m.original}→{m.mutated} (no skip primitive on this "
-                f"leg) — real survival", src=None)
+                f"leg; full face completed) — real survival", src=None)
             # 差分复用标记：与旧 suspect 同信息量（重跑无增益）
             rec["pre_existing_only"] = True
             return rec
@@ -855,16 +857,11 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
                 f"baseline_skip applied (physically skipped {removed} red "
                 f"test(s)) with empty diff after {tag} (worker leg) — "
                 f"real survival", src=src)
-        # §SPEC-027/D7（R4）：失败集 ⊆ 基线红 → 真实存活（同冷车道；
-        # 新失败仍 killed——kill 判定不削弱）。
-        leg_failing = set(getattr(leg, "failing_tests", None) or set())
-        if leg_failing and leg_failing.issubset(baseline_failures):
-            rec = _mutant_record(
-                m, "survived",
-                f"only pre-existing red failures after {tag} (worker "
-                f"leg) — real survival", src=src)
-            rec["pre_existing_only"] = True
-            return rec
+        # §SPEC-027/D7（Leader 复核修正）：worker 腿拿不到整面执行完的
+        # 结构化证据（无 tail/无选面规模）→ 失败 ⊆ 基线红保持 suspect
+        # （Harti 语义：无法区分"没抓住"与"没跑到"）；跳过生效的升级走
+        # 上方 skip_red_info 具名通道。
+        pass
         return _mutant_record(
             m, "suspect",
             f"dirty baseline ∧ empty diff after {tag} (worker leg)", src=src)

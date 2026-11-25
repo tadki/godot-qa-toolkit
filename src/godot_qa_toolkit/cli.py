@@ -1270,12 +1270,12 @@ def cmd_measure_registry_diff(args: argparse.Namespace) -> int:
 def cmd_measure_scope(args: argparse.Namespace) -> int:
     """§SPEC-031（R4）只读命令：范围解析结果打印（逐目录计数 + 带理由
     排除清单 + 引用警告）——QA 在真副本上逐目录对账用（零写入零 GUT）。"""
-    from .measurement.classify import ScopeError, discover_universe
+    from .measurement.classify import ScopeError, discover_scope
 
     root = Path(args.project_root).resolve() if args.project_root \
         else Path.cwd()
     try:
-        u = discover_universe(root)
+        u = discover_scope(root)
     except ScopeError as e:
         print(json.dumps({"tool": "measure.scope", "ok": False,
                           "summary": {"error": str(e)}}))
@@ -1287,13 +1287,21 @@ def cmd_measure_scope(args: argparse.Namespace) -> int:
                    "rules_file_present": d["rules_file_present"],
                    "rules_sha256": d["rules_sha256"],
                    "defaults_used": d["defaults_used"],
+                   "unconfigured_hint": d["unconfigured_hint"],
+                   "counts": d["counts"],
                    "universe_count": d["universe_count"],
                    "gd_count": len(u["gd"]),
+                   "production": u["production"],
+                   "non_production": u["non_production"],
+                   "test": u["test"],
+                   "non_test": u["non_test"],
                    "per_dir_counts": d["per_dir_counts"],
-                   "test_roots": d["test_roots"],
-                   "plugin_addon_roots": d["plugin_addon_roots"],
-                   "excluded_stats": d["excluded_stats"],
-                   "excluded_list": d["excluded_list"],
+                   "gut_dirs_effective": d["gut_dirs_effective"],
+                   "gut_dirs_excluded": d["gut_dirs_excluded"],
+                   "features_excluded": d["features_excluded"],
+                   "excluded_production": d["excluded_production"],
+                   "excluded_production_stats":
+                       d["excluded_production_stats"],
                    "excluded_reference_warnings":
                        d["excluded_reference_warnings"],
                }}

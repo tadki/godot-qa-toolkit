@@ -120,12 +120,23 @@ def _legal_exclusions(exclusions: list[dict]) -> tuple[list[dict], str | None]:
 
 def _recipe_gut_face(gutconfig: dict, dirs: list[str],
                      normalized_exclusions: list[dict], root: Path) -> dict:
-    """gut_face 块组装（gutconfig 原文整体入 hash——换 recipe 是显式来源事件）。"""
+    """gut_face 块组装（gutconfig 原文整体入 hash——换 recipe 是显式来源事件）。
+
+    §SPEC-031（R5）：scope 规则 `tests.exclude` 的 dir 条目在此**真正
+    执行**——被排除目录从 dirs 生效面剔除（下游 -gdir 单源继承）。"""
+    from .classify import tests_exclude_entries
+
+    excl_dirs, _excl_feats = tests_exclude_entries(root)
+    excluded_scope_dirs = {_norm_dir(str(e.get("value") or ""))
+                           for e in excl_dirs}
+    effective = [d for d in dirs
+                 if _norm_dir(d) not in excluded_scope_dirs]
     return {
         "config_source": _GUTCONFIG,
         "config_sha256": _sha256_file(root / _GUTCONFIG),
         "gutconfig_raw": gutconfig,
-        "dirs": dirs,
+        "dirs": effective,
+        "dirs_excluded_by_scope": sorted(excluded_scope_dirs),
         "include_subdirs": bool(gutconfig.get("include_subdirs", False)),
         "prefix": gutconfig.get("prefix", "test_"),
         "excluded": [
@@ -134,6 +145,13 @@ def _recipe_gut_face(gutconfig: dict, dirs: list[str],
             if x["scope"] == "gut_dir"
         ],
     }
+
+
+def _norm_dir(d: str) -> str:
+    d = str(d).strip().replace("\\", "/")
+    if d.startswith("res://"):
+        d = d[len("res://"):]
+    return d.strip("/")
 
 def adapter_source_sha256(root: Path) -> tuple[str, int]:
     """适配源指纹（SEE-1624 D-c）：递归折叠 `addons/gqt_gherkin/**` 下全部
@@ -183,6 +201,13 @@ def _recipe_gherkin_face(features: list, feature_count: int,
     # excluded 块保留具名披露（key+reason）。
     excluded_keys = {x["entry"] for x in normalized_exclusions
                      if x["scope"] == "gherkin_feature"}
+    # §SPEC-031（R5）：scope 规则 tests.exclude 的 feature key 同样在
+    # face 级剔除（与 CLI exclusions 合流，单源生效）。
+    from .classify import tests_exclude_entries
+
+    _sd, scope_feats = tests_exclude_entries(root)
+    excluded_keys |= {str(e.get("value") or "") for e in scope_feats}
+    scope_excluded = sorted(excluded_keys) if excluded_keys else []
     if excluded_keys:
         features = [f for f in features
                     if str(f.get("key") or f.get("name") or "")
@@ -191,6 +216,7 @@ def _recipe_gherkin_face(features: list, feature_count: int,
     return {
         "features": features,
         "count": feature_count,
+        "features_excluded_by_scope": scope_excluded,
         "excluded": [
             {"key": x["entry"], "reason": x["reason"]}
             for x in normalized_exclusions

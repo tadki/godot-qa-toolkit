@@ -246,7 +246,8 @@ class TestValidityClassification:
         # 失败集合 ⊆ baseline（差集空且失败名可解析）→ survived
         # （pre_existing_only——基线红失败对 mutant 无信息量）。
         proj, target = self._write_project(tmp_path)
-        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
+        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n"
+                    "    [Failed]: boom\nRan 2 tests.\nRun Summary\n")
         calls = {"n": 0}
 
         def fake_run(root, timeout_s=60, tests_glob=None):
@@ -263,6 +264,21 @@ class TestValidityClassification:
         s = result["summary"]
         assert s.get("survived", 0) == s["mutants"], s
         assert s["killed"] == 0
+
+    def test_no_summary_keeps_suspect(self, tmp_path, monkeypatch):
+        """反例：失败 ⊆ 基线红但无 Run Summary（腿中止）→ suspect。"""
+        proj, target = self._write_project(tmp_path)
+        dirty = (1, "* test_old_flaky\n[Failed]: boom\n")  # 无汇总
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: dirty,
+        )
+        glob = self._materialize_selection(proj, ["test_a.gd"])
+        result = run_mutation(str(target), str(proj), budget=2,
+                              tests_glob=glob)
+        s = result["summary"]
+        assert s.get("suspect", 0) == s["mutants"], s
+        assert s.get("survived", 0) == 0
 
     def test_clean_baseline_survived_not_suspect(self, tmp_path, monkeypatch):
         proj, target = self._write_project(tmp_path)

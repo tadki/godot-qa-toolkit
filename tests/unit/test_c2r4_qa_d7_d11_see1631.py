@@ -117,14 +117,29 @@ def test_d9_dropped_purged_increment_shape():
 # --------------------------------------------------------------------------
 
 def test_d7_cold_no_skip_primitive_red_subset_survived():
-    """beacon/降级冷腿（无 skip 原语）：失败集 ⊆ 基线红 → survived。"""
+    """beacon/降级冷腿（无 skip 原语）：失败集 ⊆ 基线红 **且整面执行完**
+    （Run Summary 在场）→ survived。"""
     tail = ("res://tests/unit/test_red.gd\n* test_red_always_fails\n"
-            "[Failed] test_red_always_fails\n")
+            "[Failed] test_red_always_fails\nRan 2 tests.\n"
+            "Run Summary\n")
     rec = _classify_mutant_run(
         _mk_mutant(), rc=1, tail=tail,
         baseline_failures={"test_red_always_fails"}, baseline_dirty=True)
     assert rec["verdict"] == "survived"
     assert "pre-existing red" in rec["reason"]
+    assert rec["pre_existing_only"] is True
+
+
+def test_d7_cold_no_full_face_evidence_stays_suspect():
+    """反例（Leader 复核）：失败 ⊆ 基线红但无收尾汇总（腿中止——绿杀手
+    可能没执行）→ 保持 suspect（不可判真实存活）。"""
+    tail = ("res://tests/unit/test_red.gd\n* test_red_always_fails\n"
+            "[Failed] test_red_always_fails\n")  # 无 Run Summary
+    rec = _classify_mutant_run(
+        _mk_mutant(), rc=1, tail=tail,
+        baseline_failures={"test_red_always_fails"}, baseline_dirty=True)
+    assert rec["verdict"] == "suspect"
+    assert rec.get("pre_existing_only") is None
 
 
 def test_d7_cold_new_failure_still_killed():
@@ -136,7 +151,9 @@ def test_d7_cold_new_failure_still_killed():
     assert rec["verdict"] == "killed"
 
 
-def test_d7_worker_red_subset_survived():
+def test_d7_worker_red_subset_without_evidence_stays_suspect():
+    """worker 腿无整面证据（无 tail/无选面规模）→ 失败 ⊆ 基线红保持
+    suspect（Leader 复核修正；跳过生效走 skip_red_info 具名通道）。"""
     class Leg:
         gut_ran = True
         fail_count = 1
@@ -152,8 +169,7 @@ def test_d7_worker_red_subset_survived():
         baseline_failures={"test_red_always_fails"}, baseline_dirty=True,
         ownership_fn=lambda *a, **k: None, project_root="/p",
         original_src="src")
-    assert rec["verdict"] == "survived"
-    assert "pre-existing red" in rec["reason"]
+    assert rec["verdict"] == "suspect"
 
 
 # --------------------------------------------------------------------------
@@ -260,117 +276,200 @@ def test_d10_red_entries_full_path_script_for_skip():
 # --------------------------------------------------------------------------
 
 def _proj(tmp_path: "object") -> "object":
+    """KOL 形态夹具（验收基准 = 手工盘点逐项相等）：
+    生产 .gd 182（systems 74 / scenes 53 / autoload 22 / resources 21 /
+    utils 12）；非生产 438（addons 436 + .dev 2）；测试 329（285
+    test_*.gd + 44 features）；非测试 15（GUT 目录内 11 mock + tests/
+    4 个 scripts——按 9 目录公共父 tests/ 口径）。"""
     root = tmp_path / "proj"
     root.mkdir()
     (root / "project.godot").write_text("config_version=5\n")
-    (root / "systems").mkdir()
-    (root / "systems" / "calc.gd").write_text("extends Node\n")
-    (root / "utils").mkdir()
-    (root / "utils" / "helper.gd").write_text("extends Node\n")
-    (root / "addons" / "gut").mkdir(parents=True)
-    (root / "addons" / "gut" / "plugin.cfg").write_text("[plugin]\n")
-    (root / "addons" / "gut" / "test.gd").write_text("extends Node\n")
-    (root / "tests" / "unit").mkdir(parents=True)
-    (root / "tests" / "unit" / "test_a.gd").write_text("extends GutTest\n")
+    for d, n in (("systems", 74), ("scenes", 53), ("autoload", 22),
+                 ("resources", 21), ("utils", 12)):
+        (root / d).mkdir()
+        for i in range(n):
+            (root / d / f"f{i}.gd").write_text("extends Node\n")
+    for name, files in (("gut", 164), ("godot_mcp", 250),
+                        ("gqt_gherkin", 21), ("kol_dialog_autodismiss", 1)):
+        d = root / "addons" / name
+        d.mkdir(parents=True)
+        (d / "plugin.cfg").write_text("[plugin]\n")
+        for i in range(files):
+            (d / f"f{i}.gd").write_text("extends Node\n")
+    (root / ".dev" / "scripts").mkdir(parents=True)
+    for i in range(2):
+        (root / ".dev" / f"w{i}.gd").write_text("x=1\n")
+    for k in range(9):
+        (root / "tests" / f"area{k}").mkdir(parents=True)
+    for i in range(285):
+        (root / "tests" / f"area{i % 9}" / f"test_{i}.gd") \
+            .write_text("extends GutTest\n")
+    for i in range(11):
+        (root / "tests" / f"area{i % 9}" / f"mock_{i}.gd") \
+            .write_text("extends Node\n")
+    (root / "tests" / "scripts").mkdir()
+    for i in range(4):
+        (root / "tests" / "scripts" / f"s{i}.gd").write_text(
+            "extends Node\n")
     (root / ".gutconfig.json").write_text(json.dumps(
-        {"dirs": ["res://tests/unit"]}))
+        {"dirs": [f"res://tests/area{k}" for k in range(9)],
+         "include_subdirs": True, "prefix": "test_"}))
+    (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
+    for i in range(44):
+        (root / "addons" / "gqt_gherkin" / "features" / f"feat_{i}.feature") \
+            .write_text("Feature: x\n")
     return root
 
 
-def test_spec031_scope_rules_include_exclude(tmp_path):
-    """v8 白/黑名单：include 挑宇宙、exclude（带 reason）相减、file 粒度
-    可从 dir 白名单抠出单文件、排除统计披露。"""
-    from godot_qa_toolkit.measurement.classify import discover_universe
+_KOL_INCLUDE = [{"kind": "dir", "value": "systems"},
+                {"kind": "dir", "value": "scenes"},
+                {"kind": "dir", "value": "autoload"},
+                {"kind": "dir", "value": "resources"},
+                {"kind": "dir", "value": "utils"}]
+
+
+def test_spec031_kol_baseline_four_classes(tmp_path):
+    """验收基准：按 KOL 文档化配置解析，四类与手工盘点逐项相等——
+    生产 182 / 非生产 438 / 测试 329（285+44）/ 非测试 15（11+4）。"""
+    from godot_qa_toolkit.measurement.classify import discover_scope
 
     root = _proj(tmp_path)
     (root / ".gqt-scope.json").write_text(json.dumps({
-        "include": [{"kind": "dir", "value": "systems"},
-                    {"kind": "dir", "value": "utils"}],
-        "exclude": [{"kind": "file", "value": "utils/helper.gd",
-                     "reason": "editor_only_helper"}]}))
-    u = discover_universe(root)
-    assert u["gd"] == ["res://systems/calc.gd"]
-    assert u["disclosure"]["excluded_stats"] == {
-        "editor_only_helper (rule)": 1}
-    assert u["disclosure"]["rules_file_present"] is True
-    assert u["disclosure"]["defaults_used"] is False
+        "production": {"include": _KOL_INCLUDE},
+        "tests": {"exclude": []}}))
+    u = discover_scope(root)
+    assert u["disclosure"]["counts"] == {
+        "production": 182, "non_production": 438, "test": 329,
+        "non_test": 15}
+    assert len(u["gd"]) == 182
+    assert u["disclosure"]["per_dir_counts"]["production"]["systems"] == 74
 
 
-def test_spec031_default_discovery_named(tmp_path):
-    """无规则文件：内置默认（按类型全项目发现，排除 GUT 目录/
-    addons/gut 等）+ defaults_used 具名披露。"""
-    from godot_qa_toolkit.measurement.classify import discover_universe
+def test_spec031_tests_exclude_executes(tmp_path):
+    """tests.exclude 真正生效：dir 条目从 gut dirs 生效面剔除、feature
+    key 从测试类剔除（归非测试），具名披露。"""
+    from godot_qa_toolkit.measurement.classify import discover_scope
 
     root = _proj(tmp_path)
-    u = discover_universe(root)
-    assert "res://systems/calc.gd" in u["gd"]
-    assert "res://utils/helper.gd" in u["gd"]
-    assert "res://addons/gut/test.gd" not in u["files"]
-    assert "res://tests/unit/test_a.gd" not in u["files"]
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": _KOL_INCLUDE},
+        "tests": {"exclude": [
+            {"kind": "dir", "value": "tests/area0", "reason": "legacy"},
+            {"kind": "feature", "value": "feat_0",
+             "reason": "quarantined"}]}}))
+    u = discover_scope(root)
+    d = u["disclosure"]
+    assert d["gut_dirs_effective"] == [f"tests/area{k}" for k in range(1, 9)]
+    assert d["gut_dirs_excluded"] == ["tests/area0"]
+    assert "feat_0" in d["features_excluded"]
+    assert d["counts"]["test"] == 296
+
+
+def test_spec031_default_unconfigured_named(tmp_path):
+    """未配规则文件：通用默认（全部非隐藏=生产；gut dirs+features=测试）
+    + "未配置范围规则"具名提示。"""
+    from godot_qa_toolkit.measurement.classify import discover_scope
+
+    root = _proj(tmp_path)
+    u = discover_scope(root)
     assert u["disclosure"]["defaults_used"] is True
+    assert u["disclosure"]["unconfigured_hint"]
+    c = u["disclosure"]["counts"]
+    # 非生产 = addons/gut 164 + addons/gqt_gherkin 21 + .dev 2（终稿
+    # 默认：插件面与隐藏目录不算生产）
+    assert c["non_production"] == 187
+    assert c["non_test"] == 15
+
+
+def test_spec031_production_granularities(tmp_path):
+    """三种粒度：dir 递归 / file 单文件 / ext 类型；exclude 带 reason
+    相减（file 可从 dir 白名单抠出）。"""
+    from godot_qa_toolkit.measurement.classify import discover_scope
+
+    root = _proj(tmp_path)
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {
+            "include": [{"kind": "dir", "value": "scenes"},
+                        {"kind": "file", "value": "systems/f0.gd"},
+                        {"kind": "ext", "value": "*.csv"}],
+            "exclude": [{"kind": "dir", "value": "addons",
+                         "reason": "editor_plugins"},
+                        {"kind": "file", "value": "scenes/f1.gd",
+                         "reason": "dead_code"}]}}))
+    u = discover_scope(root)
+    prod = set(u["production"])
+    assert "res://scenes/f2.gd" in prod
+    assert "res://scenes/f1.gd" not in prod  # file 粒度黑名单
+    assert "res://systems/f0.gd" in prod  # file 粒度白名单
+    assert "res://addons/gut/f0.gd" not in prod  # dir 粒度黑名单
+    assert "res://data.csv" not in prod  # ext 白名单只覆盖声明的 csv？无 csv 文件
+    assert u["disclosure"]["excluded_production_stats"] == {
+        "dead_code (rule)": 1}
 
 
 def test_spec031_bad_path_or_empty_whitelist_fail_loud(tmp_path):
     from godot_qa_toolkit.measurement.classify import (
-        ScopeError, discover_universe, load_scope_rules,
+        ScopeError, discover_scope, load_scope_rules,
     )
 
     root = _proj(tmp_path)
     (root / ".gqt-scope.json").write_text(json.dumps({
-        "include": [{"kind": "dir", "value": "no_such_dir"}]}))
+        "production": {"include": [{"kind": "dir", "value": "no_such_dir"}]}}))
     with pytest.raises(ScopeError):
-        discover_universe(root)
+        discover_scope(root)
     (root / ".gqt-scope.json").write_text(json.dumps({
-        "include": [], "exclude": []}))
+        "production": {"include": []}}))
+    with pytest.raises(ScopeError):
+        load_scope_rules(root)
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": [{"kind": "dir", "value": "systems"}],
+                       "exclude": [{"kind": "dir", "value": "x"}]}}))
     with pytest.raises(ScopeError):
         load_scope_rules(root)
 
 
-def test_spec031_rules_file_in_recipe(tmp_path):
+def test_spec031_rules_file_in_recipe_hash(tmp_path):
     """规则文件进 recipe：内容变更 → recipe hash 翻转（#16 失配全量）。"""
     from godot_qa_toolkit.measurement.recipe import build_recipe
 
     root = _proj(tmp_path)
-    (root / "addons" / "gqt_gherkin" / "features").mkdir(parents=True)
-    (root / "addons" / "gqt_gherkin" / "features" / "a.feature") \
-        .write_text("Feature: a\n")
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).parent))
     from gherkin_fixtures import ensure_addon_metadata
     ensure_addon_metadata(root)
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": _KOL_INCLUDE}}))
     r1, err = build_recipe(root)
     assert err is None, err
     sc = r1["source_classification"]
-    assert sc["rules_file_present"] is False
-    assert sc["defaults_used"] is True
+    assert sc["rules_file_present"] is True
     h1 = r1["recipe_hash"]
     (root / ".gqt-scope.json").write_text(json.dumps({
-        "include": [{"kind": "dir", "value": "systems"}]}))
+        "production": {"include": [{"kind": "dir", "value": "systems"}]}}))
     r2, err2 = build_recipe(root)
     assert err2 is None
     assert r2["recipe_hash"] != h1
-    assert r2["source_classification"]["rules_file_present"] is True
-    # recipe 指纹只绑规则配置面（树统计不进 recipe——run 产物不得引发
-    # 误判 stale）；universe/排除统计走产物披露（discover_universe）。
-    from godot_qa_toolkit.measurement.classify import discover_universe
-    u = discover_universe(root)
-    assert u["disclosure"]["universe_count"] >= 1
-    assert "excluded_stats" in u["disclosure"]
 
 
 def test_spec031_text_content_same_pipeline(tmp_path):
     """文本内容文件（.tscn/.tres/csv）与生产 .gd 同一套发现（v8）。"""
-    from godot_qa_toolkit.measurement.classify import discover_universe
+    from godot_qa_toolkit.measurement.classify import discover_scope
 
     root = _proj(tmp_path)
-    (root / "scenes").mkdir()
-    (root / "scenes" / "main.tscn").write_text("[node]\n")
+    (root / "scenes2").mkdir()
+    (root / "scenes2" / "main.tscn").write_text("[node]\n")
     (root / "data.csv").write_text("a,b\n")
-    u = discover_universe(root)
-    assert "res://scenes/main.tscn" in u["files"]
-    assert "res://data.csv" in u["files"]
+    (root / ".gqt-scope.json").write_text(json.dumps({
+        "production": {"include": [
+            {"kind": "dir", "value": "systems"},
+            {"kind": "dir", "value": "scenes2"},
+            {"kind": "ext", "value": "*.csv"}]}}))
+    u = discover_scope(root)
+    assert "res://scenes2/main.tscn" in u["production"]
+    assert "res://data.csv" in u["production"]
 
 
+# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 # §SPEC-029：全集对账 / 新增生产检出 / 指纹 / 显式自刷 / 不可归因全量

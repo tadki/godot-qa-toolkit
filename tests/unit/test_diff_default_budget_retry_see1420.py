@@ -63,9 +63,6 @@ def _write_project(tmp_path, src=TARGET_SRC):
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "addons" / "gut").mkdir(parents=True)
-    # §SPEC-031（R4）：插件标记（真实 gut addon 形态）——范围默认排除②
-    # 依据 plugin.cfg 识别插件（无标记的 stub 会被当生产内容进宇宙）。
-    (proj / "addons" / "gut" / "plugin.cfg").write_text("[plugin]\n")
     (proj / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub")
     # SEE-1550：killer 测试脚本必须在场（killed_by 证书按真实 tests 树
     # 解析归属 + sha1 校验）——killer 名与 fake GUT 输出的 test_x 对齐。

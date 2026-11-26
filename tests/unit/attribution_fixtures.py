@@ -34,6 +34,22 @@ def install_recipe(project_root) -> None:
     ensure_addon_metadata(project_root)
 
 
+def _feature_sha_of(project_root: Path) -> dict:
+    """盘上 features/*.feature 的 {key: sha256}（normalize 与建图同口径）。"""
+    import hashlib as _hl
+
+    feats = Path(project_root) / "addons" / "gqt_gherkin" / "features"
+    if not feats.is_dir():
+        return {}
+    out: dict = {}
+    for path in sorted(feats.glob("*.feature")):
+        key = path.stem.replace("-", "_")
+        h = _hl.sha256()
+        h.update(path.read_bytes())
+        out[key] = h.hexdigest()
+    return out
+
+
 def write_map(project_root: Path,
               target_tests: dict[str, list[str]]) -> str:
     """target_tests: 目标文件 rel → 触达它的测试身份列表（`脚本名::测试名`）。
@@ -87,6 +103,9 @@ def write_map(project_root: Path,
         "file_sha256": shas,
         "target_files": sorted(shas),
         "tests_face": tests_face,
+        # C3-R16：feature 内容指纹（map 必带——status 的 feature 失效
+        # 面对账源；缺键 = 具名 missing 因素走全量重建的新契约）。
+        "feature_sha256": _feature_sha_of(project_root),
         "instrumentable_lines": instrumentable,
         "arms": {"gut_full": arm},
         # SEE-1587 D3：真实产物携带执行完整性证据；零引用（pairs=0）
@@ -156,6 +175,9 @@ def line_facts_map(project_root: Path,
         "file_sha256": shas,
         "target_files": sorted(shas),
         "tests_face": _tests_face_of(project_root),
+        # C3-R16：feature 内容指纹（map 必带——status 的 feature 失效
+        # 面对账源；缺键 = 具名 missing 因素走全量重建的新契约）。
+        "feature_sha256": _feature_sha_of(project_root),
         "instrumentable_lines": instrumentable or {rel: [2, 3]
                                                    for rel in rels},
         "arms": {"gut_full": arm},

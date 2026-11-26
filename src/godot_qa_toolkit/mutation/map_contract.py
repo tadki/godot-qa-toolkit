@@ -87,12 +87,16 @@ def _feature_face_drift(root: str, doc: dict) -> "str | None":
     （旧产物）→ 保守返回 None（不误报，等首次全量补齐）。"""
     import hashlib as _hl
 
-    baseline_sha = doc.get("feature_sha256")
-    if not isinstance(baseline_sha, dict):
-        return None
     features_dir = Path(root) / "addons" / "gqt_gherkin" / "features"
     if not features_dir.is_dir():
         return None
+    baseline_sha = doc.get("feature_sha256")
+    if not isinstance(baseline_sha, dict):
+        # C3-R16（退回项 2）：项目有 feature 而 map 无指纹（直建产物
+        # 缺键 / 旧产物）→ 具名因素走一次全量重建，不得当 fresh。
+        return ("missing (map carries no feature_sha256 — direct-build "
+                "artifact predates feature fingerprinting); full rebuild "
+                "required")
     disk_sha: dict[str, str] = {}
     for path in sorted(features_dir.glob("*.feature")):
         key = path.stem.replace("-", "_")

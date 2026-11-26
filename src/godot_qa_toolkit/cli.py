@@ -2431,6 +2431,13 @@ def main(argv: list[str] | None = None) -> int:
     环境开关（--check-baseline / --attribution-map / --godot-bin 的落点）
     在调用结束（含异常）后恢复到调用前——同一进程里默认调用与显式调用
     交错时，各自行为与在新进程里一致。"""
+    # C3-R16：gdtoolkit 语法缓存目录并发预热——进程级唯一入口（任何
+    # 子命令的第一次 parse() 之前），消除库内裸 makedirs 的并发竞争。
+    try:
+        from .measurement.gdtoolkit_compat import ensure_parser_cache_dir
+        ensure_parser_cache_dir()
+    except Exception:  # noqa: BLE001 — 预热失败不阻断命令分发
+        pass
     parser = build_parser()
     args = parser.parse_args(argv)
     saved = {k: os.environ.get(k) for k in _CLI_PROC_ENV_KEYS}

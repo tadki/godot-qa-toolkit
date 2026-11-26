@@ -401,11 +401,15 @@ def _feature_drift(root: Path, doc: dict, changed: "set[str]",
     变更面；删除 → 只记 drift（gherkin dropped 身份由增量产物的
     dropped 清单与 §SPEC-028 断言处理）。基线无 feature_sha256（旧
     产物）→ 保守跳过（不误报，等首次全量重建补齐）。"""
-    face = {"feature_sha256": doc.get("feature_sha256")}
-    baseline_sha = face.get("feature_sha256")
-    if not isinstance(baseline_sha, dict):
-        return
     features_dir = root / "addons" / "gqt_gherkin" / "features"
+    baseline_sha = doc.get("feature_sha256")
+    if not isinstance(baseline_sha, dict):
+        if features_dir.is_dir() and any(features_dir.glob("*.feature")):
+            # C3-R16：缺键 + 项目有 feature → 具名漂移（走一次全量重建
+            # 补指纹，不得静默当新鲜）。
+            drift.add("feature_sha256 missing from map — full rebuild "
+                      "required")
+        return
     if not features_dir.is_dir():
         return
     import hashlib as _hl

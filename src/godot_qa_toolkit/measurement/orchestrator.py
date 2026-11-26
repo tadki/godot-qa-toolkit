@@ -679,6 +679,7 @@ def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
                          recipe_hash, root, attribution_out,
                          attribution_causal, causal_sites,
                          pristine_recipe_hash,
+                         feature_sha256: "dict | None" = None,
                          preflight_meta: "dict | None" = None) -> dict:
     """归属节（file_sha256 派生 + _attribution_section）。"""
     _file_sha = {rel: sha256_text(item["src"])
@@ -690,6 +691,7 @@ def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
         target_files=sorted(prepared.keys()),
         recipe_pristine_hash=pristine_recipe_hash,
         tests_face=_tests_face_map(root),
+        feature_sha256=feature_sha256,
         prepared=prepared,
         baseline_meta=(arm_a.get("baseline_failures_meta")
                        or arm_b.get("baseline_failures_meta")),
@@ -817,7 +819,9 @@ def _run_measurement_locked(project_root: str | Path, target_files: list[str],
         recipe_hash=inp["recipe_hash"], root=root,
         attribution_out=attribution_out, attribution_causal=attribution_causal,
         causal_sites=st["causal_sites"],
-        pristine_recipe_hash=inp["pristine_recipe_hash"])
+        pristine_recipe_hash=inp["pristine_recipe_hash"],
+        feature_sha256=(recipe.get("gherkin_face") or {})
+        .get("feature_sha256") or {})
     report = _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
                          comparable_reason, crap, stability_baseline, perf,
                          attr_section)

@@ -37,6 +37,17 @@ def probe_rw_lock(project_root: "str | Path"):
     按既有口径具名披露（"要么等，要么具名失败"，不有无锁分支）。"""
     import threading as _threading
 
+    try:
+        import fcntl as _fcntl
+    except ImportError:
+        # C3-R16（退回项 3）：原生 Windows 等无 fcntl 平台——具名披露
+        # （与 `_refresh_lock` 既有口径一致；此前的裸 import 在插桩前
+        # 直接 ModuleNotFoundError，注释承诺的披露走不到）。
+        print("probe-rw lock: fcntl unavailable on this platform — "
+              "proceeding WITHOUT mutual exclusion", file=sys.stderr)
+        yield
+        return
+
     root = Path(project_root)
     lock_dir = root / ".qa-cache"
     lock_path = lock_dir / "probe-rw.lock"
@@ -47,15 +58,6 @@ def probe_rw_lock(project_root: "str | Path"):
             yield
         finally:
             _PROBE_LOCK_DEPTH[key] -= 1
-        return
-    import fcntl as _fcntl
-
-    if _fcntl is None or getattr(_fcntl, "LOCK_EX", None) is None:
-        # 原生 Windows 等无 fcntl 平台：具名披露，无锁继续（与
-        # `_refresh_lock` 既有口径一致——不新增降级分支之外的形态）。
-        print("probe-rw lock: fcntl unavailable on this platform — "
-              "proceeding WITHOUT mutual exclusion", file=sys.stderr)
-        yield
         return
     try:
         lock_dir.mkdir(parents=True, exist_ok=True)

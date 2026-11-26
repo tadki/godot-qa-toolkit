@@ -934,6 +934,7 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
                           notes: list[str],
                           instrumentable_lines: "dict[str, list[int]] | None" = None,
                           baseline_meta: "dict | None" = None,
+                          feature_sha256: "dict | None" = None,
                           preflight_meta: "dict | None" = None) -> dict:
     """归属产物正文：行级主真值 + 派生视图 + 臂有效性 + 新鲜绑定
     （recipe/文件/测试面）+ 探针面（可插桩行全集）。
@@ -958,6 +959,9 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         "production_content_sha256": _production_content_fingerprint(
             project_root),
         "target_files": list(target_files or []),
+        # C3-R15/R16（定案 4/§SPEC-016）：feature 内容指纹随产物直建
+        # 落盘（不在落盘后二次改写）；status/增量的 feature 失效面对账源。
+        "feature_sha256": dict(feature_sha256 or {}),
         # 测试面内容绑定：测试脚本内容变化同样使映射过期（recipe 不含
         # 测试内容；覆盖边却依赖它）
         "tests_face": dict(tests_face or {}),
@@ -1048,6 +1052,7 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          target_files: "list[str] | None" = None,
                          recipe_pristine_hash: str | None = None,
                          tests_face: "dict[str, str] | None" = None,
+                         feature_sha256: "dict | None" = None,
                          prepared: "dict[str, dict] | None" = None,
                          baseline_meta: "dict | None" = None,
                        preflight_meta: "dict | None" = None) -> dict:
@@ -1074,6 +1079,7 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
         file_sha256, target_files, tests_face, arms, arms_attr, notes,
         instrumentable_lines=_instrumentable_lines_from_prepared(prepared),
         baseline_meta=baseline_meta,
+        feature_sha256=feature_sha256,
         preflight_meta=preflight_meta)
     artifact_path = _attribution_write_artifact(artifact, attribution_out)
     return {"test_attribution": {

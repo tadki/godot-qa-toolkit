@@ -354,3 +354,110 @@ def test_gdtoolkit_cache_warmup_survives_concurrency(tmp_path, monkeypatch):
     for th in threads:
         th.join()
     assert not errs, errs
+
+
+# ─────────────────────────────── C3-R16 ───────────────────────────────
+def test_status_names_missing_feature_sha256(tmp_path):
+    """R16 退回项 2：项目有 feature 而 map 无 `feature_sha256` 键（直建
+    产物缺键 / 旧产物）→ status 具名因素、不得当 fresh。"""
+    feats = tmp_path / "addons" / "gqt_gherkin" / "features"
+    feats.mkdir(parents=True)
+    (feats / "a.feature").write_text("Feature: A\n")
+    doc = {"file_sha256": {}, "tests_face": {}}  # 无 feature_sha256 键
+    from godot_qa_toolkit.mutation.map_contract import _feature_face_drift
+
+    drift = _feature_face_drift(str(tmp_path), doc)
+    assert drift is not None and "missing" in drift, drift
+
+
+def test_attribution_artifact_carries_feature_sha256():
+    """R16 退回项 2：`measure run --test-attribution` 直建产物顶层带
+    `feature_sha256`（三条建图路径之一；之前只在落盘后二次改写）。"""
+    from godot_qa_toolkit.measurement.attribution import (
+        _attribution_artifact,
+    )
+
+    artifact = _attribution_artifact(
+        "rh", "prh", Path("/tmp"), {}, {}, [], {}, {}, [], [],
+        feature_sha256={"demo": "sha0"})
+    assert artifact["feature_sha256"] == {"demo": "sha0"}
+
+
+def test_two_real_processes_concurrent_coverage(tmp_path, monkeypatch):
+    """R16 退回项 1：两个**真进程** + 干净 gdtoolkit 缓存并发 coverage
+    ——进程级预热（cli.main 分发前 + Parser._get_parser wrap）兜住任何
+    路径的第一次 parse()。双线程测试里 `_WARMED` 让第二次调用直接返回，
+    测不到进程级竞争。"""
+    import os as _os
+    import shutil as _sh
+    import subprocess as _sp
+    import sys as _sys
+
+    home = tmp_path / "home"
+    home.mkdir()
+    # 干净 gdtoolkit 缓存（竞争前提）
+    cache = home / ".cache" / "gdtoolkit"
+    if cache.exists():
+        _sh.rmtree(cache)
+    godot = _os.environ.get("GQT_GODOT_BIN", "")
+    if not godot or not Path(godot).is_file():
+        import shutil as _sh2
+
+        godot = _sh2.which("godot")
+    if not godot:
+        pytest.skip("real godot unavailable")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "tests" / "a").mkdir(parents=True)
+    (proj / "project.godot").write_text("config_version=5\n")
+    (proj / "src" / "calc.gd").write_text(
+        "extends RefCounted\nfunc f(a):\n\treturn a\n")
+    (proj / "tests" / "a" / "test_a.gd").write_text(
+        "extends GutTest\nfunc test_a():\n\tpass\n")
+    (proj / ".gutconfig.json").write_text(
+        '{"dirs": ["res://tests/a"], "include_subdirs": false,'
+        ' "prefix": "test_"}')
+    import sys as _sys2
+    _sys2.path.insert(0, str(Path(__file__).parent))
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+
+    install_recipe(proj)
+    ensure_addon_metadata(proj)
+    gut = _os.environ.get("GQT_FORMS_GUT_DIR", "")
+    if gut and (Path(gut) / "gut_cmdln.gd").is_file():
+        _sh.copytree(gut, proj / "addons" / "gut")
+    src_root = Path(__file__).resolve().parents[2] / "src"
+    env = dict(_os.environ)
+    env.update({"HOME": str(home),
+                "XDG_CACHE_HOME": str(home / ".cache"),
+                "XDG_DATA_HOME": str(home / ".data"),
+                "TMPDIR": str(tmp_path),
+                "PYTHONPATH": str(src_root),
+                "GQT_GODOT_BIN": godot})
+    _sp.run([godot, "--headless", "--import", "--path", str(proj)],
+            capture_output=True, timeout=300, env=env)
+    # 竞争目标 = gdtoolkit 语法缓存目录（任意触发 parse 的命令同源）；
+    # measure complexity 触发 gdtoolkit parse 且无 map 依赖——最小夹具
+    # （无 gherkin 臂）上 coverage 必然 no_attribution_map，故用
+    # complexity 承载真进程并发竞争；coverage ×10 轮形态在 KOL 判据跑。
+    if cache.exists():
+        _sh.rmtree(cache)  # 竞争前提：干净 gdtoolkit 缓存
+    procs = [
+        _sp.Popen(
+            [_sys.executable, "-m", "godot_qa_toolkit.cli", "measure",
+             "complexity", str(proj / "src")],
+            stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, env=env)
+        for _ in range(2)]
+    errs: list = []
+    outs: list = []
+    for i, pr in enumerate(procs):
+        o, e = pr.communicate(timeout=300)
+        errs.append(e or "")
+        outs.append(o or "")
+        assert pr.returncode == 0, (
+            f"process {i} rc={pr.returncode}: stderr={errs[i][-400:]} "
+            f"stdout={outs[i][-400:]}")
+    joined = "\n".join(errs)
+    assert "FileExistsError" not in joined, joined[-800:]
+    assert "proceeding WITHOUT" not in joined

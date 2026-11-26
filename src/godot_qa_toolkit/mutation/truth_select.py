@@ -440,10 +440,12 @@ def ensure_map(project_root: str | Path, files: list[str],
                timeout_s: int | None = None, *,
                force: bool = False,
                out_path: str | None = None) -> str | None:
-    """map 自判自刷（§SPEC-029：每个项目唯一一份 map，不设显式只读
-    例外——显式 `--attribution-map` 过期同样原地自刷新，原子写 +
-    `<map>.lock` 串行化）；不可用（旧 schema/解析失败）→ 原子重建；
-    失败台账记录后 fail-loud（全脸仅显式 `--select full` 审计开关）。
+    """map 建图/重建阶梯的内部入口（§SPEC-029：每个项目唯一一份 map，
+    不设显式只读例外——过期同样原地重建，原子写 + `<map>.lock` 串行化）。
+    新鲜度判定与"要不要刷"的决策已单点收口 map 契约 `status`/`refresh`
+    （§SPEC-035/S2，续新只在 prepare）；不可用（旧 schema/解析失败）→
+    原子重建；失败台账记录后 fail-loud（全脸仅显式 `--select full` 审计
+    开关）。
 
     C3-R3 项2：`force=True` + `out_path` = 续新全量重建——**不删旧
     map**，直接原子替换目标路径（失败路径旧 map 字节不变；显式 map 的
@@ -975,14 +977,16 @@ def _stale_decision_reason(evaluation_reason: str, *, explicit: bool,
 
 
 def _universe_target_gate(base: dict, evaluation: dict, doc: dict, rel: str,
-                          *, auto: bool, renew: bool, explicit) -> bool:
+                          *, auto: bool, explicit) -> bool:
     """SEE-1623 M10：预存映射 universe 不含目标 → 增量通道无法归类该路径
     （unknown_changed_paths 必失败且白跑一次 gut_full 臂）——零 GUT 具名
-    失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。
+    失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。这道门与续新无关：
+    run 侧固定不续新（§SPEC-035/S4）后同样生效，否则宇宙外目标会退化为
+    误导性的 auto_update_still_stale。
 
     命中时写入 base（reason= target_not_in_map_universe + universe_guidance）
     并返回 True（调用方 `_finish(base, strict)` 终止）。"""
-    if (auto and renew and not explicit
+    if (auto and not explicit
             and evaluation.get("reason") == "file_binding_missing_or_stale"
             and (doc.get("file_sha256") or {})
             and rel not in (doc.get("file_sha256") or {})):
@@ -1031,7 +1035,7 @@ def resolve_selection(project_root: str | Path, target_file: str,
     base["gherkin"] = evaluation.get("gherkin")
     evaluation["mapping"]["path"] = path
     if _universe_target_gate(base, evaluation, doc, rel,
-                             auto=auto, renew=renew, explicit=explicit):
+                             auto=auto, explicit=explicit):
         return _finish(base, strict)
     evaluation, terminal = _auto_renew_step(
         root, path, doc, rel, evaluation, explicit=explicit, auto=auto,

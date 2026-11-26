@@ -726,6 +726,19 @@ def _prepare_map_fresh(project_root: str, files: list[str],
     refresh(project_root, files, timeout_s=timeout_s)
 
 
+def _measure_risk_map_warmup(project_root: str, files: list[str]) -> None:
+    """measure risk 首触预温（§SPEC-035/S1：map 维护只经契约 refresh——
+    建图宇宙 = 范围规则生产全集；off 模式不触碰 map，既有 off 语义不变）。
+    失败以具名异常原样上抛，由调用方转具名 JSON（台账留痕在续新链内）。"""
+    from .mutation.truth_select import mode as _map_mode
+
+    if _map_mode() == "off":
+        return
+    from .mutation.map_contract import refresh
+
+    refresh(project_root, files)
+
+
 def _map_source_prepare_early(args: argparse.Namespace,
                               files_all: list) -> "int | None":
     """SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
@@ -794,13 +807,14 @@ def _mapping_face_gate(args: argparse.Namespace, full_face: bool,
 
 def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     """默认映射面的运行前准备链（非 dry-run 且 full-face / 显式 --tests
-    接管面以外）：单文件目标存在性校验 → 自动导入 → ensure_map。
+    接管面以外）：单文件目标存在性校验 → 自动导入 → 映射续新（契约
+    `refresh`，§SPEC-035/S1）。
 
     A20（SEE-1594 S5）：显式 `--select full` 是全脸审计——不需要映射，不得
     被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file 默认路径
     仍自动生成/复用新鲜映射；不可用 fail-loud）。
     SEE-1623 M1：显式 `--tests` 同理——用户接管测试面，映射非必需，不触发
-    ensure_map（prepare_required/映射构建都不该拦显式面）。
+    映射构建/续新（prepare_required/映射构建都不该拦显式面）。
 
     返回 rc 非 None 即终止（调用方原样返回）。"""
     if getattr(args, "dry_run", False):
@@ -1181,19 +1195,17 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
     if _perf_err is not None:
         return _emit(_perf_err)
     # SEE-1605 §SPEC-001：首触 auto 生成须一次覆盖全部请求文件的首层目录——
-    # 车道内逐文件 ensure_map 只绑定当前文件目录，跨目录文件会退化为逐车道
-    # 增量（virgin 上即 QA 实测的静默落空）。预温生成失败 = 本轮测量面不可
-    # 用，具名中止（台账已留痕），不带病进入车道循环。
+    # 逐车道各自续新只绑定当前文件目录，跨目录文件会退化为逐车道增量
+    # （virgin 上即 QA 实测的静默落空）。预温（契约 refresh）生成失败 =
+    # 本轮测量面不可用，具名中止（台账已留痕），不带病进入车道循环。
     if not args.skip_measure:
-        # §SPEC-035/S1：map 维护只经契约 refresh（不再有 ensure_map 第二
-        # 维护入口）；off 模式不触碰 map（既有 off 语义不变）。
-        from .mutation.map_contract import MapContractError, refresh
+        from .mutation.map_contract import MapContractError
         from .mutation.truth_select import (MutationSelectionError,
-                                            SelectionError, mode as _map_mode)
+                                            SelectionError)
         from .mutation.verdict_source import BaselineSourceError
         try:
-            if _map_mode() != "off":
-                refresh(args.project_root, [str(p) for p in paths])
+            _measure_risk_map_warmup(args.project_root,
+                                     [str(p) for p in paths])
         except (MutationSelectionError, SelectionError, MapContractError,
                 BaselineSourceError) as e:
             # §SPEC-009：具名原因同步走 stderr 披露，不得以空 stderr 仅留

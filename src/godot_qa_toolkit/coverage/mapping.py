@@ -4,9 +4,10 @@
 **同一**行级归属映射（test-attribution/6），不再有第二套 direct GUT 执行路径。
 
 本模块是唯一的覆盖消费实现，复用既有单一来源链（不复制 projection）：
-- `truth_select.ensure_map` —— 缺失时构建映射（映射网是核心部件，需要时跑）；
-- `truth_select.resolve_selection` —— 新鲜性判定 + 失效面增量更新 + 无法验证
-  即 fail-loud；
+- `map_contract.refresh` —— 缺失/过期时按契约续新映射（映射网是核心部件，
+  需要时跑；§SPEC-035/S1 单一委托）；
+- `truth_select.resolve_selection` —— 新鲜性判定，不可用即 fail-loud（续新
+  已单点收口 `refresh`，调用点固定不续新，§SPEC-035/S4）；
 - `coverlink.project_coverage_from_map` —— 由行事实投影 covered 行集（零第二
   次插桩、零 GUT）。
 

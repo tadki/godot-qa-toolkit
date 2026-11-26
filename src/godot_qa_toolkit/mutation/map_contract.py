@@ -132,8 +132,9 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
     """只读维护动作：零续新、零 GUT、零 import、零写盘。
 
     返回 {"present", "fresh", "factors", "would_refresh", "scope",
-    "last_cost"}——`would_refresh` 含范围与最近一次实测成本或
-    "unknown"；map 缺失 → present=False / would_refresh="create"。"""
+    "last_cost", "view"}——`would_refresh` 含范围与最近一次实测成本或
+    "unknown"；`view` 为 fresh 时的薄只读视图（契约违反不下发，None，
+    §SPEC-035/S5）；map 缺失 → present=False / would_refresh="create"。"""
     files = files or []
     root = str(Path(project_root).resolve())
     try:

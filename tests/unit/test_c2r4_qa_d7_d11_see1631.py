@@ -543,9 +543,9 @@ def test_spec029_toolchain_probe_cached(tmp_path):
                         "ops_version"}
 
 
-def test_spec029_explicit_stale_refresh(tmp_path, monkeypatch):
-    """显式 map 过期 → 自刷（不再只读透传）：§SPEC-035/S2 起新鲜度统一
-    经 map 契约 status（recipe pristine 失配判 stale；一致判 fresh）。"""
+def test_spec029_status_recipe_pristine_stale_and_fresh(tmp_path, monkeypatch):
+    """默认路径 map 的新鲜度统一经 map 契约 status 判定（§SPEC-035/S2）：
+    recipe pristine 失配 → fresh=False 且带 recipe 因素；一致 → fresh=True。"""
     import hashlib
 
     import godot_qa_toolkit.mutation.truth_select as ts

@@ -32,6 +32,7 @@ from ..digest import sha256_file
 
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -150,12 +151,13 @@ def classify_changes(root: Path, changed: list[str],
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],
                                  "prod_new": [], "prod_removed": [],
+                                 "content_changed": [], "content_new": [],
                                  "content_removed": [],
                                  "feature_changed": [], "feature_new": [],
                                  "feature_removed": [],
                                  "unknown": []}
-    content_fingerprints = set(baseline.get("production_content_sha256")
-                               or {})
+    content_fingerprints = dict(baseline.get("production_content_sha256")
+                                or {})
     for raw in changed:
         verdict = _classify_one(root, raw, edge_files, known_fids,
                                 known_test_names, feature_keys,
@@ -221,12 +223,19 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
         known = name in known_test_names
         return _path_lifecycle(p, rel, raw, known,
                                "test_changed", "test_new", "test_removed")
-    # C3-R9 退回1：非脚本生产内容删除 = content_removed（因素表第 3 行：
-    # 剔除指纹与死边，不重跑）——此前落 unknown 触发全量重建兜底。
+    # C3-R9 退回1 + Owner 裁定：非脚本生产内容（因素表第 1 行"与脚本
+    # 同一套逻辑"）——在盘且在指纹：哈希变 = content_changed（增量重跑
+    # 静态引用触达面）、不在指纹 = content_new（第 2 行具名全量回退）；
+    # 已删 = content_removed（第 3 行：剔除指纹与死边，不重跑）。
     # 生产 .gd 删除不在此列（上方 prod 分支 = prod_removed，触达面重跑）
-    if p.suffix != ".gd" and not p.is_file() \
-            and rel in (content_fingerprints or {}):
-        return "content_removed", rel
+    if p.suffix != ".gd" and rel in (content_fingerprints or {}):
+        if not p.is_file():
+            return "content_removed", rel
+        import hashlib as _hl
+
+        have = _hl.sha256(p.read_bytes()).hexdigest()
+        return ("content_changed"
+                if have != content_fingerprints[rel] else "content_new"), rel
     prod = _classify_prod_entry(p, rel, edge_files, known_fids)
     if prod is not None:
         return prod
@@ -319,7 +328,46 @@ def compute_invalidation(root: Path, baseline: dict,
         for name in static:
             sources.setdefault(name, []).append(f"static:{rel}")
         rerun |= static
+    # C3-R9 Owner 裁定（因素表第 1 行）：非脚本内容**修改**与脚本同一套
+    # 逻辑——重跑面 = 静态直连消费者测试 ∪ 消费该内容的生产 .gd 的触达
+    # 测试；gherkin 触达 feature 同步并入。无引用者 → 具名警告、零重跑。
+    content_feature_keys: set[str] = set()
+    for rel in classes.get("content_changed", []):
+        static = _static_candidates(root, rel, index)
+        for name in static:
+            sources.setdefault(name, []).append(f"content_static:{rel}")
+        rerun |= static
+        from ..mutation.gdself import query_consumers as _qc
+
+        out_q = _qc(str(root), "res://" + rel, Path(root), index=index)
+        prod_gds = {c["res"].removeprefix("res://")
+                    for c in out_q.get("consumers") or []
+                    if str(c.get("res", "")).endswith(".gd")
+                    and not str(c["res"]).startswith("res://tests/")}
+        for gd in prod_gds:
+            scripts = set((arm.get("file_to_scripts") or {}).get(gd, []))
+            for name in scripts:
+                sources.setdefault(name, []).append(f"content_prod:{gd}")
+            rerun |= scripts
+            touch2 = set(fid_to_tests.get(gd, set()))
+            for name in touch2:
+                sources.setdefault(name, []).append(f"content_prod_fn:{gd}")
+            rerun |= touch2
+        if not static and not prod_gds:
+            print(f"increment: content change {rel} has no static "
+                  "consumers — zero-rerun renewal (named warning)",
+                  file=sys.stderr)
+        # gherkin 触达 feature（消费 .gd 的行事实 feature 键）
+        garm = (baseline.get("arms") or {}).get("gherkin") or {}
+        for key, by_rel in (garm.get("feature_to_lines") or {}).items():
+            if prod_gds & set(by_rel or {}):
+                content_feature_keys.add(key)
+        for name in static:
+            sources.setdefault(name, []).append(f"static:{rel}")
+        rerun |= static
     feature_rerun = _gherkin_invalidation_surface(baseline, classes)
+    # C3-R9：非脚本内容修改的生产消费者 .gd 触达的 feature 键并入
+    feature_rerun |= content_feature_keys
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
             "explicit_rerun": explicit_rerun, "feature_rerun": feature_rerun}
 
@@ -760,7 +808,9 @@ def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
     上限）不变。"""
     if not hash_ok:
         return "hash_mismatch_fallback"
-    if classes["prod_new"]:
+    if classes["prod_new"] or classes.get("content_new"):
+        # 因素表第 2 行：生产内容新增（含非脚本内容）无基线边、不猜失效面
+        # → 具名全量回退（C3-R9 Owner 裁定：修改走增量、新增仍全量）
         return "new_prod_file_fallback"
     if gherkin_known and len(feature_rerun) > gherkin_known * gherkin_ratio_cap:
         return "gherkin_rerun_surface_too_large_fallback"

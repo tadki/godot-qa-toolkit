@@ -884,7 +884,12 @@ def _synthesized_map_baseline(path, project_root, tests_glob):
 
     §SPEC-021：prepare 阶段（CLI）已自动续新；此处为库内直调兜底——
     合成前再校验一致性，漂移即具名 fail-loud（不静默退化，续新由调用方
-    的 prepare 链承担）。"""
+    的 prepare 链承担）。
+
+    C3-R10 退回2：prepare 之后的 prewarm re-import 会把引擎侧车
+    （.translation 等，在内容指纹内）重新生成，同一条命令的 run 期合成
+    于是判 map 过期、失败一次。内容漂移类 BaselineSourceError 在本命令
+    内补一次 refresh（具名披露）再重试合成一次；仍漂移才 fail-loud。"""
     from .truth_select import mode as _map_mode
     from .verdict_source import (
         BaselineSourceError, baseline_source, map_baseline_snapshots,
@@ -893,6 +898,18 @@ def _synthesized_map_baseline(path, project_root, tests_glob):
     if baseline_source() != "map" or _map_mode() == "off":
         return None
     try:
+        syn, _fail = map_baseline_snapshots(
+            [str(path)], project_root, tests_glob)
+    except BaselineSourceError as e:
+        if "production content drift" not in str(e):
+            raise BaselineSourceError(f"loop baseline: {e}") from e
+        # 本命令内 prewarm re-import 重新生成的侧车：命令内补续新一次
+        from .map_contract import refresh as _refresh
+
+        print("mutation: run-time content drift (engine re-import "
+              "regenerated sidecars) — refreshing in-command "
+              "(C3-R10 退回2, disclosed)", file=sys.stderr)
+        _refresh(project_root, [str(path)])
         syn, _fail = map_baseline_snapshots(
             [str(path)], project_root, tests_glob)
     except BaselineSourceError as e:
@@ -947,12 +964,29 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
         raise _BaselineDirtyFailure(baseline_failures)
+    # C3-R10 退回4：map 快照基线的实跑红集与 map 红集一致性门——cold /
+    # --tests 等無 parity 腿的入口，map 说红而实跑绿（或反之）在此具名
+    # fail-loud（零 mutant），与 worker parity 门同判据。
+    if precomputed_baseline is not None \
+            and precomputed_baseline.get("red_pairs") is not None:
+        map_reds = {name for _scr, name
+                    in (precomputed_baseline.get("red_pairs") or [])}
+        real_reds = {name for _scr, name in qualified}
+        if real_reds != map_reds:
+            raise BaselineSourceError(
+                "baseline_map_mismatch: attribution-map verdict baseline "
+                "diverged from real execution (loop baseline) — "
+                f"batch invalidated: map={sorted(map_reds)[:4]} "
+                f"real={sorted(real_reds)[:4]}")
     # SEE-1631 §SPEC-022（Owner 终裁）：map 新鲜且与当前树一致时，跑
     # mutant 之前不执行任何未插桩全脸基线/验证运行——判定基线 = map
     # verdict 表（树一致性已在合成前 fail-loud 门承担）。残余通道内不
     # 一致由既有 parity 门 / re-canary / 失配整批作废守护兜底。
+    # C3-R10 退回4：合成基线在函数内部生成时回传给调用方——否则
+    # _map_parity_gate 拿到的 precomputed_baseline 仍是 None，--select
+    # full 入口的"map 与实跑分歧整批作废"负对照失效。
     return baseline_failures, bool(baseline_failures), baseline_reused, \
-        baseline_elapsed
+        baseline_elapsed, precomputed_baseline
 
 def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                baseline_failures, baseline_dirty, slot, auto_name, target_rel,
@@ -983,14 +1017,28 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
             directdrive.seed_direct_host(slot.root)
         if use_worker:
             from .worker_channel import execute_worker_branch
+            # C3-R10 退回4：chunk 路径 baseline_failures 恒空（map 红集在
+            # _BASELINE_RED_MAP）——map 红集非空视同基线脏，让 worker
+            # parity 门拿到真实期望集（负对照：map 谎报红 → 整批作废）。
+            from .verdict_source import baseline_source as _bs
+
+            wf_baseline_failures = baseline_failures
+            wf_dirty = baseline_dirty
+            wf_red_pairs = red_pairs
+            if _bs() == "map" and _BASELINE_RED_MAP:
+                if not wf_baseline_failures:
+                    wf_baseline_failures = {n for _s, n in _BASELINE_RED_MAP}
+                if not wf_red_pairs:
+                    wf_red_pairs = sorted(_BASELINE_RED_MAP)
+                wf_dirty = True
             with clock.stage("per_mutant"):
                 raw_pairs, fatal_events = execute_worker_branch(
                     path, project_root, original_src, mutants, tests_glob,
-                    baseline_failures, baseline_dirty, slot, auto_name,
+                    wf_baseline_failures, wf_dirty, slot, auto_name,
                     target_rel, target_res, kind, reporter, store2,
                     prior_entries, scopes, _ownership,
                     timings_out=timings_out, kill_bail=kill_bail,
-                    tests_scripts=direct_scripts, red_pairs=red_pairs,
+                    tests_scripts=direct_scripts, red_pairs=wf_red_pairs,
                     baseline_red_map=_BASELINE_RED_MAP,
                     allow_tests=_ACTIVE_ALLOW_TESTS,
                     expected_scheme=exec_scheme_resolved)
@@ -1091,18 +1139,27 @@ def _run_mutant_loop(
         # 实跑重解析漂移即具名失败（零 baseline 支付、零槽写入）。
         _preflight_route_check(identity, project_root, path, worker_channel)
         (baseline_failures, baseline_dirty, baseline_reused,
-         baseline_elapsed) = _loop_baseline(workdir, path, project_root,
-                                            tests_glob, timeout_s,
-                                            precomputed_baseline,
-                                            timeout_factor,
-                                            break_on_baseline_failure)
+         baseline_elapsed, precomputed_baseline) = _loop_baseline(
+            workdir, path, project_root,
+            tests_glob, timeout_s,
+            precomputed_baseline,
+            timeout_factor,
+            break_on_baseline_failure)
         clock = clock or StageClock()
         # SEE-1606 §SPEC-P3：kill 即退有效开关在此解析（env/flag 单点），
         # 直驱脚本清单按面判定一次并贯穿 cold/worker 两条腿路径。
         bail_effective = killbail.resolve_kill_bail(kill_bail)
         dirty = bool(baseline_failures)
+        # C3-R10 退回4：chunk/worker 路径的 baseline_failures 恒空（map
+        # 红集经 executor 填入 _BASELINE_RED_MAP）——map 红集非空时视同
+        # 基线脏，启用 skip 与 parity 门（负对照：map 谎报红 → parity 腿
+        # 全脸实测绿 → 失配整批作废）。
+        from .verdict_source import baseline_source as _bs
+
+        map_red_dirty = (_bs() == "map" and bool(_BASELINE_RED_MAP))
+        dirty_eff = dirty or map_red_dirty
         bail_scripts, bail_face, bail_gut_ok = _cold_direct_decision(
-            bail_effective, str(project_root), tests_glob, dirty=dirty)
+            bail_effective, str(project_root), tests_glob, dirty=dirty_eff)
         # SEE-1606 §SPEC-PERF1：历史杀手优先排序（仅置换清单，verdict 语义
         # 不变；缺失历史确定性原序；env 可关断）。
         bail_scripts = _ordered_bail_scripts(
@@ -1111,17 +1168,18 @@ def _run_mutant_loop(
         # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
         # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
         # 保证 setup 权威与实跑一致）。
-        worker_host = (dirty and (identity or {}).get("exec_scheme")
+        worker_host = (dirty_eff and (identity or {}).get("exec_scheme")
                        == WORKER_SCHEME)
-        if dirty and bail_scripts is None and not worker_host:
+        if dirty_eff and bail_scripts is None and not worker_host:
             raise _BaselineSkipUnsupportedFace(
-                sorted(baseline_failures), bail_face)
-        skip_applied = dirty and (bail_scripts is not None or worker_host)
+                sorted(baseline_failures) or sorted(_BASELINE_RED_MAP),
+                bail_face)
+        skip_applied = dirty_eff and (bail_scripts is not None or worker_host)
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,
             worker_channel, targeted_only, clock)
-        red_pairs = sorted(_BASELINE_RED_MAP) if (dirty and skip_applied) \
+        red_pairs = sorted(_BASELINE_RED_MAP) if (dirty_eff and skip_applied) \
             else []
         raw_pairs = _loop_legs(
             path, project_root, original_src, backup, mutants, tests_glob,
@@ -1135,9 +1193,9 @@ def _run_mutant_loop(
             slot_info, idpack, slot, baseline_dirty, baseline_failures,
             break_on_baseline_failure, bail_effective, bail_face, kill_bail,
             bail_scripts)
-        if dirty:
+        if dirty_eff:
             slot_info["baseline_skip"] = _baseline_skip_slot_info(
-                slot_info, dirty=dirty, skip_applied=skip_applied,
+                slot_info, dirty=dirty_eff, skip_applied=skip_applied,
                 worker_host=worker_host, bail_face=bail_face,
                 bail_scripts=bail_scripts,
                 requested=len(baseline_failures))

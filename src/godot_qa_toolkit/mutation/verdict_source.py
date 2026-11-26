@@ -231,15 +231,27 @@ def _red_entries(doc: dict) -> "dict[str, tuple[str, str]]":
             "`test_verdicts` (verdict table not conserved; §SPEC-025) — "
             "rebuild the map")
     out: dict[str, tuple[str, str, str]] = {}
+    # C3-R10：测试面清单 basename → 完整路径反查（verdict 表绿测条目本
+    # 无 script 键；毒化/增量补表的红测回退裸 basename 时经测试面恢复
+    # 目录信息，否则 --tests 目录前缀过滤把红对误滤空）
+    registry: dict[str, str] = {}
+    for rel in (doc.get("tests_face") or {}):
+        registry.setdefault(Path(str(rel)).name, "res://" + str(rel))
     for ident, entry in (doc.get("test_verdicts") or {}).items():
         if str(ident).startswith("gherkin://"):
             continue
         if entry.get("verdict") == "red":
             # §SPEC-030/D10：script 分量优先取表内完整路径（同名碰撞按
             # 完整路径消歧——基线合成不得按 basename 把另一目录绿杀手
-            # 误跳过）；表内无 script 回退身份段（实机裸 basename 宇宙）。
-            script = str(entry.get("script") or "") \
-                or str(ident).split("::", 1)[0]
+            # 误跳过）；表内无 script 回退归属注册表（裸 basename 宇宙）
+            # 再回退身份段规范为 `res://` 形态。
+            script = str(entry.get("script") or "")
+            if not script:
+                script = registry.get(str(ident).split("::", 1)[0], "")
+            if not script:
+                script = str(ident).split("::", 1)[0]
+            if not script.startswith("res://"):
+                script = "res://" + script
             out[ident] = (entry.get("classification") or "new",
                           script,
                           str(ident).split("::", 1)[1]
@@ -295,9 +307,14 @@ def map_baseline_snapshots(files: list[str], project_root: str,
         if ".gqt-attr-select/" not in base:
             prefix = base.rstrip("/") + "/"
     face_pairs: set[tuple[str, str]] = set()
+    prefix_res = "res://" + prefix if prefix is not None else None
     for ident, (_cls, script, name) in reds.items():
         rel = script[len("res://"):] if script.startswith("res://") else script
-        if prefix is not None and not rel.startswith(prefix):
+        # C3-R10：裸 basename 回退（绿测条目无 script 键）统一规范为
+        # res:// 形态再比对目录前缀——否则 --tests 目录选面的红对被
+        # 误滤空（基线 tail 缺红测 → parity 期望集恒空 → 负对照失效）
+        rel_res = rel if rel.startswith("res://") else "res://" + rel
+        if prefix_res is not None and not rel_res.startswith(prefix_res):
             continue
         # §SPEC-032/D13（Leader 修正）：脚本身份 = 完整路径；行选面
         # wrapper 由 skip 下发前按 basename 映射回原脚本完整路径（见

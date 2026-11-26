@@ -146,8 +146,17 @@ class TestExplicitTestsSkipEnsureMap:
         import io
         from contextlib import redirect_stdout
 
-        monkeypatch.setattr(ts, "ensure_map",
+        # C3-R12：prepare 续新收口单点 _prepare_map_fresh（内部经
+        # map_contract.refresh；S1：ensure_map 不再被消费方直接调用）。
+        import godot_qa_toolkit.mutation.map_contract as mc
+
+        monkeypatch.setattr(mc, "refresh",
                             lambda *a, **k: called.append(1))
+        import sys as _s
+        from godot_qa_toolkit.mutation.truth_select import mode as _mode
+        print("DBG mode:", _mode(), file=_s.stderr)
+        monkeypatch.setattr(ts, "mode", lambda: "auto")
+        print("DBG mode forced auto", file=_s.stderr)
         monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
         monkeypatch.setattr(cli, "_dispatch_mutation",
                             lambda *a, **k: {"tool": "mutation", "ok": True,

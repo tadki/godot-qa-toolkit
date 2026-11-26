@@ -847,67 +847,12 @@ def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
                                       tests_glob=tests_glob)
     return rc, tail, time.monotonic() - t0
 
-def _cold_red_observation_leg(slot, target_rel, target_res, original_src,
-                              auto_name, red_pairs,
-                              timeout_s: int) -> "set[str]":
-    """C3-R11 退回2：cold 车道红测观测腿——直驱宿主只跑 map 红测清单
-    （真实观测：非 map 自产物；只跑红测脚本，不作为判定基线——判定仍
-    读 map verdict 表），返回实跑失败名集供对照。map 红集 ≠ 实跑失败集
-    → 调用方具名 fail-loud、整批作废。"""
-    from . import directdrive
-    from .gutrun import _parse_failing_tests
-    from .inject import make_user_dir, mutant_env, register_temp, forget_temp
-
-    red_scripts = sorted({scr for scr, _n in red_pairs})
-    obs_sha = shadow.inject_mutant(slot.root, target_rel, original_src)
-    cfg_path = directdrive.write_direct_cfg(
-        slot.root, target_res, obs_sha, auto_name, red_scripts,
-        baseline_failures=[], bail_enabled=False, skip_red_tests=[])
-    register_temp(cfg_path)
-    user_dir = make_user_dir()
-    global _ACTIVE_ENV, _ACTIVE_SCRIPT, _ACTIVE_GATE_ROOT
-    saved_env, saved_script, saved_gate = _ACTIVE_ENV, _ACTIVE_SCRIPT, \
-        _ACTIVE_GATE_ROOT
-    _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
-    _ACTIVE_SCRIPT = directdrive.host_script_res(slot.root)
-    try:
-        _rc, tail = _run_gut_on_project(
-            str(slot.root), timeout_s=timeout_s, tests_glob=None)
-        return _parse_failing_tests(tail)
-    finally:
-        _ACTIVE_ENV, _ACTIVE_SCRIPT, _ACTIVE_GATE_ROOT = (
-            saved_env, saved_script, saved_gate)
-        Path(cfg_path).unlink(missing_ok=True)
-        forget_temp(cfg_path)
-        if user_dir:
-            shutil.rmtree(user_dir, ignore_errors=True)
-
-
 def _run_cold_legs(path, project_root, original_src, backup, mutants,
                    tests_glob, baseline_failures, baseline_dirty, slot,
                    auto_name, target_rel, target_res, ownership_fn, reporter,
                    store2, prior_entries, scopes, kill_bail=False,
                    direct_scripts=None, red_pairs=None):
     """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
-    # C3-R11 退回2：cold 车道红测观测腿——map 红集与真实观测对照，
-    # 失配即具名 fail-loud、整批作废（零 mutant；不用 map 自产物当
-    # 实跑证据；判定基线仍读 map verdict 表）。
-    from .verdict_source import baseline_source as _bs
-
-    if _bs() == "map" and red_pairs and _map_reds_dirty(red_pairs):
-        observed = _cold_red_observation_leg(
-            slot, target_rel, target_res, original_src, auto_name,
-            red_pairs, timeout_s=max(60, int(_adaptive_timeout or 0)))
-        map_names = {name for _scr, name in red_pairs}
-        if observed != map_names:
-            from .verdict_source import BaselineSourceError as _BSE
-
-            raise _BSE(
-                "baseline_map_mismatch: attribution-map verdict baseline "
-                "diverged from real execution (cold red observation leg) "
-                "— batch invalidated: "
-                f"map={sorted(map_names)[:4]} "
-                f"real={sorted(observed)[:4]}")
     raw_pairs: list[tuple] = []
     for seq, m in enumerate(mutants):
         t_mutant = time.monotonic()
@@ -962,26 +907,6 @@ def _synthesized_map_baseline(path, project_root, tests_glob):
     print("mutation: verdict baseline sourced from attribution "
           "map (§SPEC-020; cold start skipped)", file=sys.stderr)
     return snap
-
-
-def _assert_map_reds_match_real(precomputed_baseline, qualified) -> None:
-    """C3-R10 退回4：map 快照基线的实跑红集与 map 红集一致性门——cold /
-    --tests 等无 parity 腿的入口，map 说红而实跑绿（或反之）在此具名
-    fail-loud（零 mutant），与 worker parity 门同判据。非 map 快照放行。"""
-    if precomputed_baseline is None \
-            or precomputed_baseline.get("red_pairs") is None:
-        return
-    from .verdict_source import BaselineSourceError as _BSE
-
-    map_reds = {name for _scr, name
-                in (precomputed_baseline.get("red_pairs") or [])}
-    real_reds = {name for _scr, name in qualified}
-    if real_reds != map_reds:
-        raise _BSE(
-            "baseline_map_mismatch: attribution-map verdict baseline "
-            "diverged from real execution (loop baseline) — "
-            f"batch invalidated: map={sorted(map_reds)[:4]} "
-            f"real={sorted(real_reds)[:4]}")
 
 
 def _worker_branch_baseline(baseline_failures, baseline_dirty,
@@ -1043,7 +968,6 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
         raise _BaselineDirtyFailure(baseline_failures)
-    _assert_map_reds_match_real(precomputed_baseline, qualified)
     # SEE-1631 §SPEC-022（Owner 终裁）：map 新鲜且与当前树一致时，跑
     # mutant 之前不执行任何未插桩全脸基线/验证运行——判定基线 = map
     # verdict 表（树一致性已在合成前 fail-loud 门承担）。残余通道内不

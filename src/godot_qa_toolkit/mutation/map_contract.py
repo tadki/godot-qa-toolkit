@@ -26,6 +26,7 @@ from .verdict_source import (
     _load_map_doc,
     assert_map_fresh,
 )
+from .truth_select import SelectionError
 
 
 class MapContractError(Exception):
@@ -199,7 +200,9 @@ def refresh(project_root: str, files: "list[str] | None" = None,
     else:
         try:
             doc = load_map(path)
-        except MutationSelectionError as e:
+        except SelectionError as e:
+            # C3-R12：坏 JSON 等装载失败（SelectionError 基类，含
+            # MutationSelectionError）→ 具名 MapContractError
             raise MapContractError(
                 f"refresh failed (map unreadable): {e}") from e
         changed, drift, pristine_ok = _prepare_drift_state(doc, root, files)

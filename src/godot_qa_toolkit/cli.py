@@ -706,22 +706,61 @@ def _usage_exit(message: str) -> int:
     return 2
 
 
+def _prepare_engine_import_then_map(project_root: str, files: list[str],
+                                    timeout_s: int) -> None:
+    import sys as _s
+    print("DBG import called", file=_s.stderr)
+    """C3-R12 退回1 单点收口（§SPEC-034 顺序契约）：引擎重新导入（
+    prewarm，重生成 .translation 等内容指纹内的侧车）必须先于 map 续新
+    ——侧车纳入指纹后 run 期不再有内容漂移（D1 run 只读保持）。
+    prewarm 证明流保证导入收敛（S2/O2 相等才发证），幂等可重入。
+    无 project.godot 的裸目录（结构测试的真空形态）直接跳过导入——
+    该形态由后续续新链具名失败，行为与旧进程一致。"""
+    from .mutation.executor import prewarm_import
+
+    if not (Path(project_root) / "project.godot").is_file():
+        return
+    prewarm_import(project_root)
+
+
+def _prepare_map_fresh(project_root: str, files: list[str],
+                       timeout_s: int) -> None:
+    """map 续新单点（§SPEC-021）：先引擎导入、后续新（见
+    _prepare_engine_import_then_map）。显式 off（单元面既定形态）沿用
+    cold 源 ensure_map 直返（不 prewarm 不续新）。prewarm 失败不阻断
+    （LOW-5：预热失败不打破统一契约——续新链自会具名失败）。"""
+    from .mutation.truth_select import mode as _map_mode
+
+    if _map_mode() == "off":
+        from .mutation.truth_select import ensure_map
+
+        ensure_map(project_root, files, timeout_s=timeout_s)
+        return
+    from .mutation.map_contract import refresh
+    from .mutation.executor import prewarm_import
+
+    try:
+        prewarm_import(project_root)
+    except Exception as e:  # noqa: BLE001 — LOW-5 预热失败不打破
+        print(f"prewarm flow error (before refresh): {e}", file=sys.stderr)
+    refresh(project_root, files, timeout_s=timeout_s)
+
+
 def _map_source_prepare_early(args: argparse.Namespace,
                               files_all: list) -> "int | None":
     """SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
     --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
     入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。"""
     from .mutation.map_contract import MapContractError
-    from .mutation.verdict_source import BaselineSourceError, \
-        prepare_map_for_baseline
-
+    from .mutation.verdict_source import BaselineSourceError
+    # C3-R12 退回1：先引擎导入（re-import 侧车纳入指纹）、后续新——
+    # 与默认行 / fn 入口共用 _prepare_map_fresh 单点；run 期零续新。
     try:
-        prepare_map_for_baseline(
+        _prepare_map_fresh(
             str(Path(args.project_root)), files_all,
             timeout_s=int(getattr(args, "timeout", 600) or 600))
-    except (BaselineSourceError, MapContractError) as e:
-        # §SPEC-032/C3-R3 项1：MapView 构造期断言/refresh 失败 → 具名
-        # JSON（此前 MapContractError 在此裸逸出 traceback）
+    except MapContractError as e:
+        # §SPEC-032/C3-R3 项1：MapView 断言/refresh 失败 → 具名 JSON
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})
@@ -786,9 +825,7 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     from .mutation.truth_select import MutationSelectionError, \
         SelectionError
     from .mutation.map_contract import MapContractError
-    from .mutation.verdict_source import (
-        baseline_source, prepare_map_for_baseline,
-    )
+    from .mutation.verdict_source import BaselineSourceError
     _files_all = [str(f) for f in (getattr(args, "files", None) or [])]
     # cold 源（legacy A20/显式 --tests 契约）不预建/校验映射，同梯早退。
     terminate, rc = _mapping_face_gate(args, full_face, _files_all)
@@ -801,24 +838,13 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     rc = _bootstrap_import_or_contract("mutation", args)
     if rc is not None:
         return rc
-    # C3-R10 退回2 根因修复：引擎重新导入（.translation 等侧车在内容
-    # 指纹内）必须在 refresh **之前**发生——侧车纳入 map 指纹后，run 期
-    # 不再有内容漂移（D1「run 只读」保持；此前 run 期补续新已被否决）。
-    # prewarm 证明流保证导入收敛（S2/O2 相等才发证），幂等可重入。
-    from .mutation.executor import prewarm_import
-
-    prewarm_import(str(Path(args.project_root)))
-    # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
+    # C3-R12 退回1 单点收口：先引擎导入、后续新（与 full-face / --tests
+    # 入口共用 _prepare_map_fresh，不再各写一份）。
     try:
-        if baseline_source() == "map":
-            # §SPEC-021：map 源判定基线——prepare 自动续新（含增量），
-            # 新鲜 map 直接复用（幂等）。
-            prepare_map_for_baseline(
-                str(Path(args.project_root)), [str(f) for f in args.files],
-                timeout_s=int(getattr(args, "timeout", 600) or 600))
-        else:
-            _truth.ensure_map(str(Path(args.project_root)),
-                              [str(f) for f in args.files])
+        _prepare_map_fresh(
+            str(Path(args.project_root)),
+            [str(f) for f in (getattr(args, "files", None) or [])],
+            timeout_s=int(getattr(args, "timeout", 600) or 600))
     except MutationSelectionError as e:
         return _selection_error_payload(args, e)
     except MapContractError as e:

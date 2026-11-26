@@ -329,47 +329,62 @@ def compute_invalidation(root: Path, baseline: dict,
             sources.setdefault(name, []).append(f"static:{rel}")
         rerun |= static
     # C3-R9 Owner 裁定（因素表第 1 行）：非脚本内容**修改**与脚本同一套
-    # 逻辑——重跑面 = 静态直连消费者测试 ∪ 消费该内容的生产 .gd 的触达
-    # 测试；gherkin 触达 feature 同步并入。无引用者 → 具名警告、零重跑。
+    # 逻辑——重跑面与 gherkin 触达 feature 见 _content_changed_face。
     content_feature_keys: set[str] = set()
     for rel in classes.get("content_changed", []):
-        static = _static_candidates(root, rel, index)
-        for name in static:
-            sources.setdefault(name, []).append(f"content_static:{rel}")
-        rerun |= static
-        from ..mutation.gdself import query_consumers as _qc
-
-        out_q = _qc(str(root), "res://" + rel, Path(root), index=index)
-        prod_gds = {c["res"].removeprefix("res://")
-                    for c in out_q.get("consumers") or []
-                    if str(c.get("res", "")).endswith(".gd")
-                    and not str(c["res"]).startswith("res://tests/")}
-        for gd in prod_gds:
-            scripts = set((arm.get("file_to_scripts") or {}).get(gd, []))
-            for name in scripts:
-                sources.setdefault(name, []).append(f"content_prod:{gd}")
-            rerun |= scripts
-            touch2 = set(fid_to_tests.get(gd, set()))
-            for name in touch2:
-                sources.setdefault(name, []).append(f"content_prod_fn:{gd}")
-            rerun |= touch2
-        if not static and not prod_gds:
-            print(f"increment: content change {rel} has no static "
-                  "consumers — zero-rerun renewal (named warning)",
-                  file=sys.stderr)
-        # gherkin 触达 feature（消费 .gd 的行事实 feature 键）
-        garm = (baseline.get("arms") or {}).get("gherkin") or {}
-        for key, by_rel in (garm.get("feature_to_lines") or {}).items():
-            if prod_gds & set(by_rel or {}):
-                content_feature_keys.add(key)
-        for name in static:
-            sources.setdefault(name, []).append(f"static:{rel}")
-        rerun |= static
+        rerun |= _content_changed_rerun(root, rel, arm, index, sources)
+        content_feature_keys |= _content_feature_keys(root, baseline, rel,
+                                                      index)
     feature_rerun = _gherkin_invalidation_surface(baseline, classes)
     # C3-R9：非脚本内容修改的生产消费者 .gd 触达的 feature 键并入
     feature_rerun |= content_feature_keys
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
             "explicit_rerun": explicit_rerun, "feature_rerun": feature_rerun}
+
+
+def _content_changed_rerun(root: Path, rel: str, arm: dict,
+                           index: dict | None,
+                           sources: dict) -> "set[str]":
+    """C3-R9 Owner 裁定（因素表第 1 行）：非脚本内容**修改**与脚本同一套
+    逻辑——重跑面 = 静态直连消费者测试 ∪ 消费该内容的生产 .gd 的触达
+    测试。无引用者 → 具名警告、零重跑。"""
+    rerun: set[str] = set()
+    static = _static_candidates(root, rel, index)
+    for name in static:
+        sources.setdefault(name, []).append(f"content_static:{rel}")
+    rerun |= static
+    from ..mutation.gdself import query_consumers as _qc
+
+    out_q = _qc(str(root), "res://" + rel, Path(root), index=index)
+    prod_gds = {c["res"].removeprefix("res://")
+                for c in out_q.get("consumers") or []
+                if str(c.get("res", "")).endswith(".gd")
+                and not str(c["res"]).startswith("res://tests/")}
+    for gd in prod_gds:
+        scripts = set((arm.get("file_to_scripts") or {}).get(gd, []))
+        for name in scripts:
+            sources.setdefault(name, []).append(f"content_prod:{gd}")
+        rerun |= scripts
+    return rerun
+
+
+def _content_feature_keys(root: Path, baseline: dict, rel: str,
+                          index: dict | None) -> "set[str]":
+    """content_changed 的 gherkin 触达 feature 键 = 消费该内容的生产 .gd
+    行事实所在的 feature 键。"""
+    from ..mutation.gdself import query_consumers as _qc
+
+    out_q = _qc(str(root), "res://" + rel, Path(root), index=index)
+    prod_gds = {c["res"].removeprefix("res://")
+                for c in out_q.get("consumers") or []
+                if str(c.get("res", "")).endswith(".gd")
+                and not str(c["res"]).startswith("res://tests/")}
+    garm = (baseline.get("arms") or {}).get("gherkin") or {}
+    out: set[str] = set()
+    for key, by_rel in (garm.get("feature_to_lines") or {}).items():
+        if prod_gds & set(by_rel or {}):
+            out.add(key)
+    return out
 
 
 def _gherkin_toucher_feature_keys(garm: dict,

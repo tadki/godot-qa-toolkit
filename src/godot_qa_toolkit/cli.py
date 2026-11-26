@@ -2363,10 +2363,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_CLI_PROC_ENV_KEYS = (
+    "GQT_MUTATION_CHECK_BASELINE",
+    "GQT_ATTRIBUTION_MAP",
+    "GQT_ATTRIBUTION_MAP_MODE",
+    "GQT_GODOT_BIN",
+)
+
+
 def main(argv: list[str] | None = None) -> int:
+    """C3-R9 退回4（§SPEC-034）CLI 入口层收口：一次 CLI 调用写入的进程
+    环境开关（--check-baseline / --attribution-map / --godot-bin 的落点）
+    在调用结束（含异常）后恢复到调用前——同一进程里默认调用与显式调用
+    交错时，各自行为与在新进程里一致。"""
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    saved = {k: os.environ.get(k) for k in _CLI_PROC_ENV_KEYS}
+    try:
+        return args.func(args)
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
 
 if __name__ == "__main__":

@@ -718,11 +718,11 @@ def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
     }
 
 
-def run_attribution_increment(project_root: str | Path,
+def run_attribution_increment(project_root: "str | Path",
                               target_files: list[str], recipe: dict,
                               baseline_path: str | Path,
                               changed_files: list[str],
-                              out_path: str | Path,
+                              out_path: "str | Path",
                               *, timeout_s: int = 180,
                               attribution_causal: bool = False,
                               calibration_every: int = 5,
@@ -731,10 +731,46 @@ def run_attribution_increment(project_root: str | Path,
                               gherkin_rerun_full_face_ratio: float
                               = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
                               ) -> dict:
-    """增量重建主入口（含产物落盘与 provenance）。"""
-    t0 = time.monotonic()
+    """C3-R14（§SPEC-032③）插桩互斥外壳：增量腿同样把插桩文本写进源
+    树，与测量臂共用 `<root>/.qa-cache/probe-rw.lock` 串行化。"""
+    from .backup import probe_rw_lock
+
+    with probe_rw_lock(project_root):
+        return _run_attribution_increment_locked(
+            project_root, target_files, recipe, baseline_path,
+            changed_files, out_path, timeout_s=timeout_s,
+            attribution_causal=attribution_causal,
+            calibration_every=calibration_every,
+            rerun_full_face_ratio=rerun_full_face_ratio,
+            gherkin_rerun_full_face_ratio=gherkin_rerun_full_face_ratio)
+
+
+def _run_attribution_increment_locked(
+        project_root: str | Path, target_files: list[str],
+        recipe: dict, baseline_path: str | Path,
+        changed_files: list[str], out_path: str | Path,
+        *, timeout_s: int = 180,
+                              attribution_causal: bool = False,
+                              calibration_every: int = 5,
+                              rerun_full_face_ratio: float
+                              = DEFAULT_RERUN_FULL_FACE_RATIO,
+                              gherkin_rerun_full_face_ratio: float
+                              = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
+                              ) -> dict:
+    """增量重建主入口（含产物落盘与 provenance）。C3-R14：插桩互斥
+    外壳 + §SPEC-025 表守恒入口检查。"""
+    from .backup import probe_rw_lock
+
     root = Path(project_root).resolve()
     baseline = load_baseline(baseline_path)
+    # C3-R14（§SPEC-025）：基线缺 `test_verdicts` 键 → 增量会补出空表
+    # 冒充守恒（MapView 的"表在场"检查反而通过）。具名拒绝，走全量。
+    if "test_verdicts" not in (baseline or {}):
+        raise IncrementError(
+            "incremental rebuild refused: baseline map is missing "
+            "`test_verdicts` (§SPEC-025 table conservation) — rebuild "
+            "the attribution map from scratch")
+    t0 = time.monotonic()
     # D1：先存 raw recipe（toolchain 注入前）。回退全脸重建必须用它——
     # run_measurement 自行注入并据此计算 pristine hash；若传已注入配方，
     # pristine 会被写成注入域 hash → 映射永久"不新鲜"自锁。

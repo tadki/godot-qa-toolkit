@@ -71,13 +71,17 @@ def test_recipe_hash_stable_same_input(kol_like: Path):
 
 def test_recipe_hash_sensitive_to_any_byte_change(kol_like: Path):
     r1, _ = build_recipe(kol_like, gqt_version="1.0")
-    # one byte in a feature file → different hash
+    # C3-R14（定案 4/§SPEC-016）：one byte in a feature file →
+    # feature_sha256 失效面更新，wholesale hash **不变**（feature 编辑
+    # 走 per-feature 增量，不再判成环境失配全量重建）
     (kol_like / "addons" / "gqt_gherkin" / "features" / "feature_0.feature").write_text(
         "Feature: f0 CHANGED\n", encoding="utf-8"
     )
     r2, error = build_recipe(kol_like, gqt_version="1.0")
     assert error is None
-    assert r1["recipe_hash"] != r2["recipe_hash"]
+    assert r1["recipe_hash"] == r2["recipe_hash"]
+    assert (r1["gherkin_face"]["feature_sha256"]
+            != r2["gherkin_face"]["feature_sha256"])
     # one byte in gutconfig → different hash
     (kol_like / _gutconfig_name()).write_text(
         json.dumps({**GUTCONFIG, "include_subdirs": False}, indent=1),
@@ -85,7 +89,7 @@ def test_recipe_hash_sensitive_to_any_byte_change(kol_like: Path):
     )
     r3, error = build_recipe(kol_like, gqt_version="1.0")
     assert error is None
-    assert r3["recipe_hash"] != r1["recipe_hash"]
+    assert r3["recipe_hash"] != r2["recipe_hash"]
 
 
 def test_exclusion_with_reason_is_legal_and_hashed(kol_like: Path):

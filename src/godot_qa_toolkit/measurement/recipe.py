@@ -155,10 +155,16 @@ def _norm_dir(d: str) -> str:
 
 def adapter_source_sha256(root: Path) -> tuple[str, int]:
     """适配源指纹（SEE-1624 D-c）：递归折叠 `addons/gqt_gherkin/**` 下全部
-    `.gd`/`.feature` 为排序 (relpath, sha256) 的 sha256（no-follow、排除
-    `.uid`/README/`.json`、无文件数上限）——任一域文件/validator 字节变化
-    即改变 recipe_hash，旧缓存一次性失效。空源集 fail-loud。
-    返回 (fingerprint, file_count)。"""
+    `.gd` 为排序 (relpath, sha256) 的 sha256（no-follow、排除
+    `.uid`/README/`.json`、无文件数上限）——任一域代码文件/validator 字节
+    变化即改变 recipe_hash，旧缓存一次性失效。空源集 fail-loud。
+    返回 (fingerprint, file_count)。
+
+    C3-R14（定案 4/§SPEC-016）：`.feature` 内容从本指纹摘出——feature
+    编辑此前经此指纹与 features[].sha256 双路进 wholesale hash，任何
+    feature 编辑都被判成环境失配 = 全量重建，把 per-feature 增量闸死。
+    feature 内容的失效面由 `gherkin_face.feature_sha256`（不参与
+    wholesale hash）承载，增量走 feature_changed / feature_rerun 通道。"""
     addon = root / "addons" / "gqt_gherkin"
     if not addon.is_dir():
         raise ValueError(
@@ -168,13 +174,13 @@ def adapter_source_sha256(root: Path) -> tuple[str, int]:
     for path in sorted(addon.rglob("*")):
         if path.is_symlink() or not path.is_file():
             continue
-        if path.suffix not in (".gd", ".feature"):
+        if path.suffix != ".gd":
             continue
         rel = path.relative_to(root).as_posix()
         entries.append((rel, _sha256_file(path)))
     if not entries:
         raise ValueError(
-            "addons/gqt_gherkin has no .gd/.feature adapter sources — "
+            "addons/gqt_gherkin has no .gd adapter sources — "
             "empty run-root source set is not a valid addon layout")
     basis = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
     return sha256_text(basis), len(entries)
@@ -213,8 +219,15 @@ def _recipe_gherkin_face(features: list, feature_count: int,
                     if str(f.get("key") or f.get("name") or "")
                     not in excluded_keys]
         feature_count = len(features)
+    # C3-R14（定案 4/§SPEC-016）：feature 行拆面——`features` 只留
+    # 结构身份（key/source，进 wholesale hash）；内容指纹独立成
+    # `feature_sha256`（供失效面/feature 通道对比），经 `recipe_hash`
+    # 的排除集摘出 wholesale。feature 编辑不再触发 pristine 全量。
     return {
-        "features": features,
+        "features": [{"key": f.get("key"),
+                      "source": f.get("source")} for f in features],
+        "feature_sha256": {str(f.get("key")): str(f.get("sha256"))
+                           for f in features},
         "count": feature_count,
         "features_excluded_by_scope": scope_excluded,
         "excluded": [
@@ -412,12 +425,22 @@ def build_recipe(
     recipe["recipe_hash"] = recipe_hash(recipe)
     return recipe, None
 def recipe_hash(recipe: dict) -> str:
-    """Recompute the hash over the recipe minus its own recipe_hash AND
-    project_root — the checkout path is provenance, not a measured face
-    (§SPEC-041 L2: same content at any path must hash identically). The
-    measurement verification for loaded/recovered recipes."""
+    """Recompute the hash over the recipe minus its own recipe_hash,
+    project_root AND per-feature content fingerprints — the checkout path
+    is provenance, not a measured face (§SPEC-041 L2: same content at any
+    path must hash identically). The measurement verification for
+    loaded/recovered recipes.
+
+    C3-R14（定案 4/§SPEC-016）：`gherkin_face.feature_sha256` 是 feature
+    内容失效面（per-feature 增量通道的对比基准），不参与 wholesale
+    hash——feature 编辑走 feature_changed，不再被判成环境失配。"""
     basis = {k: v for k, v in recipe.items()
              if k not in ("recipe_hash", "project_root")}
+    gf = basis.get("gherkin_face")
+    if isinstance(gf, dict):
+        gf2 = dict(gf)
+        gf2.pop("feature_sha256", None)
+        basis["gherkin_face"] = gf2
     return canonical_sha256(basis)
 
 def _verify_faces(recipe: dict) -> "tuple[list, list] | tuple[None, str]":

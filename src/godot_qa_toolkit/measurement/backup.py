@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -19,6 +21,78 @@ class MeasurementError(Exception):
 
 def file_key8(relpath: str) -> str:
     return hashlib.sha1(relpath.encode("utf-8")).hexdigest()[:8]
+
+
+_PROBE_LOCK_DEPTH: "dict[tuple[str, int], int]" = {}
+_PROBE_LOCK_WAIT_S = 120.0
+
+
+@contextmanager
+def probe_rw_lock(project_root: "str | Path"):
+    """C3-R14（§SPEC-032③）插桩改写/恢复的项目级互斥：`<root>/.qa-cache/
+    probe-rw.lock` 的 O_EXCL 原子创建（拿不到 = 持有者存活，自旋等待，
+    上限 _PROBE_LOCK_WAIT_S 后具名放弃互斥）。测量臂与增量腿把插桩文本
+    写进源树、结束才恢复——并发两进程交错注入/恢复会把源文件留在插桩后
+    的样子（QA D-NEW-1 实碰的数据损坏）。持锁段覆盖"注入 → GUT 执行 →
+    恢复"全程。持有者进程死由陈旧锁清理承担（超过持有上限即视为陈旧）。
+
+    进程内可重入（嵌套的增量腿与 run_measurement 取同一把锁）：按
+    （锁路径, 线程 id）深度计数，同线程重入直接放行；跨线程/跨进程
+    仍互斥。锁文件不可落盘（假 root / 只读挂载）→ 降级无锁并具名披露。"""
+    import os as _os
+    import threading as _threading
+    import time as _time
+
+    root = Path(project_root)
+    lock_dir = root / ".qa-cache"
+    lock_path = lock_dir / "probe-rw.lock"
+    key = (str(lock_path.resolve()), _threading.get_ident())
+    if _PROBE_LOCK_DEPTH.get(key, 0) > 0:
+        _PROBE_LOCK_DEPTH[key] += 1
+        try:
+            yield
+        finally:
+            _PROBE_LOCK_DEPTH[key] -= 1
+        return
+    fd = None
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"probe-rw lock unavailable (no lock dir), proceeding "
+              f"without mutual exclusion: {e}", file=sys.stderr)
+        yield
+        return
+    t0 = _time.monotonic()
+    while True:
+        try:
+            fd = _os.open(str(lock_path),
+                          _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            if (_time.monotonic() - t0) > _PROBE_LOCK_WAIT_S:
+                print(f"probe-rw lock still held after "
+                      f"{_PROBE_LOCK_WAIT_S}s — proceeding without "
+                      f"mutual exclusion (stale lock cleanup is best "
+                      f"effort)", file=sys.stderr)
+                yield
+                return
+            _time.sleep(0.05)
+        except OSError as e:
+            print(f"probe-rw lock unavailable, proceeding without "
+                  f"mutual exclusion: {e}", file=sys.stderr)
+            yield
+            return
+    _PROBE_LOCK_DEPTH[key] = 1
+    try:
+        yield
+    finally:
+        _PROBE_LOCK_DEPTH[key] = 0
+        try:
+            _os.unlink(str(lock_path))
+        except OSError:
+            pass
+        if fd is not None:
+            _os.close(fd)
 
 
 def _rel_within_root(abs_path: str, root: Path) -> str:

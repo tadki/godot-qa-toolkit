@@ -180,22 +180,31 @@ def refresh(project_root: str, files: "list[str] | None" = None,
             timeout_s: int = 600) -> dict:
     """prepare 专用维护动作：内部决定 create/increment/full。
 
-    锁内先 status 复检 fresh 即合并返回（并发对端已刷完——零多余增量
-    腿）；否则走既有续新管线（原子装填），装填后 `assert_map_fresh`
-    校验——失败或复检仍 stale → 具名 `MapContractError`，旧图字节不变。
-    成功返回 {"fresh": True, "view": MapView}。"""
+    C3-R14（§SPEC-032③）全程持 `<map>.lock`：锁内 status 复检 fresh 即
+    合并返回（并发对端已刷完——零多余增量腿，双方 rc=0、增量台账恰 1
+    条）；否则走既有续新管线（唯一 tmp 原子装填），装填后
+    `assert_map_fresh` 校验——失败或复检仍 stale → 具名
+    `MapContractError`，旧图字节不变。成功返回 {"fresh": True, "view":
+    MapView}。锁可重入（进程内续新腿复用同一把）。"""
     files = files or []
     root = str(Path(project_root).resolve())
+    from .truth_select import _refresh_lock, map_path
+
+    lock_path = map_path(Path(root)) or str(
+        Path(root) / ".qa-cache" / "attribution-map.json")
+    with _refresh_lock(lock_path):
+        return _refresh_locked(root, files, timeout_s)
+
+
+def _refresh_locked(root: str, files: "list[str]",
+                    timeout_s: int) -> dict:
+    """锁内段：复检 + 续新阶梯 + 装填后校验（调用方持 `<map>.lock`）。"""
     # 锁内复检（D1 并发修复：后到者不重复增量）——status 只读探测
     st = status(root, files)
     if st["fresh"]:
-        view = st.get("view")
-        if view is None:
-            # status 只读探测对契约违反不下发视图；refresh 需要视图时
-            # 在此具名失败（与旧行为一致）。
-            doc = _load_map_doc(root)
-            view = MapView(root, doc)
-        return {"fresh": True, "already_fresh": True, "view": view}
+        doc = _load_map_doc(root)
+        return {"fresh": True, "already_fresh": True,
+                "view": MapView(root, doc)}
     # 既有续新管线（create/increment/full 阶梯；原子写 + 台账）——
     # 阶梯本体在此（verdict_source.prepare_map_for_baseline 已变薄适配器）
     from .truth_select import MutationSelectionError, load_map, map_path
@@ -233,17 +242,22 @@ def refresh(project_root: str, files: "list[str] | None" = None,
                         raise
             else:
                 _prepare_full_rebuild(root, files, path, timeout_s)
-    # 装填后校验（复检仍 stale → 具名失败，不装半成品）
+    # 装填后校验（复检仍 stale → 具名失败，不装半成品）；§SPEC-025 表
+    # 守恒：缺 `test_verdicts` 键的产物不许出装填口（增量把缺表基线
+    # 补成空表冒充守恒的通路在入口已断，这里是纵深防御）。
     try:
         doc = _load_map_doc(root)
         assert_map_fresh(root, doc, files)
+        if "test_verdicts" not in doc:
+            raise MapContractError(
+                "refresh produced a map without `test_verdicts` "
+                "(§SPEC-025 table conservation violated)")
     except BaselineSourceError as e:
         raise MapContractError(
             f"refresh still stale after renewal (old map bytes "
             f"unchanged on failure paths): {e}") from e
     return {"fresh": True, "already_fresh": False,
             "view": MapView(root, doc)}
-
 
 @dataclass
 class MapView:

@@ -601,7 +601,10 @@ def test_spec029_unattributable_falls_back_full(tmp_path, monkeypatch):
     tgt = tmp_path / "systems" / "calc.gd"
     tgt.parent.mkdir(parents=True, exist_ok=True)
     tgt.write_text("extends Node\n")
-    vs._prepare_increment_renewal({"target_files": ["systems/calc.gd"]},
+    # C3-R14：基线必须带 `test_verdicts`（§SPEC-025 表守恒入口拒绝
+    # 缺表基线——本测主题是 unknown 回退，fixture 补齐守恒前提）。
+    vs._prepare_increment_renewal({"target_files": ["systems/calc.gd"],
+                                   "test_verdicts": {}},
                                   str(tmp_path), "/x/map.json",
                                   ["some.bin"], 600)
     assert calls["full"] == 1

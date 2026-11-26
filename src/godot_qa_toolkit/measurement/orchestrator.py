@@ -713,7 +713,19 @@ def _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
     return report
 
 
-def run_measurement(project_root: str | Path, target_files: list[str],
+def run_measurement(project_root: "str | Path",
+                    target_files: list[str], recipe: dict, **kwargs) -> dict:
+    """C3-R14（§SPEC-032③）：插桩互斥外壳——测量臂把插桩文本写进源树、
+    结束才恢复，并发两个测量进程交错注入/恢复会写坏源文件（QA D-NEW-1
+    实碰）。全程持 `<root>/.qa-cache/probe-rw.lock`，后到者整段排队。"""
+    from .backup import probe_rw_lock
+
+    with probe_rw_lock(project_root):
+        return _run_measurement_locked(project_root, target_files, recipe,
+                                       **kwargs)
+
+
+def _run_measurement_locked(project_root: str | Path, target_files: list[str],
                   recipe: dict, *, gherkin_keys: list[str] | None = None,
                   probe_keys: list[str] | None = None, timeout_s: int = 180,
                   evidence_out: str | None = None, inject_toolchain: bool = True,
@@ -730,6 +742,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     """measurement 双源批式编排，产出 measurement-report/3（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
     from ..mutation.stagetiming import StageClock
+    from .backup import probe_rw_lock
     clock = StageClock()
     t_total = time.monotonic()
     with clock.stage("planning"):

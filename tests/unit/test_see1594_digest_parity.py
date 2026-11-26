@@ -67,6 +67,11 @@ def test_recipe_hash_equals_old_basis_formula(tmp_path):
     assert err is None, err
     basis = {k: v for k, v in recipe.items()
              if k not in ("recipe_hash", "project_root")}
+    # C3-R14（定案 4/§SPEC-016）：公式更新——basis 里 gherkin_face 的
+    # feature_sha256（feature 内容失效面）摘除，其余同旧公式。
+    gf = dict(recipe.get("gherkin_face") or {})
+    gf.pop("feature_sha256", None)
+    basis["gherkin_face"] = gf
     old = hashlib.sha256(json.dumps(
         basis, ensure_ascii=False, sort_keys=True,
         separators=(",", ":")).encode("utf-8")).hexdigest()

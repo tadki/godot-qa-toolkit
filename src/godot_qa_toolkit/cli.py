@@ -1560,6 +1560,19 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
     roots = [_P(r) for r in args.roots]
     targets = sorted({str(p) for root in roots
                       for p in root.rglob("*.gd") if p.is_file()})
+    # C3-R14（§SPEC-033 文件形态）：roots 传文件路径时 rglob 得空集，
+    # `MeasurementError("no target files given")` 此前裸逸成 traceback、
+    # stdout 0 字节——空 targets 在入口具名拒绝；MeasurementError 一族
+    # 统一转具名 JSON，任何路径不得裸 traceback。
+    if not targets:
+        detail = ("no target files given: roots must be directories "
+                  "containing .gd files (file-shaped roots yield an "
+                  "empty rglob set); pass the project root or a "
+                  "directory instead")
+        return _emit({"tool": "measure.map-update", "ok": False,
+                      "summary": {"error": detail},
+                      "failures": [{"reason": detail}]})
+    from .measurement.backup import MeasurementError as _Me
     try:
         report = run_attribution_increment(
             args.project_root, targets, recipe, args.baseline,
@@ -1573,6 +1586,10 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
         return _emit({"tool": "measure.map-update", "ok": False,
                       "summary": {"error": str(e), "increment_error": True},
                       "failures": [{"reason": f"increment_error: {e}"}]})
+    except _Me as e:
+        return _emit({"tool": "measure.map-update", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     return _emit({"tool": "measure.map-update", "ok": True,
                   "summary": report, "failures": []})
 

@@ -385,7 +385,51 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
     _content_drift(root, doc, changed, drift)
     # §SPEC-029 表 #8：新增测试脚本 → 变更面（必须被续新跑进去）
     _new_test_drift(root, doc, changed, drift)
+    # C3-R14（定案 4/§SPEC-016 表 #8 feature 面）：feature 内容指纹
+    # 漂移进变更面（增量走 feature_changed/feature_rerun 通道）——
+    # feature 编辑已不触发 recipe pristine（见 recipe.recipe_hash），
+    # 没有这条漂移检测 feature 编辑会既不增量也不重建（静默漏更新）。
+    _feature_drift(root, doc, changed, drift)
     return sorted(changed), sorted(drift)
+
+
+def _feature_drift(root: Path, doc: dict, changed: "set[str]",
+                   drift: "set[str]") -> None:
+    """feature 内容指纹对账：`gherkin_face.feature_sha256` vs 盘上
+    `addons/gqt_gherkin/features/*.feature`。新增 → 变更面；内容变 →
+    变更面；删除 → 只记 drift（gherkin dropped 身份由增量产物的
+    dropped 清单与 §SPEC-028 断言处理）。基线无 feature_sha256（旧
+    产物）→ 保守跳过（不误报，等首次全量重建补齐）。"""
+    face = (doc.get("gherkin_face") or {})
+    baseline_sha = face.get("feature_sha256")
+    if not isinstance(baseline_sha, dict):
+        return
+    features_dir = root / "addons" / "gqt_gherkin" / "features"
+    if not features_dir.is_dir():
+        return
+    import hashlib as _hl
+
+    # 以盘上文件为遍历主体：changed 用盘上 rel（key→rel 反推有损——
+    # normalize 把 `-` 折成 `_`，反向不可逆），删除只记 drift。
+    disk_sha: dict[str, str] = {}
+    for path in sorted(features_dir.glob("*.feature")):
+        key = path.stem.replace("-", "_")
+        rel = path.relative_to(root).as_posix()
+        h = _hl.sha256()
+        h.update(path.read_bytes())
+        disk_sha[key] = (rel, h.hexdigest())
+    seen_keys: set[str] = set()
+    for key, (rel, got) in sorted(disk_sha.items()):
+        seen_keys.add(key)
+        want = baseline_sha.get(key)
+        if want is None:
+            drift.add(f"feature_new:{key}")
+            changed.add(rel)
+        elif got != want:
+            drift.add(f"feature_changed:{key}")
+            changed.add(rel)
+    for key in sorted(set(baseline_sha) - seen_keys):
+        drift.add(f"feature_removed:{key}")
 
 
 def _content_removal_drift(root: Path, fingerprint: dict,
@@ -519,6 +563,14 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
     )
     from ..measurement.recipe import build_recipe
 
+    # C3-R14（§SPEC-025 表守恒）：基线缺 `test_verdicts` 键时增量续新
+    # 会把它"补"成一张空表——表在场检查反而通过、静默消费。具名拒绝，
+    # 走全量重建（结构性缺失不可增量）。
+    if "test_verdicts" not in (doc or {}):
+        raise BaselineSourceError(
+            "incremental renewal refused: baseline map is missing "
+            "`test_verdicts` (§SPEC-025) — incremental would fabricate "
+            "an empty table; full rebuild required")
     root = Path(project_root).resolve()
     recipe, error = build_recipe(root)
     if error is not None:
@@ -532,7 +584,13 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
     # C3-R3/R5 项2：增量产物先写唯一 tmp → **校验通过后**原子替换目标
     # （旧 map 字节在任一失败路径下不变；此前"先替换后校验"，校验失败
     # 时目标已被换成不新鲜产物——与报错文字矛盾）
-    tmp = path + ".renew-tmp"
+    # C3-R14（D1 唯一临时产物）：固定名 `.renew-tmp` 在并发下会被对端
+    # `finally` unlink 掉——败者 FileNotFoundError 且旧图字节被误动。
+    # 带进程唯一后缀，清理仍由本进程 finally 承担。
+    import os as _os
+    import uuid as _uuid
+
+    tmp = f"{path}.renew-tmp.{_os.getpid()}.{_uuid.uuid4().hex[:8]}"
     try:
         run_attribution_increment(
             project_root, targets, recipe, path, changed, tmp,

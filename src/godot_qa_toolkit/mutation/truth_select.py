@@ -97,8 +97,16 @@ class MutationSelectionError(SelectionError):
         super().__init__(reason + (f": {detail}" if detail else ""))
 
 
+_REFRESH_LOCK_DEPTH: "dict[tuple[str, int], int]" = {}
+
+
 def _refresh_lock(path: str):
     """映射刷新串行化：同目录 `<map>.lock` 上的 flock（进程死自动释放）。
+
+    C3-R14：进程内可重入——refresh 全程持锁后，其续新腿（ensure_map 的
+    锁内段）在同进程再取同一把锁会自阻塞；flock 跨 fd 同进程也互斥，故
+    以 resolved 键维护深度计数，重入直接放行（仍是同一把 OS 级锁串行化
+    跨进程并发）。
 
     fcntl 不可用平台（原生 Windows）降级为无锁（唯一 tmp + 原子 rename 仍
     防半写；并发合并语义由调用方双检 + 校验兜底并披露）。"""
@@ -109,12 +117,32 @@ def _refresh_lock(path: str):
         if fcntl is None:
             yield False
             return
+        import threading as _threading
+
+        key = (str(Path(path).resolve()) + ".lock",
+               _threading.get_ident())
+        if _REFRESH_LOCK_DEPTH.get(key, 0) > 0:
+            _REFRESH_LOCK_DEPTH[key] += 1
+            try:
+                yield True
+            finally:
+                _REFRESH_LOCK_DEPTH[key] -= 1
+            return
         lock_path = path + ".lock"
-        lf = open(lock_path, "a+")
+        try:
+            Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+            lf = open(lock_path, "a+")
+        except OSError:
+            # 假 root / 只读挂载等锁文件不可落盘形态 → 降级无锁（与
+            # fcntl 缺失同语义：唯一 tmp + 原子 rename 仍防半写）。
+            yield False
+            return
         try:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            _REFRESH_LOCK_DEPTH[key] = 1
             yield True
         finally:
+            _REFRESH_LOCK_DEPTH[key] = 0
             try:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
             finally:

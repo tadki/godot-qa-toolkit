@@ -158,6 +158,7 @@ def _baseline_doc(recipe_hash_val: str) -> dict:
                                     "src_game/node.gd": [4]}}
     return {
         "schema_version": "test-attribution/7",
+        "test_verdicts": {},
         "report_recipe_hash": recipe_hash_val,
         "recipe_hash_pristine": "pristine-1",
         "project_root": "",

@@ -186,6 +186,17 @@ def adapter_source_sha256(root: Path) -> tuple[str, int]:
     return sha256_text(basis), len(entries)
 
 
+def _feature_structural_rows(features: list) -> list:
+    """feature 行的结构身份面（进 wholesale hash）：key + source。"""
+    return [{"key": f.get("key"), "source": f.get("source")}
+            for f in features]
+
+
+def _feature_content_sha(features: list) -> dict:
+    """feature 行的内容失效面（不进 wholesale hash）：key → sha256。"""
+    return {str(f.get("key")): str(f.get("sha256")) for f in features}
+
+
 def _recipe_gherkin_face(features: list, feature_count: int,
                          normalized_exclusions: list[dict],
                          root: Path, ops_version: str) -> dict:
@@ -224,10 +235,8 @@ def _recipe_gherkin_face(features: list, feature_count: int,
     # `feature_sha256`（供失效面/feature 通道对比），经 `recipe_hash`
     # 的排除集摘出 wholesale。feature 编辑不再触发 pristine 全量。
     return {
-        "features": [{"key": f.get("key"),
-                      "source": f.get("source")} for f in features],
-        "feature_sha256": {str(f.get("key")): str(f.get("sha256"))
-                           for f in features},
+        "features": _feature_structural_rows(features),
+        "feature_sha256": _feature_content_sha(features),
         "count": feature_count,
         "features_excluded_by_scope": scope_excluded,
         "excluded": [
@@ -424,6 +433,34 @@ def build_recipe(
     # separators give "same input, same hash, any byte change changes it"
     recipe["recipe_hash"] = recipe_hash(recipe)
     return recipe, None
+def stamp_feature_sha(map_path: str, project_root: Path) -> None:
+    """C3-R15（定案 4/§SPEC-016）：map 产物不含 recipe 体——把当前树
+    feature 内容指纹（gherkin_face.feature_sha256）回填到 doc 顶层
+    `feature_sha256`，供 status/增量对账（feature 编辑 → per-feature
+    重跑通道）。原子写；任何失败静默跳过（回填不阻断建图主流程；
+    旧产物无该键 = 保守跳过同口径）。"""
+    import json as _json
+    import os as _os
+
+    try:
+        recipe, error = build_recipe(Path(project_root).resolve())
+        if error is not None:
+            return
+        sha = ((recipe.get("gherkin_face") or {}).get("feature_sha256")
+               or {})
+        doc = _json.loads(Path(map_path).read_text(encoding="utf-8"))
+        if doc.get("feature_sha256") == sha:
+            return
+        doc["feature_sha256"] = sha
+        tmp = f"{map_path}.featsha-tmp.{_os.getpid()}"
+        Path(tmp).write_text(
+            _json.dumps(doc, ensure_ascii=False, indent=1),
+            encoding="utf-8")
+        _os.replace(tmp, map_path)
+    except Exception:  # noqa: BLE001 — 回填失败不阻断建图主流程
+        return
+
+
 def recipe_hash(recipe: dict) -> str:
     """Recompute the hash over the recipe minus its own recipe_hash,
     project_root AND per-feature content fingerprints — the checkout path

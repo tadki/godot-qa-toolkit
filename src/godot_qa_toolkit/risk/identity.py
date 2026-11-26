@@ -21,6 +21,10 @@ from dataclasses import dataclass, field
 
 from gdtoolkit.gd2py import convert_code
 
+from ..measurement.gdtoolkit_compat import ensure_parser_cache_dir
+
+ensure_parser_cache_dir()
+
 from ..complexity.sanitizer import sanitize_python_ir_identifiers
 from ..registry.functions import build_file_registry
 from ..registry.manifest import build_probe_manifest_v2

@@ -528,6 +528,10 @@ def _ensure_map_locked(root, files, timeout_s, force, out_path):
         try:
             out = _ensure_generate(root, out, files, timeout_s, action,
                                    rebuild_reason, t0)
+            # C3-R15：feature 内容指纹回填（coverage 等非 mutation 建图
+            # 路径也经此落盘——status/增量的 feature 失效面对账源）。
+            from ..measurement.recipe import stamp_feature_sha
+            stamp_feature_sha(out, root)
             return out
         except MutationSelectionError as e:
             _record({"action": action, "ok": False, "error": str(e),

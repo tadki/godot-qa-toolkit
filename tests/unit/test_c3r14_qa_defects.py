@@ -69,10 +69,8 @@ def test_probe_rw_lock_serializes(tmp_path):
     t1.join()
     t2.join()
     assert order == ["a-enter", "a-exit", "b-enter", "b-exit"], order
-    # 锁文件是瞬态哨兵（持有即存在、释放即 unlink）——互斥由顺序断言
-    # 证明；锁目录留存。
-    assert (proj / ".qa-cache").is_dir()
-    assert not (proj / ".qa-cache" / "probe-rw.lock").exists()
+    # flock 语义：锁文件持久存在（持有标记），互斥由顺序断言证明。
+    assert (proj / ".qa-cache" / "probe-rw.lock").is_file()
 
 
 def test_renew_tmp_name_is_process_unique(tmp_path, monkeypatch):
@@ -257,9 +255,11 @@ def test_feature_drift_marks_changed_feature(tmp_path):
     f.write_text("Feature: old\n")
     doc = {
         "file_sha256": {}, "tests_face": {},
-        "gherkin_face": {"feature_sha256": {
+        # C3-R15：feature_sha256 在 map 产物顶层（_stamp_feature_sha 回填
+        # / 增量产物携带），不在 recipe 体（map 不存 recipe）。
+        "feature_sha256": {
             "hotkey_h_toggle": hashlib.sha256(
-                "Feature: old\n".encode()).hexdigest()}},
+                "Feature: old\n".encode()).hexdigest()},
     }
     (tmp_path / "project.godot").write_text("config_version=5\n")
     changed, drift, pristine_ok = _prepare_drift_state(
@@ -292,3 +292,65 @@ def test_adapter_sha_excludes_features(tmp_path):
     (addon / "harness.gd").write_text("extends Node\n# changed\n")
     s3, _ = adapter_source_sha256(tmp_path)
     assert s3 != s1
+
+
+def test_probe_lock_waits_indefinitely_until_released(tmp_path):
+    """R15 退回项 1：持有者占用锁 3 秒（远超 R14 的 120s 假设也要等住）
+    ——等待者在锁释放前不得进入临界段，释放后正常完成；全程无"超时后
+    无锁继续"分支（stderr 零 proceeding 字样）。"""
+    import subprocess
+    import sys
+    import time
+
+    from godot_qa_toolkit.measurement.backup import probe_rw_lock
+
+    proj = tmp_path / "proj"
+    (proj / ".qa-cache").mkdir(parents=True)
+    entered: list = []
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, time\n"
+         "lf = open(%r, 'a+')\n"
+         "fcntl.flock(lf.fileno(), fcntl.LOCK_EX)\n"
+         "print('HELD', flush=True)\n"
+         "time.sleep(3.0)\n"
+         "fcntl.flock(lf.fileno(), fcntl.LOCK_UN)\n"
+         % (str(proj / ".qa-cache" / "probe-rw.lock"),)],
+        stdout=subprocess.PIPE, text=True)
+    assert holder.stdout is not None
+    holder.stdout.readline()  # 等 HELD
+    t0 = time.monotonic()
+    with probe_rw_lock(proj):
+        entered.append(time.monotonic() - t0)
+    holder.wait(timeout=30)
+    assert len(entered) == 1
+    assert entered[0] >= 2.0, f"entered too early: {entered[0]}s"
+
+
+# ─────────────────────────────── C3-R15 ───────────────────────────────
+def test_gdtoolkit_cache_warmup_survives_concurrency(tmp_path, monkeypatch):
+    """R15 退回项 3：同一 HOME 下两个"进程"并发预热 gdtoolkit 缓存目录
+    ——exist_ok 预热消除库内裸 makedirs 的 FileExistsError 竞争。"""
+    import threading
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    monkeypatch.delenv("GQT_GODOT_BIN", raising=False)
+    import godot_qa_toolkit.measurement.gdtoolkit_compat as gc
+    gc._WARMED = False
+    errs: list = []
+
+    def warm():
+        try:
+            gc.ensure_parser_cache_dir(force_home=str(home))
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    monkeypatch.setattr(gc, "_WARMED", False)
+    threads = [threading.Thread(target=warm) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert not errs, errs

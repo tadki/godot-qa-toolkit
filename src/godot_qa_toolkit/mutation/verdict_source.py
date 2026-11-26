@@ -13,6 +13,7 @@ map 源下 parity 失配由 runner 升级为具名 fail-loud（见 runner）。
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -400,7 +401,7 @@ def _feature_drift(root: Path, doc: dict, changed: "set[str]",
     变更面；删除 → 只记 drift（gherkin dropped 身份由增量产物的
     dropped 清单与 §SPEC-028 断言处理）。基线无 feature_sha256（旧
     产物）→ 保守跳过（不误报，等首次全量重建补齐）。"""
-    face = (doc.get("gherkin_face") or {})
+    face = {"feature_sha256": doc.get("feature_sha256")}
     baseline_sha = face.get("feature_sha256")
     if not isinstance(baseline_sha, dict):
         return

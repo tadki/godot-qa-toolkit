@@ -68,7 +68,49 @@ def _factor_report(root: str, doc: dict, files: list[str]) -> "tuple[bool, list[
         _assert_no_new_production(Path(root), doc)
     except BaselineSourceError as e:
         factors.append(f"new_production: {e}")
+    # C3-R15（定案 4/§SPEC-016）：feature 内容失效面纳入新鲜度判定——
+    # feature_sha256 已摘出 wholesale recipe hash（R14），但 status 必须
+    # 仍对账（否则 feature 编辑被判完全新鲜、gherkin 过期红绿判定留给
+    # mutation）。漂移 → fresh=false、scope 走 increment（per-feature
+    # 重跑通道）；wholesale recipe hash 保持排除 feature 内容。
+    feature_drift = _feature_face_drift(root, doc)
+    if feature_drift:
+        factors.append(f"feature_sha256: {feature_drift}")
     return (not factors), factors
+
+
+def _feature_face_drift(root: str, doc: dict) -> "str | None":
+    """feature 内容指纹对账（status 只读探测）：返回漂移描述或 None。
+
+    与 `_map_drift` 的 `_feature_drift`（增量变更面收集）同一对账源——
+    status 面答"新不新鲜"，增量面答"重跑什么"。基线无 feature_sha256
+    （旧产物）→ 保守返回 None（不误报，等首次全量补齐）。"""
+    import hashlib as _hl
+
+    baseline_sha = doc.get("feature_sha256")
+    if not isinstance(baseline_sha, dict):
+        return None
+    features_dir = Path(root) / "addons" / "gqt_gherkin" / "features"
+    if not features_dir.is_dir():
+        return None
+    disk_sha: dict[str, str] = {}
+    for path in sorted(features_dir.glob("*.feature")):
+        key = path.stem.replace("-", "_")
+        h = _hl.sha256()
+        h.update(path.read_bytes())
+        disk_sha[key] = h.hexdigest()
+    changed = [k for k in sorted(set(disk_sha) & set(baseline_sha))
+               if disk_sha[k] != baseline_sha[k]]
+    new = sorted(set(disk_sha) - set(baseline_sha))
+    removed = sorted(set(baseline_sha) - set(disk_sha))
+    parts: list[str] = []
+    if changed:
+        parts.append(f"changed={changed[:4]}")
+    if new:
+        parts.append(f"new={new[:4]}")
+    if removed:
+        parts.append(f"removed={removed[:4]}")
+    return "; ".join(parts) if parts else None
 
 
 def _refresh_scope(factors: "list[str]") -> str:

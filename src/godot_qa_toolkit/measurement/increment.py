@@ -745,6 +745,19 @@ def run_attribution_increment(project_root: "str | Path",
             gherkin_rerun_full_face_ratio=gherkin_rerun_full_face_ratio)
 
 
+def _load_baseline_with_conservation(baseline_path: str | Path) -> dict:
+    """C3-R14（§SPEC-025）表守恒入口检查：基线缺 `test_verdicts` 键 →
+    增量会补出空表冒充守恒（MapView 的"表在场"检查反而通过）。
+    具名拒绝，走全量。"""
+    baseline = load_baseline(baseline_path)
+    if "test_verdicts" not in (baseline or {}):
+        raise IncrementError(
+            "incremental rebuild refused: baseline map is missing "
+            "`test_verdicts` (§SPEC-025 table conservation) — rebuild "
+            "the attribution map from scratch")
+    return baseline
+
+
 def _run_attribution_increment_locked(
         project_root: str | Path, target_files: list[str],
         recipe: dict, baseline_path: str | Path,
@@ -762,14 +775,7 @@ def _run_attribution_increment_locked(
     from .backup import probe_rw_lock
 
     root = Path(project_root).resolve()
-    baseline = load_baseline(baseline_path)
-    # C3-R14（§SPEC-025）：基线缺 `test_verdicts` 键 → 增量会补出空表
-    # 冒充守恒（MapView 的"表在场"检查反而通过）。具名拒绝，走全量。
-    if "test_verdicts" not in (baseline or {}):
-        raise IncrementError(
-            "incremental rebuild refused: baseline map is missing "
-            "`test_verdicts` (§SPEC-025 table conservation) — rebuild "
-            "the attribution map from scratch")
+    baseline = _load_baseline_with_conservation(baseline_path)
     t0 = time.monotonic()
     # D1：先存 raw recipe（toolchain 注入前）。回退全脸重建必须用它——
     # run_measurement 自行注入并据此计算 pristine hash；若传已注入配方，
@@ -1314,6 +1320,10 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
         "recipe_hash_pristine": baseline.get("recipe_hash_pristine"),
+        # C3-R15（定案 4/§SPEC-016）：feature 内容指纹随增量产物前进，
+        # 供 status/增量的 feature 失效面对账（per-feature 重跑通道）。
+        "feature_sha256": (recipe.get("gherkin_face") or {})
+        .get("feature_sha256") or {},
         "project_root": str(root),
         "identity": baseline.get("identity"),
         "causal": baseline.get("causal"),

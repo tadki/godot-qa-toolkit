@@ -24,24 +24,18 @@ def file_key8(relpath: str) -> str:
 
 
 _PROBE_LOCK_DEPTH: "dict[tuple[str, int], int]" = {}
-_PROBE_LOCK_WAIT_S = 120.0
 
 
 @contextmanager
 def probe_rw_lock(project_root: "str | Path"):
-    """C3-R14（§SPEC-032③）插桩改写/恢复的项目级互斥：`<root>/.qa-cache/
-    probe-rw.lock` 的 O_EXCL 原子创建（拿不到 = 持有者存活，自旋等待，
-    上限 _PROBE_LOCK_WAIT_S 后具名放弃互斥）。测量臂与增量腿把插桩文本
-    写进源树、结束才恢复——并发两进程交错注入/恢复会把源文件留在插桩后
-    的样子（QA D-NEW-1 实碰的数据损坏）。持锁段覆盖"注入 → GUT 执行 →
-    恢复"全程。持有者进程死由陈旧锁清理承担（超过持有上限即视为陈旧）。
-
-    进程内可重入（嵌套的增量腿与 run_measurement 取同一把锁）：按
-    （锁路径, 线程 id）深度计数，同线程重入直接放行；跨线程/跨进程
-    仍互斥。锁文件不可落盘（假 root / 只读挂载）→ 降级无锁并具名披露。"""
-    import os as _os
+    """C3-R14/R15（§SPEC-032③）插桩改写/恢复的项目级互斥：`<root>/
+    .qa-cache/probe-rw.lock` 上的 **flock**（与 `_refresh_lock` 同一套
+    语义）：无限等待（KOL 全量建图 190–250s 必须等得住，R14 的 120s
+    超时无锁继续会把写坏源文件的路径重新打开——退回项 1）、持有进程
+    死亡自动释放、按（锁路径, 线程 id）可重入（增量腿嵌套
+    run_measurement 取同一把锁）。fcntl 缺失平台与锁文件不可落盘形态
+    按既有口径具名披露（"要么等，要么具名失败"，不有无锁分支）。"""
     import threading as _threading
-    import time as _time
 
     root = Path(project_root)
     lock_dir = root / ".qa-cache"
@@ -54,45 +48,37 @@ def probe_rw_lock(project_root: "str | Path"):
         finally:
             _PROBE_LOCK_DEPTH[key] -= 1
         return
-    fd = None
-    try:
-        lock_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f"probe-rw lock unavailable (no lock dir), proceeding "
-              f"without mutual exclusion: {e}", file=sys.stderr)
+    import fcntl as _fcntl
+
+    if _fcntl is None or getattr(_fcntl, "LOCK_EX", None) is None:
+        # 原生 Windows 等无 fcntl 平台：具名披露，无锁继续（与
+        # `_refresh_lock` 既有口径一致——不新增降级分支之外的形态）。
+        print("probe-rw lock: fcntl unavailable on this platform — "
+              "proceeding WITHOUT mutual exclusion", file=sys.stderr)
         yield
         return
-    t0 = _time.monotonic()
-    while True:
-        try:
-            fd = _os.open(str(lock_path),
-                          _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
-            break
-        except FileExistsError:
-            if (_time.monotonic() - t0) > _PROBE_LOCK_WAIT_S:
-                print(f"probe-rw lock still held after "
-                      f"{_PROBE_LOCK_WAIT_S}s — proceeding without "
-                      f"mutual exclusion (stale lock cleanup is best "
-                      f"effort)", file=sys.stderr)
-                yield
-                return
-            _time.sleep(0.05)
-        except OSError as e:
-            print(f"probe-rw lock unavailable, proceeding without "
-                  f"mutual exclusion: {e}", file=sys.stderr)
-            yield
-            return
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lf = open(lock_path, "a+")
+    except OSError as e:
+        raise MeasurementError(
+            f"probe-rw lock cannot be created at {lock_path} — refusing "
+            f"to instrument without mutual exclusion: {e}") from e
+    try:
+        _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX)
+    except OSError as e:
+        lf.close()
+        raise MeasurementError(
+            f"probe-rw lock could not be acquired at {lock_path}: {e}")
     _PROBE_LOCK_DEPTH[key] = 1
     try:
         yield
     finally:
         _PROBE_LOCK_DEPTH[key] = 0
         try:
-            _os.unlink(str(lock_path))
-        except OSError:
-            pass
-        if fd is not None:
-            _os.close(fd)
+            _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
+        finally:
+            lf.close()
 
 
 def _rel_within_root(abs_path: str, root: Path) -> str:

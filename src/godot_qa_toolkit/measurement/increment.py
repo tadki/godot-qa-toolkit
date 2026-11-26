@@ -222,8 +222,10 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
         return _path_lifecycle(p, rel, raw, known,
                                "test_changed", "test_new", "test_removed")
     # C3-R9 退回1：非脚本生产内容删除 = content_removed（因素表第 3 行：
-    # 剔除指纹与死边，不重跑）——此前落 unknown 触发全量重建兜底
-    if not p.is_file() and rel in (content_fingerprints or {}):
+    # 剔除指纹与死边，不重跑）——此前落 unknown 触发全量重建兜底。
+    # 生产 .gd 删除不在此列（上方 prod 分支 = prod_removed，触达面重跑）
+    if p.suffix != ".gd" and not p.is_file() \
+            and rel in (content_fingerprints or {}):
         return "content_removed", rel
     prod = _classify_prod_entry(p, rel, edge_files, known_fids)
     if prod is not None:

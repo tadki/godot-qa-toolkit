@@ -1136,6 +1136,39 @@ def _mutant_slot_disclosures(slot_info: dict, idpack: dict, slot,
     slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
 
 
+def _map_reds_dirty(red_map) -> bool:
+    """C3-R10 退回4：chunk/worker 路径的 baseline_failures 恒空（map 红
+    集经 executor 填入 _BASELINE_RED_MAP）——map 红集非空时视同基线脏，
+    启用 skip 与 parity 门（负对照：map 谎报红 → parity 腿全脸实测绿 →
+    失配整批作废）。"""
+    from .verdict_source import baseline_source as _bs
+
+    return _bs() == "map" and bool(red_map)
+
+
+class _SkipDecision:
+    """skip/parity 门判定结果（C3-R10 退回4：dirty_eff 单点判定）。"""
+
+    def __init__(self, dirty, worker_host, bail_scripts, skip_applied):
+        self.dirty = dirty
+        self.worker_host = worker_host
+        self.bail_scripts = bail_scripts
+        self.skip_applied = skip_applied
+
+
+def _skip_decision(baseline_failures, red_map, dirty_eff, bail_scripts,
+                   identity):
+    """§SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
+    gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。"""
+    worker_host = (dirty_eff and (identity or {}).get("exec_scheme")
+                   == WORKER_SCHEME)
+    if dirty_eff and bail_scripts is None and not worker_host:
+        raise _BaselineSkipUnsupportedFace(
+            sorted(baseline_failures) or sorted(red_map), "worker")
+    skip_applied = dirty_eff and (bail_scripts is not None or worker_host)
+    return _SkipDecision(dirty_eff, worker_host, bail_scripts, skip_applied)
+
+
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
@@ -1165,15 +1198,8 @@ def _run_mutant_loop(
         # SEE-1606 §SPEC-P3：kill 即退有效开关在此解析（env/flag 单点），
         # 直驱脚本清单按面判定一次并贯穿 cold/worker 两条腿路径。
         bail_effective = killbail.resolve_kill_bail(kill_bail)
-        dirty = bool(baseline_failures)
-        # C3-R10 退回4：chunk/worker 路径的 baseline_failures 恒空（map
-        # 红集经 executor 填入 _BASELINE_RED_MAP）——map 红集非空时视同
-        # 基线脏，启用 skip 与 parity 门（负对照：map 谎报红 → parity 腿
-        # 全脸实测绿 → 失配整批作废）。
-        from .verdict_source import baseline_source as _bs
-
-        map_red_dirty = (_bs() == "map" and bool(_BASELINE_RED_MAP))
-        dirty_eff = dirty or map_red_dirty
+        dirty_eff = (bool(baseline_failures)
+                     or _map_reds_dirty(_BASELINE_RED_MAP))
         bail_scripts, bail_face, bail_gut_ok = _cold_direct_decision(
             bail_effective, str(project_root), tests_glob, dirty=dirty_eff)
         # SEE-1606 §SPEC-PERF1：历史杀手优先排序（仅置换清单，verdict 语义
@@ -1184,19 +1210,13 @@ def _run_mutant_loop(
         # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
         # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
         # 保证 setup 权威与实跑一致）。
-        worker_host = (dirty_eff and (identity or {}).get("exec_scheme")
-                       == WORKER_SCHEME)
-        if dirty_eff and bail_scripts is None and not worker_host:
-            raise _BaselineSkipUnsupportedFace(
-                sorted(baseline_failures) or sorted(_BASELINE_RED_MAP),
-                bail_face)
-        skip_applied = dirty_eff and (bail_scripts is not None or worker_host)
+        skip = _skip_decision(baseline_failures, _BASELINE_RED_MAP,
+                              dirty_eff, bail_scripts, identity)
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,
             worker_channel, targeted_only, clock)
-        red_pairs = sorted(_BASELINE_RED_MAP) if (dirty_eff and skip_applied) \
-            else []
+        red_pairs = sorted(_BASELINE_RED_MAP) if skip.skip_applied else []
         raw_pairs = _loop_legs(
             path, project_root, original_src, backup, mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,
@@ -1209,10 +1229,10 @@ def _run_mutant_loop(
             slot_info, idpack, slot, baseline_dirty, baseline_failures,
             break_on_baseline_failure, bail_effective, bail_face, kill_bail,
             bail_scripts)
-        if dirty_eff:
+        if skip.dirty:
             slot_info["baseline_skip"] = _baseline_skip_slot_info(
-                slot_info, dirty=dirty_eff, skip_applied=skip_applied,
-                worker_host=worker_host, bail_face=bail_face,
+                slot_info, dirty=skip.dirty, skip_applied=skip.skip_applied,
+                worker_host=skip.worker_host, bail_face=bail_face,
                 bail_scripts=bail_scripts,
                 requested=len(baseline_failures))
         if any(v["verdict"] == "survived" for _, v in raw_pairs):

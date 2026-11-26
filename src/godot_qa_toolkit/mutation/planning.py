@@ -712,10 +712,11 @@ def _provision_farm_slot(project_root: str,
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str,
-                          select_mode: str = "full") -> str | None:
+                          select_mode: str = "full",
+                          allow_renew: bool = True) -> str | None:
     """父层推导 scoped glob（与 worker 侧 run_mutation 内推导同口径）。"""
     from .runner import _auto_scan_tests_glob as _runner_scan
-    return _runner_scan(file_path, project_root)
+    return _runner_scan(file_path, project_root, allow_renew=allow_renew)
 
 
 def _baseline_globs(files, project_root, tests_glob, clock: StageClock,
@@ -735,7 +736,8 @@ def _baseline_globs(files, project_root, tests_glob, clock: StageClock,
                 from .truth_select import MutationSelectionError
                 try:
                     g = _auto_scan_tests_glob(f, project_root,
-                                              select_mode=select_mode)
+                                              select_mode=select_mode,
+                                              allow_renew=False)
                 except MutationSelectionError as e:
                     print(f"baseline pre-run: selection unavailable for "
                           f"{f} ({e}) — skipping shared baseline for this "

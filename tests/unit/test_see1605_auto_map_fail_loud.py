@@ -79,6 +79,9 @@ def _fresh_doc(root: Path, targets: list[str]) -> dict:
         "arms_state": {"gut_full": {
             "bundles": 1, "pairs": 2, "probes_fired": 3, "state": "valid"}},
         "instrumentable_lines": {rel: [2] for rel in rels},
+        # §SPEC-032（C3-R1）：契约 MapView 构造期断言要求 verdict 表在场
+        "test_verdicts": {
+            "res://tests/unit/test_game.gd::test_ok": {"verdict": "green"}},
     }
 
 

@@ -544,21 +544,35 @@ def test_spec029_toolchain_probe_cached(tmp_path):
 
 
 def test_spec029_explicit_stale_refresh(tmp_path, monkeypatch):
-    """显式 map 过期 → 自刷（不再只读透传）：`_explicit_map_stale` 对
-    pristine 失配判 stale；fresh 判 False。"""
+    """显式 map 过期 → 自刷（不再只读透传）：§SPEC-035/S2 起新鲜度统一
+    经 map 契约 status（recipe pristine 失配判 stale；一致判 fresh）。"""
+    import hashlib
+
     import godot_qa_toolkit.mutation.truth_select as ts
+    from godot_qa_toolkit.mutation import map_contract as mc
 
     root = tmp_path / "p"
     root.mkdir()
-    (root / "project.godot").write_text("config_version=5\n")
+    pg = root / "project.godot"
+    pg.write_text("config_version=5\n")
+    pg_sha = hashlib.sha256(pg.read_bytes()).hexdigest()
+    path = Path(ts.default_map_path(str(root)))
+    path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"schema_version": "test-attribution/7",
-           "recipe_hash_pristine": "OLD", "tests_face": {}}
-    monkeypatch.setattr(ts, "load_map", lambda p: doc)
+           "recipe_hash_pristine": "OLD",
+           "file_sha256": {"project.godot": pg_sha},
+           "tests_face": {}, "arms": {"gut_full": {}},
+           "test_verdicts": {},
+           "arms_state": {"gut_full": {"state": "valid"}}}
+    path.write_text(json.dumps(doc), encoding="utf-8")
     monkeypatch.setattr(ts, "_fresh_recipe_hash", lambda r: "NEW")
-    assert ts._explicit_map_stale("/x/map.json", str(root)) is True
+    st = mc.status(str(root), [])
+    assert st["present"] is True and st["fresh"] is False
+    assert any("recipe" in f for f in st["factors"])
     doc2 = {**doc, "recipe_hash_pristine": "NEW"}
-    monkeypatch.setattr(ts, "load_map", lambda p: doc2)
-    assert ts._explicit_map_stale("/x/map.json", str(root)) is False
+    path.write_text(json.dumps(doc2), encoding="utf-8")
+    st2 = mc.status(str(root), [])
+    assert st2["fresh"] is True
 
 
 def test_spec029_unattributable_falls_back_full(tmp_path, monkeypatch):

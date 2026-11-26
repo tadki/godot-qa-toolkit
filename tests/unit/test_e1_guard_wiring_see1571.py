@@ -96,7 +96,8 @@ class TestPrepareBaselineRoot:
         target.write_text("func a():\n\treturn 1\n")
         monkeypatch.setattr(
             runner_mod, "_auto_scan_tests_glob",
-            lambda f, root, select_mode="full": "res://tests/")
+            lambda f, root, select_mode="full", allow_renew=False:
+                "res://tests/")
         monkeypatch.setattr(
             executor, "_prepare_baseline_root",
             lambda project_root, knob, clock, globs: (
@@ -122,7 +123,8 @@ class TestPrepareBaselineRoot:
         farm.mkdir()
         monkeypatch.setattr(
             runner_mod, "_auto_scan_tests_glob",
-            lambda f, root, select_mode="full": "res://tests/")
+            lambda f, root, select_mode="full", allow_renew=False:
+                "res://tests/")
         monkeypatch.setattr(
             executor, "_prepare_baseline_root",
             lambda project_root, knob, clock, globs: (

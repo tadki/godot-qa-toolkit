@@ -148,9 +148,16 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
                 "error": msg, "missing": missing}
     fresh, factors = _factor_report(root, doc, files)
     if fresh:
+        # §SPEC-035/S5：fresh 时同样返回同一薄只读视图（视图构造失败 =
+        # 契约违反，只读探测本身不抛——由需要视图的消费方（refresh）
+        # 再取时具名失败）。
+        try:
+            view = MapView(root, doc)
+        except MapContractError:
+            view = None
         return {"present": True, "fresh": True, "factors": [],
                 "would_refresh": None, "scope": [],
-                "last_cost": _last_measured_cost(doc)}
+                "last_cost": _last_measured_cost(doc), "view": view}
     # C3-R9 退回3：would_refresh 如实预测 refresh 将执行的动作（含周期
     # 校准、新增生产文件、不可归因变更三类具名全量）；结构性失配
     # （schema/arms/recipe）直接全量，其余走决策镜像。
@@ -181,9 +188,13 @@ def refresh(project_root: str, files: "list[str] | None" = None,
     # 锁内复检（D1 并发修复：后到者不重复增量）——status 只读探测
     st = status(root, files)
     if st["fresh"]:
-        doc = _load_map_doc(root)
-        return {"fresh": True, "already_fresh": True,
-                "view": MapView(root, doc)}
+        view = st.get("view")
+        if view is None:
+            # status 只读探测对契约违反不下发视图；refresh 需要视图时
+            # 在此具名失败（与旧行为一致）。
+            doc = _load_map_doc(root)
+            view = MapView(root, doc)
+        return {"fresh": True, "already_fresh": True, "view": view}
     # 既有续新管线（create/increment/full 阶梯；原子写 + 台账）——
     # 阶梯本体在此（verdict_source.prepare_map_for_baseline 已变薄适配器）
     from .truth_select import MutationSelectionError, load_map, map_path

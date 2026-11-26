@@ -436,38 +436,6 @@ def _ensure_generate(root: str, out: str, files: list[str],
     return out
 
 
-def _explicit_map_stale(path: str, project_root: str) -> bool:
-    """§SPEC-029：显式 map 新鲜度判定（只读探测；解析失败 = stale，
-    走重建）。判据 = schema + recipe pristine + 测试面漂移（与消费侧
-    `_assert_fresh` 同源面）。"""
-    try:
-        doc = load_map(path)
-    except Exception:  # noqa: BLE001 — 不可用 → 重建（具名于调用方）
-        return True
-    root = project_root
-    try:
-        from ..measurement.attribution import ATTRIBUTION_SCHEMA
-        if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
-            return True
-    except Exception:  # noqa: BLE001
-        return True
-    # recipe pristine 对账（不依赖查询方传入 roots）
-    pristine = _fresh_recipe_hash(root)
-    if pristine is not None \
-            and pristine != doc.get("recipe_hash_pristine"):
-        return True
-    # 测试面漂移
-    import hashlib as _hl
-
-    for rel, want in (doc.get("tests_face") or {}).items():
-        p = Path(root) / rel
-        if not p.is_file():
-            return True
-        if _hl.sha256(p.read_bytes()).hexdigest() != want:
-            return True
-    return False
-
-
 def ensure_map(project_root: str | Path, files: list[str],
                timeout_s: int | None = None, *,
                force: bool = False,
@@ -504,8 +472,12 @@ def _ensure_map_locked(root, files, timeout_s, force, out_path):
         _default_map_reuse(map_path(root), explicit)
     if existing and not force:
         # §SPEC-029：显式 map 不再只读透传——过期同样自判自刷（原地
-        # 原子重建，宇宙 = 分类清单 production 全集）。
-        if _explicit_map_stale(existing, root):
+        # 原子重建，宇宙 = 分类清单 production 全集）。§SPEC-035/S2：
+        # 新鲜度统一经 map 契约 status（显式 map 同走同一判定，不再有
+        # 旁路谓词）。
+        from .map_contract import status as _map_contract_status
+
+        if not _map_contract_status(root, files).get("fresh"):
             print("measure: explicit attribution map is stale — "
                   "refreshing in place (§SPEC-029: no read-only "
                   "exception)", file=sys.stderr)
@@ -646,35 +618,35 @@ def _fresh_recipe_hash(project_root: str) -> str | None:
 def map_preview_state(project_root: str, target_file: str) -> dict:
     """SEE-1606 §SPEC-P2：dry-run 预览的映射状态只读探测（零续新零 GUT）。
 
-    absent → 不做新鲜度计算（具名缺失直接给 map）；在场才走 `_evaluate`
-    同源判定（文件绑定 + recipe + 测试面漂移，全只读）；不可用/解析失败
-    按保守未知披露。返回 {"present", "fresh", "reason"}，reason ∈
-    {map_missing, map_unusable, map_fresh, map_stale:<eval reason>}。"""
+    §SPEC-035/S3：plan 的 map 状态来自契约 `status`（不再走旧旁路判定）——
+    absent → 不做新鲜度计算（具名缺失直接给 map）；在场才经 status 全集
+    判定（零副作用）；不可用/解析失败按保守未知披露。返回
+    {"present", "fresh", "reason"}，reason ∈
+    {map_missing, map_unusable, map_fresh, map_stale:<factor>}。"""
     path = map_path(project_root)
     if not path:
         return {"present": False, "fresh": None, "reason": "map_missing"}
     try:
-        doc = load_map(path)
+        load_map(path)
     except Exception:  # noqa: BLE001 — 探测不得失败上抛（预览零副作用）
         return {"present": True, "fresh": None, "reason": "map_unusable"}
+    from .map_contract import status
     try:
         from ..source_io import anchor_to_project_root
-        from ..timing import project_relative
         # §SPEC-ANCHOR-PREVIEW：相对目标先按 project_root 锚定（与
         # runner 同源口径）——CWD≠root 时 fresh 判定不得因 CWD 相对解析
-        # 误报 file_binding_missing_or_stale
+        # 误报 stale
         anchored = anchor_to_project_root(target_file, str(project_root))
-        rel = project_relative(project_root, anchored)
-        verdict = _evaluate(str(project_root), rel, doc)
+        st = status(str(project_root), [anchored])
     except Exception:  # noqa: BLE001 — 同上，探测失败按未知保守披露
         return {"present": True, "fresh": None, "reason": "map_unusable"}
-    fresh = bool(verdict.get("ok"))
-    if fresh:
+    if not st.get("present"):
+        return {"present": False, "fresh": None, "reason": "map_missing"}
+    if st.get("fresh"):
         return {"present": True, "fresh": True, "reason": "map_fresh"}
-    # §SPEC-ANCHOR-PREVIEW LOW-L2：stale 前缀命名修正（原误为 map_fresh:）
-    detail = f":{verdict.get('reason', 'unknown')}"
-    return {"present": True, "fresh": False,
-            "reason": f"map_stale{detail}"}
+    # §SPEC-ANCHOR-PREVIEW LOW-L2：stale 前缀命名保持稳定
+    detail = ",".join(st.get("factors") or []) or "stale"
+    return {"present": True, "fresh": False, "reason": f"map_stale:{detail}"}
 
 
 def load_map(path: str | Path) -> dict:
@@ -1145,7 +1117,7 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
     root = str(Path(project_root).resolve())
     want = {int(l) for l in lines}
     file_sel = file_selection or resolve_selection(
-        root, target_file, map_path_override, strict=strict)
+        root, target_file, map_path_override, strict=strict, renew=False)
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel
     doc, rel = _line_group_load(root, target_file, file_sel)
@@ -1211,7 +1183,7 @@ def resolve_function_selection(project_root: str | Path, target_file: str,
     fail-loud（全脸仅显式审计开关）。"""
     root = str(Path(project_root).resolve())
     file_sel = file_selection or resolve_selection(
-        root, target_file, map_path_override, strict=strict)
+        root, target_file, map_path_override, strict=strict, renew=False)
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel                      # 零引用终态 / 不可用（strict 已抛）
     doc, rel = _fn_group_load(root, target_file, file_sel)

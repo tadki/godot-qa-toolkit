@@ -64,25 +64,6 @@ def classify_file_state(
     return "scored"
 
 
-def _crap_line_block(cc: int, covered, total, coverage, score, status,
-                     coverage_semantics: str, blind_spots) -> dict:
-    """crap_line 子块（公共契约的镜像投影）。"""
-    return {
-        "version": CRAP_LINE_VERSION,
-        "cc": cc,
-        "covered": covered,
-        "total": total,
-        "coverage": coverage,
-        "score": score,
-        "score_status": status,
-        "coverage_semantics": coverage_semantics,
-        "path_coverage": "not_measured",
-        "assertion_effectiveness": "not_measured",
-        "blind_spots": list(blind_spots or []),
-        "evidence_level": "exploratory",
-    }
-
-
 def _crap_line_block(cc: int, covered, total, coverage, score, status: str,
                      coverage_semantics: str, blind_spots) -> dict:
     """crap_line 子块（公共契约的镜像投影，键序冻结）。"""

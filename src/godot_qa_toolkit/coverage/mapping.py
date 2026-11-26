@@ -64,7 +64,8 @@ def _mapping_ensure(project_root: Path, path: Path, timeout_s: int | None) -> No
 def _mapping_select(root: Path, path: Path, timeout_s: int | None) -> dict:
     """选面决策（fail-loud，不回退 GUT；畸形 arms_state 转具名域错误）。"""
     try:
-        sel = truth.resolve_selection(str(root), str(path), timeout_s=timeout_s)
+        sel = truth.resolve_selection(str(root), str(path),
+                                      timeout_s=timeout_s, renew=False)
     except truth.MutationSelectionError as e:
         # SEE-1623 M10/F4：detail 用 e.detail（str(e) 已含 reason 前缀，
         # 再拼一次产生 auto_update_still_stale:… 双写）。

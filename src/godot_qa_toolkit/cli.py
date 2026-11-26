@@ -709,15 +709,12 @@ def _usage_exit(message: str) -> int:
 def _prepare_map_fresh(project_root: str, files: list[str],
                        timeout_s: int) -> None:
     """map 续新单点（§SPEC-021）：先引擎导入（prewarm，重生成
-    内容指纹内的侧车）、后续新。显式 off（单元面既定形态）沿用
-    cold 源 ensure_map 直返（不 prewarm 不续新）。prewarm 失败不阻断
-    （LOW-5：预热失败不打破统一契约——续新链自会具名失败）。"""
+    内容指纹内的侧车）、后续新。显式 off（单元面既定形态）不做任何
+    map 维护（不 prewarm 不续新）。prewarm 失败不阻断（LOW-5：预热失败
+    不打破统一契约——续新链自会具名失败）。"""
     from .mutation.truth_select import mode as _map_mode
 
     if _map_mode() == "off":
-        from .mutation.truth_select import ensure_map
-
-        ensure_map(project_root, files, timeout_s=timeout_s)
         return
     from .mutation.map_contract import refresh
     from .mutation.executor import prewarm_import
@@ -1188,10 +1185,17 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
     # 增量（virgin 上即 QA 实测的静默落空）。预温生成失败 = 本轮测量面不可
     # 用，具名中止（台账已留痕），不带病进入车道循环。
     if not args.skip_measure:
-        from .mutation.truth_select import MutationSelectionError, ensure_map
+        # §SPEC-035/S1：map 维护只经契约 refresh（不再有 ensure_map 第二
+        # 维护入口）；off 模式不触碰 map（既有 off 语义不变）。
+        from .mutation.map_contract import MapContractError, refresh
+        from .mutation.truth_select import (MutationSelectionError,
+                                            SelectionError, mode as _map_mode)
+        from .mutation.verdict_source import BaselineSourceError
         try:
-            ensure_map(args.project_root, [str(p) for p in paths])
-        except MutationSelectionError as e:
+            if _map_mode() != "off":
+                refresh(args.project_root, [str(p) for p in paths])
+        except (MutationSelectionError, SelectionError, MapContractError,
+                BaselineSourceError) as e:
             # §SPEC-009：具名原因同步走 stderr 披露，不得以空 stderr 仅留
             # 机器信封（stdout JSON 契约不变）。
             msg = (f"attribution map auto-generation failed: {e}; "

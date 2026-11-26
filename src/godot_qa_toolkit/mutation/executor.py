@@ -388,7 +388,8 @@ def _gate_zero_ref(files, project_root, tests_glob, dry_run, total,
     selection_meta: dict = {}
     if tests_glob is None and not dry_run:
         derived, selection_meta = _auto_scan_tests_glob_meta(
-            files[0], project_root, select_mode=select_mode)
+            files[0], project_root, select_mode=select_mode,
+            allow_renew=False)
         if derived is None:
             terminal = _zero_ref_terminal(files[0], total, selection_meta)
             if terminal is not None:

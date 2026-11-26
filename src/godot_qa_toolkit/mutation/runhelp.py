@@ -74,16 +74,19 @@ class _BaselineDirtyFailure(Exception):
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str,
-                          select_mode: str = "full") -> str | None:
+                          select_mode: str = "full",
+                          allow_renew: bool = True) -> str | None:
     """SPEC-001：目标 → 选面 glob（SEE-1581：运行时映射；full=显式全脸）。
 
     SEE-1581：自动选面唯一出处委托 _auto_scan_tests_glob_meta（运行时
-    真值映射；A10 后静态强度选面已退役）。
+    真值映射；A10 后静态强度选面已退役）。§SPEC-035/S4：run 侧调用点显式
+    传 allow_renew=False（续新只在 prepare）。
     """
     from godot_qa_toolkit.mutation import runner as _r
 
     glob, _meta = _r._auto_scan_tests_glob_meta(file_path, project_root,
-                                                select_mode=select_mode)
+                                                select_mode=select_mode,
+                                                allow_renew=allow_renew)
     return glob
 
 

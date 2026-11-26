@@ -69,11 +69,9 @@ _MODULE_ENV_KEYS = {
     "GQT_MEASUREMENT_GHERKIN_DISABLED": "1",
     "GQT_MUTATION_BASELINE_SOURCE": "map",
     "GQT_ATTRIBUTION_MAP_MODE": "auto",
-    # 进程内 ensure_map 会把 GQT_ATTRIBUTION_MAP 永久写入 os.environ
-    # （truth_select._auto_map_build）——同进程先跑的建图单测会把泄漏值
-    # 带进来，使本夹具的默认路径 map 被判成「显式 map」并触发 D4
-    # event_counts_stale 具名拒绝门（增量产物恒带该标志）。本模块契约 =
-    # 项目默认路径 auto map，置空恢复默认语义。
+    # 本模块契约 = 项目默认路径 auto map；子进程只带显式声明的键、
+    # 不继承进程内 GQT_*（C3-R9 退回4：产品侧写点已改为操作结束恢复，
+    # 此置空保留为默认路径语义的显式哨兵，不再针对产品泄漏）。
     "GQT_ATTRIBUTION_MAP": "",
 }
 

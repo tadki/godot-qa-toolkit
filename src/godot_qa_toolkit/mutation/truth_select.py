@@ -483,6 +483,22 @@ def ensure_map(project_root: str | Path, files: list[str],
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
+    # C3-R9 退回4（§SPEC-034）：自动建图期间写入的 `GQT_ATTRIBUTION_MAP`
+    # 只在本次操作内生效——操作结束恢复进程环境到操作前（调用者显式预设
+    # 的值原样保留，显式 --attribution-map 语义不变）。此前永久写入使同
+    # 进程后续操作把默认路径 map 当成"显式 map"。
+    _saved_env_map = os.environ.get(ENV_MAP)
+    try:
+        return _ensure_map_locked(root, files, timeout_s, force, out_path)
+    finally:
+        if _saved_env_map is None:
+            os.environ.pop(ENV_MAP, None)
+        else:
+            os.environ[ENV_MAP] = _saved_env_map
+
+
+def _ensure_map_locked(root, files, timeout_s, force, out_path):
+    """ensure_map 主体（§SPEC-034：ENV_MAP 由公共入口在操作后恢复）。"""
     explicit = bool(os.environ.get(ENV_MAP))
     existing, rebuild_reason = (None, "forced_rebuild") if force else \
         _default_map_reuse(map_path(root), explicit)

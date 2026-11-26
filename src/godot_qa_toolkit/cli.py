@@ -1029,15 +1029,41 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
 
     # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
     timing_store = None
+    # C3-R9 退回4（§SPEC-034）：CLI 旗标 → 环境开关只在本次 mutation
+    # 期间生效，结束恢复进程环境到操作前（此前永久写入使同进程后续
+    # 操作带上前一个命令的开关——批内顺序依赖的根因）。
+    _switches: dict = {}
+
+    def _set_switch(key: str, value: str) -> None:
+        _switches[key] = os.environ.get(key)
+        os.environ[key] = value
+
     if getattr(args, "check_baseline", False):
-        os.environ["GQT_MUTATION_CHECK_BASELINE"] = "1"
+        _set_switch("GQT_MUTATION_CHECK_BASELINE", "1")
     if getattr(args, "fail_on_red_baseline", False):
-        os.environ["GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"] = "1"
+        _set_switch("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE", "1")
     if getattr(args, "intolerant_tests", None):
-        os.environ["GQT_MEASUREMENT_INTOLERANT_TESTS"] = \
-            str(args.intolerant_tests)
+        _set_switch("GQT_MEASUREMENT_INTOLERANT_TESTS",
+                    str(args.intolerant_tests))
     if getattr(args, "auto_prepare", False):
-        os.environ["GQT_MUTATION_AUTO_PREPARE"] = "1"
+        _set_switch("GQT_MUTATION_AUTO_PREPARE", "1")
+    try:
+        return _run_mutation_serial_body(args, binary_kind)
+    finally:
+        for _key, _old in _switches.items():
+            if _old is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _old
+
+
+def _run_mutation_serial_body(args: argparse.Namespace,
+                              binary_kind: str) -> dict:
+    from .mutation.runner import run_mutation
+    from .timing import TimingStore
+
+    # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
+    timing_store = None
     if not args.dry_run:
         timing_store = TimingStore(args.project_root, args.files[0],
                                    "mutation", args.tests,

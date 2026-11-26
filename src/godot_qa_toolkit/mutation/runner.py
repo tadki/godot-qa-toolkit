@@ -925,6 +925,46 @@ def _synthesized_map_baseline(path, project_root, tests_glob):
     return snap
 
 
+def _assert_map_reds_match_real(precomputed_baseline, qualified) -> None:
+    """C3-R10 退回4：map 快照基线的实跑红集与 map 红集一致性门——cold /
+    --tests 等无 parity 腿的入口，map 说红而实跑绿（或反之）在此具名
+    fail-loud（零 mutant），与 worker parity 门同判据。非 map 快照放行。"""
+    if precomputed_baseline is None \
+            or precomputed_baseline.get("red_pairs") is None:
+        return
+    from .verdict_source import BaselineSourceError as _BSE
+
+    map_reds = {name for _scr, name
+                in (precomputed_baseline.get("red_pairs") or [])}
+    real_reds = {name for _scr, name in qualified}
+    if real_reds != map_reds:
+        raise _BSE(
+            "baseline_map_mismatch: attribution-map verdict baseline "
+            "diverged from real execution (loop baseline) — "
+            f"batch invalidated: map={sorted(map_reds)[:4]} "
+            f"real={sorted(real_reds)[:4]}")
+
+
+def _worker_branch_baseline(baseline_failures, baseline_dirty,
+                            red_pairs) -> tuple:
+    """C3-R10 退回4：chunk 路径 baseline_failures 恒空（map 红集经
+    executor 填入 _BASELINE_RED_MAP，ProcessPool 子进程全局不复用）——
+    map 红集非空时视同基线脏并填充失败集/红对，让 worker parity 门拿到
+    真实期望集（负对照：map 谎报红 → 整批作废）。"""
+    from .verdict_source import baseline_source as _bs
+
+    wf_baseline_failures = baseline_failures
+    wf_dirty = baseline_dirty
+    wf_red_pairs = red_pairs
+    if _bs() == "map" and _BASELINE_RED_MAP:
+        if not wf_baseline_failures:
+            wf_baseline_failures = {n for _s, n in _BASELINE_RED_MAP}
+        if not wf_red_pairs:
+            wf_red_pairs = sorted(_BASELINE_RED_MAP)
+        wf_dirty = True
+    return wf_baseline_failures, wf_dirty, wf_red_pairs
+
+
 def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
                    precomputed_baseline, timeout_factor,
                    break_on_baseline_failure: bool = False) -> tuple:
@@ -964,20 +1004,7 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
         raise _BaselineDirtyFailure(baseline_failures)
-    # C3-R10 退回4：map 快照基线的实跑红集与 map 红集一致性门——cold /
-    # --tests 等無 parity 腿的入口，map 说红而实跑绿（或反之）在此具名
-    # fail-loud（零 mutant），与 worker parity 门同判据。
-    if precomputed_baseline is not None \
-            and precomputed_baseline.get("red_pairs") is not None:
-        map_reds = {name for _scr, name
-                    in (precomputed_baseline.get("red_pairs") or [])}
-        real_reds = {name for _scr, name in qualified}
-        if real_reds != map_reds:
-            raise BaselineSourceError(
-                "baseline_map_mismatch: attribution-map verdict baseline "
-                "diverged from real execution (loop baseline) — "
-                f"batch invalidated: map={sorted(map_reds)[:4]} "
-                f"real={sorted(real_reds)[:4]}")
+    _assert_map_reds_match_real(precomputed_baseline, qualified)
     # SEE-1631 §SPEC-022（Owner 终裁）：map 新鲜且与当前树一致时，跑
     # mutant 之前不执行任何未插桩全脸基线/验证运行——判定基线 = map
     # verdict 表（树一致性已在合成前 fail-loud 门承担）。残余通道内不
@@ -1017,20 +1044,9 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
             directdrive.seed_direct_host(slot.root)
         if use_worker:
             from .worker_channel import execute_worker_branch
-            # C3-R10 退回4：chunk 路径 baseline_failures 恒空（map 红集在
-            # _BASELINE_RED_MAP）——map 红集非空视同基线脏，让 worker
-            # parity 门拿到真实期望集（负对照：map 谎报红 → 整批作废）。
-            from .verdict_source import baseline_source as _bs
-
-            wf_baseline_failures = baseline_failures
-            wf_dirty = baseline_dirty
-            wf_red_pairs = red_pairs
-            if _bs() == "map" and _BASELINE_RED_MAP:
-                if not wf_baseline_failures:
-                    wf_baseline_failures = {n for _s, n in _BASELINE_RED_MAP}
-                if not wf_red_pairs:
-                    wf_red_pairs = sorted(_BASELINE_RED_MAP)
-                wf_dirty = True
+            wf_baseline_failures, wf_dirty, wf_red_pairs = \
+                _worker_branch_baseline(baseline_failures, baseline_dirty,
+                                        red_pairs)
             with clock.stage("per_mutant"):
                 raw_pairs, fatal_events = execute_worker_branch(
                     path, project_root, original_src, mutants, tests_glob,

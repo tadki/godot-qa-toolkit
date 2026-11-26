@@ -851,9 +851,9 @@ def _cold_red_observation_leg(slot, target_rel, target_res, original_src,
                               auto_name, red_pairs,
                               timeout_s: int) -> "set[str]":
     """C3-R11 退回2：cold 车道红测观测腿——直驱宿主只跑 map 红测清单
-    （真实观测：非 map 自产物；只跑红测脚本，不退化为全脸未插桩基线），
-    返回实跑失败名集供对照。map 红集 ≠ 实跑失败集 → 调用方具名
-    fail-loud、整批作废。"""
+    （真实观测：非 map 自产物；只跑红测脚本，不作为判定基线——判定仍
+    读 map verdict 表），返回实跑失败名集供对照。map 红集 ≠ 实跑失败集
+    → 调用方具名 fail-loud、整批作废。"""
     from . import directdrive
     from .gutrun import _parse_failing_tests
     from .inject import make_user_dir, mutant_env, register_temp, forget_temp
@@ -891,7 +891,7 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
     """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
     # C3-R11 退回2：cold 车道红测观测腿——map 红集与真实观测对照，
     # 失配即具名 fail-loud、整批作废（零 mutant；不用 map 自产物当
-    # 实跑证据，也不退化为全脸未插桩基线）。
+    # 实跑证据；判定基线仍读 map verdict 表）。
     from .verdict_source import baseline_source as _bs
 
     if _bs() == "map" and red_pairs and _map_reds_dirty(red_pairs):

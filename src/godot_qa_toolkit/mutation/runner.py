@@ -847,12 +847,67 @@ def _run_baseline(project_root: str, tests_glob: str | None, timeout_s: int
                                       tests_glob=tests_glob)
     return rc, tail, time.monotonic() - t0
 
+def _cold_red_observation_leg(slot, target_rel, target_res, original_src,
+                              auto_name, red_pairs,
+                              timeout_s: int) -> "set[str]":
+    """C3-R11 退回2：cold 车道红测观测腿——直驱宿主只跑 map 红测清单
+    （真实观测：非 map 自产物；只跑红测脚本，不退化为全脸未插桩基线），
+    返回实跑失败名集供对照。map 红集 ≠ 实跑失败集 → 调用方具名
+    fail-loud、整批作废。"""
+    from . import directdrive
+    from .gutrun import _parse_failing_tests
+    from .inject import make_user_dir, mutant_env, register_temp, forget_temp
+
+    red_scripts = sorted({scr for scr, _n in red_pairs})
+    obs_sha = shadow.inject_mutant(slot.root, target_rel, original_src)
+    cfg_path = directdrive.write_direct_cfg(
+        slot.root, target_res, obs_sha, auto_name, red_scripts,
+        baseline_failures=[], bail_enabled=False, skip_red_tests=[])
+    register_temp(cfg_path)
+    user_dir = make_user_dir()
+    global _ACTIVE_ENV, _ACTIVE_SCRIPT, _ACTIVE_GATE_ROOT
+    saved_env, saved_script, saved_gate = _ACTIVE_ENV, _ACTIVE_SCRIPT, \
+        _ACTIVE_GATE_ROOT
+    _ACTIVE_ENV, _ = mutant_env(str(cfg_path), user_dir)
+    _ACTIVE_SCRIPT = directdrive.host_script_res(slot.root)
+    try:
+        _rc, tail = _run_gut_on_project(
+            str(slot.root), timeout_s=timeout_s, tests_glob=None)
+        return _parse_failing_tests(tail)
+    finally:
+        _ACTIVE_ENV, _ACTIVE_SCRIPT, _ACTIVE_GATE_ROOT = (
+            saved_env, saved_script, saved_gate)
+        Path(cfg_path).unlink(missing_ok=True)
+        forget_temp(cfg_path)
+        if user_dir:
+            shutil.rmtree(user_dir, ignore_errors=True)
+
+
 def _run_cold_legs(path, project_root, original_src, backup, mutants,
                    tests_glob, baseline_failures, baseline_dirty, slot,
                    auto_name, target_rel, target_res, ownership_fn, reporter,
                    store2, prior_entries, scopes, kill_bail=False,
                    direct_scripts=None, red_pairs=None):
     """冷通道（M0）逐 mutant 执行循环（默认路径，行为与既有逐位不变）。"""
+    # C3-R11 退回2：cold 车道红测观测腿——map 红集与真实观测对照，
+    # 失配即具名 fail-loud、整批作废（零 mutant；不用 map 自产物当
+    # 实跑证据，也不退化为全脸未插桩基线）。
+    from .verdict_source import baseline_source as _bs
+
+    if _bs() == "map" and red_pairs and _map_reds_dirty(red_pairs):
+        observed = _cold_red_observation_leg(
+            slot, target_rel, target_res, original_src, auto_name,
+            red_pairs, timeout_s=max(60, int(_adaptive_timeout or 0)))
+        map_names = {name for _scr, name in red_pairs}
+        if observed != map_names:
+            from .verdict_source import BaselineSourceError as _BSE
+
+            raise _BSE(
+                "baseline_map_mismatch: attribution-map verdict baseline "
+                "diverged from real execution (cold red observation leg) "
+                "— batch invalidated: "
+                f"map={sorted(map_names)[:4]} "
+                f"real={sorted(observed)[:4]}")
     raw_pairs: list[tuple] = []
     for seq, m in enumerate(mutants):
         t_mutant = time.monotonic()
@@ -883,13 +938,9 @@ def _synthesized_map_baseline(path, project_root, tests_glob):
     （冷启动照旧）。
 
     §SPEC-021：prepare 阶段（CLI）已自动续新；此处为库内直调兜底——
-    合成前再校验一致性，漂移即具名 fail-loud（不静默退化，续新由调用方
-    的 prepare 链承担）。
-
-    C3-R10 退回2：prepare 之后的 prewarm re-import 会把引擎侧车
-    （.translation 等，在内容指纹内）重新生成，同一条命令的 run 期合成
-    于是判 map 过期、失败一次。内容漂移类 BaselineSourceError 在本命令
-    内补一次 refresh（具名披露）再重试合成一次；仍漂移才 fail-loud。"""
+    合成前再校验一致性，漂移即具名 fail-loud（不静默退化、run 期零续新，
+    §SPEC-032 ④：D1 run 只读）。引擎重新导入已在 CLI prepare 链中先于
+    refresh 完成（C3-R11 退回2 根因修复：侧车纳入 map 指纹）。"""
     from .truth_select import mode as _map_mode
     from .verdict_source import (
         BaselineSourceError, baseline_source, map_baseline_snapshots,
@@ -898,18 +949,6 @@ def _synthesized_map_baseline(path, project_root, tests_glob):
     if baseline_source() != "map" or _map_mode() == "off":
         return None
     try:
-        syn, _fail = map_baseline_snapshots(
-            [str(path)], project_root, tests_glob)
-    except BaselineSourceError as e:
-        if "production content drift" not in str(e):
-            raise BaselineSourceError(f"loop baseline: {e}") from e
-        # 本命令内 prewarm re-import 重新生成的侧车：命令内补续新一次
-        from .map_contract import refresh as _refresh
-
-        print("mutation: run-time content drift (engine re-import "
-              "regenerated sidecars) — refreshing in-command "
-              "(C3-R10 退回2, disclosed)", file=sys.stderr)
-        _refresh(project_root, [str(path)])
         syn, _fail = map_baseline_snapshots(
             [str(path)], project_root, tests_glob)
     except BaselineSourceError as e:
@@ -1157,14 +1196,15 @@ class _SkipDecision:
 
 
 def _skip_decision(baseline_failures, red_map, dirty_eff, bail_scripts,
-                   identity):
+                   identity, face_kind=None):
     """§SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
     gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。"""
     worker_host = (dirty_eff and (identity or {}).get("exec_scheme")
                    == WORKER_SCHEME)
     if dirty_eff and bail_scripts is None and not worker_host:
+        face_kind = face_kind or "unsupported_explicit_or_full"
         raise _BaselineSkipUnsupportedFace(
-            sorted(baseline_failures) or sorted(red_map), "worker")
+            sorted(baseline_failures) or sorted(red_map), face_kind)
     skip_applied = dirty_eff and (bail_scripts is not None or worker_host)
     return _SkipDecision(dirty_eff, worker_host, bail_scripts, skip_applied)
 
@@ -1211,7 +1251,8 @@ def _run_mutant_loop(
         # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
         # 保证 setup 权威与实跑一致）。
         skip = _skip_decision(baseline_failures, _BASELINE_RED_MAP,
-                              dirty_eff, bail_scripts, identity)
+                              dirty_eff, bail_scripts, identity,
+                              face_kind=bail_face)
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,

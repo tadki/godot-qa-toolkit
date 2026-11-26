@@ -801,6 +801,13 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     rc = _bootstrap_import_or_contract("mutation", args)
     if rc is not None:
         return rc
+    # C3-R10 退回2 根因修复：引擎重新导入（.translation 等侧车在内容
+    # 指纹内）必须在 refresh **之前**发生——侧车纳入 map 指纹后，run 期
+    # 不再有内容漂移（D1「run 只读」保持；此前 run 期补续新已被否决）。
+    # prewarm 证明流保证导入收敛（S2/O2 相等才发证），幂等可重入。
+    from .mutation.executor import prewarm_import
+
+    prewarm_import(str(Path(args.project_root)))
     # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
     try:
         if baseline_source() == "map":

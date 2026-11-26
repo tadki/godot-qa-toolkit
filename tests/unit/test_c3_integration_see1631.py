@@ -1259,12 +1259,6 @@ def test_r10_cli_main_restores_proc_env(monkeypatch, tmp_path):
     explicit = tmp_path / "explicit-map.json"
     explicit.write_text("{}", encoding="utf-8")
 
-    def _no_io_patch():
-        # gherkin/measure 面 CLI 走不到（mutation dry-run 也不拉引擎）——
-        # 让 plan 门在 dry-run 下只做静态探测即可。真 IO 由 monkeypatch
-        # stub 掉：_apply_godot_bin_or_contract 返回 None（早验证放行）。
-        pass
-
     for key in ("GQT_MUTATION_CHECK_BASELINE", "GQT_ATTRIBUTION_MAP",
                 "GQT_ATTRIBUTION_MAP_MODE"):
         os.environ.pop(key, None)

@@ -706,27 +706,10 @@ def _usage_exit(message: str) -> int:
     return 2
 
 
-def _prepare_engine_import_then_map(project_root: str, files: list[str],
-                                    timeout_s: int) -> None:
-    import sys as _s
-    print("DBG import called", file=_s.stderr)
-    """C3-R12 退回1 单点收口（§SPEC-034 顺序契约）：引擎重新导入（
-    prewarm，重生成 .translation 等内容指纹内的侧车）必须先于 map 续新
-    ——侧车纳入指纹后 run 期不再有内容漂移（D1 run 只读保持）。
-    prewarm 证明流保证导入收敛（S2/O2 相等才发证），幂等可重入。
-    无 project.godot 的裸目录（结构测试的真空形态）直接跳过导入——
-    该形态由后续续新链具名失败，行为与旧进程一致。"""
-    from .mutation.executor import prewarm_import
-
-    if not (Path(project_root) / "project.godot").is_file():
-        return
-    prewarm_import(project_root)
-
-
 def _prepare_map_fresh(project_root: str, files: list[str],
                        timeout_s: int) -> None:
-    """map 续新单点（§SPEC-021）：先引擎导入、后续新（见
-    _prepare_engine_import_then_map）。显式 off（单元面既定形态）沿用
+    """map 续新单点（§SPEC-021）：先引擎导入（prewarm，重生成
+    内容指纹内的侧车）、后续新。显式 off（单元面既定形态）沿用
     cold 源 ensure_map 直返（不 prewarm 不续新）。prewarm 失败不阻断
     （LOW-5：预热失败不打破统一契约——续新链自会具名失败）。"""
     from .mutation.truth_select import mode as _map_mode
@@ -752,15 +735,19 @@ def _map_source_prepare_early(args: argparse.Namespace,
     --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
     入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。"""
     from .mutation.map_contract import MapContractError
+    from .mutation.truth_select import MutationSelectionError, SelectionError
     from .mutation.verdict_source import BaselineSourceError
-    # C3-R12 退回1：先引擎导入（re-import 侧车纳入指纹）、后续新——
-    # 与默认行 / fn 入口共用 _prepare_map_fresh 单点；run 期零续新。
+    # C3-R13 退回1：续新失败四类（建图 / 全量重建 / 增量 / map 不可读）
+    # 在 early 这一层就转具名 JSON，零 traceback——本函数经
+    # _mapping_face_gate 调用，位于 _prepare_mapping_face 的既有 try 之外。
     try:
         _prepare_map_fresh(
             str(Path(args.project_root)), files_all,
             timeout_s=int(getattr(args, "timeout", 600) or 600))
-    except MapContractError as e:
-        # §SPEC-032/C3-R3 项1：MapView 断言/refresh 失败 → 具名 JSON
+    except (MutationSelectionError, SelectionError) as e:
+        return _selection_error_payload(args, e)
+    except (MapContractError, BaselineSourceError) as e:
+        # §SPEC-032/C3-R3 项1：MapView 断言/refresh/续新失败 → 具名 JSON
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})
@@ -827,20 +814,22 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     from .mutation.map_contract import MapContractError
     from .mutation.verdict_source import BaselineSourceError
     _files_all = [str(f) for f in (getattr(args, "files", None) or [])]
-    # cold 源（legacy A20/显式 --tests 契约）不预建/校验映射，同梯早退。
-    terminate, rc = _mapping_face_gate(args, full_face, _files_all)
-    if terminate:
-        return rc
-    rc = _mutation_single_target_check(args)
-    if rc is not None:
-        return rc
-    # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
-    rc = _bootstrap_import_or_contract("mutation", args)
-    if rc is not None:
-        return rc
-    # C3-R12 退回1 单点收口：先引擎导入、后续新（与 full-face / --tests
-    # 入口共用 _prepare_map_fresh，不再各写一份）。
+    # C3-R13 退回1：gate 也纳入 try——默认与 fn 入口的续新失败与
+    # full/--tests 入口同一条具名链（此前 gate 在 try 外，early 抛出的
+    # BaselineSourceError 会裸逸出 cmd_mutation 变成 traceback）。
     try:
+        # cold 源（legacy A20/显式 --tests 契约）不预建/校验映射，同梯早退。
+        terminate, rc = _mapping_face_gate(args, full_face, _files_all)
+        if terminate:
+            return rc
+        rc = _mutation_single_target_check(args)
+        if rc is not None:
+            return rc
+        # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
+        rc = _bootstrap_import_or_contract("mutation", args)
+        if rc is not None:
+            return rc
+        # 单点收口：先引擎导入、后续新（与 full-face / --tests 入口共用）。
         _prepare_map_fresh(
             str(Path(args.project_root)),
             [str(f) for f in (getattr(args, "files", None) or [])],

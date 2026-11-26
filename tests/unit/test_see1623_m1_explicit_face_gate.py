@@ -152,11 +152,10 @@ class TestExplicitTestsSkipEnsureMap:
 
         monkeypatch.setattr(mc, "refresh",
                             lambda *a, **k: called.append(1))
-        import sys as _s
-        from godot_qa_toolkit.mutation.truth_select import mode as _mode
-        print("DBG mode:", _mode(), file=_s.stderr)
+        # conftest 的单元形态默认 MAP_MODE=off；本用例要验证 map 源续新，
+        # 显式放开（与 GQT_MUTATION_BASELINE_SOURCE=map 配套）。
         monkeypatch.setattr(ts, "mode", lambda: "auto")
-        print("DBG mode forced auto", file=_s.stderr)
+
         monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
         monkeypatch.setattr(cli, "_dispatch_mutation",
                             lambda *a, **k: {"tool": "mutation", "ok": True,

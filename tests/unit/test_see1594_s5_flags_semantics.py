@@ -87,7 +87,12 @@ class TestA20FullFaceNoPrebuild:
 
         def boom(*a, **k):
             calls["ensure"] += 1
-            raise _mc.MapContractError("unrelated_map_failure")
+            # C3-R13 退回1：注入 BaselineSourceError 族（refresh 内部步
+            # 建图/重建/增量失败的真实类型）——不得靠换异常类型绕过
+            from godot_qa_toolkit.mutation.verdict_source import (
+                BaselineSourceError,
+            )
+            raise BaselineSourceError("unrelated_map_failure")
 
         proj = tmp_path / "proj"
         (proj / "src_game").mkdir(parents=True)

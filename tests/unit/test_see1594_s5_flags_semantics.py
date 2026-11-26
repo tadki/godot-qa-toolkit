@@ -79,7 +79,7 @@ class TestA20FullFaceNoPrebuild:
         仍不预建/校验映射（原契约）；map 源（默认）下判定基线 = map，
         full 面同样走 prepare 自动续新（ensure_map 被调用一次）。"""
         from godot_qa_toolkit import cli
-        from godot_qa_toolkit.mutation import truth_select as _truth
+        from godot_qa_toolkit.mutation import map_contract as _mc
         from godot_qa_toolkit.mutation.verdict_source import (
             ENV_BASELINE_SOURCE,
         )
@@ -87,7 +87,7 @@ class TestA20FullFaceNoPrebuild:
 
         def boom(*a, **k):
             calls["ensure"] += 1
-            raise _truth.MutationSelectionError("unrelated_map_failure")
+            raise _mc.MapContractError("unrelated_map_failure")
 
         proj = tmp_path / "proj"
         (proj / "src_game").mkdir(parents=True)
@@ -102,7 +102,9 @@ class TestA20FullFaceNoPrebuild:
 
         monkeypatch.setattr(cli, "_bootstrap_import_or_contract",
                             lambda *a, **k: None)
-        monkeypatch.setattr(_truth, "ensure_map", boom)
+        # C3-R12：prepare 续新收口单点 _prepare_map_fresh——判据不变：
+        # prepare 自动续新必须发生。
+        monkeypatch.setattr(cli, "_prepare_map_fresh", boom)
         monkeypatch.setattr(
             cli, "_dispatch_mutation",
             lambda args, kind: {"tool": "mutation", "ok": True,
@@ -120,6 +122,11 @@ class TestA20FullFaceNoPrebuild:
         assert rc == 0
         # map 源（§SPEC-020/021 默认）：full 面同样走 prepare 自动续新
         monkeypatch.setenv(ENV_BASELINE_SOURCE, "map")
+        from godot_qa_toolkit.mutation.truth_select import map_path as _mp
+
+        _mp_file = _mp(Path(proj))
+        if _mp_file and Path(_mp_file).is_file():
+            Path(_mp_file).unlink()
         calls["ensure"] = 0
         rc = cli.cmd_mutation(args)
         assert calls["ensure"] == 1, (

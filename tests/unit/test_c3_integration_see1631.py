@@ -1247,7 +1247,7 @@ def test_r10_loop_baseline_returns_synthesized_snapshot(tmp_path,
 
 
 def test_r10_cli_main_restores_proc_env(monkeypatch, tmp_path):
-    """C3-R9 退回4（§SPEC-034）CLI 入口层：带 --attribution-map / 
+    """C3-R9 退回4（§SPEC-034）CLI 入口层：带 --attribution-map /
     --check-baseline 的 cli.main 调用结束后进程环境恢复到调用前——
     其后的默认调用 mapping 路径与各自新进程一致。"""
     import os

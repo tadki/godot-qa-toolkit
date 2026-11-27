@@ -311,6 +311,30 @@ def test_refresh_wraps_alien_increment_leg_failure(tmp_path, monkeypatch):
     assert map_file.read_bytes() == before, "旧图字节不变"
 
 
+# ────────────────────────── D1（C3-R21 判定处置）──────────────────────
+def test_status_names_report_recipe_hash_drift(tmp_path):
+    """C3-R21 D1（QA HIGH 判定：环境差异形态）：内容面漂移 + 地图存储的
+    report_recipe_hash 与现算注入哈希不同（建图后工具链/环境漂移，例：
+    GQT_GODOT_BIN 变更或缺失）→ 增量资格闸恒假、决策必为具名全量——
+    status 把该原因列进 factors 并预言 full。此前因素只有内容面
+    （feature_sha256: changed），预言 full 无具名原因。"""
+    proj = _make_project(tmp_path)
+    doc = _fresh_doc(proj)
+    doc["report_recipe_hash"] = "stored-build-hash-0000"  # 与现算必然不同
+    _write_map(proj, doc)
+    # 内容面漂移（QA 场景：feature 内容改动）走决策镜像
+    demo = proj / "addons" / "gqt_gherkin" / "features" / "demo.feature"
+    demo.write_text(demo.read_text(encoding="utf-8")
+                    + "\n# c3r21 d1 probe\n", encoding="utf-8")
+    from godot_qa_toolkit.mutation.map_contract import status
+
+    st = status(str(proj), list(_FILES))
+    assert st.get("fresh") is False
+    assert st.get("would_refresh") == "full", st.get("would_refresh")
+    assert any(f.startswith("report_recipe_hash:")
+               for f in st.get("factors") or []), st.get("factors")
+
+
 # ──────────────────────────── F1（C3-R20）────────────────────────────
 def test_refresh_planned_full_with_content_routes_through_named_leg(
         tmp_path, monkeypatch):

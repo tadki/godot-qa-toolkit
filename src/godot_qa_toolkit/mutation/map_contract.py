@@ -145,14 +145,21 @@ def _refresh_scope(factors: "list[str]") -> str:
     return "increment"
 
 
-def _planned_action(root: str, doc: dict, files: "list[str]") -> str:
+def _planned_action(root: str, doc: dict,
+                    files: "list[str]") -> "tuple[str, str | None]":
     """C3-R9 退回3：镜像 `refresh` 的真实决策树预测动作（increment/full）。
 
     status.would_refresh 必须与 refresh 实际执行的动作一致——周期校准
     （calibration_due_fallback）、新增生产文件（new_prod_file_fallback）、
     不可归因变更（unknown_changed_paths → 具名全量）、报告哈希失配都落
     全量，其余走增量。决策面直接复用 `_increment_decision`（与增量续新
-    同一实现，预测即所见）。只读：零 GUT、零 import、零写盘。"""
+    同一实现，预测即所见）。只读：零 GUT、零 import、零写盘。
+
+    C3-R21（D1 判定处置）：第二返回值 = 报告哈希漂移的具名原因（存储
+    report_recipe_hash != 现算注入哈希 → 增量资格闸恒假 → 决策具名全
+    量）——QA 场景（KOL feature 改动：API 预言 full 无具名原因、CLI 同
+    环境实际 increment）的根因是两次调用环境不同；同环境内预言与实际
+    由同一闸保证一致，环境差异本探针具名。"""
     from pathlib import Path as _P
 
     from .verdict_source import _prepare_drift_state
@@ -160,7 +167,7 @@ def _planned_action(root: str, doc: dict, files: "list[str]") -> str:
     root_path = _P(root)
     changed, _drift, pristine_ok = _prepare_drift_state(doc, root, files)
     if not pristine_ok:
-        return "full"
+        return "full", None
     from ..measurement.increment import (
         DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO,
         DEFAULT_RERUN_FULL_FACE_RATIO,
@@ -170,10 +177,17 @@ def _planned_action(root: str, doc: dict, files: "list[str]") -> str:
 
     recipe, error = build_recipe(root_path)
     if error is not None:
-        return "full"
+        return "full", None
+    injected = _inject_toolchain(root_path, dict(recipe))
+    drift: "str | None" = None
+    if doc.get("report_recipe_hash") != injected.get("recipe_hash"):
+        drift = (f"stored {str(doc.get('report_recipe_hash'))[:12]} != "
+                 f"computed {str(injected.get('recipe_hash'))[:12]} "
+                 "(toolchain/environment drift since the map was built) — "
+                 "full rebuild required")
     try:
         _classes, _inv, _rerun, reason = _increment_decision(
-            root_path, _inject_toolchain(root_path, dict(recipe)), doc,
+            root_path, injected, doc,
             changed,
             int((doc.get("increment") or {})
                 .get("increments_since_full") or 0),
@@ -181,8 +195,10 @@ def _planned_action(root: str, doc: dict, files: "list[str]") -> str:
             rerun_full_face_ratio=DEFAULT_RERUN_FULL_FACE_RATIO,
             gherkin_rerun_full_face_ratio=DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO)
     except Exception:  # noqa: BLE001 — unknown_changed_paths 等具名拒绝
-        return "full"   # 在 refresh 里对应 unknown → 具名全量重建
-    return "increment" if reason == "incremental" else "full"
+        return "full", drift   # 在 refresh 里对应 unknown → 具名全量重建
+    if reason != "incremental":
+        return "full", drift
+    return "increment", None
 
 
 def _last_measured_cost(doc: dict) -> "str | float":
@@ -239,9 +255,15 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
         scope = "full"
     else:
         try:
-            scope = _planned_action(root, doc, files)
+            scope, hash_drift = _planned_action(root, doc, files)
         except Exception:  # noqa: BLE001 — 预测失败按因素面口径兜底
-            scope = _refresh_scope(factors)
+            scope, hash_drift = _refresh_scope(factors), None
+        if hash_drift:
+            # C3-R21（D1 判定处置，QA HIGH）：环境/工具链漂移具名——
+            # 增量资格闸（存储 report_recipe_hash vs 现算注入哈希）恒假
+            # → 决策必为具名全量，原因随 factors 披露（QA 场景：因素
+            # 只有 feature_sha256: changed、预言 full 无具名原因）。
+            factors.append(f"report_recipe_hash: {hash_drift}")
     return {"present": True, "fresh": False, "factors": factors,
             "would_refresh": scope,
             "scope": [f.split(":", 1)[0] for f in factors] if factors

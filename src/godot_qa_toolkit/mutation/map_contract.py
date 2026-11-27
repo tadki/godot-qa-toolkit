@@ -370,6 +370,9 @@ def _refresh_locked(root: str, files: "list[str]",
         raise MapContractError(
             f"refresh still stale after renewal (old map bytes "
             f"unchanged on failure paths): {e}") from e
+    # C3-R19：create 分支的 path 在建图前解析为 None——装填后按默认位置
+    # 重解析，视图披露不再带 null 路径。
+    path = map_path(Path(root)) or path
     return {"fresh": True, "already_fresh": False,
             "view": MapView(root, doc, map_path=path)}
 

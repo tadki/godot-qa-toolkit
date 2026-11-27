@@ -23,10 +23,21 @@ from .verdict_source import (
     BaselineSourceError,
     _assert_map_arm_valid,
     _assert_map_schema,
+    _features_disk_sha256,
     _load_map_doc,
     assert_map_fresh,
 )
 from .truth_select import map_path
+
+
+# 强制全量重建的因素前缀（结构性缺失：schema/arms/recipe 失配、缺判定
+# 表、视图构造失败、缺 `feature_sha256` 键）——`status` 的
+# would_refresh=full 判定与 `measure map-update` 输出的 reason 抽取
+# 共用同一份（C3-R20 F1：全量原因具名）。
+_FORCED_FULL_FACTORS: "tuple[str, ...]" = (
+    "schema:", "arms:", "recipe:", "test_verdicts:", "view:",
+    "feature_sha256_missing:",
+)
 
 
 class MapContractError(Exception):
@@ -98,8 +109,6 @@ def _feature_face_drift(root: str, doc: dict) -> "str | None":
     与 `_map_drift` 的 `_feature_drift`（增量变更面收集）同一对账源——
     status 面答"新不新鲜"，增量面答"重跑什么"。基线无 feature_sha256
     （旧产物）→ 保守返回 None（不误报，等首次全量补齐）。"""
-    import hashlib as _hl
-
     features_dir = Path(root) / "addons" / "gqt_gherkin" / "features"
     if not features_dir.is_dir():
         return None
@@ -112,12 +121,8 @@ def _feature_face_drift(root: str, doc: dict) -> "str | None":
         return ("feature_sha256_missing: missing (map carries no "
                 "feature_sha256 — direct-build artifact predates feature "
                 "fingerprinting); full rebuild required")
-    disk_sha: dict[str, str] = {}
-    for path in sorted(features_dir.glob("*.feature")):
-        key = path.stem.replace("-", "_")
-        h = _hl.sha256()
-        h.update(path.read_bytes())
-        disk_sha[key] = h.hexdigest()
+    disk_sha = {k: sha for k, (_rel, sha)
+                in _features_disk_sha256(Path(root)).items()}
     changed = [k for k in sorted(set(disk_sha) & set(baseline_sha))
                if disk_sha[k] != baseline_sha[k]]
     new = sorted(set(disk_sha) - set(baseline_sha))
@@ -227,9 +232,7 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
     # 执行的动作（含周期校准、新增生产文件、不可归因变更三类具名全量）。
     # 强制全量的因素：schema、arms、recipe、缺判定表、视图构造失败、缺
     # `feature_sha256` 键；其余才走决策镜像（增量判定）。
-    if any(f.startswith(("schema:", "arms:", "recipe:", "test_verdicts:",
-                         "view:", "feature_sha256_missing:"))
-           for f in factors):
+    if any(f.startswith(_FORCED_FULL_FACTORS) for f in factors):
         # C3-R17：缺 `feature_sha256` 键（因素文案自带 "full rebuild
         # required"）与 schema/arms 同列——would_refresh 必须如实预测
         # refresh 将执行的全量重建，不落增量判定。

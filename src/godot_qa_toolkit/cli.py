@@ -1514,7 +1514,7 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
     # 抛出的任何具名失败都转具名 JSON（零 traceback；旧图字节不变由
     # 契约 refresh 的原子装填承担）。
     from .mutation.map_contract import (
-        MapContractError, refresh, status,
+        MapContractError, _FORCED_FULL_FACTORS, refresh, status,
     )
     from .mutation.truth_select import (
         MutationSelectionError, SelectionError,
@@ -1530,9 +1530,7 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
         # forced-full 因素；经增量腿的回退取重建后地图台账的
         # `increment.reason`（腿内决策与 status 预言同源）。
         reason = next((f for f in st.get("factors") or []
-                       if f.startswith(("schema:", "arms:", "recipe:",
-                                        "test_verdicts:", "view:",
-                                        "feature_sha256_missing:"))), None)
+                       if f.startswith(_FORCED_FULL_FACTORS)), None)
         outcome = refresh(root, [], timeout_s=int(args.timeout))
     except (MapContractError, BaselineSourceError, SelectionError,
             MutationSelectionError) as e:

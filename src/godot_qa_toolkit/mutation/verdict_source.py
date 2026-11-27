@@ -393,6 +393,24 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
     return sorted(changed), sorted(drift)
 
 
+def _features_disk_sha256(root: Path) -> "dict[str, tuple[str, str]]":
+    """盘上 feature 内容指纹（key 归一化与 sha256 与失效面对账的唯一
+    实现）：key → (盘上 rel, hexdigest)；features 目录缺失 → 空表。"""
+    import hashlib as _hl
+
+    features_dir = root / "addons" / "gqt_gherkin" / "features"
+    disk_sha: "dict[str, tuple[str, str]]" = {}
+    if not features_dir.is_dir():
+        return disk_sha
+    for path in sorted(features_dir.glob("*.feature")):
+        key = path.stem.replace("-", "_")
+        rel = path.relative_to(root).as_posix()
+        h = _hl.sha256()
+        h.update(path.read_bytes())
+        disk_sha[key] = (rel, h.hexdigest())
+    return disk_sha
+
+
 def _feature_drift(root: Path, doc: dict, changed: "set[str]",
                    drift: "set[str]") -> None:
     """feature 内容指纹对账：`gherkin_face.feature_sha256` vs 盘上
@@ -411,17 +429,9 @@ def _feature_drift(root: Path, doc: dict, changed: "set[str]",
         return
     if not features_dir.is_dir():
         return
-    import hashlib as _hl
-
     # 以盘上文件为遍历主体：changed 用盘上 rel（key→rel 反推有损——
     # normalize 把 `-` 折成 `_`，反向不可逆），删除只记 drift。
-    disk_sha: dict[str, str] = {}
-    for path in sorted(features_dir.glob("*.feature")):
-        key = path.stem.replace("-", "_")
-        rel = path.relative_to(root).as_posix()
-        h = _hl.sha256()
-        h.update(path.read_bytes())
-        disk_sha[key] = (rel, h.hexdigest())
+    disk_sha = _features_disk_sha256(root)
     seen_keys: set[str] = set()
     for key, (rel, got) in sorted(disk_sha.items()):
         seen_keys.add(key)

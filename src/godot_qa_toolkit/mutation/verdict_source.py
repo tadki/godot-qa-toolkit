@@ -83,6 +83,27 @@ def _assert_recipe_pristine(project_root: str, doc: dict) -> None:
     # pristine=None（fixture/不可构建 recipe）→ 跳过该项（其余门仍在）
 
 
+def _assert_report_recipe_hash(project_root: str, doc: dict) -> None:
+    """C3-R23（R1）：工具链面对账——地图存储的注入域 `report_recipe_hash`
+    必须与现算（含 toolchain 注入）一致；漂移 = 建图后 Godot/GUT/gqt
+    版本或 `GQT_GODOT_BIN` 指向变化 → 具名 fail-loud（决策 7：工具链
+    三版本变化 → 全量）。存储值缺席 → 跳过（与
+    `_assert_recipe_pristine` 的 None 容错同口径；磁盘树面由 pristine
+    门独立把守）。"""
+    from .truth_select import _current_report_recipe_hash
+
+    stored = doc.get("report_recipe_hash")
+    if not (isinstance(stored, str) and stored):
+        return
+    computed = _current_report_recipe_hash(str(Path(project_root).resolve()))
+    if computed is not None and computed != stored:
+        raise BaselineSourceError(
+            "baseline_source=map: report_recipe_hash drift — stored "
+            f"{stored[:12]} != computed {str(computed)[:12]} "
+            "(toolchain/environment changed since the map was built) — "
+            "rebuild the map")
+
+
 def _assert_tests_face(project_root: str, doc: dict) -> None:
     """测试面集合对账：map 记录的测试文件与**当前** GUT 测试面**双向**
     比对——多了（新增测试文件）或少了（删除）都判过期（C3-R4 项1：新增
@@ -206,11 +227,13 @@ def _content_fingerprint_drift(root: Path, fingerprint: dict,
 def assert_map_fresh(project_root: str, doc: dict, files: list[str]) -> None:
     """map 与当前树一致性门（§SPEC-029 谓词单一实现；mutation 基线路径
     与 truth_select._evaluate/coverage 选面同源调用）：schema/臂执行证据/
-    recipe pristine（含 project_face/工具链）/file_sha256 全集/tests_face
-    /宇宙新增生产检出——任一失配即具名 fail-loud。"""
+    recipe pristine（磁盘树面）+ report_recipe_hash（工具链面，C3-R23
+    R1 两面判定）/file_sha256 全集/tests_face/宇宙新增生产检出——任一
+    失配即具名 fail-loud。"""
     _assert_map_schema(doc)
     _assert_map_arm_valid(doc)
     _assert_recipe_pristine(project_root, doc)
+    _assert_report_recipe_hash(project_root, doc)
     _assert_tests_face(project_root, doc)
     _assert_target_files(project_root, doc, files)
 

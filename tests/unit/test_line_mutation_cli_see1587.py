@@ -157,11 +157,11 @@ def _map_doc(proj: Path, target: Path,
              ) -> dict:
     """构造与磁盘绑定的 /6 映射（行事实主真值；含 tests_face/file_sha256）。"""
     import attribution_fixtures
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(proj)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items()
-                       if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = attribution_fixtures.report_recipe_hash(proj)
     pristine = attribution_fixtures.pristine_recipe_hash(proj)
     rel = str(target.resolve().relative_to(proj.resolve()))
     test_to_lines: dict[str, dict[str, list[int]]] = {}

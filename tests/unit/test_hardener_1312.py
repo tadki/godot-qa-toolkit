@@ -117,7 +117,7 @@ class TestH3BranchLineMapping:
         import json
 
         import attribution_fixtures as fx
-        from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+        from godot_qa_toolkit.measurement.recipe import build_recipe
         import godot_qa_toolkit.coverage.runner as c
 
         proj, target = _write_project(tmp_path, target_src=self.GD)
@@ -127,7 +127,8 @@ class TestH3BranchLineMapping:
         fx.install_recipe(proj)
         recipe, error = build_recipe(proj)
         assert error is None
-        raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+        # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+        raw = fx.report_recipe_hash(proj)
         pristine = fx.pristine_recipe_hash(proj)
         rel = "target.gd"  # _write_project 的目标名
         covered = [5]  # false 路径：else 头行 4 + else 体行 5 覆盖；行 3 未覆盖

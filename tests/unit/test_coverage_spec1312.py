@@ -140,13 +140,11 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
     import hashlib
 
     import attribution_fixtures as fx
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
 
     fx.install_recipe(project_root)
-    recipe, error = build_recipe(project_root)
-    assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
-    pristine = attribution_fixtures.pristine_recipe_hash(project_root)
+    # C3-R23（R1）：工具链面进新鲜判定——夹具携带真实注入域存储哈希
+    raw = fx.report_recipe_hash(project_root)
+    pristine = fx.pristine_recipe_hash(project_root)
     ident = "test_x.gd::test_a"
     arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
            "tests": 1, "scripts": 1, "files": 1, "pairs": 1,

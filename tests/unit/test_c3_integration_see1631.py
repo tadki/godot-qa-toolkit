@@ -463,11 +463,14 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
     from godot_qa_toolkit.mutation.truth_select import (
         _fresh_recipe_hash as _fresh_recipe_hash,
     )
+    import attribution_fixtures as _afx
     out = root / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     doc = {
         "schema_version": "test-attribution/7",
-        "report_recipe_hash": "synthetic",
+        # C3-R23（R1）：工具链面进新鲜判定——合成判定面同样携带真实
+        # 注入域存储哈希（占位哈希会被判 report_recipe_hash drift 拒装）
+        "report_recipe_hash": _afx.report_recipe_hash(str(root)),
         "recipe_hash_pristine": _fresh_recipe_hash(str(root)),
         "project_root": str(root), "identity": "res://script::test_name",
         "causal": {"enabled": False},

@@ -223,6 +223,17 @@ def _projection_map_reject(
         return "current recipe hash unavailable"
     if doc.get("recipe_hash_pristine") != current_recipe_pristine:
         return "attribution map recipe drift"
+    # C3-R23（R1）：工具链面与新鲜度入口同口径（status/assert_map_fresh
+    # 同一现算与缓存）——Godot/GUT/gqt 版本或 bin 指向漂移即拒绝投影
+    # （消费侧回退不过滤，宁多跑不假过滤）。
+    stored_report = doc.get("report_recipe_hash")
+    if isinstance(stored_report, str) and stored_report:
+        from ..mutation.truth_select import _current_report_recipe_hash
+        computed = _current_report_recipe_hash(str(root))
+        if computed is not None and computed != stored_report:
+            return ("attribution map toolchain face drift "
+                    f"(report_recipe_hash stored {stored_report[:12]} != "
+                    f"computed {str(computed)[:12]})")
     face_now = tests_face if tests_face is not None else current_tests_face(
         str(root))
     if tests_face_digest(doc.get("tests_face") or {}) != tests_face_digest(

@@ -21,7 +21,7 @@ import pytest
 
 import godot_qa_toolkit.mutation.inject as inject
 import attribution_fixtures as fx
-from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+from godot_qa_toolkit.measurement.recipe import build_recipe
 from godot_qa_toolkit.mutation import coverlink
 
 TARGET = "utils/t.gd"
@@ -52,7 +52,8 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
     """facts: 完整 res:// 身份 → {目标 rel: 行集}。写成合法 test-attribution/6。"""
     recipe, error = build_recipe(proj)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = fx.report_recipe_hash(proj)
     pristine = fx.pristine_recipe_hash(proj)
     rel = TARGET
     arm = {"test_to_files": {}, "script_to_files": {}, "tests": 0,

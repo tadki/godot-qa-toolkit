@@ -107,20 +107,23 @@ def _map_doc(tmp_path: Path, files: dict[str, str]) -> dict:
     import hashlib
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).parent))
-    from attribution_fixtures import install_recipe
+    from attribution_fixtures import install_recipe, report_recipe_hash
     from godot_qa_toolkit.measurement.attribution import ATTRIBUTION_SCHEMA
     from godot_qa_toolkit.mutation.truth_select import _fresh_recipe_hash
 
     install_recipe(tmp_path)
     pristine = _fresh_recipe_hash(str(tmp_path))
     assert pristine, "fixture recipe must be buildable"
+    # C3-R23（R1）：工具链面进新鲜判定后，夹具必须携带真实存储哈希
+    # （占位哈希会被判 report_recipe_hash drift 不新鲜）
+    stored = report_recipe_hash(tmp_path)
     face = {rel: hashlib.sha256(content.encode()).hexdigest()
             for rel, content in files.items()}
     shas = {rel: hashlib.sha256(content.encode()).hexdigest()
             for rel, content in files.items()}
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
-        "report_recipe_hash": "rh",
+        "report_recipe_hash": stored,
         "recipe_hash_pristine": pristine,
         "project_root": str(tmp_path),
         "identity": "res://script::test_name",

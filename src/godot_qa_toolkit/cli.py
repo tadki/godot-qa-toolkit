@@ -1580,12 +1580,12 @@ def _attribution_usable(attribution_out, run_started: float,
         # 中央校验 1：臂执行完整性（probes/bundles/pairs）
         if not arms_valid(doc.get("arms_state") or {}):
             return False
-        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）。
         # project_root 由调用侧显式传入（--attribution-out/--out 可指到
         # 仓库外，路径算术猜根会把校验错归因为 recipe 漂移）。
+        root = _P(project_root) if project_root \
+            else _P(attribution_out).parent.parent
+        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）。
         if doc.get("recipe_hash_pristine"):
-            root = _P(project_root) if project_root \
-                else _P(attribution_out).parent.parent
             recipe, error = build_recipe(root)
             if error is not None:
                 return False
@@ -1594,6 +1594,14 @@ def _attribution_usable(attribution_out, run_started: float,
             if _raw_hash({k: v for k, v in recipe.items()
                           if k not in ("recipe_hash", "toolchain")}) != \
                     doc.get("recipe_hash_pristine"):
+                return False
+        # C3-R23（R1）：中央校验 3b——工具链面（存储注入域哈希 vs 现算）
+        # 与新鲜度入口同一现算口径；漂移 = Godot/GUT/gqt 版本或 bin 指向
+        # 变化，陈旧产物不得冒充本轮可用证据。
+        stored_report = doc.get("report_recipe_hash")
+        if isinstance(stored_report, str) and stored_report:
+            from .mutation.truth_select import _current_report_recipe_hash
+            if _current_report_recipe_hash(str(root)) != stored_report:
                 return False
         # 中央校验 4：本轮时间锚（映射文件不早于本轮开始——替代原 mtime
         # 单点判新，仍保留防止上轮产物冒充）

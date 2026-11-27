@@ -599,12 +599,11 @@ def _tests_face_drift(project_root: str, doc: dict) -> dict[str, list[str]]:
 def _fresh_recipe_hash(project_root: str) -> str | None:
     """当前树的 raw recipe hash（不含 toolchain 注入；零 godot 依赖）。
 
-    选面正确性只依赖测试面身份（gut dirs/features/harness）——toolchain
-    版本漂移不改变"谁测谁"，故不为此在每个消费入口启动 godot --version。
-    C3-R22（D3/QA-R2）：`build_recipe` 的 `toolchain` 版本字典
-    （godot_version 随 `GQT_GODOT_BIN` 有无变化）此前一并进哈希——
-    pristine 面随环境漂移、无 bin 环境被判结构性失配强制 full；现从
-    哈希基中剔除 toolchain（pristine = 磁盘树面，与环境无关）。
+    磁盘树面（R1 两面判定的第一面）。C3-R22（D3/QA-R2）：`build_recipe`
+    的 `toolchain` 版本字典（godot_version 随 `GQT_GODOT_BIN` 有无变化）
+    此前一并进哈希——pristine 面随环境漂移、无 bin 环境被判结构性失配
+    强制 full；现从哈希基中剔除 toolchain（pristine = 磁盘树面，与环境
+    无关）。工具链面由 `_current_report_recipe_hash` 承担。
     """
     from ..measurement.recipe import build_recipe, recipe_hash as _raw
     recipe, error = build_recipe(Path(project_root))
@@ -613,6 +612,34 @@ def _fresh_recipe_hash(project_root: str) -> str | None:
     basis = {k: v for k, v in recipe.items()
              if k not in ("recipe_hash", "toolchain")}
     return _raw(basis)
+
+
+@lru_cache(maxsize=8)
+def _current_report_recipe_hash_cached(project_root: str,
+                                       _godot_sel: str) -> "str | None":
+    from ..measurement.increment import _inject_toolchain
+    from ..measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(Path(project_root))
+    if error is not None:
+        return None
+    injected = _inject_toolchain(Path(project_root), dict(recipe))
+    return injected.get("recipe_hash")
+
+
+def _current_report_recipe_hash(project_root: str) -> "str | None":
+    """当前树的注入域 report_recipe hash（工具链面；R1 两面判定的第二面）。
+
+    C3-R23（R1/Leader 复核）：新鲜度 = 磁盘树面（`_fresh_recipe_hash`）
+    与工具链面**同时**一致——只换 Godot/GUT/gqt 版本（或换
+    `GQT_GODOT_BIN` 指向）而磁盘树不变时必须判不新鲜。本函数与
+    orchestrator 建图同源同值（`_inject_toolchain` 重算 recipe_hash）。
+    进程内缓存键含 `GQT_GODOT_BIN` 选择值：换 bin 指向即换键，同进程
+    换环境不吃旧值；godot --version 子进程每 (root, bin) 一次，与
+    `_probe_toolchain` 的「进程内探测一次」同一设计。"""
+    return _current_report_recipe_hash_cached(
+        str(Path(project_root).resolve()),
+        os.environ.get("GQT_GODOT_BIN", ""))
 
 
 def map_preview_state(project_root: str, target_file: str) -> dict:
@@ -810,6 +837,10 @@ def _evaluate(root: str, rel: str, doc: dict) -> dict:
             reason = "tests_face_drift"
         elif "recipe_hash_pristine stale" in msg:
             reason = "recipe_hash_stale"
+        elif "report_recipe_hash drift" in msg:
+            # C3-R23（R1）：工具链面漂移的 granular reason（选面出口
+            # 与 status 因素同一标签族——不新鲜原因全部具名）
+            reason = "report_recipe_hash_drift"
         elif "new universe file" in msg:
             reason = "production_new_file"
         else:

@@ -125,12 +125,13 @@ def _write_raw_map(project_root, instrumentable, covered_lines, probes_fired):
     import hashlib
 
     import attribution_fixtures as fx
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     fx.install_recipe(project_root)
     recipe, error = build_recipe(project_root)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = attribution_fixtures.report_recipe_hash(project_root)
     pristine = attribution_fixtures.pristine_recipe_hash(project_root)
     rel = "utils/calc.gd"
     ident = "test_x.gd::test_a"

@@ -56,7 +56,7 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
                  arms_state=None):
     """在约定默认位置写入 /6 行级主真值映射（含完整绑定包；arms_state
     可注入畸形形态供哨兵测试）。"""
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     fx_install = fx
     from godot_qa_toolkit.measurement import recipe as _recipe_mod
@@ -64,7 +64,8 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
     fx_install.install_recipe(proj)
     recipe, error = build_recipe(proj)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = fx.report_recipe_hash(proj)
     pristine = fx.pristine_recipe_hash(proj)
     rel = "utils/t.gd"
     ident = IDENT_A
@@ -279,8 +280,8 @@ class TestMalformedArmsState:
         fx.install_recipe(proj)
         recipe, error = build_recipe(proj)
         assert error is None, error
-        raw = recipe_hash({k: v for k, v in recipe.items()
-                           if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+        raw = fx.report_recipe_hash(proj)
         pristine = fx.pristine_recipe_hash(proj)
         rel = "utils/t.gd"
         ident = IDENT_A

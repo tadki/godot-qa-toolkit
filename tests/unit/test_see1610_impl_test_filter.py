@@ -395,11 +395,12 @@ def _write_line_map_1610(proj, target):
     （D1 回退：名单不再触发整文件面，无 scope 键）。"""
     import hashlib
     import json
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     recipe, err = build_recipe(proj)
     assert err is None, err
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = attribution_fixtures.report_recipe_hash(proj)
     pristine = attribution_fixtures.pristine_recipe_hash(proj)
     rel = str(target.resolve().relative_to(proj.resolve()))
     line_to_tests = {4: ["test_a.gd::t1"],

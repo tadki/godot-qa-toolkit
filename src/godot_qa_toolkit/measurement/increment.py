@@ -308,7 +308,9 @@ def compute_invalidation(root: Path, baseline: dict,
         explicit_rerun.add(name)
         sources.setdefault(name, []).append(f"test_changed:{rel}")
     for rel in classes["test_removed"]:
-        dropped.add(Path(rel).name)
+        # C3-R24（N1/决策 16）：删除面必须是完整路径身份——收 basename
+        # 会在同名碰撞下把幸存脚本的边与判定一并清掉
+        dropped.add(rel)
         sources.setdefault(Path(rel).name, []).append(f"test_removed:{rel}")
     for rel in classes["prod_changed"]:
         touch = set(fid_to_tests.get(rel, set()))
@@ -573,13 +575,47 @@ def _line_to_features_view(test_to_lines: dict) -> dict:
     return _gherkin_views(test_to_lines)["line_to_features"]
 
 
+def _identity_script_segment(identity) -> str:
+    """身份 → 脚本段（test 身份取 `::` 前段；script 车道键无 `::` 时取
+    整键）。"""
+    return str(identity).partition("::")[0]
+
+
+def _legacy_family_state(dropped_rels: "set[str] | None",
+                         tests_face: "dict | None") -> dict:
+    """C3-R24（N1/§SPEC-038⑤）：删除面的升级过渡家族态——basename →
+    (族是否全删, 幸存 rel 列表)。旧 basename 形态身份无法按路径定向：
+    唯一幸存者可改写规范形态，多幸存者无法消歧只能披露，整族全删才可
+    剔除。`tests_face` 兼容基线面与删除后合并面两种口径（幸存者按
+    `rel not in dropped_rels` 判定，两口径同结果）。"""
+    out: dict[str, tuple] = {}
+    for rel in dropped_rels or ():
+        base = Path(rel).name
+        if base in out:
+            continue
+        survivors = [r for r in (tests_face or {})
+                     if Path(r).name == base and r not in dropped_rels]
+        out[base] = (not survivors, survivors)
+    return out
+
+
 def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
-                       replace_names: set[str], name_of) -> dict:
-    """同语义合并：dropped 删边 + replace_names 整体替换 + 其余身份原样
-    保留 + fresh 注入。"""
+                       replace_segments: set[str], replace_bases: set[str],
+                       legacy_dead_bases: "set[str] | None") -> dict:
+    """同语义合并：dropped 删边（完整路径身份精确匹配；升级过渡旧
+    basename 键仅整族已删才剔除）+ replace 整体替换（规范键按完整路径、
+    旧键按 basename——D4 升级过渡语义不回退）+ 其余身份原样保留 +
+    fresh 注入。C3-R24（N1/决策 16）：basename 只是「选哪些脚本来跑」
+    的入口，不得反向放大到边面。"""
     base = {}
     for identity, value in (arm.get(key) or {}).items():
-        if name_of(identity) in dropped or name_of(identity) in replace_names:
+        sc = _identity_script_segment(identity)
+        if sc.startswith("res://"):
+            if sc[len("res://"):] in dropped or sc in replace_segments:
+                continue
+        elif Path(sc).name in replace_bases \
+                or (legacy_dead_bases
+                    and Path(sc).name in legacy_dead_bases):
             continue
         base[identity] = value
     for identity, value in (fresh.get(key) or {}).items():
@@ -589,13 +625,17 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
 
 def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
                              arm_identities: "list[str] | None",
-                             collisions: "list[dict] | None") -> None:
+                             collisions: "list[dict] | None",
+                             legacy_families: "dict | None" = None) -> None:
     """C3-R22（D4/QA-R2）：按规范身份（完整 res:// 路径）去重——升级
     过渡（旧 basename 形态基线 × 新 res:// 形态钩子）的增量合并会把同
     一物理测试的两种身份键并存。同 basename::name 的旧 basename 条目
     在规范条目在场时剔除（守恒：重跑重算应替换）；tests_face/宇宙都
     恢复不出规范路径的旧条目原样保留并具名披露（不静默丢证据）。
-    两目录同名测试的规范身份互异，不受影响（D2 不回退）。"""
+    两目录同名测试的规范身份互异，不受影响（D2 不回退）。
+    C3-R24（N1/§SPEC-038⑤）：删除家族——唯一幸存者的旧 basename 条目
+    改写规范形态（幸存者判定保留、产物单一形态）；多幸存者无法消歧
+    原样保留 + 具名披露；整族已删兜底剔除。"""
     tests_by_base, _idents_by_base = _verdict_identity_index(tests_face,
                                                              arm_identities)
     replaced: list[tuple[str, str]] = []
@@ -628,6 +668,43 @@ def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
                     "resolved": "",
                     "reason": "legacy_basename_identity_kept_no_canonical_path",
                 })
+        families = legacy_families if legacy_families is not None else {}
+        for ident in list(merged):
+            sc, _, nm = str(ident).partition("::")
+            if not nm or sc.startswith("res://") \
+                    or sc.startswith("gherkin://"):
+                continue
+            fam = families.get(Path(sc).name)
+            if fam is None:
+                continue
+            _dead, survivors = fam
+            full_survivors = [f"res://{r}" for r in survivors]
+            if len(full_survivors) == 1:
+                canon = f"{full_survivors[0]}::{nm}"
+                if canon not in merged and ident in merged:
+                    merged[canon] = merged.pop(ident)
+                    collisions.append({
+                        "basename_key": ident,
+                        "candidates": sorted({ident, canon}),
+                        "resolved": canon,
+                        "reason": "legacy_basename_identity_"
+                                  "canonicalized_after_delete",
+                    })
+            elif len(full_survivors) > 1:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": sorted(full_survivors),
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_ambiguous_after_delete",
+                })
+            elif ident in merged:
+                merged.pop(ident, None)
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": sorted({ident}),
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_dropped_with_family",
+                })
 
 def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
                         removed_rels: set[str]) -> tuple[dict, dict]:
@@ -641,26 +718,31 @@ def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
 
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
-               removed_rels: "set[str] | None" = None) -> dict:
-    """按脚本名替换/删边合并一张臂级映射；行事实同语义合并（重跑脚本
+               removed_rels: "set[str] | None" = None,
+               legacy_families: "dict | None" = None) -> dict:
+    """按身份替换/删边合并一张臂级映射；行事实同语义合并（重跑脚本
     整体替换、删除脚本删边、其余身份原样保留），file/function 视图与
     line→tests 反查从合并后行事实单源重算（SEE-1587：视图永不独立拼接）。
     `removed_rels`（SEE-1610 §SPEC-N1）＝已删除生产文件：从合并后行事实
     purge 该文件的全部边（触达身份已整体替换，purge 是死边兜底）。
+    `legacy_families`（C3-R24/§SPEC-038⑤）＝删除面升级过渡家族态。
     结构性统计精确重算。"""
-    # C3-R22（D4）：replace 面统一按脚本 basename 口径（新旧身份形态
-    # 归一）——script 车道的 name_of 也按 basename（裸 basename 旧键
-    # 与 res:// 全路径新键同脚本必须相互替换，不得并存）。
-    replace_names = {_script_name_of(i) for i in
-                     (fresh.get("test_to_files") or {})}
-    replace_names |= {Path(k).name
-                      for k in (fresh.get("script_to_files") or {})}
+    # C3-R24（N1/决策 16）：replace 面以完整身份为准（规范 res:// 键按
+    # 完整路径替换；旧 basename 键沿用 basename 口径——D4 升级过渡语义
+    # 不回退），删除按完整路径精确生效；basename 只是「选哪些脚本」入口。
+    replace_segments = {_identity_script_segment(i) for i in
+                        (fresh.get("test_to_files") or {})}
+    replace_segments |= {_identity_script_segment(k) for k in
+                         (fresh.get("script_to_files") or {})}
+    replace_bases = {Path(s).name for s in replace_segments}
+    dead_bases = {base for base, (dead, _surv)
+                  in (legacy_families or {}).items() if dead} or None
     test_to_lines = _merged_identities(
-        "test_to_lines", arm, fresh, dropped, replace_names,
-        lambda i: Path(i.split("::", 1)[0]).name)
+        "test_to_lines", arm, fresh, dropped, replace_segments,
+        replace_bases, dead_bases)
     script_to_lines = _merged_identities(
-        "script_to_lines", arm, fresh, dropped, replace_names,
-        lambda i: Path(i).name)
+        "script_to_lines", arm, fresh, dropped, replace_segments,
+        replace_bases, dead_bases)
     if removed_rels:
         test_to_lines, script_to_lines = _purge_removed_rels(
             test_to_lines, script_to_lines, removed_rels)
@@ -847,9 +929,14 @@ def _run_attribution_increment_locked(
     arm_targets = [t for t in target_files if Path(t).is_file()]
     arm_exec_s, fresh, executions, fid_by_line_by_rel = _run_increment_arm(
         root, arm_targets, recipe, rerun, timeout_s, attribution_causal)
+    # C3-R24（N1/§SPEC-038⑤）：升级过渡家族态从**基线**测试面现算
+    # （基线面含被删 rel，幸存者判定不受合并面新增同名脚本干扰）。
+    legacy_families = _legacy_family_state(
+        set(invalidation["dropped"]), baseline.get("tests_face") or {})
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,
                         invalidation["dropped"], fid_by_line_by_rel,
-                        removed_rels=removed)
+                        removed_rels=removed,
+                        legacy_families=legacy_families)
     # SEE-1631 §SPEC-016：gherkin 臂增量腿——只重跑失效 feature（与
     # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
     # （与 gut 重跑同一插桩文本单源）。
@@ -893,7 +980,8 @@ def _run_attribution_increment_locked(
         gherkin_rerun, gherkin_dropped,
         tests_face=face_after,
         arm_identities=sorted((merged.get("test_to_lines") or {}).keys()),
-        collisions=merge_collisions)
+        collisions=merge_collisions,
+        legacy_families=legacy_families)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
@@ -1105,15 +1193,24 @@ def _increment_arms_block(baseline: dict, merged: dict, classes: dict,
     return arms
 
 def _verdict_drop_removed(merged: dict, dropped_scripts: set,
-                          removed_rels: set) -> None:
-    """§SPEC-025：删除剔除——删除测试脚本（test_removed basename）与
-    删除生产文件（res:// rel）触达的身份从表中删除。"""
-    dropped_basenames = {Path(s).name for s in (dropped_scripts or set())}
-    if dropped_basenames:
-        for ident in list(merged):
-            sc = str(ident).split("::", 1)[0]
-            if Path(sc).name in dropped_basenames:
+                          removed_rels: set,
+                          legacy_families: "dict | None" = None) -> None:
+    """§SPEC-025：删除剔除——删除测试脚本按**完整路径身份**精确生效
+    （C3-R24/N1：同名幸存者不受牵连）；删除生产文件（res:// rel）触达
+    的身份从表中删除。升级过渡（旧 basename 形态键）仅整族已删才剔除
+    （§SPEC-038⑤：幸存在场时保留，改写/披露归 _canonical_verdict_dedup）。"""
+    dropped_rels = set(dropped_scripts or set())
+    dead_bases = {base for base, (dead, _surv)
+                  in (legacy_families or {}).items() if dead}
+    for ident in list(merged):
+        sc = str(ident).partition("::")[0]
+        if sc.startswith("gherkin://"):
+            continue
+        if sc.startswith("res://"):
+            if sc[len("res://"):] in dropped_rels:
                 del merged[ident]
+        elif dead_bases and Path(sc).name in dead_bases:
+            del merged[ident]
     for rel in removed_rels or set():
         for ident in list(merged):
             sc = str(ident).split("::", 1)[0]
@@ -1403,7 +1500,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
                           gherkin_dropped: set[str],
                           tests_face: "dict[str, str] | None" = None,
                           arm_identities: "list[str] | None" = None,
-                          collisions: "list[dict] | None" = None
+                          collisions: "list[dict] | None" = None,
+                          legacy_families: "dict | None" = None
                           ) -> "dict | None":
     """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
 
@@ -1412,15 +1510,21 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
       有失败名 → red/new（增量形态新树的失败如实记 new）；
     - gherkin 重跑键（feature_changed/new）随重跑腿执行账重算（rc==0 →
       green，否则维持基线值）；
-    - 删除测试脚本与删除生产文件触达的身份剔除。
+    - 删除测试脚本（完整路径身份，C3-R24/N1）与删除生产文件触达的
+      身份剔除。
     C3-R22（D4）：规范身份去重——升级过渡（旧 basename 形态基线 × 新
     res:// 形态身份）的同物理测试双键并存剔除（删旧留新 + 具名披露）。
+    `legacy_families`（C3-R24/§SPEC-038⑤）＝删除面升级过渡家族态；
+    缺省时按 (dropped_scripts, tests_face) 现算。
     基线无表（旧产物）→ None（消费方按缺表具名 fail-loud）。"""
     base = baseline.get("test_verdicts")
     if not isinstance(base, dict):
         return None
+    families = legacy_families
+    if families is None:
+        families = _legacy_family_state(dropped_scripts, tests_face)
     merged = dict(base)
-    _verdict_drop_removed(merged, dropped_scripts, removed_rels)
+    _verdict_drop_removed(merged, dropped_scripts, removed_rels, families)
     # §SPEC-028/D9（R4）：gherkin_dropped 剔除无条件消费——只删不重跑的
     # 轮次（fresh_gherkin=None）同样必须剔除（C2-R3 曾把它锁在
     # fresh_gherkin 门内，真实 map-update 端到端未生效）。
@@ -1431,7 +1535,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
                                tests_face, arm_identities)
     if fresh_gherkin is not None:
         _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
-    _canonical_verdict_dedup(merged, tests_face, arm_identities, collisions)
+    _canonical_verdict_dedup(merged, tests_face, arm_identities, collisions,
+                             legacy_families=families)
     return merged
 
 

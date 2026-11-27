@@ -264,12 +264,31 @@ def _build_gate_fail_reason(doc: dict) -> str | None:
     return None
 
 
+def _segment_exempt_from_refresh(segment: str, rerun: set[str],
+                                 dropped: set[str],
+                                 drop_bases: set[str]) -> bool:
+    """守恒豁免按身份形态分口径（C3-R24/N1，决策 16）：rerun 是「选哪些
+    脚本来跑」入口——basename 口径豁免（`-gselect` 同名一起执行，两形态
+    同豁免）；dropped 是删除面——规范 res:// 身份按**完整路径**精确豁免
+    （同名 basename 豁免会掩盖幸存者丢失），升级过渡裸 basename 身份
+    按 basename 豁免（幸存者由合并侧保留 + 判定表改写/披露）。"""
+    if segment in rerun or segment in dropped:
+        return True
+    base = Path(segment).name
+    if base in rerun:
+        return True
+    if segment.startswith("res://"):
+        return segment[len("res://"):] in dropped
+    return base in drop_bases
+
+
 def validate_refresh(before: dict, after: dict) -> None:
     """刷新产物守恒校验：失效即 fail-loud（不得静默交付失真映射）。
 
-    允许变化的边：rerun_scripts（整体替换）与 dropped_scripts（删除）；
-    其余测试身份必须原样保留——并发读-改-写导致映射失真（共享临时文件、
-    无串行化；修复后并发刷新实测零身份丢失）在此显式拒绝。"""
+    允许变化的边：rerun_scripts（整体替换）与 dropped_scripts（删除，
+    完整路径——C3-R24/N1）；其余测试身份必须原样保留——并发读-改-写
+    导致映射失真（共享临时文件、无串行化；修复后并发刷新实测零身份
+    丢失）在此显式拒绝。"""
     if after.get("schema_version") != SCHEMA_VERSION:
         raise MutationSelectionError("refresh_schema_mismatch")
     gate = _build_gate_fail_reason(after)
@@ -278,7 +297,10 @@ def validate_refresh(before: dict, after: dict) -> None:
     inc = after.get("increment") or {}
     rerun = {str(x) for x in (inc.get("rerun_scripts") or [])}
     dropped = {str(x) for x in (inc.get("dropped_scripts") or [])}
-    keep_before = _script_names(before) - rerun - dropped
+    drop_bases = {Path(d).name for d in dropped}
+    keep_before = {seg for seg in _script_names(before)
+                   if not _segment_exempt_from_refresh(seg, rerun, dropped,
+                                                       drop_bases)}
     missing = keep_before - _script_names(after)
     if missing:
         raise MutationSelectionError(

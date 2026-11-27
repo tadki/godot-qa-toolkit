@@ -410,7 +410,10 @@ def test_increment_fallback_artifact_is_line_primary(tmp_path, monkeypatch):
 
 
 def test_merge_arm_drops_deleted_script_line_facts():
-    """删除脚本 → 其 test 车道与 script 车道行事实连同反查一并删除。"""
+    """删除脚本 → 其 test 车道与 script 车道行事实连同反查一并删除。
+
+    C3-R24（N1）：dropped 是完整 rel 路径；本夹具为旧 basename 形态键
+    （升级过渡），整族已删经 legacy_families 显式给出。"""
     from godot_qa_toolkit.measurement.increment import _merge_arm
 
     arm = {
@@ -419,7 +422,8 @@ def test_merge_arm_drops_deleted_script_line_facts():
     }
     merged = _merge_arm(arm,
                         {"test_to_lines": {}, "script_to_lines": {}},
-                        dropped={"test_b.gd"})
+                        dropped={"tests/test_b.gd"},
+                        legacy_families={"test_b.gd": (True, [])})
     assert merged["test_to_lines"] == {}
     assert merged["script_to_lines"] == {}
     assert merged["line_to_tests"] == {}

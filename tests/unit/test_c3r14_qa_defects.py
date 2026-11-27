@@ -370,6 +370,70 @@ def test_status_names_missing_feature_sha256(tmp_path):
     assert drift is not None and "missing" in drift, drift
 
 
+def _injected_hash(root: Path) -> str:
+    from godot_qa_toolkit.measurement.increment import _inject_toolchain
+    from godot_qa_toolkit.measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(root)
+    assert error is None, error
+    return _inject_toolchain(root, dict(recipe))["recipe_hash"]
+
+
+def test_status_feature_content_change_predicts_increment(tmp_path):
+    """C3-R18 目标 0：feature **内容变化**（键在、值不同）→ would_refresh
+    为 increment（per-feature 重跑通道），只有**缺键**才报 full。
+    在 dbeb27a（`feature_sha256:` 前缀整族归 full）上此测试为红。"""
+    import hashlib as _hl
+    import json as _json
+
+    feats = tmp_path / "addons" / "gqt_gherkin" / "features"
+    feats.mkdir(parents=True)
+    f = feats / "a.feature"
+    f.write_text("Feature: A\n")
+    # _planned_action 需要 build_recipe 成功（.gutconfig + addon 元数据），
+    # 否则一律兜底 full——fixture 补齐最小合法项目形状。
+    (tmp_path / ".gutconfig.json").write_text(
+        '{"dirs": ["res://tests"], "include_subdirs": false,'
+        ' "prefix": "test_"}')
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from attribution_fixtures import install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+
+    install_recipe(tmp_path)
+    ensure_addon_metadata(tmp_path)
+    from godot_qa_toolkit.mutation.truth_select import _fresh_recipe_hash
+    install_recipe(tmp_path)  # demo.feature 也在基线（new → 具名全量）
+    # 基线指纹扫全目录（与建图产物同口径）：保证**只有** a 的内容变化
+    # 进 changed（new → 具名全量是已接受行为，不属本测目标）。
+    baseline_sha = {}
+    for path in sorted(feats.glob("*.feature")):
+        h2 = _hl.sha256()
+        h2.update(path.read_bytes())
+        baseline_sha[path.stem.replace("-", "_")] = h2.hexdigest()
+    doc = {"schema_version": "test-attribution/7",
+           "file_sha256": {}, "tests_face": {},
+           "arms": {"gut_full": {"test_to_files": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 0, "probes_fired": 1,
+                                       "vacuous": False}},
+           "recipe_hash_pristine": _fresh_recipe_hash(str(tmp_path)),
+           # report_recipe_hash = 注入 toolchain 后的 hash（_increment_
+           # decision 的 hash_ok 判据）；缺失会让 hash_ok=False → full。
+           "report_recipe_hash": _injected_hash(tmp_path),
+           "feature_sha256": baseline_sha}  # 键在，值待变
+    map_dir = tmp_path / ".qa-cache"
+    map_dir.mkdir()
+    (map_dir / "attribution-map.json").write_text(_json.dumps(doc))
+    from godot_qa_toolkit.mutation.map_contract import status
+
+    f.write_text("Feature: A edited\n")
+    st = status(str(tmp_path), [])
+    assert st.get("fresh") is False
+    assert st.get("would_refresh") == "increment", st.get("would_refresh")
+
+
 def test_status_missing_feature_sha256_predicts_full(tmp_path):
     """C3-R17（退回项 1 一行口径）：缺键因素的 would_refresh 必须如实
     预测 refresh 将执行的**全量重建**（与 schema/arms/recipe 同列），
@@ -390,7 +454,7 @@ def test_status_missing_feature_sha256_predicts_full(tmp_path):
     st = status(str(tmp_path), [])
     assert st.get("fresh") is False
     assert st.get("would_refresh") == "full", st.get("would_refresh")
-    assert any("feature_sha256: missing" in f
+    assert any("feature_sha256_missing" in f
                for f in st.get("factors") or [])
 
 

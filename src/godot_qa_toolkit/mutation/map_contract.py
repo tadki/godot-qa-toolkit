@@ -94,9 +94,11 @@ def _feature_face_drift(root: str, doc: dict) -> "str | None":
     if not isinstance(baseline_sha, dict):
         # C3-R16（退回项 2）：项目有 feature 而 map 无指纹（直建产物
         # 缺键 / 旧产物）→ 具名因素走一次全量重建，不得当 fresh。
-        return ("missing (map carries no feature_sha256 — direct-build "
-                "artifact predates feature fingerprinting); full rebuild "
-                "required")
+        # C3-R18：`_missing` 后缀供 status 区分——缺键归 full，内容变化
+        # 走 per-feature 增量。
+        return ("feature_sha256_missing: missing (map carries no "
+                "feature_sha256 — direct-build artifact predates feature "
+                "fingerprinting); full rebuild required")
     disk_sha: dict[str, str] = {}
     for path in sorted(features_dir.glob("*.feature")):
         key = path.stem.replace("-", "_")
@@ -208,7 +210,7 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
     # C3-R9 退回3：would_refresh 如实预测 refresh 将执行的动作（含周期
     # 校准、新增生产文件、不可归因变更三类具名全量）；结构性失配
     # （schema/arms/recipe）直接全量，其余走决策镜像。
-    if any(f.startswith(("schema:", "arms:", "feature_sha256:"))
+    if any(f.startswith(("schema:", "arms:", "feature_sha256_missing:"))
            for f in factors):
         # C3-R17：缺 `feature_sha256` 键（因素文案自带 "full rebuild
         # required"）与 schema/arms 同列——would_refresh 必须如实预测

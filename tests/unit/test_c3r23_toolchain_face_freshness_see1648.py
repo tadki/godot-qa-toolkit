@@ -138,19 +138,25 @@ def test_status_fresh_path_probes_bin_target_change(tmp_path, monkeypatch):
 def test_no_bin_process_names_bin_built_map_stale(tmp_path):
     """带 bin 子进程现算注入域哈希存进地图，无 `GQT_GODOT_BIN` 且 PATH
     无 godot 的子进程里 `status` 判不新鲜、具名、full（0d14f98 上
-    fresh 路径不探测 → 判新鲜）。"""
+    fresh 路径不探测 → 判新鲜）。
+
+    C3-R24（N3）：「带 bin」一侧用本地打印版本号的假脚本自给自足——
+    不读运行环境的 `GQT_GODOT_BIN`；否则零 Godot 环境（CI）下两个子
+    进程环境相同、哈希相同 → fresh 断言自败，合并门必挡。"""
     proj = _make_project(tmp_path)
-    bin_env = {}
-    real_bin = os.environ.get("GQT_GODOT_BIN")
-    if real_bin:
-        bin_env["GQT_GODOT_BIN"] = real_bin
+    fake_bin = proj.parent / "fake-version-godot"
+    fake_bin.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then '
+        'echo "9.9.9-stable.official.fake-c3r24"; exit 0; fi\n'
+        'exit 0\n', encoding="utf-8")
+    fake_bin.chmod(0o755)
     h_bin = _run_py(
         proj,
         "from godot_qa_toolkit.mutation.truth_select import "
         "_current_report_recipe_hash; "
         "h = _current_report_recipe_hash(sys.argv[1]); "
         "print(h if h else '')",
-        bin_env)
+        {"GQT_GODOT_BIN": str(fake_bin)})
     assert h_bin, "注入域哈希必须可计算"
     doc = _write_real_map(proj)
     doc["report_recipe_hash"] = h_bin

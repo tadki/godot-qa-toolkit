@@ -1,0 +1,125 @@
+"""SEE-1651 C3-R25：复核退回项 N5–N8 的回归钉。
+
+- N5（HIGH）：gherkin 增量腿成功路径——`_gherkin_leg_execute` 与
+  `_failing_scenarios_backfill` 里的 `from .gutrun import` 是错误相对
+  导入（gutrun 在 `mutation/` 包，measurement 包内无此模块），GUT 跑
+  完即 ModuleNotFoundError，feature 改动 / 新增的续新必崩（C2-R4 起的
+  backfill 一条 + C3-R24 N2 的一条）。用假 `_run_one_gut` 把两函数跑到
+  GUT 返回之后，不依赖真 Godot。
+- N6（HIGH）：重跑执行异常（rc 缺失 / error 在场）此前被折成 rc=0 →
+  无失败名时按 rc==0 判绿——既有红身份被洗白成 green（假 kill 方向）。
+  保守方向：异常账整脚本红并具名披露；gherkin 腿同口径（腿失败而
+  failing_scenarios 为空集 = 不可归因 → 保守红，不得逐 scenario 放绿）。
+- N7（HIGH）：`_content_changed_rerun` 把 `file_to_scripts` 的值（完整
+  res:// 脚本身份）直接并进重跑面——`_increment_decision` 按 basename
+  的 known 闸过滤后整批静默丢弃，非脚本内容修改的触达测试不重跑。
+  重跑面是「选哪些脚本来跑」入口，按 basename 归一（决策 16）。
+- N8（LOW）：`_canonical_verdict_dedup` / `_disclose_unresolvable_legacy`
+  不跳过 `gherkin://` 身份——每次增量给每个 gherkin 判定身份记一条
+  `legacy_basename_identity_kept_no_canonical_path` 失实披露。
+
+单元红测试在 2f7788f 的产品代码上为红；真机段（真实 Godot）覆盖
+N5 §SPEC-016 与 N7 内容车道的端到端成立，无真机按仓库惯例 skip。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+
+# ───────────────── N5：gherkin 增量腿成功路径（§SPEC-016） ─────────────────
+def test_n5_gherkin_leg_success_path_survives_gut_return(tmp_path,
+                                                         monkeypatch):
+    """单元（零真机）：假 `_run_one_gut` + 跳过 validator 预检，把
+    `run_gherkin_increment_leg` 跑到 GUT 返回之后——2f7788f 上
+    `from .gutrun import` 在 measurement 包内解析失败
+    （ModuleNotFoundError）→ 红；修后成功路径完整走通，执行账带
+    `failing_tests` / `failing_scenarios`。"""
+    import sys as _sys
+    import types
+
+    _sys.path.insert(0, str(Path(__file__).parent))
+
+    from godot_qa_toolkit.measurement import increment_runner as ir
+    from gherkin_fixtures import make_addon_project
+
+    def fake_run_one_gut(root, argv, timeout_s, env=None, gate_root=None):
+        return (types.SimpleNamespace(returncode=0, stdout="Run Summary\n",
+                                      stderr=""), 0.1)
+
+    monkeypatch.setattr(ir, "_run_one_gut", fake_run_one_gut)
+    import godot_qa_toolkit.gherkin.addon as gaddon
+
+    monkeypatch.setattr(gaddon, "run_validator_preflight",
+                        lambda root: None)
+    root = make_addon_project(tmp_path / "proj")
+    fresh, executions = ir.run_gherkin_increment_leg(
+        root, ["demo"], {}, {"recipe_hash": "x"}, False,
+        "uidc3r25n50001", 60)
+    assert executions, executions
+    ex = executions[0]
+    assert "failing_tests" in ex, ex
+    assert ex.get("failing_scenarios") is not None, ex
+    assert fresh is not None
+
+
+def test_n5_gherkin_leg_execute_returns_failing_tests(tmp_path,
+                                                      monkeypatch):
+    """单元（零真机）：`_gherkin_leg_execute` 本体——假 GUT 返回带失败
+    标记的输出 → 2f7788f 上在截断前提取处 ModuleNotFoundError；修后
+    记录携带截断前解析的 `failing_tests`。"""
+    import types
+
+    from godot_qa_toolkit.measurement import increment_runner as ir
+
+    out = ("res://gherkin/generated/x/gen_1.gd\n"
+           "* test_s\n[Failed] test_s\n"
+           "Run Summary\n- test_s\n[Failed] test_s\n")
+
+    def fake_run_one_gut(root, argv, timeout_s, env=None, gate_root=None):
+        return (types.SimpleNamespace(returncode=1, stdout=out, stderr=""),
+                0.1)
+
+    monkeypatch.setattr(ir, "_run_one_gut", fake_run_one_gut)
+    root = tmp_path / "proj"
+    root.mkdir()
+    xdg: list[str] = []
+    executions = ir._gherkin_leg_execute(
+        root, "res://gherkin/generated/x", {}, {}, [], "uidc3r25n50002",
+        60, xdg)
+    assert executions, executions
+    assert executions[0].get("failing_tests") == ["test_s"], executions
+
+
+def test_matrix_feature_change_increment_real_godot(tmp_path, monkeypatch):
+    """真机（§SPEC-016）：同名夹具建图 → 只改 feature 内容 → 续新增量
+    成功、gherkin 重跑腿真实执行、执行账带 failing_tests /
+    failing_scenarios（N5 修复前这条腿在 GUT 返回后必崩）。"""
+    import test_c3r23_same_name_increment_see1648 as _v1
+
+    root = _v1._build_same_name_project(tmp_path / "r25-feat")
+    _v1._build_map(root, monkeypatch)
+    map_file = root / ".qa-cache" / "attribution-map.json"
+    before = json.loads(map_file.read_text(encoding="utf-8"))
+    garm = ((before.get("arms") or {}).get("gherkin") or {})
+    assert (garm.get("feature_to_lines") or {}), \
+        "夹具基线必须带 gherkin 臂（否则本测覆盖不到 gherkin 腿）"
+    feat = root / "addons" / "gqt_gherkin" / "features" / "demo.feature"
+    feat.write_text(
+        feat.read_text(encoding="utf-8") + "# touched by C3-R25\n",
+        encoding="utf-8")
+    from godot_qa_toolkit.mutation.map_contract import refresh
+
+    out = refresh(str(root), ["calc_sign.gd"], timeout_s=500)
+    assert out.get("fresh") is True, out
+    doc = json.loads(map_file.read_text(encoding="utf-8"))
+    inc = doc.get("increment") or {}
+    assert inc.get("mode") == "incremental", inc
+    assert inc.get("gherkin_rerun_features") == ["demo"], inc
+    gh_execs = inc.get("gherkin_leg_executions") or []
+    assert gh_execs, inc
+    assert "failing_tests" in gh_execs[0], gh_execs[0]
+    assert gh_execs[0].get("failing_scenarios") is not None, gh_execs[0]

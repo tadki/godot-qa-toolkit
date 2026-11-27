@@ -181,10 +181,15 @@ def execute_rerun_scripts(root: Path, gut_dirs: list[str],
 
 def _scenario_map_from_manifests(out: dict, keys: "list[str]"
                                  ) -> "dict[str, str]":
-    """编译 manifests → test_name → scenario 映射（零行为拆分）。"""
+    """编译 manifests → test_name → scenario 映射（零行为拆分）。
+    C3-R25（N5）：案例清单在 manifest 的 `attribution` 键（`cases` 只在
+    IR 里）——旧读法恒得空映射，failing_scenarios 回写在真实编译产物
+    上从未生效过。"""
     mapping: dict[str, str] = {}
     for k in keys:
-        for case in ((out["manifests"].get(k) or {}).get("cases") or []):
+        m = out["manifests"].get(k) or {}
+        cases = m.get("cases") or m.get("attribution") or []
+        for case in cases:
             tn = str(case.get("test_name") or "")
             sc = str(case.get("scenario") or "")
             if tn and sc:
@@ -280,8 +285,10 @@ def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
                              gate_root=root)
         full_out = (r.stdout or "") + "\n" + (r.stderr or "")
         # C3-R24（N2）：失败名在截断之前从完整输出提取——截断尾部可能
-        # 把失败名切掉，failing_scenarios 空集会把失败 scenario 记绿
-        from .gutrun import _parse_failing_tests
+        # 把失败名切掉，failing_scenarios 空集会把失败 scenario 记绿。
+        # C3-R25（N5）：gutrun 在 mutation/ 包——measurement 包内的
+        # `from .gutrun` 是错误相对导入，GUT 一跑完即 ModuleNotFoundError
+        from ..mutation.gutrun import _parse_failing_tests
         executions.append({"shard": gen_res, "rc": r.returncode,
                            "out": full_out[-4000:],
                            "failing_tests": sorted(
@@ -301,7 +308,10 @@ def _failing_scenarios_backfill(executions: list[dict],
     scenario 名——verdict 重算按 scenario 粒度。C3-R24（N2）：优先消费
     截断前提取的失败名（failing_tests 键）；旧形态账（无该键）回退解析
     截断尾部。"""
-    from .gutrun import _parse_failing_tests
+    # C3-R25（N5）：同 `_gherkin_leg_execute`——必须指向 mutation 包的
+    # gutrun（C2-R4 起这条错误相对导入只被「scenario_of_test 非空」
+    # 掩盖：任何 feature 重跑腿的成功路径都必崩）
+    from ..mutation.gutrun import _parse_failing_tests
 
     for ex in executions:
         failing = ex.get("failing_tests")

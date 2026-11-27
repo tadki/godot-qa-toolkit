@@ -586,6 +586,49 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
         base[identity] = value
     return base
 
+
+def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
+                             arm_identities: "list[str] | None",
+                             collisions: "list[dict] | None") -> None:
+    """C3-R22（D4/QA-R2）：按规范身份（完整 res:// 路径）去重——升级
+    过渡（旧 basename 形态基线 × 新 res:// 形态钩子）的增量合并会把同
+    一物理测试的两种身份键并存。同 basename::name 的旧 basename 条目
+    在规范条目在场时剔除（守恒：重跑重算应替换）；tests_face/宇宙都
+    恢复不出规范路径的旧条目原样保留并具名披露（不静默丢证据）。
+    两目录同名测试的规范身份互异，不受影响（D2 不回退）。"""
+    tests_by_base, _idents_by_base = _verdict_identity_index(tests_face,
+                                                             arm_identities)
+    replaced: list[tuple[str, str]] = []
+    for ident in list(merged):
+        sc, _, nm = str(ident).partition("::")
+        if not nm or sc.startswith("res://"):
+            continue  # 已是规范形态 / gherkin 身份
+        base = Path(sc).name
+        twin = next((f"{full}::{nm}" for full in tests_by_base.get(base, [])
+                     if f"{full}::{nm}" in merged and full != sc), None)
+        if twin is not None:
+            merged.pop(ident, None)
+            replaced.append((ident, twin))
+    if collisions is not None:
+        for legacy, twin in replaced:
+            collisions.append({
+                "basename_key": legacy,
+                "candidates": sorted({legacy, twin}),
+                "resolved": twin,
+                "reason": "legacy_basename_identity_replaced_by_canonical",
+            })
+        for ident in list(merged):
+            sc, _, nm = str(ident).partition("::")
+            if not nm or sc.startswith("res://"):
+                continue
+            if not (tests_by_base.get(Path(sc).name) or []):
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": [],
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_kept_no_canonical_path",
+                })
+
 def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
                         removed_rels: set[str]) -> tuple[dict, dict]:
     """SEE-1610 §SPEC-N1：从合并后行事实剔除已删除生产文件的全部边
@@ -605,14 +648,19 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
     `removed_rels`（SEE-1610 §SPEC-N1）＝已删除生产文件：从合并后行事实
     purge 该文件的全部边（触达身份已整体替换，purge 是死边兜底）。
     结构性统计精确重算。"""
+    # C3-R22（D4）：replace 面统一按脚本 basename 口径（新旧身份形态
+    # 归一）——script 车道的 name_of 也按 basename（裸 basename 旧键
+    # 与 res:// 全路径新键同脚本必须相互替换，不得并存）。
     replace_names = {_script_name_of(i) for i in
                      (fresh.get("test_to_files") or {})}
-    replace_names |= set(fresh.get("script_to_files") or {})
+    replace_names |= {Path(k).name
+                      for k in (fresh.get("script_to_files") or {})}
     test_to_lines = _merged_identities(
         "test_to_lines", arm, fresh, dropped, replace_names,
-        lambda i: i.split("::", 1)[0])
+        lambda i: Path(i.split("::", 1)[0]).name)
     script_to_lines = _merged_identities(
-        "script_to_lines", arm, fresh, dropped, replace_names, lambda i: i)
+        "script_to_lines", arm, fresh, dropped, replace_names,
+        lambda i: Path(i).name)
     if removed_rels:
         test_to_lines, script_to_lines = _purge_removed_rels(
             test_to_lines, script_to_lines, removed_rels)
@@ -838,18 +886,20 @@ def _run_attribution_increment_locked(
     # C3-R6：新测试身份补表需要**合并后**的 tests_face（新文件的完整
     # 路径只在合并面里——基线面没有新文件）
     face_after = _merged_tests_face(root, baseline, classes)
+    merge_collisions: list = []
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
         gherkin_rerun, gherkin_dropped,
         tests_face=face_after,
-        arm_identities=sorted((merged.get("test_to_lines") or {}).keys()))
+        arm_identities=sorted((merged.get("test_to_lines") or {}).keys()),
+        collisions=merge_collisions)
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
         executions, merged_gherkin=merged_gherkin,
         gh_exec_s=gh_exec_s, gh_executions=gh_executions,
-        merged_verdicts=merged_verdicts)
+        merged_verdicts=merged_verdicts, merge_collisions=merge_collisions)
     return _increment_emit(root, out_path, artifact, merged, classes, rerun,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
@@ -1268,7 +1318,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
                           gherkin_rerun: set[str],
                           gherkin_dropped: set[str],
                           tests_face: "dict[str, str] | None" = None,
-                          arm_identities: "list[str] | None" = None
+                          arm_identities: "list[str] | None" = None,
+                          collisions: "list[dict] | None" = None
                           ) -> "dict | None":
     """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
 
@@ -1278,6 +1329,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     - gherkin 重跑键（feature_changed/new）随重跑腿执行账重算（rc==0 →
       green，否则维持基线值）；
     - 删除测试脚本与删除生产文件触达的身份剔除。
+    C3-R22（D4）：规范身份去重——升级过渡（旧 basename 形态基线 × 新
+    res:// 形态身份）的同物理测试双键并存剔除（删旧留新 + 具名披露）。
     基线无表（旧产物）→ None（消费方按缺表具名 fail-loud）。"""
     base = baseline.get("test_verdicts")
     if not isinstance(base, dict):
@@ -1294,6 +1347,7 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
                                tests_face, arm_identities)
     if fresh_gherkin is not None:
         _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
+    _canonical_verdict_dedup(merged, tests_face, arm_identities, collisions)
     return merged
 
 
@@ -1305,7 +1359,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               merged_gherkin: "dict | None" = None,
                               gh_exec_s: float = 0.0,
                               gh_executions: "list[dict] | None" = None,
-                              merged_verdicts: "dict | None" = None
+                              merged_verdicts: "dict | None" = None,
+                              merge_collisions: "list[dict] | None" = None
                               ) -> dict:
     removed = set(classes.get("prod_removed") or [])
     # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
@@ -1345,6 +1400,10 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                                       carried_gherkin),
         "test_verdicts": merged_verdicts if merged_verdicts is not None
         else dict(baseline.get("test_verdicts") or {}),
+        # C3-R22（D4）：升级过渡的规范身份去重披露（旧 basename 条目被
+        # 规范条目替换 / 无法恢复的旧条目保留）——与全量建图的
+        # identity_collisions 同键（空列表常态键在场）。
+        "identity_collisions": list(merge_collisions or []),
         "arms_state": {**dict(baseline.get("arms_state") or {}),
                        **({"gherkin": gh_state_out}
                           if carried_gherkin else {})},

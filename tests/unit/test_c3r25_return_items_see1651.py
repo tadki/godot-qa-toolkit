@@ -266,3 +266,26 @@ def test_matrix_content_change_real_godot(tmp_path, monkeypatch):
     sources = inc.get("rerun_sources") or {}
     assert any("content_prod:prod_user.gd" in s
                for s in (sources.get("test_data_user.gd") or [])), sources
+
+
+# ───────────────── N8：gherkin 身份不进旧 basename 披露 ─────────────────
+def test_n8_gherkin_identities_not_disclosed_as_legacy_basename():
+    """单元：判定表含 gherkin 身份 → 增量合并的 collisions 不得给它们
+    记 `legacy_basename_identity_kept_no_canonical_path`（2f7788f 上每
+    个 gherkin 身份一条失实披露 → 本测为红）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+
+    ident = "gherkin://feature/demo::s::1"
+    baseline = {"test_verdicts": {
+        ident: {"verdict": "green", "classification": "pre_existing"},
+        "res://tests/x/test_a.gd::t": {"verdict": "green"},
+    }}
+    collisions: list = []
+    merged = _merged_test_verdicts(
+        baseline, [], set(), set(), set(),
+        None, set(), set(),
+        tests_face={"tests/x/test_a.gd": "sha"},
+        arm_identities=["res://tests/x/test_a.gd::t"],
+        collisions=collisions)
+    assert merged.get(ident, {}).get("verdict") == "green", merged
+    assert collisions == [], collisions

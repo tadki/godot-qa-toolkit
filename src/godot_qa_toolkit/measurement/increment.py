@@ -678,10 +678,12 @@ def _canonicalize_deleted_families(merged: dict, families: dict,
 def _disclose_unresolvable_legacy(merged: dict, tests_by_base: dict,
                                   collisions: "list[dict] | None") -> None:
     """tests_face/宇宙都恢复不出规范路径的旧 basename 条目原样保留并具名
-    披露（不静默丢证据，C3-R22 D4/QA-R2）。"""
+    披露（不静默丢证据，C3-R22 D4/QA-R2）。C3-R25（N8）：gherkin://
+    身份不属于旧 basename 形态，不得进披露。"""
     for ident in list(merged):
         sc, _, nm = str(ident).partition("::")
-        if not nm or sc.startswith("res://"):
+        if not nm or sc.startswith("res://") \
+                or sc.startswith("gherkin://"):
             continue
         if not (tests_by_base.get(Path(sc).name) or []):
             if collisions is not None:
@@ -711,7 +713,8 @@ def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
     replaced: list[tuple[str, str]] = []
     for ident in list(merged):
         sc, _, nm = str(ident).partition("::")
-        if not nm or sc.startswith("res://"):
+        if not nm or sc.startswith("res://") \
+                or sc.startswith("gherkin://"):
             continue  # 已是规范形态 / gherkin 身份
         base = Path(sc).name
         twin = next((f"{full}::{nm}" for full in tests_by_base.get(base, [])

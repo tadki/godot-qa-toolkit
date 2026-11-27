@@ -26,14 +26,13 @@ def _project(tmp_path: Path) -> Path:
     return proj
 
 
-def test_explicit_stale_map_enters_renewal(tmp_path, monkeypatch):
-    """§SPEC-029（Owner 裁决，覆盖 D5 只读透传）：显式 `--attribution-map`
-    不设只读例外——过期同走 prepare 阶梯（续新被调用；续新拒绝时仍具名
-    explicit_map_stale 且产物字节不变）。"""
+def test_stale_map_enters_renewal(tmp_path, monkeypatch):
+    """§SPEC-029（Owner 裁决）：地图过期同走 prepare 阶梯（续新被调用；
+    续新拒绝时仍具名 stale 且产物字节不变）。C3-R20 迁移（定案 20）：
+    显式 `--attribution-map` 入口退役——地图唯一、在默认位置过期。"""
     monkeypatch.setenv(truth_select.ENV_MODE, "auto")
     proj = _project(tmp_path)
     map_path = write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
-    monkeypatch.setenv(truth_select.ENV_MAP, str(map_path))
     # 目标文件漂移 → 映射过期（file_sha256 绑定失配）
     (proj / "calc.gd").write_text(TARGET + "\n# drift\n")
     before = Path(map_path).read_bytes()
@@ -43,8 +42,8 @@ def test_explicit_stale_map_enters_renewal(tmp_path, monkeypatch):
         lambda *a, **k: calls.append("renew") or False)
     with pytest.raises(truth_select.MutationSelectionError) as ei:
         truth_select.resolve_selection(proj, str(proj / "calc.gd"))
-    # 续新被调用（被测桩拒绝续新）→ 终态仍具名 stale；显式来源披露保留
+    # 续新被调用（被测桩拒绝续新）→ 终态仍具名 stale
     assert calls == ["renew"]
-    assert "explicit_map_stale" in ei.value.reason
-    # 桩拒绝续新 → 用户显式证据产物字节不变（provenance 保护语义不变）
+    assert "auto_update_still_stale" in ei.value.reason
+    # 桩拒绝续新 → 既有产物字节不变（provenance 保护语义不变）
     assert Path(map_path).read_bytes() == before

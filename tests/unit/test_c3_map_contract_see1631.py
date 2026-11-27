@@ -142,18 +142,22 @@ def test_refresh_already_fresh_merges(tmp_path, monkeypatch):
     import godot_qa_toolkit.mutation.map_contract as mc
 
     doc = _doc()
-    called = {"ladder": 0}
     monkeypatch.setattr(mc, "status",
                         lambda r, f: {"present": True, "fresh": True,
                                       "factors": [], "would_refresh": None,
                                       "scope": [], "last_cost": "unknown"})
     monkeypatch.setattr(mc, "_load_map_doc", lambda r: doc)
+    # C3-R20 迁移（A4）：refresh 的 fresh 分支带 `map_path` 披露构造
+    # 视图——替身接收并回传同 kwargs（map_path 由函数内 import 解析，
+    # 打桩点在 truth_select 模块属性）
+    import godot_qa_toolkit.mutation.truth_select as _ts
+    monkeypatch.setattr(_ts, "map_path", lambda p: "/resolved/map.json")
     monkeypatch.setattr(mc, "MapView",
-                        lambda r, d: "VIEW")  # 构造替换为哨兵
+                        lambda r, d, map_path="/resolved/map.json":
+                        ("VIEW", map_path))
     result = mc.refresh("/p", ["src/calc.gd"])
     assert result["fresh"] is True and result["already_fresh"] is True
-    assert result["view"] == "VIEW"
-    assert called["ladder"] == 0
+    assert result["view"] == ("VIEW", "/resolved/map.json")
 
 
 def test_refresh_failure_leaves_old_bytes(tmp_path, monkeypatch):

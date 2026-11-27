@@ -159,45 +159,34 @@ def _run_cli(argv: list, monkeypatch) -> tuple:
 
 
 def test_map_update_file_shaped_roots_named_json(tmp_path, monkeypatch):
-    """roots 传文件路径 → 空 rglob → 入口具名 JSON（此前裸 traceback、
-    stdout 0 字节）。"""
-    recipe = tmp_path / "recipe.json"
-    recipe.write_text("{}")
+    """C3-R20 迁移（定案 20 / A2）：map-update 新命令面无位置参数——
+    roots 形态的位置输入 → argparse 用法错 exit 2（原"roots 传文件路径
+    具名 JSON"的输入面随位置参数退役）。"""
     target = tmp_path / "f.gd"
     target.write_text("extends RefCounted\n")
-    baseline = _baseline_doc(tmp_path, with_table=True)
-    rc, out, err = _run_cli(
-        ["measure", "map-update", "--project-root", str(tmp_path),
-         "--recipe", str(recipe),
-         "--baseline", str(baseline), "--out", str(tmp_path / "o.json"),
-         "--changed", str(target), str(target)],
-        monkeypatch)
-    assert rc == 1
-    assert "Traceback" not in err
-    payload = json.loads(out)
-    assert payload.get("ok") is False
-    assert "no target files" in (payload.get("summary") or {}).get("error", "")
+    with pytest.raises(SystemExit) as ei:
+        _run_cli(
+            ["measure", "map-update", "--project-root", str(tmp_path),
+             str(target)],
+            monkeypatch)
+    assert ei.value.code == 2
 
 
 def test_map_update_measurement_error_named_json(tmp_path, monkeypatch):
-    """`{}` recipe（recipe_version mismatch 一族 MeasurementError）→
-    具名 JSON、零 traceback。"""
-    recipe = tmp_path / "recipe.json"
-    recipe.write_text("{}")
-    baseline = _baseline_doc(tmp_path, with_table=True)
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "g.gd").write_text("extends RefCounted\n")
+    """坏 JSON 地图（SelectionError 一族）→ 新命令面下仍具名 JSON、
+    零 traceback（mode 披露 + error 在 summary）。"""
+    map_dir = tmp_path / ".qa-cache"
+    map_dir.mkdir()
+    (map_dir / "attribution-map.json").write_text("{ not json",
+                                                  encoding="utf-8")
     rc, out, err = _run_cli(
-        ["measure", "map-update", "--project-root", str(tmp_path),
-         "--recipe", str(recipe),
-         "--baseline", str(baseline), "--out", str(tmp_path / "o.json"),
-         "--changed", str(tmp_path), str(tmp_path / "src")],
+        ["measure", "map-update", "--project-root", str(tmp_path)],
         monkeypatch)
     assert rc == 1
     assert "Traceback" not in err
     payload = json.loads(out)
     assert payload.get("ok") is False
-    assert (payload.get("summary") or {}).get("error")
+    assert "unreadable" in (payload.get("summary") or {}).get("error", "")
 
 
 # ─────────────────────────────── D-NEW-4 ───────────────────────────────

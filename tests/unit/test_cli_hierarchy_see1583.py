@@ -52,7 +52,7 @@ _MEASURE_RUN_FULL_ARGV = [
     "--stability-baseline", "sb.json", "--evidence-dir", "ev",
     "--shard-width", "4", "--gherkin-shards", "2",
     "--gherkin-repeats", "2", "--shard-log-dir", "logs",
-    "--timeout", "99", "--test-attribution-out", "attr.json"]
+    "--timeout", "99"]
 
 
 def _run_cli(*argv: str) -> subprocess.CompletedProcess:
@@ -251,11 +251,15 @@ class TestSpec004See1581Flags:
         assert args.select_mode == "full"
 
     def test_mutation_attribution_map_and_auto_off(self):
-        args = _parser().parse_args(
-            ["mutation", "f.gd", "--project-root", "p",
-             "--attribution-map", "m.json", "--no-attribution-auto"])
-        assert args.attribution_map == "m.json"
-        assert args.attribution_auto is False
+        # C3-R20 迁移（定案 20 / A2）：--attribution-map 与
+        # --no-attribution-auto 退役 → argparse 用法错 exit 2
+        for argv in (["mutation", "f.gd", "--project-root", "p",
+                      "--attribution-map", "m.json"],
+                     ["mutation", "f.gd", "--project-root", "p",
+                      "--no-attribution-auto"]):
+            with pytest.raises(SystemExit) as ei:
+                _parser().parse_args(argv)
+            assert ei.value.code == 2
 
     def test_mutation_see1420_caliper_flags_preserved(self):
         args = _parser().parse_args(
@@ -283,6 +287,18 @@ class TestSpec004See1581Flags:
         assert args.baseline_failures == "bf.json"
         assert args.intolerant_tests == "it.json"
         assert args.stability_baseline == "sb.json"
+        # C3-R20 迁移（定案 20 / A2）：--test-attribution-out 退役 →
+        # argparse 用法错 exit 2；开启 --test-attribution 后归属产物随
+        # 报告落盘，路径由代码推导为 <out>.attribution.json
+        with pytest.raises(SystemExit) as ei:
+            _parser().parse_args([
+                "measure", "run", "res://src", "--project-root", "p",
+                "--out", "o.json", "--test-attribution-out", "attr.json"])
+        assert ei.value.code == 2
+        from godot_qa_toolkit.cli import _attribution_args
+        enabled, out, causal = _attribution_args(args)
+        assert enabled is True and causal is True
+        assert out == "o.json.attribution.json"
 
     def test_measure_run_see1581_shard_output_flags(self):
         args = _parser().parse_args(_MEASURE_RUN_FULL_ARGV)
@@ -292,22 +308,23 @@ class TestSpec004See1581Flags:
         assert args.gherkin_repeats == 2
         assert args.shard_log_dir == "logs"
         assert args.timeout == 99
-        assert args.test_attribution_out == "attr.json"
 
     def test_measure_map_update_flags(self):
+        # C3-R20 迁移（定案 20 / A2）：map-update 新命令面——无位置参数、
+        # 不收地图路径与手工增量输入；roots 与旧 flags 都是 exit 2
         args = _parser().parse_args(
-            ["measure", "map-update", "res://src", "--project-root", "p",
-             "--recipe", "r.json", "--baseline", "b.json", "--out", "o.json",
-             "--changed", "a.gd", "--changed", "b.gd",
-             "--calibration-every", "3", "--attribution-causal",
+            ["measure", "map-update", "--project-root", "p",
              "--timeout", "55"])
-        assert args.recipe == "r.json"
-        assert args.baseline == "b.json"
-        assert args.out == "o.json"
-        assert args.changed == ["a.gd", "b.gd"]
-        assert args.calibration_every == 3
-        assert args.attribution_causal is True
+        assert args.project_root == "p"
         assert args.timeout == 55
+        for argv in (["measure", "map-update", "res://src"],
+                     ["measure", "map-update", "--baseline", "b.json"],
+                     ["measure", "map-update", "--out", "o.json"],
+                     ["measure", "map-update", "--recipe", "r.json"],
+                     ["measure", "map-update", "--changed", "a.gd"]):
+            with pytest.raises(SystemExit) as ei:
+                _parser().parse_args(argv)
+            assert ei.value.code == 2
 
     def test_measure_diagnose_flags(self):
         args = _parser().parse_args(

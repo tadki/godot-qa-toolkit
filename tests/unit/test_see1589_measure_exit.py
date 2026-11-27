@@ -41,7 +41,9 @@ def _map_doc(pairs: int) -> dict:
 def _run(tmp_path, monkeypatch, *, ok: bool, pairs: int):
     proj, recipe = _project(tmp_path)
     out = tmp_path / "report.json"
-    amap = tmp_path / "map.json"
+    # C3-R20 迁移（定案 20 / A2）：--test-attribution-out 退役——归属
+    # 产物随报告落盘，路径由代码推导为 <out>.attribution.json
+    amap = Path(str(out) + ".attribution.json")
     amap.write_text(json.dumps(_map_doc(pairs)), encoding="utf-8")
     report = {"report_version": "measurement-report/3", "ok": ok,
               "project_root": str(proj), "arms": []}
@@ -57,8 +59,7 @@ def _run(tmp_path, monkeypatch, *, ok: bool, pairs: int):
     args = build_parser().parse_args([
         "measure", "run", str(proj / "utils"),
         "--project-root", str(proj), "--recipe", str(recipe),
-        "--out", str(out), "--test-attribution",
-        "--test-attribution-out", str(amap)])
+        "--out", str(out), "--test-attribution"])
     buf = io.StringIO()
     with redirect_stdout(buf):
         code = args.func(args)

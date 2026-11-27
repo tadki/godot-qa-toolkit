@@ -103,15 +103,19 @@ def test_ambiguous_test_names_fail_loud(tmp_path):
     assert ei.value.reason == "ambiguous_test_names"
 
 
-def test_map_path_prefers_explicit_over_env(tmp_path, monkeypatch):
+def test_map_path_decided_by_code_env_ignored(tmp_path, monkeypatch):
+    """C3-R20 迁移（定案 20）：显式/环境变量地图入口退役——地图位置由
+    代码决定；遗留 GQT_ATTRIBUTION_MAP 环境变量被无视，不改变默认位置
+    的解析。"""
     proj = _project(tmp_path)
-    explicit = write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
+    default_map = write_map(proj, {"calc.gd": ["test_hit.gd::test_ok"]})
     other = tmp_path / "other.json"
     other.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv(truth_select.ENV_MAP, str(other))
-    assert truth_select.map_path(proj, explicit) == explicit
-    # 显式参数不存在 → None（不回退环境变量之外的猜测）
-    assert truth_select.map_path(proj, str(tmp_path / "missing.json")) is None
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP", str(other))
+    assert truth_select.map_path(proj) == default_map
+    # 默认位置无图 → None（环境变量不参与任何回退猜测）
+    Path(default_map).unlink()
+    assert truth_select.map_path(proj) is None
 
 
 def test_selection_dir_keyed_by_script_set(tmp_path):

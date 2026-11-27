@@ -132,7 +132,9 @@ class TestHigh2DefaultMapRecovery:
         return json.dumps(doc)
 
     def _auto_env(self, monkeypatch):
-        monkeypatch.delenv(truth_select.ENV_MAP, raising=False)
+        # C3-R20 迁移（定案 20）：GQT_ATTRIBUTION_MAP 通道退役——地图
+        # 唯一、在默认位置；只留诊断开关 ENV_MODE。
+        monkeypatch.delenv("GQT_ATTRIBUTION_MAP", raising=False)
         monkeypatch.setenv(truth_select.ENV_MODE, "auto")
 
     def _patch_rebuild(self, monkeypatch, calls: list):
@@ -195,34 +197,39 @@ class TestHigh2DefaultMapRecovery:
 
     def test_explicit_map_never_rebuilt_or_deleted(self, tmp_path,
                                                    monkeypatch):
+        """C3-R20 迁移（定案 20）：显式/环境变量地图入口退役——遗留
+        GQT_ATTRIBUTION_MAP 被无视，ensure_map 只作用于默认位置的地图；
+        外部文件本体零接触。"""
         proj, target = _project(tmp_path)
-        explicit = tmp_path / "explicit" / "map.json"
-        raw = self._write_map(explicit, OLD_SCHEMA)
-        monkeypatch.setenv(truth_select.ENV_MAP, str(explicit))
+        install_recipe(proj)
+        external = tmp_path / "explicit" / "map.json"
+        raw = self._write_map(external, OLD_SCHEMA)
+        monkeypatch.setenv("GQT_ATTRIBUTION_MAP", str(external))
         monkeypatch.setenv(truth_select.ENV_MODE, "auto")
         self._patch_rebuild(monkeypatch, calls := [])
         truth_select.reset_ledger()
 
         out = truth_select.ensure_map(proj, [str(target)])
 
-        assert out == str(explicit)
-        assert explicit.read_text() == raw      # 逐字节未动
-        assert calls == []                       # 显式面绝不触发重建
+        assert out == str(proj / ".qa-cache" / "attribution-map.json")
+        assert json.loads(Path(out).read_text())["schema_version"] == \
+            NEW_SCHEMA
+        assert external.read_text() == raw      # 外部文件逐字节未动
+        assert calls == [1]                      # 重建只发生在默认位置
 
     def test_explicit_old_schema_map_fails_loud_file_intact(
-            self, tmp_path, monkeypatch, capsys):
-        # CLI 面：显式 --attribution-map 旧 schema → fail-loud，文件不动。
+            self, tmp_path, monkeypatch):
+        """C3-R20 迁移（定案 20 / A2）：显式 `--attribution-map` 退役 →
+        argparse 用法错 exit 2；外部文件本体零接触。"""
         proj, target = _project(tmp_path)
-        explicit = tmp_path / "explicit" / "map.json"
-        raw = self._write_map(explicit, OLD_SCHEMA)
+        external = tmp_path / "explicit" / "map.json"
+        raw = self._write_map(external, OLD_SCHEMA)
         monkeypatch.setenv(truth_select.ENV_MODE, "off")
 
-        rc = cli.main(["mutation", str(target),
-                       "--project-root", str(proj),
-                       "--attribution-map", str(explicit),
-                       "--jobs", "1", "--dry-run"])
-        out = capsys.readouterr().out
-        payload = json.loads(out[out.index("{"):])
-        assert rc == 1
-        assert payload["summary"]["selection_error"] is True
-        assert explicit.read_text() == raw
+        with pytest.raises(SystemExit) as ei:
+            cli.main(["mutation", str(target),
+                      "--project-root", str(proj),
+                      "--attribution-map", str(external),
+                      "--jobs", "1", "--dry-run"])
+        assert ei.value.code == 2
+        assert external.read_text() == raw

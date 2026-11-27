@@ -1199,9 +1199,9 @@ def test_r9_env_switches_restored_after_serial_mutation(monkeypatch):
 
 
 def test_r9_env_map_restored_after_auto_map_build(tmp_path, monkeypatch):
-    """C3-R9 退回4（§SPEC-034）：自动建图写入的 GQT_ATTRIBUTION_MAP 只在
-    本次操作内生效，操作结束恢复进程环境（显式 --attribution-map 预设值
-    原样保留）。"""
+    """C3-R20 迁移（定案 20 / §SPEC-034）：GQT_ATTRIBUTION_MAP 环境变量
+    通道退役——自动建图不读、不写、不恢复该变量（进程环境零接触），
+    地图唯一、位置由代码决定。"""
     import os
 
     import godot_qa_toolkit.mutation.truth_select as ts
@@ -1209,23 +1209,22 @@ def test_r9_env_map_restored_after_auto_map_build(tmp_path, monkeypatch):
     calls: dict = {}
 
     def fake_generate(*_a, **_k):
-        # 模拟操作内写入 ENV_MAP（与产品写点同位等价）
         out = tmp_path / ".qa-cache" / "attribution-map.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("{}", encoding="utf-8")
-        os.environ[ts.ENV_MAP] = str(out)
-        calls["during"] = os.environ.get(ts.ENV_MAP)
+        calls["during"] = os.environ.get("GQT_ATTRIBUTION_MAP")
         return str(out)
 
     monkeypatch.setattr(ts, "mode", lambda: "auto")
     monkeypatch.setattr(ts, "_ensure_generate", fake_generate)
     monkeypatch.setattr(ts, "_default_map_reuse",
                         lambda *_a, **_k: (None, ""))
-    monkeypatch.setenv(ts.ENV_MAP, "/explicit/preset.json")
+    monkeypatch.setenv("GQT_ATTRIBUTION_MAP", "/explicit/preset.json")
     got = ts.ensure_map(str(tmp_path), ["x.gd"], force=True)
     assert got == str(tmp_path / ".qa-cache" / "attribution-map.json")
-    assert calls["during"] == got  # 操作内指向本次产物
-    assert os.environ.get(ts.ENV_MAP) == "/explicit/preset.json"  # 恢复
+    # 通道退役：建图全程不读也不改该变量（预设值原样保留，仅是死值）
+    assert calls["during"] == "/explicit/preset.json"
+    assert os.environ.get("GQT_ATTRIBUTION_MAP") == "/explicit/preset.json"
 
 
 def test_r10_loop_baseline_returns_synthesized_snapshot(tmp_path,
@@ -1247,32 +1246,36 @@ def test_r10_loop_baseline_returns_synthesized_snapshot(tmp_path,
 
 
 def test_r10_cli_main_restores_proc_env(monkeypatch, tmp_path):
-    """C3-R9 退回4（§SPEC-034）CLI 入口层：带 --attribution-map /
-    --check-baseline 的 cli.main 调用结束后进程环境恢复到调用前——
-    其后的默认调用 mapping 路径与各自新进程一致。"""
+    """C3-R20 迁移（定案 20 / §SPEC-034）CLI 入口层：显式 --attribution-map
+    退役；cli.main 调用结束后进程环境不残留 map/check-baseline 通道
+    变量——其后的默认调用 mapping 路径与各自新进程一致。"""
     import os
 
     import godot_qa_toolkit.cli as cli_mod
     from godot_qa_toolkit.mutation import truth_select as ts
 
     (tmp_path / "project.godot").write_text("config_version=5\n")
-    explicit = tmp_path / "explicit-map.json"
-    explicit.write_text("{}", encoding="utf-8")
 
     for key in ("GQT_MUTATION_CHECK_BASELINE", "GQT_ATTRIBUTION_MAP",
                 "GQT_ATTRIBUTION_MAP_MODE"):
         os.environ.pop(key, None)
+    # C3-R20 迁移（定案 20）：--attribution-map 退役 → argparse exit 2；
+    # 用法错同样不得向进程环境写入 map 通道变量
     argv_explicit = ["mutation", "x.gd", "--dry-run",
-                     "--attribution-map", str(explicit),
+                     "--attribution-map", str(tmp_path / "explicit-map.json"),
                      "--project-root", str(tmp_path)]
-    rc = cli_mod.main(argv_explicit)
-    assert rc in (0, 1, 2)
+    try:
+        cli_mod.main(argv_explicit)
+        raised = False
+    except SystemExit as ei:
+        raised = ei.code == 2
+    assert raised, "显式 --attribution-map 必须是 argparse 用法错"
     assert os.environ.get("GQT_ATTRIBUTION_MAP") is None
     argv_default = ["mutation", "x.gd", "--dry-run",
                     "--project-root", str(tmp_path)]
     rc2 = cli_mod.main(argv_default)
     assert rc2 in (0, 1, 2)
-    # 默认调用不残留上一条显式调用的 map 路径
+    # 默认调用不残留任何 map 路径
     assert os.environ.get("GQT_ATTRIBUTION_MAP") is None
     argv_check = ["mutation", "x.gd", "--dry-run", "--check-baseline",
                   "--project-root", str(tmp_path)]

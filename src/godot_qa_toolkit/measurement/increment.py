@@ -1222,7 +1222,10 @@ def _verdict_per_script(executions: list[dict]) -> dict:
     """重跑脚本执行账：脚本 basename → (rc, 解析失败名集, 脚本限定失败对,
     实际执行脚本头集)。C3-R23（V1）：同名碰撞下 `-gselect` 按 basename
     可能选中多个物理脚本——账必须携带脚本级证据（失败对 + 执行头）才能
-    逐脚本归因，不能只按名字并集。"""
+    逐脚本归因，不能只按名字并集。C3-R24（N2/§SPEC-038⑥）：证据在
+    截断之前从完整输出提取并随执行账保存（evidence 键），此处优先消费；
+    out 允许截断只作披露，不再从尾部重解析——部分截断不得把本轮转红
+    的同名前脚本记成绿。旧形态账（无 evidence 键）回退解析 out。"""
     from ..mutation.gutrun import (
         _parse_failing_tests, executed_script_headers,
         parse_failures_with_scripts,
@@ -1234,11 +1237,17 @@ def _verdict_per_script(executions: list[dict]) -> dict:
         if not script:
             continue
         b = Path(script).name
-        out = r.get("out") or ""
-        per_script[b] = (int(r.get("rc") or 0),
-                         _parse_failing_tests(out),
-                         parse_failures_with_scripts(out),
-                         executed_script_headers(out))
+        ev = r.get("evidence")
+        if isinstance(ev, dict):
+            failing = {str(x) for x in ev.get("failing") or []}
+            pairs = {(str(s), str(n)) for s, n in (ev.get("pairs") or [])}
+            executed = {str(x) for x in ev.get("executed") or []}
+        else:
+            out = r.get("out") or ""
+            failing = _parse_failing_tests(out)
+            pairs = parse_failures_with_scripts(out)
+            executed = executed_script_headers(out)
+        per_script[b] = (int(r.get("rc") or 0), failing, pairs, executed)
     return per_script
 
 

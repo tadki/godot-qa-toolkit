@@ -113,3 +113,16 @@ def executed_script_headers(gut_output: str) -> set[str]:
         if stripped.startswith("res://") and ".gd" in stripped:
             out.add(stripped)
     return out
+
+
+def script_evidence(gut_output: str) -> dict:
+    """C3-R24（N2/§SPEC-038⑥）：截断前一次性提取的脚本级执行证据——
+    执行的脚本头集、(script, name) 失败对、失败名集（JSON 友好形态，
+    随执行账保存）。增量重跑的执行账必须在**完整输出**上解析（部分
+    截断会把前一脚本的头/失败切掉，同名前脚本被误判「未执行」继承旧
+    判定 = 假 kill 方向）；out 允许截断只作披露。三个解析器单源复用，
+    识别规则不另起一份。"""
+    return {"executed": sorted(executed_script_headers(gut_output)),
+            "pairs": sorted([s, n] for s, n in
+                            parse_failures_with_scripts(gut_output)),
+            "failing": sorted(_parse_failing_tests(gut_output))}

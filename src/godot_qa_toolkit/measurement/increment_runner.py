@@ -112,6 +112,18 @@ def _rerun_stage(root: Path, templates: dict, hook_files: list,
     return started_files, instrumented
 
 
+def _execution_record(name: str, rc, full_out: str,
+                      error: "str | None" = None) -> dict:
+    """执行账记录组装单源（C3-R24/N2/§SPEC-038⑥）：脚本级证据（脚本头、
+    失败对、失败名）在**截断之前**从完整输出提取并随执行账保存；out
+    保留 4000 字符截断只作披露——部分截断不得把本轮转红的同名前脚本
+    记成绿（假 kill 方向）。"""
+    from ..mutation.gutrun import script_evidence
+
+    return {"script": name, "rc": rc, "out": full_out[-4000:],
+            "error": error, "evidence": script_evidence(full_out)}
+
+
 def _rerun_one(root: Path, name: str, args_head: list[str], timeout_s: int,
                xdg: str) -> dict:
     """单脚本 `-gselect` 跑 GUT（独立 XDG user://）；单脚本失败不断链。"""
@@ -122,9 +134,8 @@ def _rerun_one(root: Path, name: str, args_head: list[str], timeout_s: int,
     try:
         r, _w = _run_one_gut(root, argv_gut, timeout_s,
                              env=env, gate_root=root)
-        return {"script": name, "rc": r.returncode,
-                "out": ((r.stdout or "") + "\n" + (r.stderr or ""))[-4000:],
-                "error": None}
+        return _execution_record(
+            name, r.returncode, (r.stdout or "") + "\n" + (r.stderr or ""))
     except Exception as e:  # noqa: BLE001 — 单脚本失败不断链
         return {"script": name, "rc": None, "out": "", "error": str(e)}
 
@@ -267,9 +278,14 @@ def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
         env["XDG_DATA_HOME"] = xdg
         r, _w = _run_one_gut(root, argv, timeout_s, env=env,
                              gate_root=root)
+        full_out = (r.stdout or "") + "\n" + (r.stderr or "")
+        # C3-R24（N2）：失败名在截断之前从完整输出提取——截断尾部可能
+        # 把失败名切掉，failing_scenarios 空集会把失败 scenario 记绿
+        from .gutrun import _parse_failing_tests
         executions.append({"shard": gen_res, "rc": r.returncode,
-                           "out": ((r.stdout or "") + "\n"
-                                   + (r.stderr or ""))[-4000:],
+                           "out": full_out[-4000:],
+                           "failing_tests": sorted(
+                               _parse_failing_tests(full_out)),
                            "error": None})
     finally:
         for abs_path, original in started_files.items():
@@ -337,7 +353,11 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
         if scenario_of_test:
             from .gutrun import _parse_failing_tests
             for ex in executions:
-                failing = _parse_failing_tests(str(ex.get("out") or ""))
+                # C3-R24（N2）：优先消费截断前提取的失败名；旧形态账
+                # （无 failing_tests 键）回退解析截断尾部
+                failing = ex.get("failing_tests")
+                if failing is None:
+                    failing = _parse_failing_tests(str(ex.get("out") or ""))
                 ex["failing_scenarios"] = sorted(
                     {scenario_of_test[t] for t in failing
                      if t in scenario_of_test})

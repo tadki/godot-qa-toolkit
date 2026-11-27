@@ -7,6 +7,9 @@ C3-R23 复核退回项 N1–N4 的回归钉（判据 §SPEC-038 场景矩阵）�
   路径匹配，规范身份下同名豁免不得掩盖幸存者丢失；升级过渡（旧
   basename 形态基线）删除后判定表单一形态、幸存者判定保留、无法消歧
   旧条目具名披露（场景 ②③⑤）。
+- N2（MEDIUM）：执行账脚本级证据（脚本头 / 失败对 / 失败名）在输出
+  截断**之前**从完整输出提取并随执行账保存；`out` 保留截断只作披露——
+  部分截断不得把本轮转红的同名前脚本记成绿（场景 ⑥，假 kill 方向）。
 
 单元红测试在 972dcc4 的产品代码上为红（各用例 docstring 标明红因）；
 真机段（真实 Godot + GUT）覆盖场景 ②③④⑥ 的端到端成立，无真机时
@@ -278,6 +281,43 @@ def test_n1_upgrade_transition_delete_via_refresh_flow(tmp_path):
                for c in collisions), collisions
 
 
+# ───────────────── N2：执行账证据在截断前提取（§SPEC-038 ⑥） ─────────────────
+def test_n2_truncated_output_prev_same_name_turning_red_not_inherited():
+    """⑥单元：重跑输出超 4000 字符、前一个同名脚本（本轮转红）的
+    `res://` 头落在截断窗口之外 → 仍判红，不继承旧绿判定；后一个同名
+    脚本不受污染（972dcc4 上执行账只解析截断尾部 → 前脚本被当"未执行"
+    继承绿 = 假 kill 方向；且旧代码无截断前证据提取路径，本测在
+    972dcc4 上因 `_execution_record` 不存在为红）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+    from godot_qa_toolkit.measurement.increment_runner import \
+        _execution_record
+
+    filler = "\n".join(
+        f"output line {i:04d} padding padding padding" for i in range(300))
+    full = (
+        "res://tests/a/test_green.gd\n"
+        f"* {TEST_NAME}\n{filler}\n"
+        f"[Failed] {TEST_NAME}\n"
+        "res://tests/b/test_green.gd\n"
+        f"* {TEST_NAME}\n"
+        "Run Summary\n"
+        f"- {TEST_NAME}\n[Failed] {TEST_NAME}\n")
+    assert len(full) > 4000
+    assert "res://tests/a/test_green.gd" not in full[-4000:]
+    rec = _execution_record("test_green.gd", 1, full)
+    assert len(rec["out"]) <= 4000
+    baseline = {"test_verdicts": {A_IDENT: {"verdict": "green"},
+                                  B_IDENT: {"verdict": "green"}}}
+    merged = _merged_test_verdicts(
+        baseline, [rec], {"test_green.gd"}, set(), set(),
+        None, set(), set(),
+        tests_face=_face(["tests/a/test_green.gd",
+                          "tests/b/test_green.gd"]),
+        arm_identities=[A_IDENT, B_IDENT], collisions=[])
+    assert merged.get(A_IDENT, {}).get("verdict") == "red", merged
+    assert merged.get(B_IDENT, {}).get("verdict") == "green", merged
+
+
 # ───────────────── 真机段：§SPEC-038 ②③④⑥ 端到端（无真机 skip） ─────────────────
 def test_matrix_delete_same_name_a_real_godot(tmp_path, monkeypatch):
     """②真机：建图 → 删 a/ → refresh 增量 → 被删身份剔除、幸存者判定
@@ -401,3 +441,33 @@ def test_matrix_add_same_name_real_godot(tmp_path, monkeypatch):
     assert table.get(B_IDENT, {}).get("verdict") == "red", table.get(B_IDENT)
     # 无重复形态：旧 basename 形态键不得出现
     assert LEGACY_IDENT not in table, sorted(table)
+
+
+def test_matrix_truncation_turning_red_real_godot(tmp_path, monkeypatch):
+    """⑥真机：a/ 本轮转红且输出超 4000 字符（a 的 res:// 头落在截断
+    窗口外）→ 判定仍红、不继承旧绿；b/ 既有红保持。"""
+    root = _v1._build_same_name_project(tmp_path / "case-e")
+    _v1._build_map(root, monkeypatch)
+    map_file = root / ".qa-cache" / "attribution-map.json"
+    (root / "tests" / "a" / "test_green.gd").write_text(
+        'extends GutTest\nconst C = preload("res://calc_sign.gd")\n'
+        "func test_sign_positive():\n"
+        "\tfor i in range(300):\n"
+        '\t\tprint("padding %04d ' + "x" * 80 + '" % i)\n'
+        "\tassert_eq(C.new().sign(5), -1)\n",
+        encoding="utf-8")
+    from godot_qa_toolkit.mutation.map_contract import refresh
+
+    out = refresh(str(root), ["calc_sign.gd"], timeout_s=500)
+    assert out.get("fresh") is True, out
+    doc = json.loads(map_file.read_text(encoding="utf-8"))
+    inc = doc.get("increment") or {}
+    assert inc.get("mode") == "incremental", inc
+    assert inc.get("rerun_scripts") == ["test_green.gd"], inc
+    table = doc.get("test_verdicts") or {}
+    assert table.get(A_IDENT, {}).get("verdict") == "red", \
+        table.get(A_IDENT)
+    assert table.get(B_IDENT, {}).get("verdict") == "red", \
+        table.get(B_IDENT)
+    assert table.get(B_IDENT, {}).get("classification") == "pre_existing", \
+        table.get(B_IDENT)

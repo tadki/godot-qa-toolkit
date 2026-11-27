@@ -762,7 +762,8 @@ def _emit_collided(key: str, cls: str, sc_full: str,
                    candidates: "list[str]", universe_script: dict,
                    out: dict, collisions: "list[dict] | None") -> None:
     """同名碰撞（同键多候选）：按完整脚本路径消歧（§SPEC-030）——
-    命中路径匹配候选；无匹配保守全候选红 + 具名披露。"""
+    命中路径匹配候选（碰撞同样具名披露，不静默）；无匹配保守全候选红
+    + 具名披露。"""
     matched = _verdict_match_candidate(candidates, sc_full)
     if matched is not None:
         if matched not in out:
@@ -771,6 +772,15 @@ def _emit_collided(key: str, cls: str, sc_full: str,
                             "script": sc_full
                             or universe_script.get(key)
                             or matched.split("::", 1)[0]}
+        if collisions is not None:
+            # C3-R21（D2）：路径命中也要披露碰撞——§SPEC-030 第 3 句
+            # 「消歧并披露碰撞」，静默消歧会让同 basename 事实不可见。
+            collisions.append({
+                "basename_key": key,
+                "candidates": sorted(candidates),
+                "resolved": matched,
+                "reason": "same_basename_resolved_by_path",
+            })
         return
     resolved = ""
     if sc_full:

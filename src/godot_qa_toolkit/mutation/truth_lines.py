@@ -132,10 +132,12 @@ def _tests_for_target(root: str, arm: dict, rel: str) -> tuple[list[str], list[s
     names: set[str] = set()
     for identity, files in (arm.get("test_to_files") or {}).items():
         if rel in files:
-            names.add(identity.split("::", 1)[0])
+            # C3-R21（D2）：身份脚本段两形态（真建图 res:// 全路径 /
+            # 合成夹具裸 basename）按 basename 反查 `_test_scripts_by_name`。
+            names.add(Path(identity.split("::", 1)[0]).name)
     for identity, files in (arm.get("script_to_files") or {}).items():
         if rel in files:
-            names.add(identity)
+            names.add(Path(identity).name)
     by_name = _ts()._test_scripts_by_name(root)
     scripts: list[str] = []
     ambiguous: list[str] = []

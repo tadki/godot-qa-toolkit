@@ -200,6 +200,17 @@ def _verdict_entry(proj: Path, needle: str) -> "dict | None":
     return None
 
 
+def _tv_get(tv: dict, basename_key: str) -> "dict | None":
+    """C3-R21（D2）形态迁移：真建图判定表键的脚本段是 res:// 全路径
+    （§SPEC-030 同名保留）——按 basename::name 查找，两形态兼容。"""
+    script, _, name = basename_key.partition("::")
+    for k, v in tv.items():
+        ks, _, kn = k.partition("::")
+        if Path(ks).name == script and kn == name:
+            return v
+    return None
+
+
 def test_r6_case_a_noncov_red_test_no_fake_kill(r6_project):
     """情况 A：不触达产品代码的新失败测试——执行账补 red（无归属事实
     也进表），full 面判定数字与基线一致，skip-red marked=2/2。"""
@@ -264,7 +275,7 @@ def test_r7_case_g_passing_test_green_in_table(r6_project):
     universe = ((doc.get("arms") or {}).get("gut_full")
                 or {}).get("test_to_lines") or {}
     idents = [k for k in universe
-              if k.split("::", 1)[0] == "test_new_green_cov.gd"]
+              if Path(k.split("::", 1)[0]).name == "test_new_green_cov.gd"]
     assert idents, "触达产品代码的新通过测试必须有归属身份（行事实宇宙）"
     missing = {k: tv.get(k) for k in idents
                if k not in tv or tv[k].get("verdict") != "green"}
@@ -298,8 +309,8 @@ def test_r8_delete_plus_add_same_batch_renews(r6_project):
             encoding="utf-8"))
     tv = doc.get("test_verdicts") or {}
     assert (doc.get("increment") or {}).get("mode") == "incremental"
-    assert "test_fill_00.gd::test_fill" not in tv
-    assert tv.get("test_r8_new_pass.gd::test_pass") == {"verdict": "green"}
+    assert _tv_get(tv, "test_fill_00.gd::test_fill") is None
+    assert _tv_get(tv, "test_r8_new_pass.gd::test_pass") == {"verdict": "green"}
 
 
 def test_r8_delete_only_incremental_no_full_rebuild(r6_project):
@@ -315,7 +326,7 @@ def test_r8_delete_only_incremental_no_full_rebuild(r6_project):
     # 全量重建产物无 increment 块——据此判定未走全量
     assert (doc.get("increment") or {}).get("mode") == "incremental"
     tv = doc.get("test_verdicts") or {}
-    assert "test_fill_01.gd::test_fill" not in tv
+    assert _tv_get(tv, "test_fill_01.gd::test_fill") is None
 
 
 def test_r8_case_d_mixed_script_inc_vs_full_consistent(r6_project):
@@ -332,8 +343,8 @@ def test_r8_case_d_mixed_script_inc_vs_full_consistent(r6_project):
         (proj / ".qa-cache" / "attribution-map.json").read_text(
             encoding="utf-8"))
     tv = doc.get("test_verdicts") or {}
-    assert tv.get("test_r8_mixed.gd::test_mixed_pass") == {"verdict": "green"}
-    fail_entry = tv.get("test_r8_mixed.gd::test_mixed_fail") or {}
+    assert _tv_get(tv, "test_r8_mixed.gd::test_mixed_pass") == {"verdict": "green"}
+    fail_entry = _tv_get(tv, "test_r8_mixed.gd::test_mixed_fail") or {}
     assert fail_entry.get("verdict") == "red", fail_entry
 
     def _run_counts() -> dict:

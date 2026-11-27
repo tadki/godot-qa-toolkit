@@ -673,10 +673,15 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
     _ACTIVE_ALLOW_TESTS = None
     _ta = (selection_meta or {}).get("tests_allow") or {}
     if _ta and killbail.resolve_test_filter():
+        # C3-R21（D2）：宿主 face 过滤按收集脚本 basename 匹配（选择
+        # wrapper 与原件同名）——真建图身份的脚本段是 res:// 全路径，
+        # 统一归一为 basename 下发（合成夹具的裸 basename 不受影响）。
         _ACTIVE_ALLOW_TESTS = (
-            [[str(i).partition("::")[0], str(i).partition("::")[2]]
+            [[Path(str(i).partition("::")[0]).name,
+              str(i).partition("::")[2]]
              for i in (_ta.get("identities") or [])]
-            + [[str(s2), "*"] for s2 in (_ta.get("script_lane") or [])])
+            + [[Path(str(s2)).name, "*"]
+               for s2 in (_ta.get("script_lane") or [])])
     global _ACTIVE_ALLOW_SCOPE
     _ACTIVE_ALLOW_SCOPE = str(_ta.get("scope") or "line") if _ta else None
     scoped = tests_glob is not None

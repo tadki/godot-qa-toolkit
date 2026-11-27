@@ -533,19 +533,24 @@ def test_d10_same_name_real_godot_line_face(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(directdrive, "write_direct_cfg", spy_write)
     from godot_qa_toolkit.mutation.runner import run_mutation
 
-    r = run_mutation(str(target), str(root), budget=20, timeout_s=300,
-                     select_mode="line", select_lines=[3, 4],
-                     reuse_coverage=False, worker_channel=True)
-    # 物理跳过只命中 nested 红测 wrapper；unit 绿测 wrapper 不在 skip 名单
-    s = r["summary"]
-    # D10 判据（Leader 预许可形态）：行选面对同名歧义**具名拒跑**
-    # （零引用短路以映射为准——face 不可达时绝不静默跳过绿测）。
-    err = capsys.readouterr().err
-    # D10 判据：同名歧义 face 下**具名拒跑**（ambiguous/no-test），
-    # 绝不静默跳过绿测或以红测假 kill
-    assert ("ambiguous" in err or "no test touches" in err
-            or s.get("mutants", 0) == 0), \
-        "行选面须具名拒跑: " + err[-800:]
+    # C3-R21（D2）升级形态：file 级选面在真建图（全路径身份）下对同名
+    # 歧义**具名 fail-loud**（`_tests_for_target` 按 basename 反查后
+    # 检测到同名多路径）——同名歧义 face 下**具名拒跑**，绝不静默跳过
+    # 绿测或以红测假 kill。具名出口两种形态等价：MutationSelectionError
+    # （ambiguous_test_names，CLI 层归一为具名 JSON）或
+    # summary/stderr 里的 ambiguous / no-test / 零 mutant。
+    from godot_qa_toolkit.mutation.truth_select import MutationSelectionError
+    try:
+        r = run_mutation(str(target), str(root), budget=20, timeout_s=300,
+                         select_mode="line", select_lines=[3, 4],
+                         reuse_coverage=False, worker_channel=True)
+        s = r.get("summary") or {}
+        err = capsys.readouterr().err
+        assert ("ambiguous" in err or "no test touches" in err
+                or s.get("mutants", 0) == 0), \
+            "行选面须具名拒跑: " + err[-800:]
+    except MutationSelectionError as ei:
+        assert "ambiguous_test_names" in str(ei), str(ei)
 
 
 def test_f1_universe_exact_four_configs(tmp_path):

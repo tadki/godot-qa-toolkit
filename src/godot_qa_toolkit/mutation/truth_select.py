@@ -1028,7 +1028,9 @@ def function_tests(project_root: str, doc: dict, rel: str,
     for identity, fids in ((doc.get("arms") or {}).get("gut_full", {})
                            .get("test_to_functions") or {}).items():
         if fid in fids:
-            names.add(identity.split("::", 1)[0])
+            # C3-R21（D2）：真建图身份脚本段是 res:// 全路径——按 basename
+            # 反查 `_test_scripts_by_name`，两形态归一。
+            names.add(Path(identity.split("::", 1)[0]).name)
     by_name = _test_scripts_by_name(str(Path(project_root).resolve()))
     scripts: list[str] = []
     ambiguous: list[str] = []

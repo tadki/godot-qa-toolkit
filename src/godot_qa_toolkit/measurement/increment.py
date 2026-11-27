@@ -91,13 +91,15 @@ def load_baseline(path: str | Path) -> dict:
     return baseline
 
 def _script_name_of(identity: str) -> str:
-    """测试身份 `test_x.gd::test_name` → 脚本名；脚本级身份本就是脚本名。"""
-    return identity.split("::", 1)[0]
+    """测试身份 → 脚本 basename。C3-R21（D2）：真建图身份的脚本段是
+    完整 res:// 路径（§SPEC-030 同名保留），合成夹具仍是裸 basename——
+    失效面/rerun 匹配统一按 basename 口径，两形态在此归一。"""
+    return Path(identity.split("::", 1)[0]).name
 
 def _baseline_script_names(baseline: dict) -> set[str]:
     arm = baseline["arms"]["gut_full"]
     names = {_script_name_of(i) for i in (arm.get("test_to_files") or {})}
-    names |= set(arm.get("script_to_files") or {})
+    names |= {Path(k).name for k in (arm.get("script_to_files") or {})}
     return names
 
 def _fid_file_of(fid: str) -> str:
@@ -279,7 +281,7 @@ def _line_fact_touchers(arm: dict, rel: str) -> set[str]:
             touch.add(_script_name_of(identity))
     for script, by_rel in (arm.get("script_to_lines") or {}).items():
         if rel in by_rel:
-            touch.add(script)
+            touch.add(Path(script).name)
     return touch
 
 

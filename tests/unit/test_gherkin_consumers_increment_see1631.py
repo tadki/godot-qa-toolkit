@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 from attribution_fixtures import install_recipe, line_facts_map
 
 
@@ -145,10 +147,11 @@ def _baseline_doc(tmp_path: Path) -> dict:
     recipe, error = build_recipe(tmp_path)
     assert error is None
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = attribution_fixtures.pristine_recipe_hash(tmp_path)
     gher_ident = "gherkin://feature/alpha::s0_01"
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(tmp_path),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},

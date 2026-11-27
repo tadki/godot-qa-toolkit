@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+import attribution_fixtures
+
 from godot_qa_toolkit.mutation import killbail
 from godot_qa_toolkit.mutation import truth_select as _ts  # noqa: F401 — 先导破环
 from godot_qa_toolkit.mutation.truth_lines import line_identity_sets
@@ -398,6 +400,7 @@ def _write_line_map_1610(proj, target):
     recipe, err = build_recipe(proj)
     assert err is None, err
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = attribution_fixtures.pristine_recipe_hash(proj)
     rel = str(target.resolve().relative_to(proj.resolve()))
     line_to_tests = {4: ["test_a.gd::t1"],
                      7: ["test_a.gd::t1", "test_b.gd::t2"],
@@ -419,7 +422,7 @@ def _write_line_map_1610(proj, target):
         "unattributed_files": [rel],
     }
     doc = {"schema_version": "test-attribution/7",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+           "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
            "project_root": str(proj), "identity": "res://script::test_name",
            "causal": {"enabled": False},
            "file_sha256": {rel: hashlib.sha256(

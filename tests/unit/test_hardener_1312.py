@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 
@@ -126,11 +128,12 @@ class TestH3BranchLineMapping:
         recipe, error = build_recipe(proj)
         assert error is None
         raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+        pristine = fx.pristine_recipe_hash(proj)
         rel = "target.gd"  # _write_project 的目标名
         covered = [5]  # false 路径：else 头行 4 + else 体行 5 覆盖；行 3 未覆盖
         doc = {
             "schema_version": "test-attribution/7",
-            "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+            "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
             "project_root": str(proj), "identity": "test_x.gd::test_a",
             "causal": {"enabled": False},
             "file_sha256": {rel: hashlib.sha256(

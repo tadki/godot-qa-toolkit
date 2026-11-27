@@ -514,8 +514,13 @@ def _measure_inputs(project_root, target_files, recipe, baseline_failures,
     if not target_files:
         raise MeasurementError("no target files given")
     from .recipe import recipe_hash as _pristine_recipe_hash
+    # C3-R22（D3/QA-R2）：pristine 面 = 磁盘树 raw hash，**不含 toolchain**
+    # （godot_version 随 GQT_GODOT_BIN 有无变化）——与
+    # truth_select._fresh_recipe_hash 的剥离口径一致，pristine 在无 bin
+    # 环境不得结构性失配。
     pristine_recipe_hash = _pristine_recipe_hash(
-        {k: v for k, v in recipe.items() if k != "recipe_hash"})
+        {k: v for k, v in recipe.items()
+         if k not in ("recipe_hash", "toolchain")})
     if inject_toolchain:
         recipe = _inject_toolchain(root, recipe)
     return {

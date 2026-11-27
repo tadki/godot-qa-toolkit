@@ -316,8 +316,11 @@ def test_d3_legit_empty_map_keeps_zero_ref_short_circuit(tmp_path,
     from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
     recipe, err = build_recipe(proj)
     assert err is None, err
+    # C3-R22（D3）：pristine 面 = 磁盘树 raw hash **不含 toolchain**——
+    # 与 `_fresh_recipe_hash` 的剥离口径一致（含 toolchain 的旧形态在
+    # 无 bin 环境会结构性失配）。
     raw = recipe_hash({k: v for k, v in recipe.items()
-                       if k != "recipe_hash"})
+                       if k not in ("recipe_hash", "toolchain")})
     legit = {"gut_full": {"state": "valid", "bundles": 1, "pairs": 0,
                           "probes_fired": 12, "vacuous": False}}
     doc = _map_doc({"a.gd": hashlib.sha256(

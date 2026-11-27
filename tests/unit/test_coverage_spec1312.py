@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.coverage.runner import (
@@ -144,6 +146,7 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
     recipe, error = build_recipe(project_root)
     assert error is None, error
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = attribution_fixtures.pristine_recipe_hash(project_root)
     ident = "test_x.gd::test_a"
     arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
            "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
@@ -157,7 +160,7 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
            "script_to_lines": {},
            "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
     doc = {"schema_version": "test-attribution/7",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+           "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
            "project_root": str(project_root), "identity": ident,
            "causal": {"enabled": False},
            "file_sha256": {rel: hashlib.sha256(

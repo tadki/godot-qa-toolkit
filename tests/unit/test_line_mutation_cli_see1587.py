@@ -162,6 +162,7 @@ def _map_doc(proj: Path, target: Path,
     assert error is None, error
     raw = recipe_hash({k: v for k, v in recipe.items()
                        if k != "recipe_hash"})
+    pristine = attribution_fixtures.pristine_recipe_hash(proj)
     rel = str(target.resolve().relative_to(proj.resolve()))
     test_to_lines: dict[str, dict[str, list[int]]] = {}
     for ln, idents in line_to_tests.items():
@@ -192,7 +193,7 @@ def _map_doc(proj: Path, target: Path,
     inst = sorted({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
     return {
         "schema_version": "test-attribution/7",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(proj), "identity": "res://script::test_name",
         "causal": {"enabled": False},
         "file_sha256": {rel: hashlib.sha256(

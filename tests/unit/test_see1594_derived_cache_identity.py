@@ -53,6 +53,7 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
     recipe, error = build_recipe(proj)
     assert error is None, error
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = fx.pristine_recipe_hash(proj)
     rel = TARGET
     arm = {"test_to_files": {}, "script_to_files": {}, "tests": 0,
            "scripts": 0, "files": 1, "pairs": 0, "function_pairs": 0,
@@ -76,7 +77,7 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
     arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     return {
         "schema_version": "test-attribution/7",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(proj),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},

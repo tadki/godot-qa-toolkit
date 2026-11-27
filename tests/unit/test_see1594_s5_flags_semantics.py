@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 REPO = Path(__file__).resolve().parents[2]
@@ -147,10 +149,13 @@ class TestA22CentralFreshness:
         map_file = root / ".qa-cache" / "attribution-map.json"
         map_file.parent.mkdir(parents=True, exist_ok=True)
         recipe, error = build_recipe(root)
-        raw = recipe_hash({k: v for k, v in recipe.items()
-                           if k != "recipe_hash"}) if error is None else "rh"
+        raw = (recipe_hash({k: v for k, v in recipe.items()
+                            if k != "recipe_hash"})
+               if error is None else "rh")
+        pristine = (attribution_fixtures.pristine_recipe_hash(root)
+                    if error is None else "rh")
         doc = {"schema_version": "test-attribution/6",
-               "recipe_hash_pristine": raw,
+               "recipe_hash_pristine": pristine,
                "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
                                            "pairs": 1, "probes_fired": 100,
                                            "vacuous": False}},

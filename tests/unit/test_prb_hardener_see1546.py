@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+import attribution_fixtures
 from lark import Tree
 from lark.lexer import Token
 
@@ -129,6 +131,7 @@ def _write_raw_map(project_root, instrumentable, covered_lines, probes_fired):
     recipe, error = build_recipe(project_root)
     assert error is None, error
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = attribution_fixtures.pristine_recipe_hash(project_root)
     rel = "utils/calc.gd"
     ident = "test_x.gd::test_a"
     arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
@@ -143,7 +146,7 @@ def _write_raw_map(project_root, instrumentable, covered_lines, probes_fired):
            "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
     doc = {
         "schema_version": "test-attribution/7",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(project_root), "identity": ident,
         "causal": {"enabled": False},
         "file_sha256": {rel: hashlib.sha256(

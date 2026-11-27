@@ -35,9 +35,32 @@ from .truth_select import map_path
 # would_refresh=full 判定与 `measure map-update` 输出的 reason 抽取
 # 共用同一份（C3-R20 F1：全量原因具名）。
 _FORCED_FULL_FACTORS: "tuple[str, ...]" = (
-    "schema:", "arms:", "recipe:", "test_verdicts:", "view:",
-    "feature_sha256_missing:",
+    "schema:", "arms:", "recipe:", "report_recipe_hash:", "test_verdicts:",
+    "view:", "feature_sha256_missing:",
 )
+
+
+def _report_hash_drift_reason(root: str, doc: dict) -> "str | None":
+    """C3-R22（D3-b）：stale 路径的报告哈希漂移具名——地图存储的
+    report_recipe_hash 与现算注入哈希不同 = 建图后工具链/环境漂移，
+    增量资格闸（`_increment_decision` 的 stored == 现算）恒假 → 决策必
+    为具名全量。只在 stale（factors 非空）时调用；fresh 路径不探测。
+    只读：build_recipe/_inject_toolchain 不写盘、不拉 GUT。"""
+    stored = doc.get("report_recipe_hash")
+    if not (isinstance(stored, str) and stored):
+        return None
+    from ..measurement.increment import _inject_toolchain
+    from ..measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(Path(root))
+    if error is not None:
+        return None
+    computed = _inject_toolchain(Path(root), dict(recipe)).get("recipe_hash")
+    if computed == stored:
+        return None
+    return (f"stored {str(stored)[:12]} != computed {str(computed)[:12]} "
+            "(toolchain/environment drift since the map was built) — "
+            "full rebuild required")
 
 
 class MapContractError(Exception):
@@ -230,6 +253,9 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
                 "error": msg, "missing": missing}
     fresh, factors = _factor_report(root, doc, files)
     if fresh:
+        # §SPEC-029（D3-a 闭合后的语义）：pristine 面已与环境无关——
+        # 纯工具链/环境漂移（存储 report_recipe_hash 与现算不同）由
+        # stale 路径的 report_recipe_hash 因素具名，fresh 判定不探测。
         # §SPEC-035/S5：fresh 时返回同一薄只读视图。C3-R19（P5/要点①）：
         # 各项因素都通过但视图构造失败（判定表残留、dropped 身份残留等
         # 契约自洽缺口）→ 追加一条具名因素并按不新鲜处理（由 prepare
@@ -243,6 +269,13 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
             return {"present": True, "fresh": True, "factors": [],
                     "would_refresh": None, "scope": [],
                     "last_cost": _last_measured_cost(doc), "view": view}
+    # C3-R22（D3-b/QA-R2）：stale 路径的报告哈希漂移具名——存储
+    # report_recipe_hash 与现算注入哈希不同（环境/工具链漂移）→ 增量
+    # 资格闸恒假 → 决策必为具名全量。pristine 短路 / forced-full 分支
+    # 均不再吞掉该因素；fresh 路径不探测（合成夹具生态零波及）。
+    drift_reason = _report_hash_drift_reason(root, doc)
+    if drift_reason:
+        factors.append(f"report_recipe_hash: {drift_reason}")
     # C3-R9 退回3 + C3-R19（要点①）：would_refresh 如实预测 refresh 将
     # 执行的动作（含周期校准、新增生产文件、不可归因变更三类具名全量）。
     # 强制全量的因素：schema、arms、recipe、缺判定表、视图构造失败、缺

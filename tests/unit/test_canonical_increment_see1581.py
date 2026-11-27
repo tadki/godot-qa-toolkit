@@ -403,8 +403,9 @@ def test_increment_fallback_keeps_raw_pristine_and_includes_prod_new(
     project = _project(tmp_path)
     recipe, targets = _recipe_and_targets(project, tmp_path)
     sp.run = BareNameFakeGodot(project)
+    # C3-R22（D3）：pristine 面 = raw hash 剥离 toolchain（环境无关）。
     raw_pristine = recipe_hash({k: v for k, v in recipe.items()
-                                if k != "recipe_hash"})
+                                if k not in ("recipe_hash", "toolchain")})
     base_artifact = tmp_path / "base.attribution.json"
     run_measurement(project, targets, recipe, test_attribution=True,
                   attribution_out=str(base_artifact))

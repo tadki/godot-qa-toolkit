@@ -50,6 +50,19 @@ def _feature_sha_of(project_root: Path) -> dict:
     return out
 
 
+
+def pristine_recipe_hash(project_root) -> str:
+    """C3-R22（D3）：pristine 面 = 磁盘树 raw hash，**不含 toolchain**
+    （godot_version 随 GQT_GODOT_BIN 有无变化，与 `_fresh_recipe_hash`
+    的剥离口径一致）——两段式 build_recipe + 剥离哈希。"""
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+
+    recipe, error = build_recipe(project_root)
+    assert error is None, error
+    return recipe_hash({k: v for k, v in recipe.items()
+                        if k not in ("recipe_hash", "toolchain")})
+
+
 def write_map(project_root: Path,
               target_tests: dict[str, list[str]]) -> str:
     """target_tests: 目标文件 rel → 触达它的测试身份列表（`脚本名::测试名`）。
@@ -96,7 +109,7 @@ def write_map(project_root: Path,
     doc = {
         "schema_version": "test-attribution/7",
         "report_recipe_hash": raw,
-        "recipe_hash_pristine": raw,
+        "recipe_hash_pristine": pristine_recipe_hash(project_root),
         "project_root": str(project_root),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},
@@ -169,7 +182,7 @@ def line_facts_map(project_root: Path,
     arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     doc = {
         "schema_version": "test-attribution/7",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine_recipe_hash(project_root),
         "project_root": str(project_root),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},

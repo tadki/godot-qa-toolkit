@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 
 # --------------------------------------------------------------------------
 # §SPEC-018：invalid_reason 反映真实首因
@@ -323,12 +325,13 @@ def _baseline_with_gherkin(tmp_path: Path) -> dict:
     install_recipe(tmp_path)
     recipe, error = build_recipe(tmp_path)
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = attribution_fixtures.pristine_recipe_hash(tmp_path)
     base = _doc_with_gherkin_state.__wrapped__ if False else None
     ident_a = "gherkin://feature/alpha::s0_01"
     ident_b = "gherkin://feature/beta::s0_01"
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(tmp_path), "identity": "res://script::test_name",
         "causal": {"enabled": False},
         "file_sha256": {"alpha_only.gd": "x", "shared.gd": "y"},

@@ -1589,8 +1589,10 @@ def _attribution_usable(attribution_out, run_started: float,
             recipe, error = build_recipe(root)
             if error is not None:
                 return False
+            # C3-R22（D3）：pristine 复算与 `_fresh_recipe_hash`/orchestrator
+            # 同口径——剥离 toolchain（环境无关的磁盘树面）。
             if _raw_hash({k: v for k, v in recipe.items()
-                          if k != "recipe_hash"}) != \
+                          if k not in ("recipe_hash", "toolchain")}) != \
                     doc.get("recipe_hash_pristine"):
                 return False
         # 中央校验 4：本轮时间锚（映射文件不早于本轮开始——替代原 mtime

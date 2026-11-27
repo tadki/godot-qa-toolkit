@@ -601,12 +601,18 @@ def _fresh_recipe_hash(project_root: str) -> str | None:
 
     选面正确性只依赖测试面身份（gut dirs/features/harness）——toolchain
     版本漂移不改变"谁测谁"，故不为此在每个消费入口启动 godot --version。
+    C3-R22（D3/QA-R2）：`build_recipe` 的 `toolchain` 版本字典
+    （godot_version 随 `GQT_GODOT_BIN` 有无变化）此前一并进哈希——
+    pristine 面随环境漂移、无 bin 环境被判结构性失配强制 full；现从
+    哈希基中剔除 toolchain（pristine = 磁盘树面，与环境无关）。
     """
     from ..measurement.recipe import build_recipe, recipe_hash as _raw
     recipe, error = build_recipe(Path(project_root))
     if error is not None:
         return None
-    return _raw({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    basis = {k: v for k, v in recipe.items()
+             if k not in ("recipe_hash", "toolchain")}
+    return _raw(basis)
 
 
 def map_preview_state(project_root: str, target_file: str) -> dict:

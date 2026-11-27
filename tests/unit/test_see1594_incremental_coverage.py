@@ -65,6 +65,7 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
     recipe, error = build_recipe(proj)
     assert error is None, error
     raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    pristine = fx.pristine_recipe_hash(proj)
     rel = "utils/t.gd"
     ident = IDENT_A
     if arms_state is None:
@@ -90,7 +91,7 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
         for gd in sorted(proj.rglob("tests/**/*.gd"))
     }
     doc = {"schema_version": "test-attribution/7",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+           "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
            "project_root": str(proj), "identity": ident,
            "causal": {"enabled": False},
            "file_sha256": {rel: hashlib.sha256(
@@ -280,6 +281,7 @@ class TestMalformedArmsState:
         assert error is None, error
         raw = recipe_hash({k: v for k, v in recipe.items()
                            if k != "recipe_hash"})
+        pristine = fx.pristine_recipe_hash(proj)
         rel = "utils/t.gd"
         ident = IDENT_A
         tests_face = {
@@ -288,7 +290,7 @@ class TestMalformedArmsState:
             for gd in sorted(proj.rglob("tests/**/*.gd"))
         }
         doc = {"schema_version": "test-attribution/7",
-               "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+               "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
                "project_root": str(proj), "identity": ident,
                "causal": {"enabled": False},
                "file_sha256": {rel: hashlib.sha256(

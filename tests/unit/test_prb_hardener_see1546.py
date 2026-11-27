@@ -158,6 +158,9 @@ def _write_raw_map(project_root, instrumentable, covered_lines, probes_fired):
                                     "probes_fired": probes_fired,
                                     "vacuous": False}},
         "notes": [],
+        "test_verdicts": {ident: {"verdict": "green",
+                                  "classification": "pre_existing"}},
+        "feature_sha256": fx._feature_sha_of(project_root),
     }
     out = Path(project_root) / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)

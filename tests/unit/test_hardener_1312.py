@@ -155,7 +155,10 @@ class TestH3BranchLineMapping:
                                         "invalid_reason": None, "bundles": 1,
                                         "pairs": 1, "probes_fired": 2,
                                         "vacuous": False}},
-            "notes": []}
+            "notes": [],
+            "test_verdicts": {"test_x.gd::test_a": {
+                "verdict": "green", "classification": "pre_existing"}},
+            "feature_sha256": fx._feature_sha_of(proj)}
         (proj / ".qa-cache").mkdir()
         (proj / ".qa-cache" / "attribution-map.json").write_text(
             json.dumps(doc, ensure_ascii=False), encoding="utf-8")

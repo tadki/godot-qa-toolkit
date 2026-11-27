@@ -96,6 +96,13 @@ def _fresh_doc(root: Path, targets: list[str]) -> dict:
         # §SPEC-032（C3-R1）：契约 MapView 构造期断言要求 verdict 表在场
         "test_verdicts": {
             "res://tests/unit/test_game.gd::test_ok": {"verdict": "green"}},
+        # C3-R20 迁移（B）：feature 指纹按目录实算（项目带 demo.feature，
+        # 缺键会被判 feature_sha256_missing → 不新鲜 → 车道 run_error）
+        "feature_sha256": {
+            p.stem.replace("-", "_"):
+                hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted((Path(root) / "addons" / "gqt_gherkin"
+                             / "features").glob("*.feature"))},
     }
     return doc
 

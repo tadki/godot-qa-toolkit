@@ -86,9 +86,10 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
         "tests_face": _tests_face(proj),
         "instrumentable_lines": {rel: [2, 3]},
         # C3-R16/R18：map 必带 feature 内容指纹与 verdict 表（缺键 =
-        # 具名 missing 因素走全量重建的新契约）。
+        # 具名 missing 因素走全量重建的新契约）。C3-R20 迁移（B）：指纹
+        # 按目录实算——夹具项目有 demo.feature，写空集会被判 new 漂移。
         "test_verdicts": {},
-        "feature_sha256": {},  # 空面：无 features 目录的夹具 → 对账空集
+        "feature_sha256": fx._feature_sha_of(proj),
         "arms": {"gut_full": arm},
         "arms_state": {"gut_full": {"state": "valid", "invalid_reason": None,
                                     "bundles": 1, "pairs": arm["pairs"],
@@ -214,16 +215,19 @@ class TestA06ResolvedMapPath:
     显式 map 与默认 map 不串线。"""
 
     def test_explicit_map_beats_default_map(self, tmp_path):
+        """C3-R20 迁移（定案 20 / A06）：显式 map 退役——selection 已解析
+        路径只作披露，投影 doc 一律取自契约视图（默认位置的唯一地图），
+        外来路径不串线（P3 契约视图单一入口）。"""
         proj = _proj(tmp_path)
         default_doc = _map_doc(proj, {UNIT: {TARGET: [2]}})
         _write_map(default_doc, Path(proj) / ".qa-cache"
                    / "attribution-map.json")
-        explicit_doc = _map_doc(proj, {UNIT: {TARGET: [3]}})
-        explicit_path = _write_map(explicit_doc, Path(proj) / ".qa-cache"
-                                   / "other-map.json")
+        foreign_doc = _map_doc(proj, {UNIT: {TARGET: [3]}})
+        foreign_path = _write_map(foreign_doc, Path(proj) / ".qa-cache"
+                                  / "other-map.json")
         cov, inst, reason, source = _resolve(proj, [UNIT],
-                                             map_path=explicit_path)
-        assert cov == {3}, f"must project from the resolved map: {reason}"
+                                             map_path=foreign_path)
+        assert cov == {2}, f"doc must come from the contract view: {reason}"
         assert source == "projection_live"
 
     def test_default_map_used_when_no_path_given(self, tmp_path):

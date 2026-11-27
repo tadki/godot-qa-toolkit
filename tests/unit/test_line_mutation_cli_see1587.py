@@ -156,6 +156,7 @@ def _map_doc(proj: Path, target: Path,
              extra_script_lines: "dict[str, dict[int, list[int]]] | None" = None
              ) -> dict:
     """构造与磁盘绑定的 /6 映射（行事实主真值；含 tests_face/file_sha256）。"""
+    import attribution_fixtures
     from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
     recipe, error = build_recipe(proj)
     assert error is None, error
@@ -197,9 +198,11 @@ def _map_doc(proj: Path, target: Path,
         "file_sha256": {rel: hashlib.sha256(
             target.read_bytes()).hexdigest()},
 
-        # C3-R16/R18：map 必带 verdict 表与 feature 指纹。
+        # C3-R16/R18：map 必带 verdict 表与 feature 指纹。C3-R20 迁移
+        # （B）：指纹按目录实算——夹具有 demo.feature，空集会被判 new 漂移。
         "test_verdicts": {},
-        "feature_sha256": {},"target_files": [rel], "tests_face": face,
+        "feature_sha256": attribution_fixtures._feature_sha_of(proj),
+        "target_files": [rel], "tests_face": face,
         "instrumentable_lines": {rel: inst},
         "arms": {"gut_full": arm},
         "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
@@ -497,7 +500,8 @@ def test_prefilter_stale_map_falls_back_unfiltered_with_reasons(tmp_path):
         scripts=["res://tests/unit/test_a.gd"])
     assert cov is None and inst is None
     assert state == "store_miss"
-    assert "file binding stale" in (reason or "")
+    # C3-R20 迁移：stale 原因经契约视图具名（内容面因素文案）
+    assert "target file drift" in (reason or "")
 
 
 def test_prefilter_identity_drift_reason_kept_in_fallback(tmp_path):

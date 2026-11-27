@@ -100,7 +100,11 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
            "instrumentable_lines": {rel: [2, 3]},
            "arms": {"gut_full": arm},
            "arms_state": arms_state,
-           "notes": []}
+           "notes": [],
+           # C3-R20 迁移（B）：契约认可的地图带判定表与 feature 指纹
+           "test_verdicts": {ident: {"verdict": "green",
+                                     "classification": "pre_existing"}},
+           "feature_sha256": fx._feature_sha_of(proj)}
     out = proj / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
@@ -304,7 +308,11 @@ class TestMalformedArmsState:
                    "script_to_lines": {},
                    "line_to_tests": {rel: {"2": [ident]}}}},
                "arms_state": arms_state,
-               "notes": []}
+               "notes": [],
+               # C3-R20 迁移（B）：契约键齐备（畸形面只注入 arms_state）
+               "test_verdicts": {ident: {"verdict": "green",
+                                         "classification": "pre_existing"}},
+               "feature_sha256": fx._feature_sha_of(proj)}
         out = proj / ".qa-cache" / "attribution-map.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")

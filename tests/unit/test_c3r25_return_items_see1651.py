@@ -95,18 +95,32 @@ def test_n5_gherkin_leg_execute_returns_failing_tests(tmp_path,
 
 
 def test_matrix_feature_change_increment_real_godot(tmp_path, monkeypatch):
-    """真机（§SPEC-016）：同名夹具建图 → 只改 feature 内容 → 续新增量
-    成功、gherkin 重跑腿真实执行、执行账带 failing_tests /
-    failing_scenarios（N5 修复前这条腿在 GUT 返回后必崩）。"""
+    """真机（§SPEC-016）：同名夹具建图 → 基线补种最小 gherkin 臂
+    （stub 校验器预检可通过——真实 harness 的建图臂需要 KOL 全量运行
+    时，不在合成夹具范围；腿的编译 / 回放 / 校验 / GUT 执行全链真机
+    真实）→ 只改 feature 内容 → 续新增量成功、gherkin 重跑腿真实
+    执行、执行账带 failing_tests / failing_scenarios（N5 修复前这条腿
+    在 GUT 返回后必崩）。"""
     import test_c3r23_same_name_increment_see1648 as _v1
 
     root = _v1._build_same_name_project(tmp_path / "r25-feat")
     _v1._build_map(root, monkeypatch)
     map_file = root / ".qa-cache" / "attribution-map.json"
-    before = json.loads(map_file.read_text(encoding="utf-8"))
-    garm = ((before.get("arms") or {}).get("gherkin") or {})
-    assert (garm.get("feature_to_lines") or {}), \
-        "夹具基线必须带 gherkin 臂（否则本测覆盖不到 gherkin 腿）"
+    doc = json.loads(map_file.read_text(encoding="utf-8"))
+    ident = "gherkin://feature/demo::s::1"
+    doc["arms"]["gherkin"] = {
+        "feature_to_lines": {"demo": {"calc_sign.gd": [3]}},
+        "test_to_lines": {ident: {"calc_sign.gd": [3]}},
+        "line_to_features": {"calc_sign.gd": {"3": [ident]}},
+        "tests": 1, "pairs": 1,
+    }
+    doc.setdefault("test_verdicts", {})[ident] = {
+        "verdict": "green", "classification": "pre_existing"}
+    (doc.setdefault("arms_state", {}))["gherkin"] = {
+        "state": "valid", "invalid_reason": None, "bundles": 1,
+        "pairs": 1, "probes_fired": 10, "vacuous": False}
+    map_file.write_text(json.dumps(doc, ensure_ascii=False),
+                        encoding="utf-8")
     feat = root / "addons" / "gqt_gherkin" / "features" / "demo.feature"
     feat.write_text(
         feat.read_text(encoding="utf-8") + "# touched by C3-R25\n",
@@ -170,3 +184,85 @@ def test_n6_gherkin_failed_leg_empty_failing_set_conservative_red():
         fresh_gherkin, {"demo"}, set(),
         tests_face=None, arm_identities=[], collisions=[])
     assert merged.get(ident, {}).get("verdict") == "red", merged
+
+
+# ───────────────── N7：内容修改车道的重跑面身份口径 ─────────────────
+def test_n7_content_change_rerun_face_includes_gd_toucher_tests(tmp_path):
+    """单元：基线臂 `file_to_scripts` 用 res:// 完整身份，非脚本内容
+    修改（被 prod gd preload）→ `_increment_decision` 的 rerun 必含
+    触达消费 gd 的测试脚本（basename）、`rerun_sources` 带
+    `content_prod:<gd>`（2f7788f 上完整路径被 basename known 闸静默
+    丢弃 → 本测为红）。"""
+    import hashlib
+
+    from godot_qa_toolkit.measurement.increment import _increment_decision
+
+    root = tmp_path / "proj"
+    (root / "tests" / "x").mkdir(parents=True)
+    content = root / "data.tres"
+    content.write_text("k=1\n", encoding="utf-8")
+    (root / "prod_user.gd").write_text(
+        'extends RefCounted\nconst D = preload("res://data.tres")\n',
+        encoding="utf-8")
+    baseline = {
+        "schema_version": "test-attribution/7",
+        "report_recipe_hash": "h-ok",
+        "production_content_sha256": {
+            "data.tres": hashlib.sha256(b"k=0\n").hexdigest()},
+        "tests_face": {"tests/x/test_user.gd": "sha"},
+        "arms": {"gut_full": {
+            "test_to_files": {
+                "res://tests/x/test_user.gd::t": ["prod_user.gd"]},
+            "script_to_files": {},
+            "test_to_lines": {
+                "res://tests/x/test_user.gd::t": {"prod_user.gd": [2]}},
+            "script_to_lines": {},
+            "file_to_scripts": {
+                "prod_user.gd": ["res://tests/x/test_user.gd"]},
+        }},
+    }
+    classes, invalidation, rerun, reason = _increment_decision(
+        root, {"recipe_hash": "h-ok"}, baseline, ["data.tres"], 0, 5, 0.05)
+    assert classes.get("content_changed") == ["data.tres"], classes
+    assert "test_user.gd" in rerun, (rerun, invalidation["sources"])
+    assert any("content_prod:prod_user.gd" in s
+               for s in (invalidation["sources"].get("test_user.gd") or [])), \
+        invalidation["sources"]
+
+
+def test_matrix_content_change_real_godot(tmp_path, monkeypatch):
+    """真机：内容文件被 prod gd preload、prod gd 被测试触达 → 改内容
+    触发增量，`rerun_scripts` 必含触达测试（重跑面 = 静态直连消费者
+    ∪ 触达消费 gd 的测试，因素表第 1 行）。"""
+    import test_c3r23_same_name_increment_see1648 as _v1
+
+    root = _v1._build_same_name_project(tmp_path / "r25-content")
+    (root / "data.tres").write_text("k=1\n", encoding="utf-8")
+    (root / "prod_user.gd").write_text(
+        'extends RefCounted\nconst D = preload("res://data.tres")\n'
+        "func value() -> int:\n\treturn 1\n", encoding="utf-8")
+    (root / "tests" / "fill" / "test_data_user.gd").write_text(
+        'extends GutTest\nconst U = preload("res://prod_user.gd")\n'
+        "func test_user_value():\n\tassert_eq(U.value(), 1)\n",
+        encoding="utf-8")
+    scope = json.loads((root / ".gqt-scope.json")
+                       .read_text(encoding="utf-8"))
+    scope["production"]["include"].extend(
+        [{"kind": "file", "value": "data.tres"},
+         {"kind": "file", "value": "prod_user.gd"}])
+    (root / ".gqt-scope.json").write_text(
+        json.dumps(scope, ensure_ascii=False), encoding="utf-8")
+    _v1._build_map(root, monkeypatch)
+    map_file = root / ".qa-cache" / "attribution-map.json"
+    (root / "data.tres").write_text("k=2\n", encoding="utf-8")
+    from godot_qa_toolkit.mutation.map_contract import refresh
+
+    out = refresh(str(root), ["calc_sign.gd"], timeout_s=500)
+    assert out.get("fresh") is True, out
+    doc = json.loads(map_file.read_text(encoding="utf-8"))
+    inc = doc.get("increment") or {}
+    assert inc.get("mode") == "incremental", inc
+    assert "test_data_user.gd" in (inc.get("rerun_scripts") or []), inc
+    sources = inc.get("rerun_sources") or {}
+    assert any("content_prod:prod_user.gd" in s
+               for s in (sources.get("test_data_user.gd") or [])), sources

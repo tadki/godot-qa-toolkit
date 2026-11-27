@@ -365,7 +365,12 @@ def _content_changed_rerun(root: Path, rel: str, arm: dict,
                 if str(c.get("res", "")).endswith(".gd")
                 and not str(c["res"]).startswith("res://tests/")}
     for gd in prod_gds:
-        scripts = set((arm.get("file_to_scripts") or {}).get(gd, []))
+        # C3-R25（N7/决策 16）：file_to_scripts 的值是完整 res:// 脚本
+        # 身份（C3-R21 起真建图口径）；重跑面是「选哪些脚本来跑」的
+        # basename 入口——不归一会被 _increment_decision 的 basename
+        # known 闸整批静默丢弃（触达测试不重跑，续新仍报新鲜）。
+        scripts = {Path(s).name
+                   for s in (arm.get("file_to_scripts") or {}).get(gd, [])}
         for name in scripts:
             sources.setdefault(name, []).append(f"content_prod:{gd}")
         rerun |= scripts

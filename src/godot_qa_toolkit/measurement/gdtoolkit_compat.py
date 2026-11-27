@@ -37,13 +37,10 @@ def _wrap_parser_cache_makedirs(parser_cls, cache_dirpath: str) -> None:
     parser_cls._get_parser = _get_parser_with_warm_cache
 
 
-
-
 def ensure_parser_cache_dir(force_home: "str | None" = None) -> None:
     """幂等预热 gdtoolkit 语法缓存目录（每进程一次，失败静默——预热
     只是消除库内裸 makedirs 的并发竞争；解析本身不依赖本预热成功）。"""
     global _WARMED
-    ident = str(force_home) if force_home else None
     if _WARMED and not force_home:
         return
     try:

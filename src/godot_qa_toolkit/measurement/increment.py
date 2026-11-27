@@ -763,17 +763,15 @@ def _run_attribution_increment_locked(
         recipe: dict, baseline_path: str | Path,
         changed_files: list[str], out_path: str | Path,
         *, timeout_s: int = 180,
-                              attribution_causal: bool = False,
-                              calibration_every: int = 5,
-                              rerun_full_face_ratio: float
-                              = DEFAULT_RERUN_FULL_FACE_RATIO,
-                              gherkin_rerun_full_face_ratio: float
-                              = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
-                              ) -> dict:
+        attribution_causal: bool = False,
+        calibration_every: int = 5,
+        rerun_full_face_ratio: float
+        = DEFAULT_RERUN_FULL_FACE_RATIO,
+        gherkin_rerun_full_face_ratio: float
+        = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
+        ) -> dict:
     """增量重建主入口（含产物落盘与 provenance）。C3-R14：插桩互斥
     外壳 + §SPEC-025 表守恒入口检查。"""
-    from .backup import probe_rw_lock
-
     root = Path(project_root).resolve()
     baseline = _load_baseline_with_conservation(baseline_path)
     t0 = time.monotonic()

@@ -728,23 +728,22 @@ def run_measurement(project_root: "str | Path",
 
 
 def _run_measurement_locked(project_root: str | Path, target_files: list[str],
-                  recipe: dict, *, gherkin_keys: list[str] | None = None,
-                  probe_keys: list[str] | None = None, timeout_s: int = 180,
-                  evidence_out: str | None = None, inject_toolchain: bool = True,
-                  scope_roots: list[str] | None = None, block_compress: bool = True,
-                  shard_width: int = 6, gherkin_shards: int = 4,
-                  shard_log_dir: str | None = None,
-                  stability_baseline: str | None = None,
-                  baseline_failures: "set[tuple[str, str]] | None" = None,
-                  intolerant_config: dict | None = None,
-                  gherkin_repeats: int = 3, test_attribution: bool = False,
-                  attribution_out: str | None = None,
-                  attribution_causal: bool = False, arms_parallel: bool = False,
-                  gherkin_adaptive: bool = False) -> dict:
+                            recipe: dict, *, gherkin_keys: list[str] | None = None,
+                            probe_keys: list[str] | None = None, timeout_s: int = 180,
+                            evidence_out: str | None = None, inject_toolchain: bool = True,
+                            scope_roots: list[str] | None = None, block_compress: bool = True,
+                            shard_width: int = 6, gherkin_shards: int = 4,
+                            shard_log_dir: str | None = None,
+                            stability_baseline: str | None = None,
+                            baseline_failures: "set[tuple[str, str]] | None" = None,
+                            intolerant_config: dict | None = None,
+                            gherkin_repeats: int = 3, test_attribution: bool = False,
+                            attribution_out: str | None = None,
+                            attribution_causal: bool = False, arms_parallel: bool = False,
+                            gherkin_adaptive: bool = False) -> dict:
     """measurement 双源批式编排，产出 measurement-report/3（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
     from ..mutation.stagetiming import StageClock
-    from .backup import probe_rw_lock
     clock = StageClock()
     t_total = time.monotonic()
     with clock.stage("planning"):

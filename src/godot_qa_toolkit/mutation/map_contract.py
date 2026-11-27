@@ -26,7 +26,7 @@ from .verdict_source import (
     _load_map_doc,
     assert_map_fresh,
 )
-from .truth_select import SelectionError, map_path
+from .truth_select import map_path
 
 
 class MapContractError(Exception):
@@ -253,6 +253,8 @@ def view(project_root: str) -> MapView:
     fresh 且三断言通过 → MapView（含 map_path 披露）；不新鲜、缺键、
     视图构造失败 → 具名 `MapContractError`（消费方按不新鲜处理，由
     prepare 重建）。"""
+    # map_path 的函数内 import 是打桩 seam（打桩点在 truth_select 模块
+    # 属性，与 `_refresh_locked` 的 fresh 分支同一约定）——不是冗余绑定。
     from .truth_select import map_path
 
     root = str(Path(project_root).resolve())

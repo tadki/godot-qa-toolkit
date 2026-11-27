@@ -1490,9 +1490,9 @@ def _attribution_args(args: argparse.Namespace
                       ) -> tuple[bool, str | None, bool]:
     """§SPEC-083：`--test-attribution` 开关与其产物路径的默认推导。
 
-    仅在开关开启时落到 `<--out>.attribution.json`（随报告产物，定案 20：
-    （定案 20：路径参数退役，产物随报告落盘）。`--attribution-causal`（R2）
-    依附归属开关：开关未开时忽略。"""
+    仅在开关开启时落到 `<--out>.attribution.json`（产物随报告落盘；
+    定案 20：路径参数退役）。`--attribution-causal`（R2）依附归属
+    开关：开关未开时忽略。"""
     enabled = bool(getattr(args, "test_attribution", False))
     out = f"{args.out}.attribution.json" if enabled else None
     causal = bool(getattr(args, "attribution_causal", False)) and enabled
@@ -1552,7 +1552,6 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
     return _emit({"tool": "measure.map-update", "ok": True,
                   "summary": summary,
                   "failures": []})
-
 
 
 def _attribution_usable(attribution_out, run_started: float,

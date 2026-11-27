@@ -13,7 +13,6 @@ map 源下 parity 失配由 runner 升级为具名 fail-loud（见 runner）。
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path

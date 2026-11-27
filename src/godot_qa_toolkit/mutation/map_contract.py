@@ -71,14 +71,13 @@ def _factor_report(root: str, doc: dict, files: list[str]) -> "tuple[bool, list[
     except BaselineSourceError as e:
         factors.append(f"tests_face: {e}")
     try:
+        # C3-R21（LOW ②）：`_assert_target_files` 末尾已调用
+        # `_assert_no_new_production`（生产内容指纹对账，载荷
+        # changed:<file>）——不再以 new_production: 标签重复包装同一次
+        # 探测（标签与载荷语义一致，且因素不重复计数）。
         _assert_target_files(root, doc, files)
     except BaselineSourceError as e:
         factors.append(f"content: {e}")
-    try:
-        from .verdict_source import _assert_no_new_production
-        _assert_no_new_production(Path(root), doc)
-    except BaselineSourceError as e:
-        factors.append(f"new_production: {e}")
     # C3-R15/R18 契约自洽缺口：各项因素新鲜但缺 `test_verdicts` →
     # 视图构造必失败 → 视为不新鲜（具名因素，走一次全量重建补表），
     # 不再要用户手删地图。

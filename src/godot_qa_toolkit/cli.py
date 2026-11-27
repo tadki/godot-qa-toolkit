@@ -1318,6 +1318,14 @@ def cmd_measure_scope(args: argparse.Namespace) -> int:
 
     root = Path(args.project_root).resolve() if args.project_root \
         else Path.cwd()
+    # §SPEC-031/C3-R21（LOW ①）：不存在的项目根具名失败——缺目录不是
+    # 「未配置走默认」，不得 ok=true + defaults_used。
+    if not root.is_dir():
+        print(json.dumps(
+            {"tool": "measure.scope", "ok": False,
+             "summary": {"project_root": str(root),
+                         "error": f"project root not found: {root}"}}))
+        return 1
     try:
         u = discover_scope(root)
     except ScopeError as e:

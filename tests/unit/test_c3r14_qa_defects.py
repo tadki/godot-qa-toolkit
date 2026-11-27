@@ -370,6 +370,30 @@ def test_status_names_missing_feature_sha256(tmp_path):
     assert drift is not None and "missing" in drift, drift
 
 
+def test_status_missing_feature_sha256_predicts_full(tmp_path):
+    """C3-R17（退回项 1 一行口径）：缺键因素的 would_refresh 必须如实
+    预测 refresh 将执行的**全量重建**（与 schema/arms/recipe 同列），
+    不得落进增量判定（因素文案自己写着 "full rebuild required"）。"""
+    feats = tmp_path / "addons" / "gqt_gherkin" / "features"
+    feats.mkdir(parents=True)
+    (feats / "a.feature").write_text("Feature: A\n")
+    doc = {"schema_version": "test-attribution/7",
+           "file_sha256": {}, "tests_face": {},
+           "arms": {"gut_full": {"test_to_files": {}}}}  # 无 feature_sha256 键
+    import json as _json
+
+    map_dir = tmp_path / ".qa-cache"
+    map_dir.mkdir()
+    (map_dir / "attribution-map.json").write_text(_json.dumps(doc))
+    from godot_qa_toolkit.mutation.map_contract import status
+
+    st = status(str(tmp_path), [])
+    assert st.get("fresh") is False
+    assert st.get("would_refresh") == "full", st.get("would_refresh")
+    assert any("feature_sha256: missing" in f
+               for f in st.get("factors") or [])
+
+
 def test_attribution_artifact_carries_feature_sha256():
     """R16 退回项 2：`measure run --test-attribution` 直建产物顶层带
     `feature_sha256`（三条建图路径之一；之前只在落盘后二次改写）。"""

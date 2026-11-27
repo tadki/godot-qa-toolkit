@@ -208,7 +208,11 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
     # C3-R9 退回3：would_refresh 如实预测 refresh 将执行的动作（含周期
     # 校准、新增生产文件、不可归因变更三类具名全量）；结构性失配
     # （schema/arms/recipe）直接全量，其余走决策镜像。
-    if any(f.startswith(("schema:", "arms:")) for f in factors):
+    if any(f.startswith(("schema:", "arms:", "feature_sha256:"))
+           for f in factors):
+        # C3-R17：缺 `feature_sha256` 键（因素文案自带 "full rebuild
+        # required"）与 schema/arms 同列——would_refresh 必须如实预测
+        # refresh 将执行的全量重建，不落增量判定。
         scope = "full"
     else:
         try:

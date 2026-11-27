@@ -1303,7 +1303,7 @@ def _verdict_identity_index(
 
 def _verdict_case_a_concrete(merged: dict, full_paths: "list[str]",
                              pairs: set) -> "set[str]":
-    """Case A 具体归因腿：脚本头证据在场时按 (script, name) 建 canonical
+    """Case A 具体归因腿：脚本头证据在场时按 (script, name) 建规范形态
     red；摘要通配（无具体证据的失败名）保守全路径红。返回已归因名集。"""
     concrete = sorted({(s, n) for (s, n) in pairs if s != "*"})
     concrete_names = {n for _s, n in concrete}

@@ -427,11 +427,12 @@ def _line_map_sets(f, project_root, selection_meta, executed_list) -> tuple:
             "line_group_chunks: source=runtime_mapping without a resolved "
             "map path — refusing to re-guess the default attribution map")
     rel = _res_path_of(f, project_root).removeprefix("res://")
+    # C3-R18（定案 22）：doc 装载走契约只读视图（零裸读/零路径查找）。
+    from .map_contract import MapContractError, view as _mc_view
+
     try:
-        doc = truth_select.load_map(
-            mapping_path) if mapping_path else truth_select.load_map(
-                truth_select.map_path(str(Path(project_root).resolve())))
-    except Exception as e:  # noqa: BLE001 — 不可用即 fail-loud（不静默回退）
+        doc = _mc_view(str(Path(project_root).resolve())).doc
+    except MapContractError as e:  # noqa: BLE001 — 不可用即 fail-loud
         raise truth_select.MutationSelectionError(
             "line_selection_map_unusable", str(e)) from e
     by_line = truth_select._line_script_sets(

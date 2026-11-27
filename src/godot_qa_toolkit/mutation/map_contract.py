@@ -26,7 +26,7 @@ from .verdict_source import (
     _load_map_doc,
     assert_map_fresh,
 )
-from .truth_select import SelectionError
+from .truth_select import SelectionError, map_path
 
 
 class MapContractError(Exception):
@@ -68,6 +68,13 @@ def _factor_report(root: str, doc: dict, files: list[str]) -> "tuple[bool, list[
         _assert_no_new_production(Path(root), doc)
     except BaselineSourceError as e:
         factors.append(f"new_production: {e}")
+    # C3-R15/R18 契约自洽缺口：各项因素新鲜但缺 `test_verdicts` →
+    # 视图构造必失败 → 视为不新鲜（具名因素，走一次全量重建补表），
+    # 不再要用户手删地图。
+    if "test_verdicts" not in doc:
+        factors.append(
+            "test_verdicts: missing — map cannot be consumed as fresh; "
+            "full rebuild required")
     # C3-R15（定案 4/§SPEC-016）：feature 内容失效面纳入新鲜度判定——
     # feature_sha256 已摘出 wholesale recipe hash（R14），但 status 必须
     # 仍对账（否则 feature 编辑被判完全新鲜、gherkin 过期红绿判定留给
@@ -201,7 +208,7 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
         # 契约违反，只读探测本身不抛——由需要视图的消费方（refresh）
         # 再取时具名失败）。
         try:
-            view = MapView(root, doc)
+            view = MapView(root, doc, map_path=map_path(Path(root)))
         except MapContractError:
             view = None
         return {"present": True, "fresh": True, "factors": [],
@@ -226,6 +233,45 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
             "scope": [f.split(":", 1)[0] for f in factors] if factors
             else [],
             "last_cost": _last_measured_cost(doc)}
+
+
+def read_doc_at(map_path: str) -> dict:
+    """已知路径的裸装载（只读，零新鲜判定）——供 selection 元数据守卫
+    （S2.2/S2.3 三态）场景使用：路径已由契约解析链给出，此处只负责
+    读取与 schema 校验。定案 22 的"零裸读"指消费方不得自行**查路径**
+    或绕过判定构造视图；已解析路径的装载仍是契约出口。"""
+    return _load_map_doc(map_path)
+
+
+def view(project_root: str) -> MapView:
+    """C3-R18（定案 22）：只读取视图的唯一入口（零续新、零写盘）——
+    map 模块之外不得裸读/自行查路径。
+
+    fresh 且三断言通过 → MapView（含 map_path 披露）；不新鲜、缺键、
+    视图构造失败 → 具名 `MapContractError`（消费方按不新鲜处理，由
+    prepare 重建）。"""
+    from .truth_select import map_path
+
+    root = str(Path(project_root).resolve())
+    path = map_path(Path(root))
+    if not path:
+        raise MapContractError(
+            "no attribution map at the default location — run any gqt "
+            "command with preparation (e.g. measure coverage) to build it")
+    st = status(root, [])
+    if not st.get("fresh"):
+        raise MapContractError(
+            "attribution map is not fresh: "
+            + "; ".join(st.get("factors") or []))
+    try:
+        doc = _load_map_doc(root)
+        return MapView(root, doc, map_path=path)
+    except MapContractError:
+        # 契约自洽缺口（R15/定案 22）：判定新鲜但视图构造失败 → 视为
+        # 不新鲜（由 prepare 重建），不要求用户手删地图。
+        raise MapContractError(
+            "attribution map judged fresh but view construction failed "
+            "— treating as stale; prepare will rebuild")
 
 
 def refresh(project_root: str, files: "list[str] | None" = None,
@@ -256,7 +302,7 @@ def _refresh_locked(root: str, files: "list[str]",
     if st["fresh"]:
         doc = _load_map_doc(root)
         return {"fresh": True, "already_fresh": True,
-                "view": MapView(root, doc)}
+                "view": MapView(root, doc, map_path=map_path)}
     # 既有续新管线（create/increment/full 阶梯；原子写 + 台账）——
     # 阶梯本体在此（verdict_source.prepare_map_for_baseline 已变薄适配器）
     from .truth_select import MutationSelectionError, load_map, map_path
@@ -309,17 +355,19 @@ def _refresh_locked(root: str, files: "list[str]",
             f"refresh still stale after renewal (old map bytes "
             f"unchanged on failure paths): {e}") from e
     return {"fresh": True, "already_fresh": False,
-            "view": MapView(root, doc)}
+            "view": MapView(root, doc, map_path=map_path)}
 
 @dataclass
 class MapView:
     """薄只读视图（只作为 `refresh`/`status` fresh 的返回值）。
 
     构造期三断言（QA 反例转常驻测试）：§SPEC-025 verdict 表在场、
-    §SPEC-028 dropped 无残留、§SPEC-015 invalid 臂边不出场。"""
+    §SPEC-028 dropped 无残留、§SPEC-015 invalid 臂边不出场。
+    `map_path` 供披露使用（定案 22：消费方不得自行从裸路径构造视图）。"""
 
     project_root: str
     doc: dict
+    map_path: str = ""
 
     def __post_init__(self) -> None:
         # §SPEC-025：verdict 表在场（缺表 = 表不守恒，拒装）

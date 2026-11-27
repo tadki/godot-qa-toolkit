@@ -88,15 +88,19 @@ def _mapping_doc(root: Path) -> tuple:
     """映射文档装载 + 顶层 instrumentable_lines 形状守卫（投影前验证——
     防止 _projection_map_reject 的 AttributeError 被兜底 except 遮蔽成
     projection_failed，§SPEC-025/027 域命名）。返回 (map_path, doc)。"""
-    map_path = truth.map_path(str(root))
-    if not map_path:
-        raise CoverageMappingError(
-            "no_attribution_map",
-            "build it first: `gqt measure run --test-attribution`")
+    # C3-R18（定案 22）：map 装载走契约只读视图（零裸读/零路径查找）。
+    from ..mutation.map_contract import MapContractError, view as _mc_view
+
     try:
-        doc = truth.load_map(map_path)
-    except truth.SelectionError as e:
-        raise CoverageMappingError("attribution_map_unusable", str(e)) from e
+        v = _mc_view(str(root))
+    except MapContractError as e:
+        msg = str(e)
+        code = ("no_attribution_map"
+                if "no attribution map" in msg else
+                "attribution_map_unusable")
+        raise CoverageMappingError(code, msg) from e
+    map_path = v.map_path
+    doc = v.doc
     inst_all = doc.get("instrumentable_lines")
     if inst_all is None:
         inst_all = {}

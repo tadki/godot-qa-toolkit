@@ -106,6 +106,7 @@ def write_map(project_root: Path,
         # C3-R16：feature 内容指纹（map 必带——status 的 feature 失效
         # 面对账源；缺键 = 具名 missing 因素走全量重建的新契约）。
         "feature_sha256": _feature_sha_of(project_root),
+        "test_verdicts": {},
         "instrumentable_lines": instrumentable,
         "arms": {"gut_full": arm},
         # SEE-1587 D3：真实产物携带执行完整性证据；零引用（pairs=0）
@@ -178,6 +179,7 @@ def line_facts_map(project_root: Path,
         # C3-R16：feature 内容指纹（map 必带——status 的 feature 失效
         # 面对账源；缺键 = 具名 missing 因素走全量重建的新契约）。
         "feature_sha256": _feature_sha_of(project_root),
+        "test_verdicts": {},
         "instrumentable_lines": instrumentable or {rel: [2, 3]
                                                    for rel in rels},
         "arms": {"gut_full": arm},

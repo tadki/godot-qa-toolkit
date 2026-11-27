@@ -622,15 +622,14 @@ def _prepare_full_rebuild(project_root: str, files: list[str], path: str,
     """全脸重建（measure run 同形态；recipe pristine 失配/结构性漂移
     不可增量）——宇宙 = §SPEC-031 清单 production 全集（§SPEC-029）。
 
-    C3-R3 项2：**不删旧 map**——ensure_map(force=True, out_path=path)
-    直接原子替换目标路径；生成/校验失败时旧 map 字节不变（此前先
-    unlink 再重建，中途失败即销毁用户地图——显式 map 同样受害）。"""
+    C3-R3 项2：**不删旧 map**——ensure_map(force=True) 直接原子替换
+    默认位置目标路径；生成/校验失败时旧 map 字节不变。"""
     from .truth_select import MutationSelectionError, ensure_map
 
     build_files = _production_universe(project_root, files)
     try:
         ensure_map(project_root, build_files, timeout_s=timeout_s,
-                   force=True, out_path=path)
+                   force=True)
     except MutationSelectionError as e:
         raise BaselineSourceError(
             f"prepare renewal failed (rebuild): {e}") from e

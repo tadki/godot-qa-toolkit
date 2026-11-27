@@ -263,14 +263,16 @@ def _cov_vacuous(path, src, tests_glob, evidence_out, min_percent: float,
             "failures": []}
 
 def _cov_probes_evidence(path, src, tests_glob, evidence_out, min_percent,
-                         proj: dict) -> tuple:
+                         proj: dict, project_root: str = "") -> tuple:
     """执行证据链（probes_fired 取自映射 arms_state，不伪造）：缺失/畸形/
-    无效 → 具名 run_error。返回 ((arms_ok, probes), None) 或 (None, err)。"""
+    无效 → 具名 run_error。返回 ((arms_ok, probes), None) 或 (None, err)。
+    C3-R18（定案 22）：doc 装载走契约只读视图。"""
     from ..mutation import truth_select as _truth
+    from ..mutation.map_contract import MapContractError, view as _mc_view
 
     try:
-        doc = _truth.load_map(proj["map_path"])
-    except Exception as e:  # noqa: BLE001
+        doc = _mc_view(project_root).doc
+    except MapContractError as e:  # noqa: BLE001
         return None, _cov_fail(path, src, tests_glob, evidence_out,
                                f"attribution map unusable: {e}", min_percent)
     try:
@@ -404,7 +406,8 @@ def run_coverage(
         return _cov_vacuous(path, src, tests_glob, evidence_out, min_percent,
                             proj)
     checked, err = _cov_probes_evidence(path, src, tests_glob, evidence_out,
-                                        min_percent, proj)
+                                        min_percent, proj,
+                                        project_root=str(project_root))
     if checked is None:
         return err
     _arms_ok, probes = checked

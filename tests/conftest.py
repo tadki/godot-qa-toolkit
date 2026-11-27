@@ -55,7 +55,7 @@ def _attribution_map_default_off(monkeypatch):
     """
     from godot_qa_toolkit.mutation import truth_select
     monkeypatch.setenv(truth_select.ENV_MODE, "off")
-    monkeypatch.delenv(truth_select.ENV_MAP, raising=False)
+    monkeypatch.delenv("GQT_ATTRIBUTION_MAP", raising=False)
     # SEE-1594 §SPEC-019：单元测试不得触发真实 `godot --import`（假
     # project.godot fixture 会让自动导入外呼真实引擎）；零配置自动导入只
     # 在真实 KOL 矩阵/生产路径生效。

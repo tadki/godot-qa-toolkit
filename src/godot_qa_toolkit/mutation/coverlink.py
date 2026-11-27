@@ -599,10 +599,16 @@ def _prefilter_resolve_map(project_root, map_path, reasons) -> tuple:
 
     root = str(Path(project_root).resolve())
     doc: dict | None = None
+    resolved: "str | None" = None
     if map_path is _UNRESOLVED_MAP:
-        resolved = _truth.map_path(root)
-        if not resolved:
-            reasons.append("no attribution map for projection")
+        # C3-R18（定案 22）：默认解析走契约 view（含 map_path 披露与
+        # 新鲜/构造校验），零裸路径查找。
+        from .map_contract import MapContractError, view as _mc_view
+
+        try:
+            resolved = _mc_view(root).map_path
+        except MapContractError as e:
+            reasons.append(f"no attribution map for projection: {e}")
     elif map_path is MAP_PATH_METADATA_INCONSISTENT:
         resolved = None
         reasons.append("selection metadata inconsistent: source="
@@ -616,9 +622,18 @@ def _prefilter_resolve_map(project_root, map_path, reasons) -> tuple:
                        "--tests override) — map-derived coverage prefilter "
                        "skipped")
     if resolved:
+        # C3-R18（定案 22）：doc 装载走契约（零裸读）。已解析路径的
+        # 装载用 read_doc_at（零新鲜判定的裸装载——新鲜判定已由
+        # selection 链完成）；默认解析失败下沉披露。
+        from .map_contract import MapContractError, read_doc_at as _rda
+        from .map_contract import view as _mc_view
+
         try:
-            doc = _truth.load_map(resolved)
-        except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
+            if map_path is _UNRESOLVED_MAP:
+                doc = _mc_view(project_root).doc
+            else:
+                doc = _rda(resolved)
+        except MapContractError as e:  # noqa: BLE001 — 不可用即下沉
             reasons.append(f"attribution map unusable: {e}")
     return resolved, doc
 

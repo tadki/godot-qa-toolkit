@@ -200,8 +200,7 @@ class RuntimeOwnership:
             return None
         return paths[0]
 
-def ownership_for(project_root: str, target_file: str,
-                  map_path_override: str | None = None):
+def ownership_for(project_root: str, target_file: str):
     """新鲜映射 → RuntimeOwnership；无新鲜映射/解析异常 → None（A09）。
 
     None = 不产出 kill 证书 → killed 保守重跑（fail-safe 只偏向重跑）。
@@ -211,14 +210,16 @@ def ownership_for(project_root: str, target_file: str,
     try:
         # §SPEC-032/D1：证书归属路径只读（run 侧零续新）
         sel = _ts().resolve_selection(project_root, target_file,
-                                      map_path_override, renew=False)
+                                      renew=False)
         mp = sel.get("mapping") or {}
         # §SPEC-029 谓词单一实现：新鲜判定 = resolve 判 fresh（共享
         # assert_map_fresh 谓词；source=runtime_mapping 仅在新鲜路径赋值；
         # recipe_hash_ok 旧字段已退役）。
         if mp.get("file_sha256_bound") \
                 and sel.get("source") == "runtime_mapping":
-            doc = _ts().load_map(mp["path"])
+            # C3-R18（定案 22）：doc 装载走契约只读视图（零裸读）。
+            from .map_contract import view as _mc_view
+            doc = _mc_view(project_root).doc
             owner = RuntimeOwnership(project_root, doc)
             owner.source = "runtime_mapping"
             return owner

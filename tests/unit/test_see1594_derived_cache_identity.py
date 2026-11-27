@@ -85,6 +85,10 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
         "target_files": [rel],
         "tests_face": _tests_face(proj),
         "instrumentable_lines": {rel: [2, 3]},
+        # C3-R16/R18：map 必带 feature 内容指纹与 verdict 表（缺键 =
+        # 具名 missing 因素走全量重建的新契约）。
+        "test_verdicts": {},
+        "feature_sha256": {},  # 空面：无 features 目录的夹具 → 对账空集
         "arms": {"gut_full": arm},
         "arms_state": {"gut_full": {"state": "valid", "invalid_reason": None,
                                     "bundles": 1, "pairs": arm["pairs"],

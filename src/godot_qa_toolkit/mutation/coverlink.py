@@ -196,22 +196,28 @@ def _projection_binding(doc: dict, rel: str) -> dict | None:
     return binding
 
 
-def _projection_map_reject(
-        root: Path, doc: dict, rel: str,
-        current_recipe_pristine: "str | None",
-        tests_face: "dict | None") -> "str | None":
-    """行事实投影的前置校验链（写侧，逐项顺序与原因文案保持稳定）：
-    map schema / 臂有效性 / 目标文件 sha / recipe pristine / 测试面摘要 /
-    探针面。任一失配返回拒绝原因——消费侧回退不过滤；通过返回 None。"""
-    from ..measurement.attribution import ATTRIBUTION_SCHEMA
-    from .truth_select import arms_valid
+def _projection_toolchain_drift(root: Path, doc: dict) -> "str | None":
+    """C3-R23（R1）：投影前置的工具链面对账（与 status/assert_map_fresh
+    同一现算与缓存）。存储 report_recipe_hash 与现算注入域不一致 →
+    具名拒绝原因；一致或不可判（缺席/recipe 不可构建）→ None。"""
+    stored = doc.get("report_recipe_hash")
+    if not (isinstance(stored, str) and stored):
+        return None
+    from ..mutation.truth_select import _current_report_recipe_hash
 
-    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
-        return (f"attribution map schema "
-                f"{doc.get('schema_version')!r} != "
-                f"{ATTRIBUTION_SCHEMA!r}")
-    if not arms_valid(doc.get("arms_state") or {}):
-        return "attribution map arms invalid"
+    computed = _current_report_recipe_hash(str(root))
+    if computed is None or computed == stored:
+        return None
+    return (f"attribution map toolchain face drift "
+            f"(report_recipe_hash stored {stored[:12]} != "
+            f"computed {str(computed)[:12]})")
+
+
+def _projection_reject_recipe(root: Path, doc: dict, rel: str,
+                              current_recipe_pristine: "str | None"
+                              ) -> "str | None":
+    """投影前置校验链的 recipe 段（目标文件 sha / pristine / 工具链面）。
+    任一失配返回拒绝原因；通过返回 None。"""
     try:
         file_sha = sha256_file(root / rel)
     except OSError as e:
@@ -223,17 +229,32 @@ def _projection_map_reject(
         return "current recipe hash unavailable"
     if doc.get("recipe_hash_pristine") != current_recipe_pristine:
         return "attribution map recipe drift"
-    # C3-R23（R1）：工具链面与新鲜度入口同口径（status/assert_map_fresh
-    # 同一现算与缓存）——Godot/GUT/gqt 版本或 bin 指向漂移即拒绝投影
+    # C3-R23（R1）：工具链面与新鲜度入口同口径——漂移即拒绝投影
     # （消费侧回退不过滤，宁多跑不假过滤）。
-    stored_report = doc.get("report_recipe_hash")
-    if isinstance(stored_report, str) and stored_report:
-        from ..mutation.truth_select import _current_report_recipe_hash
-        computed = _current_report_recipe_hash(str(root))
-        if computed is not None and computed != stored_report:
-            return ("attribution map toolchain face drift "
-                    f"(report_recipe_hash stored {stored_report[:12]} != "
-                    f"computed {str(computed)[:12]})")
+    return _projection_toolchain_drift(root, doc)
+
+
+def _projection_map_reject(
+        root: Path, doc: dict, rel: str,
+        current_recipe_pristine: "str | None",
+        tests_face: "dict | None") -> "str | None":
+    """行事实投影的前置校验链（写侧，逐项顺序与原因文案保持稳定）：
+    map schema / 臂有效性 / 目标文件 sha / recipe pristine / 工具链面 /
+    测试面摘要 / 探针面。任一失配返回拒绝原因——消费侧回退不过滤；
+    通过返回 None。"""
+    from ..measurement.attribution import ATTRIBUTION_SCHEMA
+    from .truth_select import arms_valid
+
+    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
+        return (f"attribution map schema "
+                f"{doc.get('schema_version')!r} != "
+                f"{ATTRIBUTION_SCHEMA!r}")
+    if not arms_valid(doc.get("arms_state") or {}):
+        return "attribution map arms invalid"
+    recipe_reason = _projection_reject_recipe(root, doc, rel,
+                                              current_recipe_pristine)
+    if recipe_reason is not None:
+        return recipe_reason
     face_now = tests_face if tests_face is not None else current_tests_face(
         str(root))
     if tests_face_digest(doc.get("tests_face") or {}) != tests_face_digest(

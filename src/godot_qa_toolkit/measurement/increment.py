@@ -1301,6 +1301,49 @@ def _verdict_identity_index(
     return tests_by_base, idents_by_base
 
 
+def _verdict_case_a_concrete(merged: dict, full_paths: "list[str]",
+                             pairs: set) -> "set[str]":
+    """Case A 具体归因腿：脚本头证据在场时按 (script, name) 建 canonical
+    red；摘要通配（无具体证据的失败名）保守全路径红。返回已归因名集。"""
+    concrete = sorted({(s, n) for (s, n) in pairs if s != "*"})
+    concrete_names = {n for _s, n in concrete}
+    wild = sorted({n for (s, n) in pairs if s == "*"} - concrete_names)
+    for (s, n) in concrete:
+        ident = f"{s}::{n}"
+        if ident not in merged:
+            merged[ident] = {"verdict": "red", "classification": "new",
+                             "script": s}
+    for n in wild:
+        for fp in full_paths:
+            ident = f"{Path(fp).name}::{n}"
+            if ident not in merged:
+                merged[ident] = {"verdict": "red", "classification": "new",
+                                 "script": fp}
+    return concrete_names | set(wild)
+
+
+def _verdict_case_a_failures(merged: dict, full_paths: "list[str]",
+                             failing: "set[str]", pairs: set,
+                             executed: set) -> None:
+    """Case A：执行账失败名（宇宙外身份）→ red 进表。C3-R23（V1）：有
+    脚本头证据按 (script, name) 具体归因——同名碰撞下不再给未失败的
+    另一目录同名脚本凭空建红；Run Summary 通配（无具体证据）与无头
+    （旧输出形态）失败名保守全路径红。"""
+    if executed and pairs:
+        attributed = _verdict_case_a_concrete(merged, full_paths, pairs)
+        residual = [n for n in sorted(failing) if n not in attributed]
+    else:
+        residual = sorted(failing)
+    for fp in full_paths:
+        base = Path(fp).name
+        for name in residual:
+            ident = f"{base}::{name}"
+            if ident not in merged:
+                merged[ident] = {"verdict": "red",
+                                 "classification": "new",
+                                 "script": fp}
+
+
 def _verdict_add_new_identities(merged: dict, per_script: dict,
                                 rerun_scripts: "set[str]",
                                 tests_face: "dict[str, str] | None",
@@ -1345,40 +1388,10 @@ def _verdict_add_new_identities(merged: dict, per_script: dict,
                                  "classification": "new",
                                  "script": (sc if sc.startswith("res://")
                                             else (full or sc))}
-        # 执行账失败名（宇宙外身份，Case A）：red。C3-R23（V1）：有脚本
-        # 头证据按 (script, name) 具体归因——同名碰撞下不再给未失败的
-        # 另一目录同名脚本凭空建红；Run Summary 通配（无具体证据）与
-        # 无头（旧输出形态）失败名保持保守全路径红。
-        if executed and pairs:
-            concrete = sorted({(s, n) for (s, n) in pairs if s != "*"})
-            concrete_names = {n for _s, n in concrete}
-            wild = sorted({n for (s, n) in pairs if s == "*"}
-                          - concrete_names)
-            attributed = concrete_names | set(wild)
-            for (s, n) in concrete:
-                ident = f"{s}::{n}"
-                if ident not in merged:
-                    merged[ident] = {"verdict": "red",
-                                     "classification": "new",
-                                     "script": s}
-            for n in wild:
-                for fp in full_paths:
-                    ident = f"{Path(fp).name}::{n}"
-                    if ident not in merged:
-                        merged[ident] = {"verdict": "red",
-                                         "classification": "new",
-                                         "script": fp}
-            residual = [n for n in sorted(failing) if n not in attributed]
-        else:
-            residual = sorted(failing)
-        for fp in full_paths:
-            base = Path(fp).name
-            for name in residual:
-                ident = f"{base}::{name}"
-                if ident not in merged:
-                    merged[ident] = {"verdict": "red",
-                                     "classification": "new",
-                                     "script": fp}
+        # 执行账失败名（宇宙外身份，Case A）→ red（归因见
+        # _verdict_case_a_failures）
+        _verdict_case_a_failures(merged, full_paths, failing, pairs,
+                                 executed)
 
 
 def _merged_test_verdicts(baseline: dict, executions: list[dict],

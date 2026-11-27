@@ -623,6 +623,71 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
     return base
 
 
+def _canonicalize_deleted_families(merged: dict, families: dict,
+                                   collisions: "list[dict] | None") -> None:
+    """C3-R24（N1/§SPEC-038⑤）：删除家族的旧 basename 条目处置——唯一
+    幸存者改写规范形态（幸存者判定保留、产物单一形态）；多幸存者无法
+    消歧原样保留 + 具名披露；整族已删兜底剔除（_verdict_drop_removed
+    已删时此处为空转）。"""
+    for ident in list(merged):
+        sc, _, nm = str(ident).partition("::")
+        if not nm or sc.startswith("res://") \
+                or sc.startswith("gherkin://"):
+            continue
+        fam = families.get(Path(sc).name)
+        if fam is None:
+            continue
+        _dead, survivors = fam
+        full_survivors = [f"res://{r}" for r in survivors]
+        if len(full_survivors) == 1:
+            canon = f"{full_survivors[0]}::{nm}"
+            if canon not in merged and ident in merged:
+                merged[canon] = merged.pop(ident)
+                if collisions is not None:
+                    collisions.append({
+                        "basename_key": ident,
+                        "candidates": sorted({ident, canon}),
+                        "resolved": canon,
+                        "reason": "legacy_basename_identity_"
+                                  "canonicalized_after_delete",
+                    })
+        elif len(full_survivors) > 1:
+            if collisions is not None:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": sorted(full_survivors),
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_ambiguous_after_delete",
+                })
+        elif ident in merged:
+            merged.pop(ident, None)
+            if collisions is not None:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": sorted({ident}),
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_dropped_with_family",
+                })
+
+
+def _disclose_unresolvable_legacy(merged: dict, tests_by_base: dict,
+                                  collisions: "list[dict] | None") -> None:
+    """tests_face/宇宙都恢复不出规范路径的旧 basename 条目原样保留并具名
+    披露（不静默丢证据，C3-R22 D4/QA-R2）。"""
+    for ident in list(merged):
+        sc, _, nm = str(ident).partition("::")
+        if not nm or sc.startswith("res://"):
+            continue
+        if not (tests_by_base.get(Path(sc).name) or []):
+            if collisions is not None:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": [],
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_kept_no_canonical_path",
+                })
+
+
 def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
                              arm_identities: "list[str] | None",
                              collisions: "list[dict] | None",
@@ -657,54 +722,11 @@ def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
                 "resolved": twin,
                 "reason": "legacy_basename_identity_replaced_by_canonical",
             })
-        for ident in list(merged):
-            sc, _, nm = str(ident).partition("::")
-            if not nm or sc.startswith("res://"):
-                continue
-            if not (tests_by_base.get(Path(sc).name) or []):
-                collisions.append({
-                    "basename_key": ident,
-                    "candidates": [],
-                    "resolved": "",
-                    "reason": "legacy_basename_identity_kept_no_canonical_path",
-                })
-        families = legacy_families if legacy_families is not None else {}
-        for ident in list(merged):
-            sc, _, nm = str(ident).partition("::")
-            if not nm or sc.startswith("res://") \
-                    or sc.startswith("gherkin://"):
-                continue
-            fam = families.get(Path(sc).name)
-            if fam is None:
-                continue
-            _dead, survivors = fam
-            full_survivors = [f"res://{r}" for r in survivors]
-            if len(full_survivors) == 1:
-                canon = f"{full_survivors[0]}::{nm}"
-                if canon not in merged and ident in merged:
-                    merged[canon] = merged.pop(ident)
-                    collisions.append({
-                        "basename_key": ident,
-                        "candidates": sorted({ident, canon}),
-                        "resolved": canon,
-                        "reason": "legacy_basename_identity_"
-                                  "canonicalized_after_delete",
-                    })
-            elif len(full_survivors) > 1:
-                collisions.append({
-                    "basename_key": ident,
-                    "candidates": sorted(full_survivors),
-                    "resolved": "",
-                    "reason": "legacy_basename_identity_ambiguous_after_delete",
-                })
-            elif ident in merged:
-                merged.pop(ident, None)
-                collisions.append({
-                    "basename_key": ident,
-                    "candidates": sorted({ident}),
-                    "resolved": "",
-                    "reason": "legacy_basename_identity_dropped_with_family",
-                })
+        _disclose_unresolvable_legacy(merged, tests_by_base, collisions)
+    _canonicalize_deleted_families(merged,
+                                   legacy_families
+                                   if legacy_families is not None else {},
+                                   collisions)
 
 def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
                         removed_rels: set[str]) -> tuple[dict, dict]:
@@ -715,6 +737,23 @@ def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
                     if r not in removed_rels}
                 for i, by_rel in by_ident.items()}
     return strip(test_to_lines), strip(script_to_lines)
+
+def _replace_surface_and_dead(fresh: dict,
+                              legacy_families: "dict | None"
+                              ) -> "tuple[set[str], set[str], set[str] | None]":
+    """替换面与升级过渡死族（C3-R24/N1/决策 16）：规范 res:// 键按完整
+    路径替换；旧 basename 键沿用 basename 口径——D4 升级过渡语义不回退；
+    整族已删的 basename 集来自删除家族态（basename 只是「选哪些脚本」
+    入口，不得反向放大到边面）。"""
+    replace_segments = {_identity_script_segment(i) for i in
+                        (fresh.get("test_to_files") or {})}
+    replace_segments |= {_identity_script_segment(k) for k in
+                         (fresh.get("script_to_files") or {})}
+    replace_bases = {Path(s).name for s in replace_segments}
+    dead_bases = {base for base, (dead, _surv)
+                  in (legacy_families or {}).items() if dead} or None
+    return replace_segments, replace_bases, dead_bases
+
 
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
@@ -727,16 +766,8 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
     purge 该文件的全部边（触达身份已整体替换，purge 是死边兜底）。
     `legacy_families`（C3-R24/§SPEC-038⑤）＝删除面升级过渡家族态。
     结构性统计精确重算。"""
-    # C3-R24（N1/决策 16）：replace 面以完整身份为准（规范 res:// 键按
-    # 完整路径替换；旧 basename 键沿用 basename 口径——D4 升级过渡语义
-    # 不回退），删除按完整路径精确生效；basename 只是「选哪些脚本」入口。
-    replace_segments = {_identity_script_segment(i) for i in
-                        (fresh.get("test_to_files") or {})}
-    replace_segments |= {_identity_script_segment(k) for k in
-                         (fresh.get("script_to_files") or {})}
-    replace_bases = {Path(s).name for s in replace_segments}
-    dead_bases = {base for base, (dead, _surv)
-                  in (legacy_families or {}).items() if dead} or None
+    replace_segments, replace_bases, dead_bases = \
+        _replace_surface_and_dead(fresh, legacy_families)
     test_to_lines = _merged_identities(
         "test_to_lines", arm, fresh, dropped, replace_segments,
         replace_bases, dead_bases)
@@ -850,6 +881,13 @@ def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
     }
 
 
+def _deleted_family_state(baseline: dict, dropped_rels: "set[str]") -> dict:
+    """删除面升级过渡家族态（C3-R24/N1）：从**基线**测试面现算（基线面
+    含被删 rel，幸存者判定不受合并面新增同名脚本干扰）。"""
+    return _legacy_family_state(dropped_rels,
+                                baseline.get("tests_face") or {})
+
+
 def run_attribution_increment(project_root: "str | Path",
                               target_files: list[str], recipe: dict,
                               baseline_path: str | Path,
@@ -931,8 +969,8 @@ def _run_attribution_increment_locked(
         root, arm_targets, recipe, rerun, timeout_s, attribution_causal)
     # C3-R24（N1/§SPEC-038⑤）：升级过渡家族态从**基线**测试面现算
     # （基线面含被删 rel，幸存者判定不受合并面新增同名脚本干扰）。
-    legacy_families = _legacy_family_state(
-        set(invalidation["dropped"]), baseline.get("tests_face") or {})
+    legacy_families = _deleted_family_state(baseline,
+                                            set(invalidation["dropped"]))
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,
                         invalidation["dropped"], fid_by_line_by_rel,
                         removed_rels=removed,
@@ -1192,16 +1230,11 @@ def _increment_arms_block(baseline: dict, merged: dict, classes: dict,
         arms["gherkin"] = carried_gherkin
     return arms
 
-def _verdict_drop_removed(merged: dict, dropped_scripts: set,
-                          removed_rels: set,
-                          legacy_families: "dict | None" = None) -> None:
-    """§SPEC-025：删除剔除——删除测试脚本按**完整路径身份**精确生效
-    （C3-R24/N1：同名幸存者不受牵连）；删除生产文件（res:// rel）触达
-    的身份从表中删除。升级过渡（旧 basename 形态键）仅整族已删才剔除
-    （§SPEC-038⑤：幸存在场时保留，改写/披露归 _canonical_verdict_dedup）。"""
-    dropped_rels = set(dropped_scripts or set())
-    dead_bases = {base for base, (dead, _surv)
-                  in (legacy_families or {}).items() if dead}
+def _drop_removed_test_identities(merged: dict, dropped_rels: set,
+                                  dead_bases: "set[str] | None") -> None:
+    """C3-R24（N1）：删除测试脚本按完整路径身份剔除；升级过渡旧 basename
+    键仅整族已删才剔除（幸存在场保留，改写/披露归
+    _canonical_verdict_dedup）。"""
     for ident in list(merged):
         sc = str(ident).partition("::")[0]
         if sc.startswith("gherkin://"):
@@ -1211,6 +1244,18 @@ def _verdict_drop_removed(merged: dict, dropped_scripts: set,
                 del merged[ident]
         elif dead_bases and Path(sc).name in dead_bases:
             del merged[ident]
+
+
+def _verdict_drop_removed(merged: dict, dropped_scripts: set,
+                          removed_rels: set,
+                          legacy_families: "dict | None" = None) -> None:
+    """§SPEC-025：删除剔除——删除测试脚本按**完整路径身份**精确生效
+    （C3-R24/N1：同名幸存者不受牵连）；删除生产文件（res:// rel）触达
+    的身份从表中删除。"""
+    dropped_rels = set(dropped_scripts or set())
+    dead_bases = {base for base, (dead, _surv)
+                  in (legacy_families or {}).items() if dead} or None
+    _drop_removed_test_identities(merged, dropped_rels, dead_bases)
     for rel in removed_rels or set():
         for ident in list(merged):
             sc = str(ident).split("::", 1)[0]

@@ -295,6 +295,23 @@ def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
     return executions
 
 
+def _failing_scenarios_backfill(executions: list[dict],
+                                scenario_of_test: dict) -> None:
+    """§SPEC-025/D8（R4）：执行账失败名（编译 test_name）回写为
+    scenario 名——verdict 重算按 scenario 粒度。C3-R24（N2）：优先消费
+    截断前提取的失败名（failing_tests 键）；旧形态账（无该键）回退解析
+    截断尾部。"""
+    from .gutrun import _parse_failing_tests
+
+    for ex in executions:
+        failing = ex.get("failing_tests")
+        if failing is None:
+            failing = _parse_failing_tests(str(ex.get("out") or ""))
+        ex["failing_scenarios"] = sorted(
+            {scenario_of_test[t] for t in failing
+             if t in scenario_of_test})
+
+
 def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
                               templates: dict, recipe: dict, causal: bool,
                               run_uuid: str, timeout_s: int
@@ -351,16 +368,7 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
         # §SPEC-025/D8（R4）：执行账失败名（编译 test_name）回写为
         # scenario 名（failing_scenarios）——verdict 重算按 scenario 粒度。
         if scenario_of_test:
-            from .gutrun import _parse_failing_tests
-            for ex in executions:
-                # C3-R24（N2）：优先消费截断前提取的失败名；旧形态账
-                # （无 failing_tests 键）回退解析截断尾部
-                failing = ex.get("failing_tests")
-                if failing is None:
-                    failing = _parse_failing_tests(str(ex.get("out") or ""))
-                ex["failing_scenarios"] = sorted(
-                    {scenario_of_test[t] for t in failing
-                     if t in scenario_of_test})
+            _failing_scenarios_backfill(executions, scenario_of_test)
         return fresh, executions
     finally:
         try:

@@ -309,3 +309,58 @@ def test_refresh_wraps_alien_increment_leg_failure(tmp_path, monkeypatch):
         refresh(str(proj), list(_FILES))
     assert "gherkin" in str(ei.value)
     assert map_file.read_bytes() == before, "旧图字节不变"
+
+
+# ──────────────────────────── F1（C3-R20）────────────────────────────
+def test_refresh_planned_full_with_content_routes_through_named_leg(
+        tmp_path, monkeypatch):
+    """C3-R20 F1：预言 full 且内容面有可续新改动（周期校准到期 + 内容
+    漂移）→ refresh 仍经增量腿，腿的具名全量回退把原因写进地图台账。
+    （61b293c 上"预言 full"被一律直接重建：原因既不进输出也不进台账，
+    经增量腿的具名回退在生产路径不可达——Leader 复核退回项。）"""
+    proj = _make_project(tmp_path)
+    doc = _fresh_doc(proj)
+    doc["increment"] = {"increments_since_full": 5}
+    map_file = _write_map(proj, doc)
+    (proj / "prod.gd").write_text("extends Node\n# drifted\n",
+                                  encoding="utf-8")
+    from godot_qa_toolkit.mutation.map_contract import status
+
+    st = status(str(proj), list(_FILES))
+    assert st.get("would_refresh") == "full", st
+
+    import godot_qa_toolkit.measurement.increment as _inc
+    from godot_qa_toolkit.mutation import truth_select as _ts
+
+    leg_calls: list = []
+    rebuild_calls: list = []
+
+    def fake_leg(project_root, targets, recipe, baseline, changed, out,
+                 **_kw):
+        # 模拟增量腿的具名全量回退（_fallback_full_face）：重建图并按
+        # 台账契约写入 `increment.reason`
+        leg_calls.append(list(changed))
+        rebuilt = _fresh_doc(proj)
+        rebuilt["increment"] = {"mode": "calibration_due_fallback",
+                                "reason": "calibration_due_fallback",
+                                "changed_files": {},
+                                "increments_since_full": 0}
+        Path(out).write_text(json.dumps(rebuilt), encoding="utf-8")
+        return {"mode": "calibration_due_fallback"}
+
+    def fake_rebuild(root, files, timeout_s=600, force=False, **_kw):
+        rebuild_calls.append(1)
+        _write_map(proj, _fresh_doc(proj))
+        return None
+
+    monkeypatch.setattr(_inc, "run_attribution_increment", fake_leg)
+    monkeypatch.setattr(_ts, "ensure_map", fake_rebuild)
+    from godot_qa_toolkit.mutation.map_contract import refresh
+
+    outcome = refresh(str(proj), list(_FILES))
+    assert outcome.get("fresh") is True
+    assert leg_calls, "预言 full 且内容面可续新时必须经增量腿（具名回退可达）"
+    assert not rebuild_calls, "内容面可续新时不得绕过具名回退直接重建"
+    after = json.loads(map_file.read_text(encoding="utf-8"))
+    assert (after.get("increment") or {}).get("reason") == \
+        "calibration_due_fallback", "全量原因必须进地图台账"

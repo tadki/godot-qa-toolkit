@@ -1522,8 +1522,17 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
     from .mutation.verdict_source import BaselineSourceError
     root = str(Path(args.project_root).resolve())
     mode = "unknown"
+    reason = None
     try:
-        mode = status(root, []).get("would_refresh") or "fresh"
+        st = status(root, [])
+        mode = st.get("would_refresh") or "fresh"
+        # C3-R20（F1）：全量原因具名——结构性缺失取 status 的首个
+        # forced-full 因素；经增量腿的回退取重建后地图台账的
+        # `increment.reason`（腿内决策与 status 预言同源）。
+        reason = next((f for f in st.get("factors") or []
+                       if f.startswith(("schema:", "arms:", "recipe:",
+                                        "test_verdicts:", "view:",
+                                        "feature_sha256_missing:"))), None)
         outcome = refresh(root, [], timeout_s=int(args.timeout))
     except (MapContractError, BaselineSourceError, SelectionError,
             MutationSelectionError) as e:
@@ -1531,12 +1540,17 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
                       "summary": {"mode": mode, "error": str(e)},
                       "failures": [{"reason": str(e)}]})
     view = outcome.get("view")
+    summary = {"mode": mode,
+               "map_path": getattr(view, "map_path", None),
+               "already_fresh": outcome.get("already_fresh", False),
+               "fresh": outcome.get("fresh")}
+    if not reason:
+        reason = ((getattr(view, "doc", None) or {}).get("increment")
+                  or {}).get("reason")
+    if reason:
+        summary["reason"] = reason
     return _emit({"tool": "measure.map-update", "ok": True,
-                  "summary": {"mode": mode,
-                              "map_path": getattr(view, "map_path", None),
-                              "already_fresh":
-                                  outcome.get("already_fresh", False),
-                              "fresh": outcome.get("fresh")},
+                  "summary": summary,
                   "failures": []})
 
 

@@ -322,11 +322,14 @@ def _refresh_locked(root: str, files: "list[str]",
         return {"fresh": True, "already_fresh": True,
                 "view": MapView(root, doc,
                                 map_path=map_path(Path(root)))}
-    # C3-R19（要点②）：status 的预言即本函数的实际动作——预言 full
-    # （结构性失配 / 周期校准 / 新增生产文件 / 不可归因变更 / 缺判定
-    # 表 / 视图构造失败）而漂移状态里没有可续新内容时，直接全量重建，
-    # 不再空转后由装填后校验抛错（旧图原样不动、之后每次都失败）。
-    planned = st.get("would_refresh")
+    # C3-R19（要点②）+ C3-R20（F1）：status 的预言即本函数的实际动作。
+    # 直接全量重建只留给结构性缺失（无可续新内容：缺判定表 / 视图构造
+    # 失败 / schema/arms 失配 / 缺 feature_sha256 键）与 pristine 失配；
+    # 内容面有可续新改动时一律经增量腿——腿的具名全量回退把原因写进
+    # 地图台账（`increment.reason`；不可定位变更另有具名 stderr 说明），
+    # 预言 full 不再绕过它直接重建（C3-R19 曾使具名回退在生产路径不可
+    # 达——Leader 复核退回项）。腿的决策与 status 预言同源
+    # （`_increment_decision`），预言与实际动作保持一致。
     path = map_path(Path(root))
     try:
         if not path or not Path(path).is_file():
@@ -341,8 +344,7 @@ def _refresh_locked(root: str, files: "list[str]",
                     f"refresh failed (map unreadable): {e}") from e
             changed, drift, pristine_ok = _prepare_drift_state(doc, root,
                                                                files)
-            if planned == "increment" and changed and drift \
-                    and pristine_ok:
+            if changed and drift and pristine_ok:
                 _prepare_increment_renewal(doc, root, path, changed,
                                            timeout_s)
             else:

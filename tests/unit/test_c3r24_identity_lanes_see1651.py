@@ -10,6 +10,9 @@ C3-R23 复核退回项 N1–N4 的回归钉（判据 §SPEC-038 场景矩阵）�
 - N2（MEDIUM）：执行账脚本级证据（脚本头 / 失败对 / 失败名）在输出
   截断**之前**从完整输出提取并随执行账保存；`out` 保留截断只作披露——
   部分截断不得把本轮转红的同名前脚本记成绿（场景 ⑥，假 kill 方向）。
+- N4（LOW）：`_script_scoped_failed` 在「有脚本头、该名字无失败对」
+  分支取保守方向（失败名在场即红；场景 ⑨）——两套解析器不一致不得
+  记绿；同名具体证据在场时的 V1 豁免语义不回退。
 
 单元红测试在 972dcc4 的产品代码上为红（各用例 docstring 标明红因）；
 真机段（真实 Godot + GUT）覆盖场景 ②③④⑥ 的端到端成立，无真机时
@@ -316,6 +319,33 @@ def test_n2_truncated_output_prev_same_name_turning_red_not_inherited():
         arm_identities=[A_IDENT, B_IDENT], collisions=[])
     assert merged.get(A_IDENT, {}).get("verdict") == "red", merged
     assert merged.get(B_IDENT, {}).get("verdict") == "green", merged
+
+
+# ───────────────── N4：无失败对分支取保守方向（§SPEC-038 ⑨） ─────────────────
+def test_n4_no_pair_but_failing_name_conservative_red():
+    """⑨单元：有脚本头证据、该名字没有失败对、但失败名集里有它 →
+    保守判红（972dcc4 上该分支直接判绿，本测为红）。"""
+    from godot_qa_toolkit.measurement.increment import _script_scoped_failed
+
+    failed = _script_scoped_failed(
+        "res://tests/a/test_x.gd", "test_target", 1,
+        {"test_target"},
+        {("res://tests/b/test_x.gd", "test_other")},
+        {"res://tests/a/test_x.gd"})
+    assert failed is True, failed
+
+
+def test_n4_concrete_sibling_evidence_keeps_green_v1_not_regressed():
+    """V1 豁免不回退：Run Summary 通配 + 具体同名脚本证据在场 → 本脚本
+    的同名绿测保持绿（972dcc4 与修后都必须绿）。"""
+    from godot_qa_toolkit.measurement.increment import _script_scoped_failed
+
+    failed = _script_scoped_failed(
+        "res://tests/a/test_x.gd", "test_target", 1,
+        {"test_target"},
+        {("res://tests/b/test_x.gd", "test_target"), ("*", "test_target")},
+        {"res://tests/a/test_x.gd", "res://tests/b/test_x.gd"})
+    assert failed is False, failed
 
 
 # ───────────────── 真机段：§SPEC-038 ②③④⑥ 端到端（无真机 skip） ─────────────────

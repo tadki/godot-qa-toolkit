@@ -273,14 +273,13 @@ class TestMalformedArmsState:
     def _write_map_with_arms(self, proj, arms_state):
         import hashlib
 
-        from godot_qa_toolkit.measurement.recipe import (build_recipe,
-                                                          recipe_hash)
+        from godot_qa_toolkit.measurement.recipe import build_recipe
         import attribution_fixtures as fx
 
         fx.install_recipe(proj)
         recipe, error = build_recipe(proj)
         assert error is None, error
-    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+        # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
         raw = fx.report_recipe_hash(proj)
         pristine = fx.pristine_recipe_hash(proj)
         rel = "utils/t.gd"

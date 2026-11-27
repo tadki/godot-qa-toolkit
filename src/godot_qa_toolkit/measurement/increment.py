@@ -1258,7 +1258,9 @@ def _script_scoped_failed(script: str, name: str, rc: int,
 
     - script 是完整 `res://` 路径且运行流带脚本头：只有它自己的失败对
       判红；Run Summary 通配仅在无任何具体脚本证据时保守红（摘要段是
-      运行流的复制，具体证据在场时不得外溢到同名脚本）；其余 → 绿；
+      运行流的复制，具体证据在场时不得外溢到同名脚本）；有失败对但
+      该名字无任何失败对时取保守方向——失败名集在场即红（C3-R24/N4：
+      两套解析器不一致不得记绿）；其余 → 绿；
     - 无脚本头（旧形态/输出截断只剩摘要）或裸 basename 身份（升级过渡
       无法定向）：保守名集合并集（与 0d14f98 行为一致，不放宽）。"""
     if script.startswith("res://") and executed:
@@ -1268,7 +1270,7 @@ def _script_scoped_failed(script: str, name: str, rc: int,
             concrete = {n for (s, n) in pairs if s != "*"}
             return name not in concrete
         if pairs:
-            return False
+            return name in failing
         return (name in failing) if failing else (rc != 0)
     return (name in failing) if failing else (rc != 0)
 

@@ -123,3 +123,50 @@ def test_matrix_feature_change_increment_real_godot(tmp_path, monkeypatch):
     assert gh_execs, inc
     assert "failing_tests" in gh_execs[0], gh_execs[0]
     assert gh_execs[0].get("failing_scenarios") is not None, gh_execs[0]
+
+
+# ───────────────── N6：执行异常不得产出任何 green（§SPEC-038⑥ 同族） ─────────────────
+def test_n6_execution_error_record_never_produces_green():
+    """单元：基线含既有红身份，重跑执行账给一条
+    `{"rc": None, "error": "GUT timed out …"}` → 该脚本全部身份保守红，
+    不得出现 green（2f7788f 上 rc None 被折成 0 → 双身份全绿，本测为
+    红）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+
+    a = "res://tests/x/test_a.gd::test_r"
+    b = "res://tests/x/test_a.gd::test_g"
+    baseline = {"test_verdicts": {
+        a: {"verdict": "red", "classification": "pre_existing",
+            "script": "res://tests/x/test_a.gd"},
+        b: {"verdict": "green"},
+    }}
+    merged = _merged_test_verdicts(
+        baseline,
+        [{"script": "test_a.gd", "rc": None, "out": "",
+          "error": "GUT timed out after 180s "
+                   "(args: -gselect=test_a.gd)"}],
+        {"test_a.gd"}, set(), set(),
+        None, set(), set(),
+        tests_face={"tests/x/test_a.gd": "sha"},
+        arm_identities=[a, b], collisions=[])
+    assert merged is not None
+    assert merged.get(a, {}).get("verdict") == "red", merged
+    assert merged.get(b, {}).get("verdict") == "red", merged
+
+
+def test_n6_gherkin_failed_leg_empty_failing_set_conservative_red():
+    """单元（执行账失败语义两腿对齐）：gherkin 重跑腿失败
+    （rc != 0）而 `failing_scenarios` 是空集（失败名不可归因）→ 保守
+    整键红，不得逐 scenario 放绿（2f7788f 上空集按名判定 → 绿，本测为
+    红）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+
+    ident = "gherkin://feature/demo::s::1"
+    baseline = {"test_verdicts": {ident: {"verdict": "green"}}}
+    fresh_gherkin = {"executions": [{"rc": 1, "failing_scenarios": [],
+                                      "out": "Run Summary\n"}]}
+    merged = _merged_test_verdicts(
+        baseline, [], set(), set(), set(),
+        fresh_gherkin, {"demo"}, set(),
+        tests_face=None, arm_identities=[], collisions=[])
+    assert merged.get(ident, {}).get("verdict") == "red", merged

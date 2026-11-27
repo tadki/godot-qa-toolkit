@@ -1292,7 +1292,17 @@ def _verdict_per_script(executions: list[dict]) -> dict:
             failing = _parse_failing_tests(out)
             pairs = parse_failures_with_scripts(out)
             executed = executed_script_headers(out)
-        per_script[b] = (int(r.get("rc") or 0), failing, pairs, executed)
+        rc_raw = r.get("rc")
+        # C3-R25（N6）：执行异常（rc 缺失 / error 在场——超时、二进制
+        # 拉起失败、GUT runner 缺失）不得折成 rc=0 放绿：按失败计（保守
+        # 整脚本红，既有红不洗白），与 gherkin 腿「缺失 rc 当失败」
+        # （_gherkin_rerun_all_passed）同口径；错误文本随执行账
+        # （rerun_executions / rerun_execution_errors）具名披露。
+        if rc_raw is None or r.get("error"):
+            rc = 1
+        else:
+            rc = int(rc_raw)
+        per_script[b] = (rc, failing, pairs, executed)
     return per_script
 
 
@@ -1421,11 +1431,12 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
             merged[ident] = {"verdict": "green"}
             continue
         # 失败腿：scenario 名可归因时逐名判定（通过 scenario 不标红）；
-        # 不可归因（旧形态账/零失败名解析）保守整键红。
+        # 失败名缺失（旧形态账）**或空集**（腿失败但零可归因名——不可
+        # 归因）都保守整键红（C3-R25/N6：不得按空集逐 scenario 放绿，
+        # 与 gut 腿「rc!=0 无失败名 = 保守红」对齐）。
         scenario = str(ident).split("::", 1)[1] \
             if "::" in str(ident) else ""
-        failed = True if failing_scenarios is None \
-            else scenario in failing_scenarios
+        failed = (not failing_scenarios) or scenario in failing_scenarios
         if not failed:
             merged[ident] = {"verdict": "green"}
             continue
@@ -1596,6 +1607,16 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     return merged
 
 
+def _rerun_error_disclosure(executions: "list[dict] | None") -> "list[dict]":
+    """C3-R25（N6）：执行异常具名披露（超时 / 拉起失败 / rc 缺失）——
+    对应脚本的判定已按保守方向记红。"""
+    return [
+        {"script": str(r.get("script") or ""),
+         "error": str(r.get("error") or "rc missing")}
+        for r in (executions or [])
+        if r.get("error") or r.get("rc") is None]
+
+
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
                               invalidation: dict, since_full: int,
@@ -1679,6 +1700,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
             "gherkin_leg_exec_s": gh_exec_s,
             "gherkin_leg_executions": gh_executions or [],
             "rerun_executions": executions or [],
+            # C3-R25（N6）：执行异常的具名披露（对应脚本判定已保守记红）
+            "rerun_execution_errors": _rerun_error_disclosure(executions),
         },
     }
 

@@ -196,7 +196,7 @@ def _map_doc(proj: Path, target: Path,
         "causal": {"enabled": False},
         "file_sha256": {rel: hashlib.sha256(
             target.read_bytes()).hexdigest()},
-        
+
         # C3-R16/R18：map 必带 verdict 表与 feature 指纹。
         "test_verdicts": {},
         "feature_sha256": {},"target_files": [rel], "tests_face": face,

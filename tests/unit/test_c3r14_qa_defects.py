@@ -441,13 +441,38 @@ def test_status_feature_content_change_predicts_increment(tmp_path):
 def test_status_missing_feature_sha256_predicts_full(tmp_path):
     """C3-R17（退回项 1 一行口径）：缺键因素的 would_refresh 必须如实
     预测 refresh 将执行的**全量重建**（与 schema/arms/recipe 同列），
-    不得落进增量判定（因素文案自己写着 "full rebuild required"）。"""
+    不得落进增量判定（因素文案自己写着 "full rebuild required"）。
+    C3-R20（P6 残留）：夹具补到契约认可形状（臂态 / pristine / report
+    hash / 判定表齐备）——full 必须只因缺键这一条因素，不再是残缺
+    夹具被 arms 因素顶成 full 的空测试。"""
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from attribution_fixtures import _feature_sha_of, install_recipe
+    from gherkin_fixtures import ensure_addon_metadata
+
     feats = tmp_path / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
     (feats / "a.feature").write_text("Feature: A\n")
+    (tmp_path / ".gutconfig.json").write_text(
+        '{"dirs": ["res://tests"], "include_subdirs": false,'
+        ' "prefix": "test_"}')
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    install_recipe(tmp_path)
+    ensure_addon_metadata(tmp_path)
+    from godot_qa_toolkit.mutation.truth_select import _fresh_recipe_hash
+
     doc = {"schema_version": "test-attribution/7",
+           "report_recipe_hash": _injected_hash(tmp_path),
+           "recipe_hash_pristine": _fresh_recipe_hash(str(tmp_path)),
            "file_sha256": {}, "tests_face": {},
-           "arms": {"gut_full": {"test_to_files": {}}}}  # 无 feature_sha256 键
+           "arms": {"gut_full": {"test_to_files": {}}},
+           "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
+                                       "pairs": 0, "probes_fired": 1,
+                                       "vacuous": False}},
+           "test_verdicts": {}}  # 仅缺 feature_sha256 键
+    assert "feature_sha256" not in doc
+    assert _feature_sha_of(tmp_path), "项目必须有 feature 才构成缺键场景"
     import json as _json
 
     map_dir = tmp_path / ".qa-cache"
@@ -458,8 +483,11 @@ def test_status_missing_feature_sha256_predicts_full(tmp_path):
     st = status(str(tmp_path), [])
     assert st.get("fresh") is False
     assert st.get("would_refresh") == "full", st.get("would_refresh")
-    assert any("feature_sha256_missing" in f
-               for f in st.get("factors") or [])
+    factors = st.get("factors") or []
+    assert [f for f in factors
+            if f.startswith("feature_sha256_missing")] == \
+        [f for f in factors], \
+        f"full 必须只因缺键：{factors}"
 
 
 def test_attribution_artifact_carries_feature_sha256():

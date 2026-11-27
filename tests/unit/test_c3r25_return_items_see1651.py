@@ -108,8 +108,13 @@ def test_matrix_feature_change_increment_real_godot(tmp_path, monkeypatch):
     map_file = root / ".qa-cache" / "attribution-map.json"
     doc = json.loads(map_file.read_text(encoding="utf-8"))
     ident = "gherkin://feature/demo::s::1"
+    # 补种 24 个合成 feature 键：gherkin 重跑比例帽 0.05，单 feature 面
+    # 重跑占比 1.0 会具名回退全量；1/25 = 0.04 走真腿
+    f2l = {f"demo_filler_{i:02d}": {"calc_sign.gd": [3]}
+           for i in range(24)}
+    f2l["demo"] = {"calc_sign.gd": [3]}
     doc["arms"]["gherkin"] = {
-        "feature_to_lines": {"demo": {"calc_sign.gd": [3]}},
+        "feature_to_lines": f2l,
         "test_to_lines": {ident: {"calc_sign.gd": [3]}},
         "line_to_features": {"calc_sign.gd": {"3": [ident]}},
         "tests": 1, "pairs": 1,
@@ -237,13 +242,22 @@ def test_matrix_content_change_real_godot(tmp_path, monkeypatch):
     import test_c3r23_same_name_increment_see1648 as _v1
 
     root = _v1._build_same_name_project(tmp_path / "r25-content")
-    (root / "data.tres").write_text("k=1\n", encoding="utf-8")
+    # 合法空 Resource（可被 preload——prod_user 必须可编译，否则触达链
+    # 整体断裂）；静态扫描的 path 字面量只认 preload/load 调用。
+    (root / "data.tres").write_text(
+        '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+        encoding="utf-8")
+    # 测试脚本 preload 合法的 prod_user：load 期命中走**脚本车道**
+    # （file_to_scripts——N7 修的身份口径所在车道）。
     (root / "prod_user.gd").write_text(
         'extends RefCounted\nconst D = preload("res://data.tres")\n'
         "func value() -> int:\n\treturn 1\n", encoding="utf-8")
     (root / "tests" / "fill" / "test_data_user.gd").write_text(
-        'extends GutTest\nconst U = preload("res://prod_user.gd")\n'
-        "func test_user_value():\n\tassert_eq(U.value(), 1)\n",
+        'extends GutTest\nconst US = preload("res://prod_user.gd")\n'
+        "var _u\n"
+        "func before_all():\n\t_u = US.new()\n"
+        "\tassert_eq(_u.value(), 1)\n"
+        "func test_user_value():\n\tassert_eq(_u.value(), 1)\n",
         encoding="utf-8")
     scope = json.loads((root / ".gqt-scope.json")
                        .read_text(encoding="utf-8"))

@@ -59,7 +59,9 @@ def test_d8_gut_rerun_per_test_not_whole_script():
         "test_stats.gd::test_mean_empty": {"verdict": "green"},
         "test_stats.gd::test_clamp_pct": {"verdict": "green"},
     }
-    per_script = {"test_stats.gd": (1, {"test_mean_basic"})}
+  # C3-R23（V1）：执行账四元组 (rc, 失败名集, 脚本限定失败对, 执行脚本头集)
+    per_script = {"test_stats.gd": (1, {"test_mean_basic"},
+                                    set(), set())}
     _verdict_recompute_rerun(merged, per_script)
     assert merged["test_stats.gd::test_mean_basic"]["verdict"] == "red"
     assert merged["test_stats.gd::test_mean_basic"]["classification"] == "new"
@@ -73,7 +75,9 @@ def test_d8_gut_rerun_unparseable_failure_conservative_red():
         "test_a.gd::test_x": {"verdict": "green"},
         "test_a.gd::test_y": {"verdict": "green"},
     }
-    _verdict_recompute_rerun(merged, {"test_a.gd": (1, set())})
+    # C3-R23（V1）：执行账四元组 (rc, 失败名集, 脚本限定失败对, 执行脚本头集)
+    _verdict_recompute_rerun(
+        merged, {"test_a.gd": (1, set(), set(), set())})
     assert merged["test_a.gd::test_x"]["verdict"] == "red"
     assert merged["test_a.gd::test_y"]["verdict"] == "red"
 

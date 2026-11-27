@@ -111,7 +111,9 @@ def test_gut_pre_existing_rerun_still_fails_keeps_pre_existing():
             "verdict": "red", "classification": "pre_existing",
             "script": "res://tests/unit/test_red.gd"},
     }
-    per_script = {"test_red.gd": (1, {"test_red_always_fails"})}
+  # C3-R23（V1）：执行账四元组 (rc, 失败名集, 脚本限定失败对, 执行脚本头集)
+    per_script = {"test_red.gd": (1, {"test_red_always_fails"},
+                                  set(), set())}
     _verdict_recompute_rerun(merged, per_script)
     entry = merged["test_red.gd::test_red_always_fails"]
     assert entry["verdict"] == "red"
@@ -122,7 +124,8 @@ def test_gut_green_rerun_now_fails_classified_new():
     merged = {
         "test_a.gd::test_green": {"verdict": "green"},
     }
-    per_script = {"test_a.gd": (1, {"test_green"})}
+  # C3-R23（V1）：执行账四元组 (rc, 失败名集, 脚本限定失败对, 执行脚本头集)
+    per_script = {"test_a.gd": (1, {"test_green"}, set(), set())}
     _verdict_recompute_rerun(merged, per_script)
     entry = merged["test_a.gd::test_green"]
     assert entry["verdict"] == "red"
@@ -134,7 +137,8 @@ def test_gut_rerun_passes_green():
         "test_a.gd::test_x": {"verdict": "red",
                               "classification": "pre_existing"},
     }
-    per_script = {"test_a.gd": (0, set())}
+  # C3-R23（V1）：执行账四元组 (rc, 失败名集, 脚本限定失败对, 执行脚本头集)
+    per_script = {"test_a.gd": (0, set(), set(), set())}
     _verdict_recompute_rerun(merged, per_script)
     assert merged["test_a.gd::test_x"] == {"verdict": "green"}
 

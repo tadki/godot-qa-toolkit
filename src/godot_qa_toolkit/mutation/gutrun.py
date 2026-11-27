@@ -98,3 +98,18 @@ def _parse_failing_tests(gut_output: str) -> set[str]:
         if "[Failed]" in line and current:
             failing.add(current)
     return failing
+
+
+def executed_script_headers(gut_output: str) -> set[str]:
+    """C3-R23（V1）：运行流里实际执行脚本的 `res://` 头集合（与
+    parse_failures_with_scripts 同一识别规则）。执行账按脚本归因的
+    「谁真的跑了」证据——同名碰撞下 `-gselect` 按 basename 可能选中
+    多个物理脚本，只有头集能区分；无头（旧形态/截断只剩摘要）→ 空集
+    （调用方按保守并集回退，不放宽既有方向）。"""
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    out: set[str] = set()
+    for raw in gut_output.splitlines():
+        stripped = ansi.sub("", raw).replace("\r", "").strip()
+        if stripped.startswith("res://") and ".gd" in stripped:
+            out.add(stripped)
+    return out

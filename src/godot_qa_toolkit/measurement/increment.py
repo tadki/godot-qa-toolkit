@@ -1122,18 +1122,49 @@ def _verdict_drop_removed(merged: dict, dropped_scripts: set,
 
 
 def _verdict_per_script(executions: list[dict]) -> dict:
-    """重跑脚本执行账：脚本 basename → (rc, 解析失败名集)。"""
-    from ..mutation.gutrun import _parse_failing_tests
+    """重跑脚本执行账：脚本 basename → (rc, 解析失败名集, 脚本限定失败对,
+    实际执行脚本头集)。C3-R23（V1）：同名碰撞下 `-gselect` 按 basename
+    可能选中多个物理脚本——账必须携带脚本级证据（失败对 + 执行头）才能
+    逐脚本归因，不能只按名字并集。"""
+    from ..mutation.gutrun import (
+        _parse_failing_tests, executed_script_headers,
+        parse_failures_with_scripts,
+    )
 
-    per_script: dict[str, tuple[int, set[str]]] = {}
+    per_script: dict[str, tuple] = {}
     for r in executions or []:
         script = str(r.get("script") or "")
         if not script:
             continue
         b = Path(script).name
+        out = r.get("out") or ""
         per_script[b] = (int(r.get("rc") or 0),
-                         _parse_failing_tests(r.get("out") or ""))
+                         _parse_failing_tests(out),
+                         parse_failures_with_scripts(out),
+                         executed_script_headers(out))
     return per_script
+
+
+def _script_scoped_failed(script: str, name: str, rc: int,
+                          failing: "set[str]", pairs: set,
+                          executed: set) -> bool:
+    """C3-R23（V1）：单身份失败判定按脚本级证据归因。
+
+    - script 是完整 `res://` 路径且运行流带脚本头：只有它自己的失败对
+      判红；Run Summary 通配仅在无任何具体脚本证据时保守红（摘要段是
+      运行流的复制，具体证据在场时不得外溢到同名脚本）；其余 → 绿；
+    - 无脚本头（旧形态/输出截断只剩摘要）或裸 basename 身份（升级过渡
+      无法定向）：保守名集合并集（与 0d14f98 行为一致，不放宽）。"""
+    if script.startswith("res://") and executed:
+        if (script, name) in pairs:
+            return True
+        if ("*", name) in pairs:
+            concrete = {n for (s, n) in pairs if s != "*"}
+            return name not in concrete
+        if pairs:
+            return False
+        return (name in failing) if failing else (rc != 0)
+    return (name in failing) if failing else (rc != 0)
 
 
 def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
@@ -1141,23 +1172,30 @@ def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
     失败名可解析时按名判定——通过的测试不得随脚本级 rc 整体标红；
     失败名空且 rc!=0 = 不可归因（输出不可解析/崩溃）保守整脚本红
     （不得无证据放绿）；red 分类沿基线（pre_existing 不被无依据改写
-    为 new）；基线绿而本轮失败 = new。"""
+    为 new）；基线绿而本轮失败 = new。
+    C3-R23（V1）：同名碰撞下按脚本头证据逐脚本归因——重跑腿未执行的
+    物理脚本基线判定原样继承，不被同名脚本的执行账改写。"""
     for ident in list(merged):
         sc = str(ident).split("::", 1)[0]
         b = Path(sc).name
-        if b in per_script:
-            rc, failing = per_script[b]
-            name = str(ident).split("::", 1)[1]
-            failed = (name in failing) if failing else (rc != 0)
-            if not failed:
-                merged[ident] = {"verdict": "green"}
-                continue
-            prior = merged.get(ident) or {}
-            cls = (prior.get("classification")
-                   if prior.get("verdict") == "red" else None) \
-                or "new"
-            merged[ident] = {"verdict": "red", "classification": cls,
-                             "script": prior.get("script") or sc}
+        acct = per_script.get(b)
+        if acct is None:
+            continue
+        rc, failing, pairs, executed = acct
+        if executed and sc.startswith("res://") and sc not in executed:
+            continue
+        name = str(ident).split("::", 1)[1]
+        failed = _script_scoped_failed(sc, name, rc, failing, pairs,
+                                       executed)
+        if not failed:
+            merged[ident] = {"verdict": "green"}
+            continue
+        prior = merged.get(ident) or {}
+        cls = (prior.get("classification")
+               if prior.get("verdict") == "red" else None) \
+            or "new"
+        merged[ident] = {"verdict": "red", "classification": cls,
+                         "script": prior.get("script") or sc}
 
 
 def _drop_gherkin_dropped(merged: dict, gherkin_dropped: set) -> None:
@@ -1278,7 +1316,7 @@ def _verdict_add_new_identities(merged: dict, per_script: dict,
     tests_by_base, idents_by_base = _verdict_identity_index(
         tests_face, arm_identities)
 
-    for script_base, (rc, failing) in per_script.items():
+    for script_base, (rc, failing, pairs, executed) in per_script.items():
         if script_base not in rerun_scripts:
             continue
         full_paths = tests_by_base.get(script_base, [])
@@ -1287,22 +1325,55 @@ def _verdict_add_new_identities(merged: dict, per_script: dict,
         # 失败名可解析时只看 name in failing，脚本内其余通过测试记 green；
         # 全部不可解析（无失败名且 rc!=0）才整脚本保守红。C3-R8 退回2：
         # 此前 rc!=0 把同脚本其余新身份全记红 → mutation 把可杀的 mutant
-        # 报成存活）
+        # 报成存活。C3-R23（V1）：同名碰撞按脚本级证据归因；重跑腿未
+        # 执行的物理脚本不凭空补表（基线继承面负责）
         for ident in idents_by_base.get(script_base, []):
             if ident in merged:
                 continue
+            sc = str(ident).partition("::")[0]
             name = str(ident).partition("::")[2]
-            failed = (name in failing) if failing else (rc != 0)
+            if executed and sc.startswith("res://") and sc not in executed:
+                continue
+            failed = _script_scoped_failed(sc, name, rc, failing, pairs,
+                                           executed)
             if not failed:
                 merged[ident] = {"verdict": "green"}
             else:
+                # script 字段 = 身份自己的完整路径（V1：同名碰撞下
+                # full_paths[0] 是另一个目录的脚本，不得张冠李戴）
                 merged[ident] = {"verdict": "red",
                                  "classification": "new",
-                                 "script": full or str(ident).partition("::")[0]}
-        # 执行账失败名（宇宙外身份，Case A）：red，完整路径 script
+                                 "script": (sc if sc.startswith("res://")
+                                            else (full or sc))}
+        # 执行账失败名（宇宙外身份，Case A）：red。C3-R23（V1）：有脚本
+        # 头证据按 (script, name) 具体归因——同名碰撞下不再给未失败的
+        # 另一目录同名脚本凭空建红；Run Summary 通配（无具体证据）与
+        # 无头（旧输出形态）失败名保持保守全路径红。
+        if executed and pairs:
+            concrete = sorted({(s, n) for (s, n) in pairs if s != "*"})
+            concrete_names = {n for _s, n in concrete}
+            wild = sorted({n for (s, n) in pairs if s == "*"}
+                          - concrete_names)
+            attributed = concrete_names | set(wild)
+            for (s, n) in concrete:
+                ident = f"{s}::{n}"
+                if ident not in merged:
+                    merged[ident] = {"verdict": "red",
+                                     "classification": "new",
+                                     "script": s}
+            for n in wild:
+                for fp in full_paths:
+                    ident = f"{Path(fp).name}::{n}"
+                    if ident not in merged:
+                        merged[ident] = {"verdict": "red",
+                                         "classification": "new",
+                                         "script": fp}
+            residual = [n for n in sorted(failing) if n not in attributed]
+        else:
+            residual = sorted(failing)
         for fp in full_paths:
             base = Path(fp).name
-            for name in failing:
+            for name in residual:
                 ident = f"{base}::{name}"
                 if ident not in merged:
                     merged[ident] = {"verdict": "red",

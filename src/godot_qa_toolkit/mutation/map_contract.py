@@ -82,7 +82,13 @@ def _factor_report(root: str, doc: dict, files: list[str]) -> "tuple[bool, list[
     # 重跑通道）；wholesale recipe hash 保持排除 feature 内容。
     feature_drift = _feature_face_drift(root, doc)
     if feature_drift:
-        factors.append(f"feature_sha256: {feature_drift}")
+        # C3-R19（P4）：缺键因素的文案自带 `feature_sha256_missing:`
+        # 标签——不再外层再包一层 `feature_sha256: `（外层前缀让
+        # status 的 forced-full 前缀判断永不命中 → 预言 increment）。
+        if feature_drift.startswith("feature_sha256_missing:"):
+            factors.append(feature_drift)
+        else:
+            factors.append(f"feature_sha256: {feature_drift}")
     return (not factors), factors
 
 
@@ -204,20 +210,25 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
                 "error": msg, "missing": missing}
     fresh, factors = _factor_report(root, doc, files)
     if fresh:
-        # §SPEC-035/S5：fresh 时同样返回同一薄只读视图（视图构造失败 =
-        # 契约违反，只读探测本身不抛——由需要视图的消费方（refresh）
-        # 再取时具名失败）。
+        # §SPEC-035/S5：fresh 时返回同一薄只读视图。C3-R19（P5/要点①）：
+        # 各项因素都通过但视图构造失败（判定表残留、dropped 身份残留等
+        # 契约自洽缺口）→ 追加一条具名因素并按不新鲜处理（由 prepare
+        # 全量重建），不再吞掉断言失败冒充 fresh（view=None）。
         try:
             view = MapView(root, doc, map_path=map_path(Path(root)))
-        except MapContractError:
-            view = None
-        return {"present": True, "fresh": True, "factors": [],
-                "would_refresh": None, "scope": [],
-                "last_cost": _last_measured_cost(doc), "view": view}
-    # C3-R9 退回3：would_refresh 如实预测 refresh 将执行的动作（含周期
-    # 校准、新增生产文件、不可归因变更三类具名全量）；结构性失配
-    # （schema/arms/recipe）直接全量，其余走决策镜像。
-    if any(f.startswith(("schema:", "arms:", "feature_sha256_missing:"))
+        except MapContractError as e:
+            factors.append(f"view: construction failed — {e}")
+            fresh = False
+        else:
+            return {"present": True, "fresh": True, "factors": [],
+                    "would_refresh": None, "scope": [],
+                    "last_cost": _last_measured_cost(doc), "view": view}
+    # C3-R9 退回3 + C3-R19（要点①）：would_refresh 如实预测 refresh 将
+    # 执行的动作（含周期校准、新增生产文件、不可归因变更三类具名全量）。
+    # 强制全量的因素：schema、arms、recipe、缺判定表、视图构造失败、缺
+    # `feature_sha256` 键；其余才走决策镜像（增量判定）。
+    if any(f.startswith(("schema:", "arms:", "recipe:", "test_verdicts:",
+                         "view:", "feature_sha256_missing:"))
            for f in factors):
         # C3-R17：缺 `feature_sha256` 键（因素文案自带 "full rebuild
         # required"）与 schema/arms 同列——would_refresh 必须如实预测
@@ -233,14 +244,6 @@ def status(project_root: str, files: "list[str] | None" = None) -> dict:
             "scope": [f.split(":", 1)[0] for f in factors] if factors
             else [],
             "last_cost": _last_measured_cost(doc)}
-
-
-def read_doc_at(map_path: str) -> dict:
-    """已知路径的裸装载（只读，零新鲜判定）——供 selection 元数据守卫
-    （S2.2/S2.3 三态）场景使用：路径已由契约解析链给出，此处只负责
-    读取与 schema 校验。定案 22 的"零裸读"指消费方不得自行**查路径**
-    或绕过判定构造视图；已解析路径的装载仍是契约出口。"""
-    return _load_map_doc(map_path)
 
 
 def view(project_root: str) -> MapView:
@@ -297,15 +300,12 @@ def refresh(project_root: str, files: "list[str] | None" = None,
 def _refresh_locked(root: str, files: "list[str]",
                     timeout_s: int) -> dict:
     """锁内段：复检 + 续新阶梯 + 装填后校验（调用方持 `<map>.lock`）。"""
-    # 锁内复检（D1 并发修复：后到者不重复增量）——status 只读探测
-    st = status(root, files)
-    if st["fresh"]:
-        doc = _load_map_doc(root)
-        return {"fresh": True, "already_fresh": True,
-                "view": MapView(root, doc, map_path=map_path)}
-    # 既有续新管线（create/increment/full 阶梯；原子写 + 台账）——
-    # 阶梯本体在此（verdict_source.prepare_map_for_baseline 已变薄适配器）
-    from .truth_select import MutationSelectionError, load_map, map_path
+    # C3-R19（P1）：import 收敛到函数头——旧写法在分支之后再 import
+    # `map_path`，使它在整个函数域成为局部名，锁内复检 fresh 的早退
+    # 分支触发 UnboundLocalError（已有新鲜地图时四个入口全坏）。
+    from .truth_select import (
+        MutationSelectionError, SelectionError, load_map, map_path,
+    )
     from .verdict_source import (
         _prepare_build_missing,
         _prepare_drift_state,
@@ -313,33 +313,49 @@ def _refresh_locked(root: str, files: "list[str]",
         _prepare_increment_renewal,
     )
 
+    # 锁内复检（D1 并发修复：后到者不重复增量）——status 只读探测；
+    # fresh 时 status 已按要点①验证视图可构造（构造失败按不新鲜处理），
+    # 此处按同一 doc 重建视图（含 map_path 披露）。
+    st = status(root, files)
+    if st["fresh"]:
+        doc = _load_map_doc(root)
+        return {"fresh": True, "already_fresh": True,
+                "view": MapView(root, doc,
+                                map_path=map_path(Path(root)))}
+    # C3-R19（要点②）：status 的预言即本函数的实际动作——预言 full
+    # （结构性失配 / 周期校准 / 新增生产文件 / 不可归因变更 / 缺判定
+    # 表 / 视图构造失败）而漂移状态里没有可续新内容时，直接全量重建，
+    # 不再空转后由装填后校验抛错（旧图原样不动、之后每次都失败）。
+    planned = st.get("would_refresh")
     path = map_path(Path(root))
-    if not path or not Path(path).is_file():
-        _prepare_build_missing(root, files, timeout_s)
-    else:
-        try:
-            doc = load_map(path)
-        except SelectionError as e:
-            # C3-R12：坏 JSON 等装载失败（SelectionError 基类，含
-            # MutationSelectionError）→ 具名 MapContractError
-            raise MapContractError(
-                f"refresh failed (map unreadable): {e}") from e
-        changed, drift, pristine_ok = _prepare_drift_state(doc, root, files)
-        if drift:
-            if changed and pristine_ok:
-                try:
-                    _prepare_increment_renewal(doc, root, path, changed,
-                                               timeout_s)
-                except MapContractError:
-                    raise
-                except Exception as e:  # noqa: BLE001
-                    from .verdict_source import BaselineSourceError as _B
-                    if isinstance(e, _B) and "unknown_changed_paths" in str(e):
-                        _prepare_full_rebuild(root, files, path, timeout_s)
-                    else:
-                        raise
+    try:
+        if not path or not Path(path).is_file():
+            _prepare_build_missing(root, files, timeout_s)
+        else:
+            try:
+                doc = load_map(path)
+            except SelectionError as e:
+                # C3-R12：坏 JSON 等装载失败（SelectionError 基类，含
+                # MutationSelectionError）→ 具名 MapContractError
+                raise MapContractError(
+                    f"refresh failed (map unreadable): {e}") from e
+            changed, drift, pristine_ok = _prepare_drift_state(doc, root,
+                                                               files)
+            if planned == "increment" and changed and drift \
+                    and pristine_ok:
+                _prepare_increment_renewal(doc, root, path, changed,
+                                           timeout_s)
             else:
                 _prepare_full_rebuild(root, files, path, timeout_s)
+    except (MapContractError, BaselineSourceError, SelectionError,
+            MutationSelectionError):
+        raise
+    except Exception as e:  # noqa: BLE001 — C3-R19（P7/要点⑤）：续新管线
+        # 的任何失败（gherkin 增量腿的 GherkinRunError/SuiteError/
+        # AddonError 一族）都以契约错误类型出 refresh——四个入口才是
+        # 具名 JSON、零 traceback、旧图字节不变。
+        raise MapContractError(
+            f"renewal pipeline failed ({type(e).__name__}): {e}") from e
     # 装填后校验（复检仍 stale → 具名失败，不装半成品）；§SPEC-025 表
     # 守恒：缺 `test_verdicts` 键的产物不许出装填口（增量把缺表基线
     # 补成空表冒充守恒的通路在入口已断，这里是纵深防御）。
@@ -355,7 +371,7 @@ def _refresh_locked(root: str, files: "list[str]",
             f"refresh still stale after renewal (old map bytes "
             f"unchanged on failure paths): {e}") from e
     return {"fresh": True, "already_fresh": False,
-            "view": MapView(root, doc, map_path=map_path)}
+            "view": MapView(root, doc, map_path=path)}
 
 @dataclass
 class MapView:

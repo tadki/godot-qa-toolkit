@@ -41,9 +41,9 @@ def _load_map_doc(project_root: str) -> dict:
     if not path:
         raise BaselineSourceError(
             "baseline_source=map: no attribution map at the default path — "
-            "build one via `gqt measure run --test-attribution` / "
-            "`measure map-update` (fail-loud: silent full-face fallback is "
-            "forbidden by §SPEC-020)")
+            "run any gqt command with preparation (e.g. `gqt measure "
+            "map-update`) to build it (fail-loud: silent full-face "
+            "fallback is forbidden by §SPEC-020)")
     try:
         return load_map(path)
     except SelectionError as e:

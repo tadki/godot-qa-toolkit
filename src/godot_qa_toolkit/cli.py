@@ -1500,29 +1500,40 @@ def _attribution_args(args: argparse.Namespace
 
 
 def cmd_measure_map_update(args: argparse.Namespace) -> int:
-    """§SPEC-036（定案 20）：契约 `refresh` 的薄适配——map-update 只
-    做一次创建 / 增量 / 全量（或报告已新鲜），路径只由代码决定。"""
-    rc = _resolve_project_root_or_contract(
-        "measure.map-update", args,
-        target=(args.roots[0] if getattr(args, "roots", None) else None))
+    """§SPEC-036（定案 20）：契约 `refresh` 的薄适配——不带任何路径
+    参数，一次创建 / 增量 / 全量（或报告已新鲜并说明本次是哪一种）。"""
+    rc = _resolve_project_root_or_contract("measure.map-update", args)
     if rc is not None:
         return rc
     rc = _apply_godot_bin_or_contract("measure.map-update", args)
     if rc is not None:
         return rc
-    from .map_contract import refresh, MapContractError
-    from .truth_select import MutationSelectionError
-    root = Path(args.project_root).resolve()
+    # C3-R19（P2/要点④）：模块从 `.mutation.*` 导入（旧处理函数两处
+    # import 的模块路径都错、BaselineSourceError 未导入 → 入口整体
+    # 崩）；`mode` 取刷新前 status 的 would_refresh（空 = fresh）；续新
+    # 抛出的任何具名失败都转具名 JSON（零 traceback；旧图字节不变由
+    # 契约 refresh 的原子装填承担）。
+    from .mutation.map_contract import (
+        MapContractError, refresh, status,
+    )
+    from .mutation.truth_select import (
+        MutationSelectionError, SelectionError,
+    )
+    from .mutation.verdict_source import BaselineSourceError
+    root = str(Path(args.project_root).resolve())
+    mode = "unknown"
     try:
-        outcome = refresh(str(root), [], timeout_s=args.timeout)
-    except (MapContractError, MutationSelectionError, BaselineSourceError) \
-            as e:
+        mode = status(root, []).get("would_refresh") or "fresh"
+        outcome = refresh(root, [], timeout_s=int(args.timeout))
+    except (MapContractError, BaselineSourceError, SelectionError,
+            MutationSelectionError) as e:
         return _emit({"tool": "measure.map-update", "ok": False,
-                      "summary": {"error": str(e)},
+                      "summary": {"mode": mode, "error": str(e)},
                       "failures": [{"reason": str(e)}]})
     view = outcome.get("view")
     return _emit({"tool": "measure.map-update", "ok": True,
-                  "summary": {"map_path": getattr(view, "map_path", None),
+                  "summary": {"mode": mode,
+                              "map_path": getattr(view, "map_path", None),
                               "already_fresh":
                                   outcome.get("already_fresh", False),
                               "fresh": outcome.get("fresh")},
@@ -2182,14 +2193,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     inc = mssub.add_parser(
         "map-update",
-        help="EXPERIMENTAL (SEE-1581 方向①): incremental rebuild of the "
-             "test-attribution mapping from a baseline artifact")
-    inc.add_argument("roots", nargs="+",
-                     help="project root (exactly one; the map is "
-                          "project-scoped and its location is decided by "
-                          "code)")
+        help="refresh the project's unique test-attribution map (thin "
+             "adapter over the map contract's refresh: create / increment "
+             "/ full, or report already-fresh; the map location is "
+             "decided by code, §SPEC-036)")
     inc.add_argument("--project-root", default=None,
-                     help="project root (defaults to each root)")
+                     help="project root (defaults to CWD discovery)")
     inc.add_argument("--timeout", type=int, default=600,
                      help="refresh timeout in seconds")
     inc.add_argument("--godot-bin", default=None,

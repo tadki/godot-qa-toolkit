@@ -23,17 +23,28 @@ def _fresh_map(tmp_path: Path, files: dict[str, str]) -> dict:
     import hashlib
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).parent))
+    from attribution_fixtures import _feature_sha_of
     from godot_qa_toolkit.measurement.attribution import ATTRIBUTION_SCHEMA
     from godot_qa_toolkit.mutation.truth_select import _fresh_recipe_hash
 
     install_recipe(tmp_path)
     pristine = _fresh_recipe_hash(str(tmp_path))
     assert pristine
+    # C3-R19（要点②）：status 的预言即 refresh 的实际动作——report_
+    # recipe_hash 须为当前树的注入哈希，增量资格判定（hash_ok）才成立、
+    # 预言才是 increment（占位符会让预言落 full、增量腿不可达）。
+    from godot_qa_toolkit.measurement.increment import _inject_toolchain
+    from godot_qa_toolkit.measurement.recipe import build_recipe
+
+    _recipe, _err = build_recipe(tmp_path)
+    assert _err is None, _err
+    report_hash = _inject_toolchain(tmp_path, dict(_recipe))["recipe_hash"]
     face = {rel: hashlib.sha256(c.encode()).hexdigest()
             for rel, c in files.items()}
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
-        "report_recipe_hash": "rh", "recipe_hash_pristine": pristine,
+        "report_recipe_hash": report_hash,
+        "recipe_hash_pristine": pristine,
         "project_root": str(tmp_path),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},
@@ -44,7 +55,12 @@ def _fresh_map(tmp_path: Path, files: dict[str, str]) -> dict:
                               "pairs": 0, "function_pairs": 0,
                               "test_to_functions": {},
                               "script_to_functions": {},
-                              "file_to_tests": {}, "file_to_scripts": {},
+                              # 基线 file 边：无边的生产文件在增量分类判
+                              # prod_new（具名全量回退），有边才走增量。
+                              "file_to_tests": {"prod.gd":
+                                                ["tests/unit/test_a.gd::"
+                                                 "test_a"]},
+                              "file_to_scripts": {},
                               "line_pairs": 0, "script_line_pairs": 0,
                               "test_to_lines": {}, "script_to_lines": {},
                               "line_to_tests": {}}},
@@ -52,6 +68,10 @@ def _fresh_map(tmp_path: Path, files: dict[str, str]) -> dict:
                                     "pairs": 0, "probes_fired": 5,
                                     "vacuous": False}},
         "test_verdicts": {}, "notes": [],
+        # C3-R19（P4 夹具同步）：契约认可的地图必须带 `feature_sha256`
+        # 键（install_recipe 的 demo.feature 在基线）——缺键会被判具名
+        # 全量重建，增量路由测试不再可达增量腿。
+        "feature_sha256": _feature_sha_of(tmp_path),
     }
 
 
@@ -151,13 +171,11 @@ def test_prepare_drift_uses_increment(tmp_path, monkeypatch):
     # C3-R5 项1：装填后校验桩——路由测试不验新鲜度
     monkeypatch.setattr(
         vs, "assert_map_fresh", lambda *a, **k: None)
-    # C3 契约：装填后校验桩（同上，路由断言语义不变）
+    # C3 契约：装填后校验桩（同上，路由断言语义不变）。C3-R19：不再给
+    # `_mc._load_map_doc` 打残缺桩——status 的预言即 refresh 的实际动作
+    # （要点②），残缺桩会让预言落 full、阶梯走真全量重建，增量腿不可
+    # 达；status/装填后校验统一读盘上真地图（契约认可的基线）。
     from godot_qa_toolkit.mutation import map_contract as _mc
-    monkeypatch.setattr(
-        _mc, "_load_map_doc",
-        lambda root: {"schema_version": "test-attribution/7",
-                      "arms_state": {"gut_full": {"state": "valid"}},
-                      "test_verdicts": {}})
     monkeypatch.setattr(_mc, "assert_map_fresh", lambda *a, **k: None)
     out = vs.prepare_map_for_baseline(str(tmp_path),
                                       ["prod.gd", "tests/unit/test_a.gd"])

@@ -594,47 +594,39 @@ def coverage_prefilter_summary(source, uncovered, covered_executed) -> dict:
 def _prefilter_resolve_map(project_root, map_path, reasons) -> tuple:
     """map_path 三态解析（A06/S2.1）：未传哨兵 → 默认解析；显式 None →
     显式跳过并披露（绝不重猜默认 map）；路径 → 原样消费。返回 (resolved,
-    doc_or_None)。两层共享同一次映射加载（A05 合并读取）。"""
-    from . import truth_select as _truth
+    doc_or_None)。两层共享同一次映射加载（A05 合并读取）。
+
+    C3-R19（P3/要点③）：doc 一律取自契约视图、视图只取一次——已解析
+    路径的裸装载（read_doc_at）退役（它把文件路径当项目根裸装载，任何
+    路径都抛 BaselineSourceError；地图唯一、位置由代码决定，selection
+    链的路径即契约默认位置）。"""
+    from .map_contract import MapContractError, view as _mc_view
 
     root = str(Path(project_root).resolve())
     doc: dict | None = None
     resolved: "str | None" = None
-    if map_path is _UNRESOLVED_MAP:
-        # C3-R18（定案 22）：默认解析走契约 view（含 map_path 披露与
-        # 新鲜/构造校验），零裸路径查找。
-        from .map_contract import MapContractError, view as _mc_view
-
-        try:
-            resolved = _mc_view(root).map_path
-        except MapContractError as e:
-            reasons.append(f"no attribution map for projection: {e}")
-    elif map_path is MAP_PATH_METADATA_INCONSISTENT:
+    if map_path is MAP_PATH_METADATA_INCONSISTENT:
         resolved = None
         reasons.append("selection metadata inconsistent: source="
                        "runtime_mapping without resolved map path — "
                        "map-derived coverage prefilter skipped")
-    elif map_path:
-        resolved = map_path
+    elif map_path is _UNRESOLVED_MAP or map_path:
+        try:
+            v = _mc_view(root)
+            doc = v.doc
+            resolved = v.map_path if map_path is _UNRESOLVED_MAP \
+                else map_path
+        except MapContractError as e:  # noqa: BLE001 — 不可用即下沉披露
+            resolved = None if map_path is _UNRESOLVED_MAP else map_path
+            reasons.append(
+                f"no attribution map for projection: {e}"
+                if map_path is _UNRESOLVED_MAP
+                else f"attribution map unusable: {e}")
     else:
         resolved = None
         reasons.append("selection resolved no attribution map (explicit "
                        "--tests override) — map-derived coverage prefilter "
                        "skipped")
-    if resolved:
-        # C3-R18（定案 22）：doc 装载走契约（零裸读）。已解析路径的
-        # 装载用 read_doc_at（零新鲜判定的裸装载——新鲜判定已由
-        # selection 链完成）；默认解析失败下沉披露。
-        from .map_contract import MapContractError, read_doc_at as _rda
-        from .map_contract import view as _mc_view
-
-        try:
-            if map_path is _UNRESOLVED_MAP:
-                doc = _mc_view(project_root).doc
-            else:
-                doc = _rda(resolved)
-        except MapContractError as e:  # noqa: BLE001 — 不可用即下沉
-            reasons.append(f"attribution map unusable: {e}")
     return resolved, doc
 
 

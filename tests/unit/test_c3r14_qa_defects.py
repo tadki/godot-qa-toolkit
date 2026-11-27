@@ -422,6 +422,10 @@ def test_status_feature_content_change_predicts_increment(tmp_path):
            # report_recipe_hash = 注入 toolchain 后的 hash（_increment_
            # decision 的 hash_ok 判据）；缺失会让 hash_ok=False → full。
            "report_recipe_hash": _injected_hash(tmp_path),
+           # C3-R19（P6）：契约认可的地图必须带判定表——缺表在契约下
+           # 属结构性缺失（would_refresh=full），会让本测的增量预言
+           # 失真（夹具曾缺 `test_verdicts`）。
+           "test_verdicts": {},
            "feature_sha256": baseline_sha}  # 键在，值待变
     map_dir = tmp_path / ".qa-cache"
     map_dir.mkdir()

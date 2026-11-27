@@ -961,10 +961,10 @@ def _universe_target_gate(base: dict, evaluation: dict, doc: dict, rel: str,
             and rel not in (doc.get("file_sha256") or {})):
         base["reason"] = "target_not_in_map_universe"
         base["universe_guidance"] = (
-            f"the existing attribution map does not bind {rel} — rebuild "
-            "the map so the target enters its universe (delete "
-            ".qa-cache/attribution-map.json and rerun, or gqt measure "
-            "map-update --changed <path>)")
+            f"the existing attribution map does not bind {rel} — refresh "
+            "the map so the target enters its universe (`gqt measure "
+            "map-update` rebuilds it in place; the map is unique and its "
+            "location is decided by code, §SPEC-036)")
         return True
     return False
 

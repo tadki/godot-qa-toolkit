@@ -142,8 +142,7 @@ def test_matrix_gherkin_leg_success_green_and_heals(tmp_path, monkeypatch):
         "line_to_features": {"calc_sign.gd": {"3": [ident]}},
         "tests": 1, "pairs": 1,
     }
-    doc.setdefault("test_verdicts", {})[ident] = {
-        "verdict": "green", "classification": "pre_existing"}
+    doc.setdefault("test_verdicts", {})[ident] = {"verdict": "green"}
     (doc.setdefault("arms_state", {}))["gherkin"] = {
         "state": "valid", "invalid_reason": None, "bundles": 1,
         "pairs": 1, "probes_fired": 10, "vacuous": False}
@@ -171,7 +170,7 @@ def test_matrix_gherkin_leg_success_green_and_heals(tmp_path, monkeypatch):
     table = doc.get("test_verdicts") or {}
     assert table.get(ident, {}).get("verdict") == "green", \
         table.get(ident)
-    baseline_table = json.loads(json.dumps(table), )
+    baseline_table = json.loads(json.dumps(table))
 
     # heal：恢复原文再增量 → 判定表逐位回基线（成功路径与全量一致）
     feat.write_text(PASSING_FEATURE, encoding="utf-8")

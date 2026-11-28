@@ -1028,9 +1028,24 @@ def _run_attribution_increment_locked(
         from ..coverage.evidence import make_run_uuid
 
         t_gh = time.monotonic()
-        fresh_gherkin, gh_executions = run_gherkin_increment_leg(
-            root, sorted(gherkin_rerun), templates, recipe,
-            attribution_causal, make_run_uuid(), timeout_s)
+        try:
+            fresh_gherkin, gh_executions = run_gherkin_increment_leg(
+                root, sorted(gherkin_rerun), templates, recipe,
+                attribution_causal, make_run_uuid(), timeout_s)
+        except Exception as e:
+            if not gherkin_arm_full_reason:
+                raise
+            # C3-R28（D5/决策 20）：臂级全量的腿跑不了（如预检必红夹具
+            # ——R12 已知形态）→ 具名披露后降级两臂全量自愈；不削弱
+            # 「判不新鲜的任何原因 prepare 都必须自己修好」。普通增量的
+            # 腿失败维持具名失败契约不变（无 gherkin_arm_full_reason）。
+            print(f"measure: arm-level feature face rebuild failed "
+                  f"({type(e).__name__}: {e}) — falling back to full "
+                  f"rebuild", file=sys.stderr)
+            return _fallback_full_face(root, target_files, raw_recipe,
+                                       out_path, classes,
+                                       gherkin_arm_full_reason,
+                                       attribution_causal, timeout_s, t0)
         gh_exec_s = round(time.monotonic() - t_gh, 3)
     baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
     if isinstance(baseline_gherkin, dict) and baseline_gherkin or \

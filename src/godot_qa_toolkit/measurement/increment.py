@@ -365,15 +365,15 @@ def _content_changed_rerun(root: Path, rel: str, arm: dict,
                 if str(c.get("res", "")).endswith(".gd")
                 and not str(c["res"]).startswith("res://tests/")}
     for gd in prod_gds:
-        # C3-R25（N7/决策 16）：file_to_scripts 的值是完整 res:// 脚本
-        # 身份（C3-R21 起真建图口径）；重跑面是「选哪些脚本来跑」的
-        # basename 入口——不归一会被 _increment_decision 的 basename
-        # known 闸整批静默丢弃（触达测试不重跑，续新仍报新鲜）。
-        scripts = {Path(s).name
-                   for s in (arm.get("file_to_scripts") or {}).get(gd, [])}
-        for name in scripts:
+        # C3-R26（D1/因素表第 1 行）：触达反查按**行事实双车道**（与
+        # prod_removed 的 _line_fact_touchers 同源：test 车道 + script
+        # 车道，basename 归一）——真实建图里 script 车道通常为空
+        # （KOL 真图 script_to_lines 0 : test_to_lines 208），单查
+        # file_to_scripts 会漏掉主流形态（test 体内消费）的触达测试。
+        touch = _line_fact_touchers(arm, gd)
+        for name in touch:
             sources.setdefault(name, []).append(f"content_prod:{gd}")
-        rerun |= scripts
+        rerun |= touch
     return rerun
 
 
@@ -1382,7 +1382,8 @@ def _drop_gherkin_dropped(merged: dict, gherkin_dropped: set) -> None:
 
 def _gherkin_rerun_all_passed(fresh_gherkin: dict) -> bool:
     """§SPEC-028：重跑腿**全部**执行账判定——任一 rc!=0 都算失败
-    （多分片/多 rep 各算一账）；零执行账 = 失败（不落 green）。"""
+    （多分片/多 rep 各算一账）；零执行账 = 失败（不落 green）。
+"""
     execs = fresh_gherkin.get("executions") or []
     # rc=0 是合法成功值——falsy 陷阱（`0 or 1`）会把成功当失败
     return bool(execs) and all(

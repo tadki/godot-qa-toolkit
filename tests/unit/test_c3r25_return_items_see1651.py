@@ -247,8 +247,10 @@ def test_matrix_content_change_real_godot(tmp_path, monkeypatch):
     (root / "data.tres").write_text(
         '[gd_resource type="Resource" format=3]\n\n[resource]\n',
         encoding="utf-8")
-    # 测试脚本 preload 合法的 prod_user：load 期命中走**脚本车道**
-    # （file_to_scripts——N7 修的身份口径所在车道）。
+    # 测试脚本经 before_all 实例化后调用（before_all 属脚本窗口）：
+    # 本夹具覆盖 content_prod 触达反查的 **script 车道** 腿；test 车道
+    # 主流形态由 test_c3r26 的 test_matrix_content_change_test_body_
+    # form_real_godot 覆盖（C3-R26/D1 行事实双车道）。
     (root / "prod_user.gd").write_text(
         'extends RefCounted\nconst D = preload("res://data.tres")\n'
         "func value() -> int:\n\treturn 1\n", encoding="utf-8")

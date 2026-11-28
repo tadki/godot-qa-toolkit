@@ -1014,8 +1014,6 @@ def _run_attribution_increment_locked(
     gherkin_rerun = set(invalidation.get("feature_rerun") or [])
     if gherkin_arm_full_reason:
         # 臂级全量：重跑面 = 全部盘上 feature（与失效面同一盘上检测源）。
-        from ..mutation.truth_select import _features_disk_sha256
-
         gherkin_rerun = set(_features_disk_sha256(root))
     gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
     templates = prepare_attr_templates(root, arm_targets, recipe,

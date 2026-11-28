@@ -24,12 +24,12 @@ default non-dry-run path):
    A read-only `estimated_costs` list previews expensive operations without
    executing them.
 2. **prepare** — performs the work plan disclosed: import cache warm-up,
-   attribution-map build / incremental refresh, baseline preflight, warm pool
-   provisioning. A missing or stale attribution map is renewed here on its
+   attribution-map renewal, warm pool provisioning. A missing or stale
+   attribution map is renewed here on its
    own; `--auto-prepare` is only needed for the other auto-preparable blocker
    (the import cache), and without it such a blocker stops the run as
    `prepare_required`. Anything that fails here is named (`route_drift`,
-   `baseline_preflight_red`, `suspected_instrumentation_intolerance`,
+   `fail_on_red_baseline`, `suspected_instrumentation_intolerance`,
    `plan_blocked` if a plan error surfaced late, …) instead of collapsing
    into a generic `run_error`.
 3. **run** — consumes the prepared assets. The static plan output is reused
@@ -138,9 +138,12 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   new failure keeps the build fail-loud.
 - Explicit `--tests`: the caller takes over test selection; the report uses
   `test_selection.source=explicit_tests` to disclose that line-level selection
-  was not used. This face does not require an attribution map and bypasses the
-  map-ensure/P1 prepare gate. A missing explicit glob is a plan error
-  (`tests_glob_target_missing`) before any GUT leg.
+  was not used (`test_selection.mapping=null`). This face bypasses the P1
+  prepare gate, but under the default map source the verdict baseline still
+  comes from the map and preparation renews it first; only
+  `GQT_MUTATION_BASELINE_SOURCE=cold` leaves the map alone entirely. A missing
+  explicit glob is a plan error (`tests_glob_target_missing`) before any GUT
+  leg.
 - `summary.selection_mode` is the **effective** face, one of `line` / `fn` /
   `file` / `full` / `lines` / `mutation` / `explicit_tests` (caliper beats
   explicit `--tests`, which beats `--select`). When line/fn slicing is capped
@@ -168,6 +171,62 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   canary/parity and R-C reset semantics are unchanged.
 - `--jobs 1`: the explicit serial path still uses a file-level union glob. It is
   a correct superset, but less converged than line-signature grouping.
+
+## Verdict baseline: the map is the single source of truth
+
+- Default `GQT_MUTATION_BASELINE_SOURCE=map`: the mutation verdict baseline is
+  the project's attribution map, not a fresh GUT run. After preparation renews
+  the map, the run builds a baseline snapshot from its `test_verdicts` table
+  with the same shape as a measured cold snapshot (`{rc, tail, elapsed: 0.0,
+  source: "map", red_names, red_pairs}`), using only executable GUT
+  identities; Gherkin identities stay disclosure-only. The failing-name set
+  and the script-qualified red pairs feed the physical skip (`skip_red`) and
+  the kill difference set unchanged, and are disclosed as `baseline_dirty` /
+  `baseline_failures` / `baseline_failure_names`.
+- Observable keys: stderr prints `mutation: verdict baseline sourced from
+  attribution map (§SPEC-020; cold start skipped)`,
+  `summary.baseline_reused=true`, `stage_timings.baseline=0.0`, and the
+  adaptive timeout anchor falls back to `--timeout` because the snapshot's
+  elapsed is `0.0`. Before synthesis the map must pass the freshness checks
+  (schema, arm execution evidence, recipe pristine, report recipe hash, test
+  face, target-file hashes, new universe files); a mismatch aborts by name
+  (`BaselineSourceError`) rather than degrading to a full face.
+- No uninstrumented full-face baseline or validation run happens before the
+  mutants (§SPEC-022); on the cold lane no GUT run at all precedes the first
+  mutant. The equivalence gates stay: R-C reset, the session's first parity
+  leg (original source, whose direct-drive failing set must equal the expected
+  failure set in what that leg observes), periodic re-canaries, and batch
+  invalidation on mismatch. A baseline actually runs only under
+  `GQT_MUTATION_BASELINE_SOURCE=cold` (stderr `mutation: verdict baseline via
+  legacy cold start (…cold, disclosed)`, `stage_timings.baseline` measured);
+  those runs, the parity leg and the canary cold legs always take the cold
+  channel. `summary.baseline_reused` only says that the unit reused a ready
+  snapshot: always `true` under the map source, and `true` or `false` under
+  the cold source depending on whether a chunk reused the parent's shared cold
+  snapshot — read "no baseline ran" from the stderr line plus
+  `stage_timings.baseline=0.0`. The diagnostic switch
+  `GQT_ATTRIBUTION_MAP_MODE=off` suppresses renewal only: a fresh map is still
+  consumed, and a stale map fails by name instead of triggering a cold
+  baseline (measured exception: the serial `--select full` path).
+- This holds for all four selection entries (default line, `--select fn`,
+  `--select full`, explicit `--tests`): an explicit face takes over the
+  **selection** only, the verdict baseline still comes from the map, and
+  preparation renews the map first (measured: with a stale map, both
+  `--tests` and `--select full` renew before running). A project without
+  `.gutconfig.json` or `addons/gqt_gherkin/features/` therefore cannot run
+  under the map source on any entry (`prepare renewal failed (map build):
+  attribution_generate_failed: recipe unavailable: …`); run it with
+  `GQT_MUTATION_BASELINE_SOURCE=cold` plus an explicit `--tests`, which leaves
+  the map alone entirely.
+- Negative control (fixtures only): a parity mismatch under a map-sourced
+  baseline is escalated to `BaselineSourceError` as
+  `baseline_map_mismatch: attribution-map verdict baseline diverged from real
+  execution (parity gate) — batch invalidated: …` — `ok=false`, exit `1`,
+  `summary.error` only, and no mutant verdicts. The cold (legacy) path keeps
+  its degrade-to-cold semantics. Cold-lane targets have no parity leg, so a
+  map that calls a test red while it really passes is a disclosed residual:
+  the test is physically skipped and its failures never count as kills,
+  under-reporting kills instead of faking them.
 
 ## Output & exit codes
 
@@ -240,14 +299,16 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 
 ## Failure semantics
 
-- **Abort shape**: baseline timeout or untrustworthy →
+- **Abort shape (cold source)**: baseline timeout or untrustworthy →
   `summary.{file, run_error: true, error}` with no killed keys; check
   `summary.run_error` before reading metrics. A baseline timeout also carries
   `suggested_action` + `suggested_action_kind`: `raise_timeout` (below the
   600s cap) or `narrow_face` (at/over the cap — `--select full` runs the whole
   GUT suite, so switch to `--select line|fn` or a `--lines`/`--mutation`
   caliper face instead of re-running with the same timeout).
-- **Kill = newly-failing test-name set relative to baseline**, never the GUT
+- **Kill = newly-failing test-name set relative to the baseline failure set**
+  (taken from the map's `test_verdicts` by default, or from a measured cold
+  baseline with `GQT_MUTATION_BASELINE_SOURCE=cold`), never the GUT
   exit code — a baseline with pre-existing failures would otherwise fake
   kills.
 - `suspect` = dirty baseline with an empty difference set; `timeout_pinned` =
@@ -335,22 +396,22 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `<files...>` (positional) | git diff HEAD when omitted | `.gd` files, or one compact `<file>.gd#<lines>` address; omitted = tracked changes plus untracked `.gd` files, excluding hidden/tool/vendor paths |
 | `--project-root <root>` | discover from target/CWD | Project root containing `addons/gut/`; explicit value wins and invalid values fail loud |
 | `--budget <n>` | 50 | Max mutants (must be ≥1); with diff reuse present, counted on the post-diff retry set (order-preserving truncation). Zero or negative values are usage errors: exit `2`, readable stderr, no stdout JSON |
-| `--timeout <s>` | 600 | Single GUT wall-clock limit (must be ≥1); default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade. Zero or negative values are usage errors: exit `2`, no stdout JSON |
+| `--timeout <s>` | 600 | Single GUT wall-clock limit (must be ≥1); default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the cold-source baseline-snapshot timeout and its documented serial downgrade (the default map source runs no baseline). Zero or negative values are usage errors: exit `2`, no stdout JSON |
 | `--dry-run` | off | Run the static plan only; zero GUT, map renewal, import or census unless `--check-baseline` explicitly requests the one read-only baseline leg. The plan response carries `problems[]` (severity/code/evidence/fix per finding) and `estimated_costs`, plus the diff-estimate, `execution_plan` / `execution_plan_meta` views. A missing or stale attribution map does not block the dry-run: the response is `ok=true` with `selection_mode=plan_only` and the plan's `problems[]` records `attribution_map_missing_or_stale` as a warning. Error-class problems abort as `plan_blocked`. Existing selection fail-loud semantics still apply when a usable map is present and `--dry-run` is asked to enumerate sites. Caliper addressing is applied before estimation, so `mutants` / `executed_estimate` equal the selected site count; an entirely site-less `--lines` request or stale `--mutation` id fails with the same named error as a real run |
 | `--check-baseline` | off (`not_checked`) | In dry-run/plan-only form, run one uninstrumented baseline GUT and disclose `summary.static_preconditions.baseline_health`; without this flag no baseline leg runs |
 | `--auto-prepare` | off | Automatically prepare the P1 prepare-blockers the tool can build itself (the import cache). The attribution map is renewed by preparation regardless of this flag; without it a remaining blocker stops the run as `prepare_required` |
 | `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; auto-build interruption reports provide a ready-to-save draft |
-| `--fail-on-red-baseline` | off | Fail fast on a red uninstrumented baseline; shares the same abort channel as `--break-on-baseline-failure` |
-| `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping, discloses `explicit_tests`, and does not require map ensure/P1 preparation. A missing glob is rejected during plan as `tests_glob_target_missing`, before any GUT leg |
+| `--fail-on-red-baseline` | off | Fail fast on a red baseline; shares the same abort channel as `--break-on-baseline-failure`. Under the default map source the red set is the map's red entries and no baseline run is spent; only `GQT_MUTATION_BASELINE_SOURCE=cold` measures an uninstrumented baseline |
+| `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping, discloses `explicit_tests`, and bypasses the P1 prepare gate. Under the default map source the verdict baseline still comes from the map, so preparation renews it first; only `GQT_MUTATION_BASELINE_SOURCE=cold` leaves the map alone. A missing glob is rejected during plan as `tests_glob_target_missing`, before any GUT leg |
 | `--jobs <n>` | `max(2, cpu//2)` | Worker pool size (must be ≥1) for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value. Zero or negative values are usage errors: exit `2`, no stdout JSON |
 | `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |
 | `--select {line,fn,file,full}` | `line` | line = test-set signature groups; fn/file = explicit calibration/fallback views; full = explicit full-face audit. The reported `selection_mode` also uses `lines` / `mutation` for calipers and `explicit_tests` when `--tests` takes over |
 | `--attribution-map <path>` | **retired** | Removed: the map is unique per project at `.qa-cache/attribution-map.json` and no flag selects another file; passing it is an argparse usage error (exit `2`, no stdout JSON) |
 | `--no-attribution-auto` | **retired** | Removed: renewal belongs to preparation; `GQT_ATTRIBUTION_MAP_MODE=off` is the diagnostic switch that suppresses it |
 | `--mutation-warning <n>` | 50 | Warn on stderr + `summary.attention` when the pre-truncation site count exceeds N |
-| `--timeout-factor <f>` | 2.0 | Adaptive per-mutant timeout = `max(timeout, baseline×f+1)`; only widened, never tightened |
+| `--timeout-factor <f>` | 2.0 | Adaptive per-mutant timeout = `max(timeout, baseline×f+1)`; only widened, never tightened. With a map-sourced baseline the snapshot's elapsed is `0.0`, so the anchor falls back to `--timeout` (`adaptive_timeout_s = timeout`) |
 | `--no-kill-bail` | off (bail ON) | SEE-1606 P3, aligns with Stryker `disableBail`: with bail on, a mutant's selection face runs the selection face in script order inside ONE engine process in chunks of 32 scripts (cold one-shot direct-drive host for materialized selection dirs / single-script faces; in-session sequencing for the resident worker) and stops after the first chunk containing a failure NEW vs baseline — killing legs save the remaining chunks (≤31-script overshoot bound; chunking chosen by measurement: per-script calls made a 286-script survivor leg 2.69× slower, C=32 gives 0.81×) (`GQT_KILL_BAIL scripts=k/n new_fail=<test>`); verdicts unchanged (difference-set semantics). Unsupported faces (explicit `--tests` dir / `--select full`), missing real `gut.gd`, flag or env `GQT_MUTATION_KILL_BAIL=0` disable bail with named `kill_bail_face` / `kill_bail_disabled_by` disclosure — never a silent fallback |
-| `--break-on-baseline-failure` | off | SEE-1606 P2 + P2-R1: when off (default) baseline-red tests are **physically skipped** from every mutant execution face at test granularity (removed from the GUT collector inside controlled hosts, matched by script identity + test name (same-named green tests in other scripts keep running and keep killing — no false survivors); marker `GQT_SKIP_RED marked=k requested=n names=…`, `summary.baseline_skip`, per-verdict `skip_red`; red names absent from the run stream = machine evidence of not-called). With skip active an empty diff is a genuine survive (suspect suppressed). Cold-legacy faces (explicit `--tests` dir / `--select full` / missing real `gut.gd`) cannot per-test filter: a dirty baseline aborts fail-loud (`baseline_skip_unsupported` + suggested action). When on, a dirty baseline aborts before any mutant GUT |
+| `--break-on-baseline-failure` | off | SEE-1606 P2 + P2-R1: when off (default) baseline-red tests are **physically skipped** from every mutant execution face at test granularity (removed from the GUT collector inside controlled hosts, matched by script identity + test name (same-named green tests in other scripts keep running and keep killing — no false survivors); marker `GQT_SKIP_RED marked=k requested=n names=…`, `summary.baseline_skip`, per-verdict `skip_red`; red names absent from the run stream = machine evidence of not-called). With skip active an empty diff is a genuine survive (suspect suppressed). Cold-legacy faces (explicit `--tests` dir / `--select full` / missing real `gut.gd`) cannot per-test filter: a dirty baseline aborts fail-loud (`baseline_skip_unsupported` + suggested action). When on, a dirty baseline aborts before any mutant GUT. Under the default map source the dirty baseline and its failing names come from the map's `test_verdicts` (red entries), so the abort spends no baseline run |
 | `--mutate-all` | off | Force full execution (the only escape from diff reuse) |
 | `--mutation <file>#<scope_id>#<n>` | omitted | Single-site caliper (single file): fresh execution using that site's line-level tests; bypasses diff reuse and prefilter |
 | `--lines <spec>` | omitted | Single line `42`, range `10-20`, or multi-segment `10-20,30,35-40`; intersects actual sites, discloses no-site lines, and uses the selected lines' test union. A malformed spec is a usage error (exit `2`, no stdout JSON); a valid spec with zero sites fails with exit `1`, including dry-run |

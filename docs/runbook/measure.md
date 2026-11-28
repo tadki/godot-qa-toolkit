@@ -4,9 +4,10 @@
 
 - Build a reproducible **measurement suite definition** (which GUT face and
   which acceptance features participate in measurement).
-- Run coverage measurement over the full GUT face, yielding per-function
-  line coverage and CRAP data. Acceptance is paused by default; when explicitly
-  restored, active arms' line sets are unioned into the same report. With
+- Run coverage measurement over the full GUT face and the gherkin suite,
+  yielding per-function line coverage and CRAP data. Both arms run by default
+  and their line sets are unioned into the same report;
+  `GQT_MEASUREMENT_GHERKIN_DISABLED=1` pauses the gherkin arm. With
   `--test-attribution`, the run also records per-test/per-script covered lines
   as the primary attribution facts.
 - Print the project's scope resolution — which files count as production,
@@ -26,7 +27,7 @@
 1. **plan** — recipe build, target universe enumeration, exclusion
    validation. Output is the in-memory suite, no execution.
 2. **prepare** — attribution instrumentation of the target tree, attribution
-   map build/refresh, **baseline preflight**, warm pool provisioning. Stage
+   map build/refresh, warm pool provisioning. Stage
    timings are disclosed on the report as
    `stage_timings.{instrument_prepare, baseline_preflight, gut_full_arm,
    gherkin_arm, planning, total}` (seconds, summed across the matching
@@ -35,50 +36,61 @@
 3. **run** — the active instrumented arm or arms consume the prepared map.
    The report is written only after every named failure has been classified.
 
-**Baseline preflight** runs the uninstrumented baseline GUT once before any
-instrumented arm. When it observes failing `(script, test)` pairs:
+**No front-loaded baseline** (SEE-1631 §SPEC-019): the instrumented
+`gut_full` arm runs directly — no uninstrumented baseline GUT precedes it, so
+`stage_timings.baseline_preflight` is `0.0`. When the arm observes failing
+`(script, test)` pairs, one same-face uninstrumented baseline is acquired
+lazily and only the failures that are **new** against it gate the arm:
 
-- default: the red tests are **excluded by name** from the instrumented
-  arms and disclosed on the map as `status=partial` plus
-  `excluded_tests=[(script, test), ...]`; the run continues. Print line:
-  `measure: baseline_preflight RED — N failing pair(s) ... EXCLUDED by name
-  ... mapping marked partial, run continues`.
-- explicit short-stop: set `GQT_MEASUREMENT_FAIL_ON_RED_BASELINE=1` (or any
-  non-empty / non-`0` / non-`false` value) to fail loud with
-  `MeasurementError("baseline_preflight_red: ... top-N of M failing tests")`
-  instead. With this switch the instrumented arms do not run.
+- pre-existing red tests are **absorbed**: they are excluded by name and
+  disclosed on the map as `arms_state.gut_full.partial=true` plus
+  `excluded_tests=[…]`; `baseline_failures_meta` carries `method` / `lazy` /
+  `face` / `pairs` / `count` / `sha256` / `wall_s` / `status` /
+  `excluded_tests` (`method="uninstrumented_run"`, `lazy=true`,
+  `status="partial"`), and the run continues. Print lines:
+  `measure: lazy baseline ABSORBED N pre-existing failing pair(s) EXCLUDED by
+  name (top-1: <script>::<test>); baseline marked partial` and
+  `measure: lazy baseline N failing pairs acquired uninstrumented (<s>s) —
+  only NEW failures gate the arm`. A green arm pays no extra GUT.
+- `GQT_MEASUREMENT_FAIL_ON_RED_BASELINE=1` (or any non-empty / non-`0` /
+  non-`false` value) does not stop the arms: after an automatic map build it
+  refuses to install a map that carries red evidence, failing loud with
+  `fail_on_red_baseline: refusing to install auto-built attribution map —
+  red evidence: [...]` (exit `1`, no map installed).
 
-The preflight result is reused for the instrumented arms (the lazy-baseline
-path is skipped when preflight has already produced the failing-pair set).
-
-**Acceptance arm is paused by default** (Owner decision in SEE-1615
-§SPEC-PLANFIRST). This applies equally to ordinary runs and
-`--test-attribution` runs. The acceptance arm has `state=disabled`,
-`stage_timings.gherkin_arm` is `0.0`, and the report field
-`report.gherkin_arm = "disabled_pending_atomization — restored after SEE-1619
-(shared-process shards); env override GQT_MEASUREMENT_GHERKIN_DISABLED=0"`
-discloses the pause.
+**Both arms run by default** (SEE-1631: atomization is complete, so the
+SEE-1615 pause is no longer the default). Set
+`GQT_MEASUREMENT_GHERKIN_DISABLED=1` (or any value other than `""`, `0`,
+`false`) to pause the gherkin arm explicitly, with or without
+`--test-attribution`: the arm entry has `state=disabled`,
+`stage_timings.gherkin_arm` is `0.0`, and both `summary.gherkin_arm` and
+`report.gherkin_arm` carry
+`"disabled_pending_atomization — restored after SEE-1619 (shared-process
+shards); env override GQT_MEASUREMENT_GHERKIN_DISABLED=0"`.
 
 While paused, an ordinary run without `--test-attribution` uses single-arm
 exit semantics: a valid, passing `gut_full` arm returns `ok=true` / exit `0`
 with `certification=uncertified` and
 `exit_semantics=single_arm_usable_gherkin_paused`; an invalid or failing
 arm returns `ok=false` / exit `1`. Attribution runs retain their
-`attribution_usable` semantics, and an explicitly restored dual-arm run keeps
-the union semantics. To restore acceptance measurement, set
-`GQT_MEASUREMENT_GHERKIN_DISABLED=0` after SEE-1619 has landed; the default
-(unset or `1`) keeps the arm paused. Exact stripped `""`, `0`, or `false`
-restores it, so a whitespace-only value also restores; other values keep it
-paused. Any presence of the retired `GQT_MEASUREMENT_ACCEPTANCE_DISABLED` —
+`attribution_usable` semantics, and a dual-arm run keeps the union
+semantics. Any presence of the retired `GQT_MEASUREMENT_ACCEPTANCE_DISABLED` —
 including `""`, whitespace, `0`, or `false` — is a named error, never a silent
 alias.
 
-**Target universe anchoring**: positional roots are anchored to the
-project root via `anchor_to_project_root`. When the requested paths fall
-outside the project root or sit at the project top level, the target
-universe falls back to the project root and discloses this on stderr as
-`measure: targets_root_fallback (<reason>) — target face widened to the
-whole project root (<root>)`. The fallback is named, not silent.
+**Roots resolve against the process CWD**: the positional roots of
+`measure run` and `measure diagnose` are ordinary paths, globbed relative to
+the directory the process runs in; they are not re-anchored to
+`--project-root`. The examples above work because they run from the project
+root. From another directory, pass absolute paths. A relative root that does
+not exist under the CWD fails with `no .gd targets under roots`, and one that
+resolves outside the project is rejected by name with
+`target outside project root: <path> (root=<project root>)` — neither widens
+the target universe to the project root. Anchoring a relative path to
+`--project-root` applies to the target files of `mutation` and
+`measure coverage` / `measure risk`; the `measure: targets_root_fallback`
+disclosure belongs to mutation's git-diff target scoping (see
+mutation.md), not to `measure run`.
 
 ## Prerequisites
 
@@ -99,7 +111,7 @@ gqt measure suite --project-root . --out recipe.json
 gqt measure suite --project-root . --out recipe.json \
   --exclude 'gherkin_feature:some_feature:reason here'
 
-# 2) Measurement report (acceptance paused by default)
+# 2) Measurement report (both arms by default)
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json
 
 # Common increments: parallel shards / stability baseline / evidence bundles
@@ -140,7 +152,7 @@ gqt measure scope --project-root .
   Legacy `/2`, `acceptance_face`, and `acceptance_feature` inputs fail loud;
   the exclusion scope is `gherkin_feature`.
 - run: `measurement-report/3`, with `crap` records (see crap.md) and
-  active-arm coverage data; a restored dual-arm run carries the two-arm
+  active-arm coverage data; a dual-arm run carries the two-arm
   coverage union. Every report remains
   `certification.status="not_certified"`, `evidence_level="exploratory"`,
   `diagnostic_only=true`.
@@ -150,7 +162,8 @@ gqt measure scope --project-root .
   `single_arm_usable_gherkin_paused` / `failed`) and `attribution_map`
   when an attribution artifact exists. A fresh, execution-backed attribution
   map with an uncertified union exits **0** as
-  `artifacts_usable_union_uncertified`. With acceptance paused, an ordinary
+  `artifacts_usable_union_uncertified`. With the gherkin arm paused
+  (`GQT_MEASUREMENT_GHERKIN_DISABLED=1`), an ordinary
   run without attribution instead exits **0** when `gut_full` is valid,
   disclosed as `single_arm_usable_gherkin_paused`. Outside those usable
   forms, an invalid union or arm exits **1** with
@@ -174,8 +187,9 @@ gqt measure scope --project-root .
   `increment.reason` (one of `hash_mismatch_fallback`,
   `new_prod_file_fallback`, `calibration_due_fallback`,
   `rerun_surface_too_large_fallback`,
-  `gherkin_rerun_surface_too_large_fallback`). A `fresh` response echoes the
-  `reason` its ledger still carries. A failed refresh returns `ok=false` with
+  `gherkin_rerun_surface_too_large_fallback`); it is present only when this
+  call involved a rebuild, so a `fresh` response carries none. A failed
+  refresh returns `ok=false` with
   `summary.mode` plus `summary.error` (exit `1`); the old map's bytes are left
   untouched.
 - The refreshed artifact is `test-attribution/7`. Its `test_verdicts` table
@@ -222,7 +236,7 @@ gqt measure scope --project-root .
 ## Failure semantics
 
 - Exclusion without a reason → invalid recipe (`ok=false`).
-- Union validity on a restored dual-arm run: both arms must share source
+- Union validity on a dual-arm run: both arms must share source
   sha256, probe manifest and recipe_hash, differ in `run_uuid`, both be valid,
   and have different arm names; any violation → `valid=false` and
   `union=null`, so that file gets no score.
@@ -240,7 +254,7 @@ gqt measure scope --project-root .
   `collected_scripts` and `execution_stream`. Zero collected scripts →
   `invalid_reason=empty_test_face`; scripts were collected but no GUT test
   stream was observed → `invalid_reason=no_execution_evidence`. Both are
-  invalid arms and cannot take the acceptance-paused single-arm exit-`0` path.
+  invalid arms and cannot take the paused single-arm exit-`0` path.
 - **Arm `invalid_reason` classification** (execution/failure classes use
   priority order `launch_failure > shard_timeout > unattributed_failures >
   new_failures > reconciliation_failed`; an invalid arm carries the first
@@ -290,7 +304,7 @@ gqt measure scope --project-root .
 
 - `measure run` temporarily instruments the target tree and restores it
   atomically in `finally`; no residue on production trees.
-- A restored Gherkin arm uses the same addon preflight as `gherkin run`:
+- The Gherkin arm uses the same addon preflight as `gherkin run`:
   `compile_preflight` and per-key replay run before one `validator.gd` launch,
   which in turn precedes shared GUT fan-out. A failed validator marks the arm
   invalid and leaves no tool-owned private-suite residue. This addon handshake
@@ -390,8 +404,9 @@ GQT_MEASUREMENT_GHERKIN_DISABLED=0 PYTHONPATH=src python3 -I tests/integration/r
   --report <work>/acceptance-perf.json
 ```
 
-The environment prefix restores the Gherkin arm, which is otherwise paused by
-default. Reports use `doc="see1619-gherkin-perf/1"` and per-round
+The environment prefix keeps the Gherkin arm on explicitly (`0` means the
+same as the default, which already runs both arms). Reports use
+`doc="see1619-gherkin-perf/1"` and per-round
 `gherkin_wall_s`; resume rejects the retired `see1619-acceptance-perf/1`
 document instead of mixing old and new rounds.
 
@@ -440,14 +455,15 @@ reasons, and any reference warnings. Output keys are listed under
 `gqt measure run <roots...> [--project-root <root>] --recipe <recipe.json> --out <report.json> [all options]`
 
 Acceptance-specific repeat/shard/adaptive/parallel knobs apply only when the
-acceptance arm is explicitly restored; while paused, that arm stays disabled.
+gherkin arm runs (the default); with `GQT_MEASUREMENT_GHERKIN_DISABLED=1`
+that arm stays disabled.
 The retired `--acceptance-probe-keys`, `--acceptance-shards`,
 `--acceptance-repeats`, and `--acceptance-adaptive` spellings are not aliases:
 they are argparse usage errors (exit `2`, no stdout JSON).
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `<roots...>` (positional) | required | Target `.gd` roots (recursive glob); `gut_full` runs the full gutconfig face, while acceptance runs only when explicitly restored from its default pause |
+| `<roots...>` (positional) | required | Target `.gd` roots (recursive glob); `gut_full` runs the full gutconfig face and the gherkin suite also runs, unless paused with `GQT_MEASUREMENT_GHERKIN_DISABLED=1` |
 | `--project-root <root>` | discover from roots/CWD | Project root containing `addons/gut` + `.gutconfig.json`; explicit value wins |
 | `--recipe <path>` | required | `measurement-suite/3` JSON from `gqt measure suite` |
 | `--out <path>` | required | `measurement-report/3` output JSON path |

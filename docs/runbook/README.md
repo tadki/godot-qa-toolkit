@@ -7,7 +7,7 @@ front and a full command reference at the end.
 |---|---|---|
 | `gherkin` | `.feature` → versioned IR → generated GUT tests → run / contract-mutate | [gherkin.md](gherkin.md) |
 | `mutation` | Mutation-test `.gd` files (selection, kill verdicts, diff resume, single-site reruns) | [mutation.md](mutation.md) |
-| `measure` chain | Build a measurement suite, print scope classes, run GUT coverage (acceptance paused by default), diagnose features, refresh the attribution map | [measure.md](measure.md) |
+| `measure` chain | Build a measurement suite, print scope classes, run dual-arm coverage (GUT + gherkin by default), diagnose features, refresh the attribution map | [measure.md](measure.md) |
 | CRAP risk | Rank functions by CRAP score; coverage and complexity as inputs | [crap.md](crap.md) |
 | Guards & doctor | Architecture guard, CC parity, registry diffs, install self-check | [guards.md](guards.md) |
 

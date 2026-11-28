@@ -142,3 +142,16 @@ B 轮的目标不是「再优化一次」，而是解释并消除**机制在真�
 - **prepare 分段计时**：report `stage_timings` 增列 `instrument_prepare` / `baseline_preflight` / `gut_full_arm` / `gherkin_arm` / `planning` / `total`；同名阶段多次发生按求和累计，缺失阶段表示本轮未执行。
 - **gherkin 臂默认暂停**：`gqt measure run` 默认不执行 gherkin 套件；report `gherkin_arm = "disabled_pending_atomization — restored after SEE-1619 (shared-process shards); env override GQT_MEASUREMENT_GHERKIN_DISABLED=0"` 具名披露，`stage_timings.gherkin_arm = 0.0`。恢复条件：SEE-1619 原子化落地后设 `GQT_MEASUREMENT_GHERKIN_DISABLED=0`。
 - **`_roots_of` 项目根锚定**：变更文件相对路径先经 `anchor_to_project_root` 锚到 `--project-root`，再求首层目录并集。工程外路径或工程顶层文件触发到工程根的 fallback 时，stderr 具名披露 `measure: targets_root_fallback (<reason>) — target face widened to the whole project root`，禁止静默放大。
+
+## 11. SEE-1631 增量：地图契约
+
+地图（attribution map）从「mutation 的一个可选输入」变成每个项目唯一、自己判断新鲜度、既是选面来源也是判定真源的契约对象。接口契约见 [contract.md](contract.md) §13.7；本节只记录相对前文的决策反转，被取代的说法留在原章节作为谱系。
+
+- **地图唯一，位置由代码决定**：取代「自动管理 + `--attribution-map` 显式只读映射」两形态。手动指定地图的入口（`--attribution-map` 及其别名 `--no-attribution-auto`、环境变量 `GQT_ATTRIBUTION_MAP`、`measure run --test-attribution-out`、`map-update` 的路径与手工增量参数）全部退役；每个项目一份 `.qa-cache/attribution-map.json`，对外只有 `status`（只读）与 `refresh`（prepare 专用）两个维护动作和一个只读取视图入口。Owner 裁定（2026-11-27）：map 在项目范围内唯一，不支持手动指定，位置由代码决定。§7 所述的「显式旧 schema 产物 fail-loud」形态自此不复存在。
+- **prepare 自动续新，run 只读**（细化 §10 的三段式）：plan 是静态探测，只读报出地图状态与将执行的刷新；prepare 基本上就是地图更新，缺失或过期时自动续新，不要求 `--auto-prepare`；run 不续新、不重推导，任何漂移具名 fail-loud、零 mutant。会产生内容漂移的步骤（引擎重新导入等）必须排在 prepare 续新之前，次序因此固定为 import → map → baseline。
+- **全量与增量之后地图都是最新可用的**：取代「增量产物不能用」的旧规则；「事件计数未重测」只作披露（`increment.event_counts_stale`），不再是可用性判据。
+- **判定基线 = 地图 verdict 表**：取代 §2③「baseline 永远实测（判定语义）」与 §1 L5、L7 的实测前提（§2④「共享 baseline 快照」的共享原则不变，快照改为合成）。`test-attribution/7` 的 `test_verdicts` 是 mutation 判定的单一真源：地图新鲜时，跑 mutant 之前不再执行未插桩全脸基线或验证运行，判定用的基线快照由 verdict 表合成，红名差集、物理跳过与并行分片零改动消费。依据是三件事合起来保证 mutation 拿到的 verdict 可直接使用——两臂测试已原子化、建图时红的测试会被单独复跑分类且不进 mutation、地图过期由 prepare 自动续新。保留的是通道等价性证明而不是基线：R-C 重置、会话首腿 parity 门、周期 re-canary、失配整批作废。代价与残余：cold 车道没有 parity 腿，「map 说红、实跑绿」只会少杀、不会假杀；自适应超时失去实测锚，回落 `--timeout`；`GQT_MUTATION_BASELINE_SOURCE=cold` 保留为显式回退。
+- **失配即整批作废**（升级 §8「披露先于信任」）：map 源下 parity 门失配不再「降冷继续」，而是以 `baseline_map_mismatch` 具名 fail-loud，不交付任何 mutant 判定。基线来自地图时，失配意味着判定真值与实跑分歧，继续执行只会产出批量假 kill；负对照只在 fixture 内构造，四个选面入口同此。
+- **身份口径统一**（补充 §7「行事实唯一主真值」）：地图里的测试身份是完整 `res://` 路径，basename 只是「选哪些脚本来跑」的入口；同名碰撞按完整脚本路径消歧并披露（`identity_collisions`）；gherkin 身份的第二段是编译测试名而不是 scenario 名，增量腿的判定回写因此按与身份段同一命名空间的失败名逐名进行。原则同 §8「路由判据域」：按名比对的两侧必须取自同一命名空间，否则「永不相等」会被误读成「全部通过」。
+- **新鲜度是对账不是猜测**（细化 §8「分层新鲜度权威」）：地图自己判断新鲜——环境 / 配置面比 recipe 与工具链哈希，内容面比文件指纹全集与测试面；可定位的漂移走增量，不可定位的漂移具名全量，原因进输出或地图台账。建图宇宙由范围规则文件 `.gqt-scope.json` 决定，从根上取消「地图外产品代码」这一类别。
+- **默认双臂，建图入口不再前置基线**（取代 §10「gherkin 臂默认暂停」与「基线预检与红测解耦」）：原子化完成后 `measure run` 缺省即执行 gherkin 套件，`GQT_MEASUREMENT_GHERKIN_DISABLED=1` 只是诊断回退，旧名 `GQT_MEASUREMENT_ACCEPTANCE_DISABLED` 只要被设置即具名失败。映射构建也不在插桩臂前跑未插桩基线（SEE-1631 §SPEC-019）：既有失败由臂内懒获取的基线按名吸收并标 partial，只有新增失败门控臂；`GQT_MEASUREMENT_FAIL_ON_RED_BASELINE=1` 从「跑臂前短停」改为「建图后拒装带红证据的地图」。原则同 §8「阶段全归因」：不为尚未发生的红预付一次全脸运行。

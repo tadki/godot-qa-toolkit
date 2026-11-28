@@ -44,9 +44,9 @@ the target path or CWD, and fail loudly if none exists.
   differential resume re-runs only unproven verdicts, and kills are judged as
   newly-failing test sets, never by exit codes.
 - **Measurement, one instrumentation pass.** `measure suite` builds
-  the hashed suite definition; `measure run` executes the full GUT arm, with
-  acceptance paused by default. When acceptance is explicitly restored, the
-  active arms' line sets are **unioned, never averaged**. While acceptance is
+  the hashed suite definition; `measure run` executes the full GUT arm and
+  the gherkin suite, and their line sets are **unioned, never averaged**.
+  `GQT_MEASUREMENT_GHERKIN_DISABLED=1` pauses the gherkin arm; while it is
   paused, a valid ordinary GUT-only run exits `0` with
   `certification=uncertified`. With attribution enabled, the same run records
   per-test/per-script covered lines, derives file/function views, and lets
@@ -144,7 +144,7 @@ gqt measure arch src/systems
 # CRAP risk ranking for candidate files
 gqt measure risk src/save/save_manager.gd --project-root . --report shadow-report.json
 
-# Measurement (acceptance paused by default) → CRAP records
+# Measurement (both arms by default) → CRAP records
 gqt measure suite --project-root . --out recipe.json
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json
 

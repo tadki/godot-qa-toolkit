@@ -74,13 +74,14 @@ def _setup_env(monkeypatch, value: str | None):
         monkeypatch.setenv("GQT_MEASUREMENT_GHERKIN_DISABLED", value)
 
 
-def test_plain_run_paused_no_gherkin_arm(monkeypatch):
-    """普通 measure run（无 env、无 --test-attribution）：acceptance 臂
-    不执行——单臂 gut_full + 占位 disabled 臂 + 0.0 计时 + 具名披露。"""
+def test_plain_run_paused_no_gherkin_arm(monkeypatch, tmp_path):
+    """显式诊断暂停（env=1，SEE-1631 起为非默认回退通道）：gherkin 臂
+    不执行——单臂 gut_full + 占位 disabled 臂 + 0.0 计时 + 具名披露。
+    （历史默认暂停语义由本测试以显式开关覆盖；默认已恢复双臂。）"""
     emit_capture: list = []
     _wire(monkeypatch, emit_capture=emit_capture)
-    _setup_env(monkeypatch, None)
-    report = mo.run_measurement("/p", ["a.gd"], _RECIPE,
+    _setup_env(monkeypatch, "1")
+    report = mo.run_measurement(str(tmp_path), ["a.gd"], _RECIPE,
                                 test_attribution=False)
     _args, _inp, _st, arm_a, arm_b = emit_capture[0][:5]
     assert (arm_a or {}).get("arm") == "gut_full"
@@ -89,18 +90,18 @@ def test_plain_run_paused_no_gherkin_arm(monkeypatch):
     assert "disabled_pending_atomization" in report["gherkin_arm"]
 
 
-def test_plain_run_explicit_env_one_still_paused(monkeypatch):
+def test_plain_run_explicit_env_one_still_paused(monkeypatch, tmp_path):
     """显式 env=1：普通路径同样暂停（此前被 and test_attribution 无视）。"""
     emit_capture: list = []
     _wire(monkeypatch, emit_capture=emit_capture)
     _setup_env(monkeypatch, "1")
-    report = mo.run_measurement("/p", ["a.gd"], _RECIPE,
+    report = mo.run_measurement(str(tmp_path), ["a.gd"], _RECIPE,
                                 test_attribution=False)
     assert report["stage_timings"]["gherkin_arm"] == 0.0
     assert "disabled_pending_atomization" in report["gherkin_arm"]
 
 
-def test_plain_run_env_zero_restores_dual_arms(monkeypatch):
+def test_plain_run_env_zero_restores_dual_arms(monkeypatch, tmp_path):
     """显式 env=0：恢复路径对普通路径生效——双臂 execute_arms 进入。"""
     calls: list = []
     _wire(monkeypatch, emit_capture=[])
@@ -119,7 +120,7 @@ def test_plain_run_env_zero_restores_dual_arms(monkeypatch):
         return arm_a, arm_b
 
     monkeypatch.setattr(mo, "execute_arms", spy_arms)
-    report = mo.run_measurement("/p", ["a.gd"], _RECIPE,
+    report = mo.run_measurement(str(tmp_path), ["a.gd"], _RECIPE,
                                 test_attribution=False)
     assert len(calls) == 1
     assert report["stage_timings"]["gherkin_arm"] == 2.0

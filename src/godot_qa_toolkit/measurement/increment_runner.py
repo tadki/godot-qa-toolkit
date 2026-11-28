@@ -112,6 +112,18 @@ def _rerun_stage(root: Path, templates: dict, hook_files: list,
     return started_files, instrumented
 
 
+def _execution_record(name: str, rc, full_out: str,
+                      error: "str | None" = None) -> dict:
+    """执行账记录组装单源（C3-R24/N2/§SPEC-038⑥）：脚本级证据（脚本头、
+    失败对、失败名）在**截断之前**从完整输出提取并随执行账保存；out
+    保留 4000 字符截断只作披露——部分截断不得把本轮转红的同名前脚本
+    记成绿（假 kill 方向）。"""
+    from ..mutation.gutrun import script_evidence
+
+    return {"script": name, "rc": rc, "out": full_out[-4000:],
+            "error": error, "evidence": script_evidence(full_out)}
+
+
 def _rerun_one(root: Path, name: str, args_head: list[str], timeout_s: int,
                xdg: str) -> dict:
     """单脚本 `-gselect` 跑 GUT（独立 XDG user://）；单脚本失败不断链。"""
@@ -122,9 +134,8 @@ def _rerun_one(root: Path, name: str, args_head: list[str], timeout_s: int,
     try:
         r, _w = _run_one_gut(root, argv_gut, timeout_s,
                              env=env, gate_root=root)
-        return {"script": name, "rc": r.returncode,
-                "out": ((r.stdout or "") + "\n" + (r.stderr or ""))[-4000:],
-                "error": None}
+        return _execution_record(
+            name, r.returncode, (r.stdout or "") + "\n" + (r.stderr or ""))
     except Exception as e:  # noqa: BLE001 — 单脚本失败不断链
         return {"script": name, "rc": None, "out": "", "error": str(e)}
 
@@ -166,3 +177,234 @@ def execute_rerun_scripts(root: Path, gut_dirs: list[str],
         for relpath, _text in hook_files:
             Path(root / relpath).unlink(missing_ok=True)
     return results, xdg_homes
+
+
+def _scenario_map_from_manifests(out: dict, keys: "list[str]"
+                                 ) -> "dict[str, str]":
+    """编译 manifests → test_name → scenario 映射（零行为拆分）。
+    C3-R25（N5）：案例清单在 manifest 的 `attribution` 键（`cases` 只在
+    IR 里）——旧读法恒得空映射，failing_scenarios 回写在真实编译产物
+    上从未生效过。"""
+    mapping: dict[str, str] = {}
+    for k in keys:
+        m = out["manifests"].get(k) or {}
+        cases = m.get("cases") or m.get("attribution") or []
+        for case in cases:
+            tn = str(case.get("test_name") or "")
+            sc = str(case.get("scenario") or "")
+            if tn and sc:
+                mapping[tn] = sc
+    return mapping
+
+
+def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
+                               ) -> "tuple[Path, dict, str, object, dict]":
+    """编译 rerun keys 进私有 suite 并做 validator 预检恰好一次
+    （§SPEC-003 契约：业务执行前同一 validator）。返回 (suite_dir,
+    identities, gen_res, identity_rewrite, scenario_of_test)；编译/预检
+    失败具名抛出。"""
+    from ..gherkin.addon import AddonError, compile_preflight, \
+        run_validator_preflight
+    from ..gherkin.run import GherkinRunError, replay_check
+    from ..gherkin.suite import (
+        SuiteError,
+        compile_keys_to_suite,
+        create_suite_dir,
+    )
+    from .attribution import _gherkin_identity_rewrite
+
+    try:
+        compile_preflight(root)
+    except AddonError as e:
+        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    # C3-R31：私有 suite 目录经 `create_suite_dir` 创建——所有权标记
+    # （`.gqt-owner`）是 `_cleanup_suite_dir` 的删除前提；此前裸 mkdir
+    # 缺标记 → 清理恒判「调用方持有」→ 失败路径目录全部泄漏。
+    # 本函数自回收：预检/编译/重放/validator 任一步失败零 `.gqt-run-*`
+    # 残留（决策 25 零残留要求；失败路径早于调用方 try/finally）。
+    suite_dir = create_suite_dir(root, run_uuid=run_uuid[:12])
+    try:
+        out = compile_keys_to_suite(root, keys, suite_dir)
+        identities = {k: (out["manifests"].get(k) or {}).get("attribution")
+                      or [] for k in keys}
+        # §SPEC-025/D8（R4）：test_name → scenario 映射（执行账
+        # failing_scenarios 回写用，仅披露——C3-R27/D3 起判定按
+        # failing_tests，不经本映射）。
+        scenario_of_test = _scenario_map_from_manifests(out, keys)
+        for k in keys:
+            replay_check(root, k, suite_dir=suite_dir)
+        try:
+            run_validator_preflight(root)
+        except AddonError as e:
+            raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    except BaseException:
+        from .arms import _cleanup_suite_dir
+
+        _cleanup_suite_dir(suite_dir, root)
+        raise
+    gen_res = ("res://" + suite_dir.joinpath("generated")
+               .relative_to(root).as_posix())
+    rw = _gherkin_identity_rewrite(root, [{"suite_dir": str(suite_dir),
+                                           "keys": keys}], identities)
+    return suite_dir, identities, gen_res, rw, scenario_of_test
+
+
+def _gherkin_leg_texts(templates: dict, run_uuid: str,
+                       causal: bool) -> "tuple[dict, dict, list]":
+    """插桩文本与 ATTR 钩子清单：(started_files 原文, instrumented 插桩
+    后文本, hook_files)。"""
+    started_files: dict[str, str] = {}
+    instrumented: dict[str, str] = {}
+    for rel, item in templates.items():
+        if "template" not in item:
+            continue
+        inst = item["template"].replace(prepcache.SINK_UUID_PLACEHOLDER,
+                                        run_uuid)
+        started_files[item["abs"]] = item["src"]
+        instrumented[item["abs"]] = inst
+    hook_files = [(_FLUSHER_RELPATH, _ATTR_FLUSHER_GD),
+                  (_PRE_HOOK_RELPATH, _ATTR_PRE_HOOK_GD.replace(
+                      _ATTR_RUN_UUID_PLACEHOLDER, run_uuid))]
+    if causal:
+        hook_files.append((_ATTR_CTX_RELPATH, _ATTR_CTX_GD))
+    return started_files, instrumented, hook_files
+
+
+def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
+                         instrumented: dict, hook_files: list,
+                         run_uuid: str, timeout_s: int,
+                         xdg_homes: list[str]) -> list[dict]:
+    """写插桩文本与 ATTR 钩子 → `-gdir` 单进程跑 suite（XDG 隔离）→
+    finally 还原文树/清钩子。返回逐轮执行记录；xdg 目录只登记，由调用方
+    成功路径回收（与既有口径一致，错误路径不新增回收）。"""
+    import tempfile
+
+    executions: list[dict] = []
+    try:
+        for abs_path, inst in instrumented.items():
+            Path(abs_path).write_text(inst, encoding="utf-8")
+        for relpath, text in hook_files:
+            abs_p = root / relpath
+            abs_p.parent.mkdir(parents=True, exist_ok=True)
+            abs_p.write_text(text, encoding="utf-8")
+        xdg = tempfile.mkdtemp(prefix=f"gqt-incr-gh-{run_uuid[:8]}-")
+        xdg_homes.append(xdg)
+        argv = [f"-gdir={gen_res}",
+                "-gpre_run_script=res://" + _PRE_HOOK_RELPATH]
+        env = dict(os.environ)
+        env["XDG_DATA_HOME"] = xdg
+        r, _w = _run_one_gut(root, argv, timeout_s, env=env,
+                             gate_root=root)
+        full_out = (r.stdout or "") + "\n" + (r.stderr or "")
+        # C3-R24（N2）：失败名在截断之前从完整输出提取——截断尾部可能
+        # 把失败名切掉，判定将因失败名缺失退到 N6 保守整键红（C3-R27/D3：
+        # 判定证据是同命名空间的 failing_tests）。
+        # C3-R25（N5）：gutrun 在 mutation/ 包——measurement 包内的
+        # `from .gutrun` 是错误相对导入，GUT 一跑完即 ModuleNotFoundError。
+        # C3-R26（D2）：执行脚本头同在截断前提取——rc=0 且零执行证据
+        # （空收集/解析失败零测试执行）的第五形态判定依据。
+        from ..mutation.gutrun import _parse_failing_tests, \
+            executed_script_headers
+        executions.append({"shard": gen_res, "rc": r.returncode,
+                           "out": full_out[-4000:],
+                           "failing_tests": sorted(
+                               _parse_failing_tests(full_out)),
+                           "executed_scripts": sorted(
+                               executed_script_headers(full_out)),
+                           "error": None})
+    finally:
+        for abs_path, original in started_files.items():
+            Path(abs_path).write_text(original, encoding="utf-8")
+        for relpath, _text in hook_files:
+            Path(root / relpath).unlink(missing_ok=True)
+    return executions
+
+
+def _failing_scenarios_backfill(executions: list[dict],
+                                scenario_of_test: dict) -> None:
+    """§SPEC-025/D8（R4）：执行账失败名（编译 test_name）经桥映射回写为
+    scenario 名（`failing_scenarios`）——只作执行账披露（C3-R27/D3：判定
+    按与身份段同命名空间的 `failing_tests` 逐名比对，不消费本回写）。
+    C3-R24（N2）：优先消费截断前提取的失败名（failing_tests 键）；旧形态
+    账（无该键）回退解析截断尾部。"""
+    # C3-R25（N5）：同 `_gherkin_leg_execute`——必须指向 mutation 包的
+    # gutrun（C2-R4 起这条错误相对导入只被「scenario_of_test 非空」
+    # 掩盖：任何 feature 重跑腿的成功路径都必崩）
+    from ..mutation.gutrun import _parse_failing_tests
+
+    for ex in executions:
+        failing = ex.get("failing_tests")
+        if failing is None:
+            failing = _parse_failing_tests(str(ex.get("out") or ""))
+        ex["failing_scenarios"] = sorted(
+            {scenario_of_test[t] for t in failing
+             if t in scenario_of_test})
+
+
+def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
+                              templates: dict, recipe: dict, causal: bool,
+                              run_uuid: str, timeout_s: int
+                              ) -> tuple[dict, list[dict]]:
+    """SEE-1631 §SPEC-016：gherkin 臂增量重跑腿（只跑失效 feature）。
+
+    编译 rerun keys 进私有 suite（捕获 manifest 身份）→ validator 预检
+    恰好一次（§SPEC-003 契约：业务执行前同一 validator）→ 根树写插桩
+    文本与 ATTR 钩子 → `-gdir` 单进程跑 suite（XDG 隔离）→ 归属读回
+    （身份改写为 gherkin:// 规范形态）→ finally 还原/清钩子/回收 suite。
+    返回 (fresh 臂级映射, 逐轮执行记录)。编译/预检失败具名抛出（SuiteError
+    / GherkinRunError / AddonError），不得静默缩面。"""
+    import shutil
+    import sys
+
+    from .arms import _cleanup_suite_dir
+    from .attribution import (
+        _fid_by_line_from_registry,
+        build_attribution_map,
+    )
+    from .orchestrator import _read_attr_merged, _read_registries
+
+    keys = sorted({str(k) for k in feature_keys})
+    if not keys:
+        return None, []
+    suite_dir, _identities, gen_res, rw, scenario_of_test = \
+        _gherkin_leg_compile_suite(root, keys, run_uuid)
+    # C3-R31：compile_suite 的私有 suite 目录由它自己回收——预检/编译/
+    # 适配器失败不得在夹具树残留 `.gqt-run-*`（决策 25 零残留要求）。
+    started_files, instrumented, hook_files = _gherkin_leg_texts(
+        templates, run_uuid, causal)
+    xdg_homes: list[str] = []
+    try:
+        executions = _gherkin_leg_execute(root, gen_res, started_files,
+                                          instrumented, hook_files,
+                                          run_uuid, timeout_s, xdg_homes)
+        attr_by_rel = {}
+        for rel, item in templates.items():
+            attr_by_rel[rel] = _read_attr_merged(root, run_uuid, rel,
+                                                 xdg_homes)
+        registries = _read_registries(root, run_uuid, xdg_homes,
+                                      consume=True)
+        fid_by_line = {rel: _fid_by_line_from_registry(it["registry"])
+                       for rel, it in templates.items()
+                       if it.get("registry") is not None}
+        fresh = build_attribution_map(
+            "gherkin", attr_by_rel, registries,
+            probe_lines_by_rel={rel: it["probe_lines"]
+                                for rel, it in templates.items()},
+            block_map_by_rel={rel: it["block_map"]
+                              for rel, it in templates.items()},
+            fid_by_line_by_rel=fid_by_line,
+            identity_rewrite=rw)
+        for xdg in xdg_homes:
+            shutil.rmtree(xdg, ignore_errors=True)
+        # §SPEC-025/D8（R4）：执行账失败名（编译 test_name）经桥映射回写
+        # scenario 名（failing_scenarios）——仅执行账披露（C3-R27/D3：判定
+        # 按 failing_tests 逐名，见 _verdict_gherkin_rerun）。
+        if scenario_of_test:
+            _failing_scenarios_backfill(executions, scenario_of_test)
+        return fresh, executions
+    finally:
+        try:
+            _cleanup_suite_dir(suite_dir, root)
+        except OSError as e:
+            print(f"measure: increment gherkin suite cleanup failed: {e}",
+                  file=sys.stderr)

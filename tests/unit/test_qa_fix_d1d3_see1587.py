@@ -56,7 +56,7 @@ def _zero_test_arms() -> dict:
 
 
 def _map_doc(file_sha256: dict, arms_state: dict) -> dict:
-    return {"schema_version": "test-attribution/6",
+    return {"schema_version": "test-attribution/7",
             "file_sha256": dict(file_sha256),
             "arms": {"gut_full": {}}, "arms_state": arms_state}
 
@@ -296,10 +296,11 @@ def _resolve_project(tmp_path: Path) -> tuple[Path, Path]:
 def test_d3_zero_test_map_fails_resolve_selection_loud(tmp_path, monkeypatch):
     """零测试映射不得产出假绿 ok:true/mutants:0——选面阶段 fail-loud。"""
     proj, target = _resolve_project(tmp_path)
-    path = _write_map_file(proj, _map_doc(
+    _write_map_file(proj, _map_doc(
         {"a.gd": hashlib.sha256(target.read_bytes()).hexdigest()},
         _zero_test_arms()))
-    monkeypatch.setenv(truth_select.ENV_MAP, str(path))
+    # C3-R20 迁移（定案 20）：地图唯一、位置由代码决定——地图写默认
+    # 位置即可，GQT_ATTRIBUTION_MAP 环境变量通道退役。
     monkeypatch.setenv(truth_select.ENV_MODE, "off")
     with pytest.raises(truth_select.MutationSelectionError) as ei:
         truth_select.resolve_selection(str(proj), str(target))
@@ -315,15 +316,17 @@ def test_d3_legit_empty_map_keeps_zero_ref_short_circuit(tmp_path,
     from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
     recipe, err = build_recipe(proj)
     assert err is None, err
+    # C3-R22（D3）：pristine 面 = 磁盘树 raw hash **不含 toolchain**——
+    # 与 `_fresh_recipe_hash` 的剥离口径一致（含 toolchain 的旧形态在
+    # 无 bin 环境会结构性失配）。
     raw = recipe_hash({k: v for k, v in recipe.items()
-                       if k != "recipe_hash"})
+                       if k not in ("recipe_hash", "toolchain")})
     legit = {"gut_full": {"state": "valid", "bundles": 1, "pairs": 0,
                           "probes_fired": 12, "vacuous": False}}
     doc = _map_doc({"a.gd": hashlib.sha256(
         target.read_bytes()).hexdigest()}, legit)
     doc["recipe_hash_pristine"] = raw
-    path = _write_map_file(proj, doc)
-    monkeypatch.setenv(truth_select.ENV_MAP, str(path))
+    _write_map_file(proj, doc)
     monkeypatch.setenv(truth_select.ENV_MODE, "off")
     sel = truth_select.resolve_selection(str(proj), str(target))
     assert sel["source"] == "runtime_mapping" and sel["zero_ref"] is True

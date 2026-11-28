@@ -262,7 +262,7 @@ def test_adapter_fingerprint_empty_source_set_named(tmp_path: Path) -> None:
     addon.mkdir(parents=True)
     (addon / "schema.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError,
-                       match="no .gd/.feature adapter sources"):
+                       match="no .gd adapter sources"):
         adapter_source_sha256(project)
 
 

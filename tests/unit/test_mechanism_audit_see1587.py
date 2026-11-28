@@ -91,7 +91,7 @@ def test_schema_constants_aligned_line_primary():
     )
     from godot_qa_toolkit.mutation import coverlink, truth_select
 
-    assert ATTRIBUTION_SCHEMA == "test-attribution/6"
+    assert ATTRIBUTION_SCHEMA == "test-attribution/7"
     assert ATTRIBUTION_ALGO_TAG == "attr-line/1"
     assert truth_select.SCHEMA_VERSION == ATTRIBUTION_SCHEMA
     assert inc_mod.ATTRIBUTION_SCHEMA == ATTRIBUTION_SCHEMA
@@ -159,7 +159,7 @@ def test_manual_store_and_projection_store_never_impersonate(tmp_path):
         str(proj), str(target), glob)
     assert lines is None and "manual measurement entry" in err
     # /2 写路径受控：无绑定 doc → 投影拒绝（不产出无绑定缓存）
-    doc = {"schema_version": "test-attribution/6",
+    doc = {"schema_version": "test-attribution/7",
            "recipe_hash_pristine": "p", "file_sha256": {}, "tests_face": {},
            "instrumentable_lines": {}, "arms_state": {}, "arms": {}}
     covered, perr = coverlink.project_coverage_from_map(
@@ -233,7 +233,7 @@ def test_write_map_fixture_produces_line_primary_doc(tmp_path):
     (proj / "src" / "a.gd").write_text("func f():\n\treturn 1\n")
     write_map(proj, {"src/a.gd": ["test_a.gd::t1"]})
     doc = truth_select.load_map(proj / ".qa-cache" / "attribution-map.json")
-    assert doc["schema_version"] == "test-attribution/6"
+    assert doc["schema_version"] == "test-attribution/7"
     arm = doc["arms"]["gut_full"]
     assert arm["test_to_lines"]["test_a.gd::t1"]["src/a.gd"] == [2]
     assert arm["line_to_tests"]["src/a.gd"]["2"] == ["test_a.gd::t1"]

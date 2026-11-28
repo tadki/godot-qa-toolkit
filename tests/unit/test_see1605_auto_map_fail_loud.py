@@ -21,7 +21,7 @@ from godot_qa_toolkit.mutation import truth_select as ts
 from godot_qa_toolkit.mutation.truth_select import (MutationSelectionError,
                                                     ensure_map)
 
-SCHEMA = "test-attribution/6"
+SCHEMA = "test-attribution/7"
 
 ELIGIBLE_A = "func a():\n\treturn 1\n"
 ELIGIBLE_B = "func b():\n\treturn 2\n"
@@ -79,6 +79,9 @@ def _fresh_doc(root: Path, targets: list[str]) -> dict:
         "arms_state": {"gut_full": {
             "bundles": 1, "pairs": 2, "probes_fired": 3, "state": "valid"}},
         "instrumentable_lines": {rel: [2] for rel in rels},
+        # §SPEC-032（C3-R1）：契约 MapView 构造期断言要求 verdict 表在场
+        "test_verdicts": {
+            "res://tests/unit/test_game.gd::test_ok": {"verdict": "green"}},
     }
 
 

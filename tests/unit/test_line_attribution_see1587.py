@@ -141,7 +141,7 @@ def test_increment_baseline_rejects_old_schema(tmp_path):
 def test_schema_constants_aligned():
     from godot_qa_toolkit.measurement.increment import ATTRIBUTION_SCHEMA \
         as INC_SCHEMA
-    assert ATTRIBUTION_SCHEMA == "test-attribution/6"
+    assert ATTRIBUTION_SCHEMA == "test-attribution/7"
     assert INC_SCHEMA == ATTRIBUTION_SCHEMA
     assert truth_select.SCHEMA_VERSION == ATTRIBUTION_SCHEMA
 
@@ -364,7 +364,7 @@ def _write_line_primary_doc(tmp_path: Path, project: Path, rel: str,
                                 for ln in line_map["a"]}},
     }
     return {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": "rh",
         "recipe_hash_pristine": "pristine-1",
         "project_root": str(project),

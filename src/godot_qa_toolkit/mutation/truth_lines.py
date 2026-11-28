@@ -132,10 +132,12 @@ def _tests_for_target(root: str, arm: dict, rel: str) -> tuple[list[str], list[s
     names: set[str] = set()
     for identity, files in (arm.get("test_to_files") or {}).items():
         if rel in files:
-            names.add(identity.split("::", 1)[0])
+            # C3-R21（D2）：身份脚本段两形态（真建图 res:// 全路径 /
+            # 合成夹具裸 basename）按 basename 反查 `_test_scripts_by_name`。
+            names.add(Path(identity.split("::", 1)[0]).name)
     for identity, files in (arm.get("script_to_files") or {}).items():
         if rel in files:
-            names.add(identity)
+            names.add(Path(identity).name)
     by_name = _ts()._test_scripts_by_name(root)
     scripts: list[str] = []
     ambiguous: list[str] = []
@@ -200,8 +202,7 @@ class RuntimeOwnership:
             return None
         return paths[0]
 
-def ownership_for(project_root: str, target_file: str,
-                  map_path_override: str | None = None):
+def ownership_for(project_root: str, target_file: str):
     """新鲜映射 → RuntimeOwnership；无新鲜映射/解析异常 → None（A09）。
 
     None = 不产出 kill 证书 → killed 保守重跑（fail-safe 只偏向重跑）。
@@ -209,10 +210,18 @@ def ownership_for(project_root: str, target_file: str,
     （结构性兜底已退役——静态归属会给 stale 索引签发 kill 证书）。"""
     import sys
     try:
-        sel = _ts().resolve_selection(project_root, target_file, map_path_override)
+        # §SPEC-032/D1：证书归属路径只读（run 侧零续新）
+        sel = _ts().resolve_selection(project_root, target_file,
+                                      renew=False)
         mp = sel.get("mapping") or {}
-        if mp.get("file_sha256_bound") and mp.get("recipe_hash_ok"):
-            doc = _ts().load_map(mp["path"])
+        # §SPEC-029 谓词单一实现：新鲜判定 = resolve 判 fresh（共享
+        # assert_map_fresh 谓词；source=runtime_mapping 仅在新鲜路径赋值；
+        # recipe_hash_ok 旧字段已退役）。
+        if mp.get("file_sha256_bound") \
+                and sel.get("source") == "runtime_mapping":
+            # C3-R18（定案 22）：doc 装载走契约只读视图（零裸读）。
+            from .map_contract import view as _mc_view
+            doc = _mc_view(project_root).doc
             owner = RuntimeOwnership(project_root, doc)
             owner.source = "runtime_mapping"
             return owner

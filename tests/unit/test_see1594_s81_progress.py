@@ -56,9 +56,11 @@ def test_progress_lines_shape(tmp_path, capsys):
     assert re.search(
         r"measure: arm=gut_full shard=\d+/\d+ done s=[0-9.]+", err), err
     assert re.search(
-        r"measure: arm=gut_full done state=(valid|invalid) "
+        r"measure: arm=gut_full done state=(valid|invalid)"
+        r"( \(pre-reconciliation intermediate[^)]*\))? "
         r"wall_s=[0-9.]+", err), err
-    # §SPEC-PLANFIRST 任务 2：gherkin 暂停——不再出现 gherkin
-    # 分片行与 done 行（占位臂无分片执行）
-    assert "measure: arm=gherkin start shards=" not in err
-    assert not re.search(r"measure: arm=gherkin done state=", err), err
+        # SEE-1631：默认双臂恢复——gherkin 臂分片行与 done 行在场
+    # （历史暂停语义：显式 GQT_MEASUREMENT_GHERKIN_DISABLED=1 时无分片
+    # 执行、无 done 行，占位臂不变。）
+    assert "measure: arm=gherkin start shards=" in err
+    assert re.search(r"measure: arm=gherkin done state=", err), err

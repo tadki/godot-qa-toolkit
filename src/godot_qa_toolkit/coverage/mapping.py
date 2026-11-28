@@ -4,9 +4,10 @@
 **同一**行级归属映射（test-attribution/6），不再有第二套 direct GUT 执行路径。
 
 本模块是唯一的覆盖消费实现，复用既有单一来源链（不复制 projection）：
-- `truth_select.ensure_map` —— 缺失时构建映射（映射网是核心部件，需要时跑）；
-- `truth_select.resolve_selection` —— 新鲜性判定 + 失效面增量更新 + 无法验证
-  即 fail-loud；
+- `map_contract.refresh` —— 缺失/过期时按契约续新映射（映射网是核心部件，
+  需要时跑；§SPEC-035/S1 单一委托）；
+- `truth_select.resolve_selection` —— 新鲜性判定，不可用即 fail-loud（续新
+  已单点收口 `refresh`，调用点固定不续新，§SPEC-035/S4）；
 - `coverlink.project_coverage_from_map` —— 由行事实投影 covered 行集（零第二
   次插桩、零 GUT）。
 
@@ -47,9 +48,15 @@ def _mapping_ensure(project_root: Path, path: Path, timeout_s: int | None) -> No
             "godot_binary_unusable",
             f"godot binary not found in PATH: {_cmd} "
             f"(set GQT_GODOT_BIN or --godot-bin)")
+    # §SPEC-032/D1（C3-R1 F3）：单一委托、失败具名——refresh 失败直接
+    # 转具名 CoverageMappingError，不再回退 ensure_map（双续新路径已裁）。
+    from ..mutation.map_contract import refresh
+
     try:
-        truth.ensure_map(str(root), [str(path)], timeout_s=timeout_s)
-    except Exception as e:  # noqa: BLE001 — 映射构建失败转具名域错误
+        refresh(str(root), [str(path)], timeout_s=timeout_s or 600)
+    except Exception as e:  # noqa: BLE001 — 单一委托失败具名转域
+        # C3-R2 项2：备份目录残留由创建处自清（arms/diagnose mkdir 后
+        # 失败自删）——此处不再做全量扫描式清理（会误删他进程刚建的目录）
         raise CoverageMappingError(
             "attribution_map_build_failed",
             f"{type(e).__name__}: {e}") from e
@@ -58,7 +65,8 @@ def _mapping_ensure(project_root: Path, path: Path, timeout_s: int | None) -> No
 def _mapping_select(root: Path, path: Path, timeout_s: int | None) -> dict:
     """选面决策（fail-loud，不回退 GUT；畸形 arms_state 转具名域错误）。"""
     try:
-        sel = truth.resolve_selection(str(root), str(path), timeout_s=timeout_s)
+        sel = truth.resolve_selection(str(root), str(path),
+                                      timeout_s=timeout_s, renew=False)
     except truth.MutationSelectionError as e:
         # SEE-1623 M10/F4：detail 用 e.detail（str(e) 已含 reason 前缀，
         # 再拼一次产生 auto_update_still_stale:… 双写）。
@@ -80,15 +88,19 @@ def _mapping_doc(root: Path) -> tuple:
     """映射文档装载 + 顶层 instrumentable_lines 形状守卫（投影前验证——
     防止 _projection_map_reject 的 AttributeError 被兜底 except 遮蔽成
     projection_failed，§SPEC-025/027 域命名）。返回 (map_path, doc)。"""
-    map_path = truth.map_path(str(root))
-    if not map_path:
-        raise CoverageMappingError(
-            "no_attribution_map",
-            "build it first: `gqt measure run --test-attribution`")
+    # C3-R18（定案 22）：map 装载走契约只读视图（零裸读/零路径查找）。
+    from ..mutation.map_contract import MapContractError, view as _mc_view
+
     try:
-        doc = truth.load_map(map_path)
-    except truth.SelectionError as e:
-        raise CoverageMappingError("attribution_map_unusable", str(e)) from e
+        v = _mc_view(str(root))
+    except MapContractError as e:
+        msg = str(e)
+        code = ("no_attribution_map"
+                if "no attribution map" in msg else
+                "attribution_map_unusable")
+        raise CoverageMappingError(code, msg) from e
+    map_path = v.map_path
+    doc = v.doc
     inst_all = doc.get("instrumentable_lines")
     if inst_all is None:
         inst_all = {}
@@ -118,12 +130,13 @@ def _mapping_project(root: Path, path: Path, rel: str, doc: dict,
 
 def _mapping_report(path: Path, covered: set, inst: set, scripts: list,
                     tests_glob: "str | None", face: "str | None",
-                    map_path) -> dict:
-    """投影结果聚合（total/pct/契约键集）。"""
+                    map_path, gherkin: "dict | None" = None) -> dict:
+    """投影结果聚合（total/pct/契约键集）。SEE-1631：gherkin 臂命中
+    披露块（不进 covered 行集——投影保持 gut_full 单源口径）。"""
     total = len(inst)
     cov = len(covered)
     pct = round(100.0 * cov / total, 2) if total else 100.0
-    return {
+    out = {
         "file": str(path), "covered_lines": covered,
         "instrumentable_lines": inst, "total_lines": total,
         "covered_count": cov, "coverage_percent": pct,
@@ -131,6 +144,49 @@ def _mapping_report(path: Path, covered: set, inst: set, scripts: list,
         "map_path": str(map_path),
         "source": "line_mapping_projection",
     }
+    if gherkin is not None:
+        out["gherkin"] = gherkin
+    return out
+
+
+def _gherkin_projection_lines(garm: dict, rel: str) -> set:
+    """目标文件上的 gherkin 命中行集（test_to_lines ∪ script_to_lines
+    双车道并集）。"""
+    glines: set[int] = set()
+    for _ident, by_rel in (garm.get("test_to_lines") or {}).items():
+        glines |= set((by_rel or {}).get(rel) or [])
+    for _script, by_rel in (garm.get("script_to_lines") or {}).items():
+        glines |= set((by_rel or {}).get(rel) or [])
+    return glines
+
+
+def _gherkin_projection_disclosure(doc: dict, rel: str,
+                                   covered: set) -> "dict | None":
+    """SEE-1631 §SPEC-005：coverage 投影的 gherkin 命中披露（行集/百分比
+    parity 不变；仅披露 gherkin 覆盖行与 gut 投影的差集）。
+    SEE-1631 §SPEC-015：gherkin 臂 state!=valid 时不得把其边当命中——
+    披露转为具名 unavailable，行集不出场；valid 时披露不变。"""
+    garm = (doc.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict):
+        return None
+    if not (garm.get("test_to_lines") or garm.get("script_to_lines")):
+        return None
+    gh_state = ((doc.get("arms_state") or {}).get("gherkin") or {})
+    if gh_state.get("state") != "valid":
+        return {"unavailable": True,
+                "state": gh_state.get("state"),
+                "invalid_reason": gh_state.get("invalid_reason"),
+                "covered_lines": [], "gherkin_only_lines": [],
+                "consumption": ("not disclosed: invalid gherkin arm edges "
+                                "are not truth (state=%s)"
+                                % (gh_state.get("state"),))}
+    glines = _gherkin_projection_lines(garm, rel)
+    if not glines:
+        return None
+    return {"covered_lines": sorted(glines),
+            "gherkin_only_lines": sorted(glines - set(covered)),
+            "consumption": ("disclosed_only: projection stays gut_full "
+                            "(single-source caliber unchanged)")}
 
 
 def _mapping_target(project_root: Path, file_path: str) -> tuple:
@@ -208,4 +264,6 @@ def project_file_coverage(
                                binary_kind, identity, tests_face)
     inst = set(doc.get("instrumentable_lines", {}).get(rel, []))
     return _mapping_report(path, covered, inst, scripts, tests_glob, face,
-                           map_path)
+                           map_path,
+                           gherkin=_gherkin_projection_disclosure(
+                               doc, rel, covered))

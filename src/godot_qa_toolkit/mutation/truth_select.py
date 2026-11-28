@@ -3,8 +3,8 @@
 
 合同（Owner 2026-11-14 拍板 + ④ 实测数据）：
 
-- **映射来源**：measurement 归属产物（`test-attribution/6`，行级主真值），
-  路径经 `--attribution-map` 或环境变量 `GQT_ATTRIBUTION_MAP` 给出；
+- **映射来源**：measurement 归属产物（行级主真值），位置由代码决定
+  （定案 20：项目唯一一份 map 在默认位置）；
 - **新鲜判据**：产物 `report_recipe_hash` 与本树现值一致（含 toolchain 注入
   口径；按 project_root 记忆化）+ **目标文件 sha256 与产物 `file_sha256`
   绑定一致**；任一不满足 → 视为过期，自动增量/重建一次后重判，仍不可用
@@ -32,10 +32,10 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-# SEE-1587：行级主真值 schema。旧 /5 产物在 load_map / validate_refresh
-# 处 fail-loud（schema 不符即拒），无兼容别名。
-SCHEMA_VERSION = "test-attribution/6"
-ENV_MAP = "GQT_ATTRIBUTION_MAP"
+# SEE-1587：行级主真值 schema。旧产物在 load_map / validate_refresh
+# 处 fail-loud（schema 不符即拒），无兼容别名。SEE-1631：/7——gherkin
+# 臂归属接入（gherkin:// 身份形态 + feature/scenario 反查视图）。
+SCHEMA_VERSION = "test-attribution/7"
 ENV_MODE = "GQT_ATTRIBUTION_MAP_MODE"   # "auto"（默认）| "off"
 DEFAULT_MAP_REL = ".qa-cache/attribution-map.json"
 
@@ -46,14 +46,6 @@ _REGENERATED: set[str] = set()
 
 def mode() -> str:
     return (os.environ.get(ENV_MODE) or "auto").strip().lower()
-
-
-def map_event_counts_stale(doc: dict) -> bool:
-    """SEE-1604 D4：增量产物的车道事件计数未重测（increment 块唯一出处）。
-
-    结构边/行事实在增量中已刷新，但事件计数（hit_events/rates/phases/
-    hotspots）不重测——消费侧不得把它当新鲜证据（显式产物具名拒绝）。"""
-    return bool((doc.get("increment") or {}).get("event_counts_stale"))
 
 
 def ledger() -> dict:
@@ -96,8 +88,16 @@ class MutationSelectionError(SelectionError):
         super().__init__(reason + (f": {detail}" if detail else ""))
 
 
+_REFRESH_LOCK_DEPTH: "dict[tuple[str, int], int]" = {}
+
+
 def _refresh_lock(path: str):
     """映射刷新串行化：同目录 `<map>.lock` 上的 flock（进程死自动释放）。
+
+    C3-R14：进程内可重入——refresh 全程持锁后，其续新腿（ensure_map 的
+    锁内段）在同进程再取同一把锁会自阻塞；flock 跨 fd 同进程也互斥，故
+    以 resolved 键维护深度计数，重入直接放行（仍是同一把 OS 级锁串行化
+    跨进程并发）。
 
     fcntl 不可用平台（原生 Windows）降级为无锁（唯一 tmp + 原子 rename 仍
     防半写；并发合并语义由调用方双检 + 校验兜底并披露）。"""
@@ -108,12 +108,32 @@ def _refresh_lock(path: str):
         if fcntl is None:
             yield False
             return
+        import threading as _threading
+
+        key = (str(Path(path).resolve()) + ".lock",
+               _threading.get_ident())
+        if _REFRESH_LOCK_DEPTH.get(key, 0) > 0:
+            _REFRESH_LOCK_DEPTH[key] += 1
+            try:
+                yield True
+            finally:
+                _REFRESH_LOCK_DEPTH[key] -= 1
+            return
         lock_path = path + ".lock"
-        lf = open(lock_path, "a+")
+        try:
+            Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+            lf = open(lock_path, "a+")
+        except OSError:
+            # 假 root / 只读挂载等锁文件不可落盘形态 → 降级无锁（与
+            # fcntl 缺失同语义：唯一 tmp + 原子 rename 仍防半写）。
+            yield False
+            return
         try:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            _REFRESH_LOCK_DEPTH[key] = 1
             yield True
         finally:
+            _REFRESH_LOCK_DEPTH[key] = 0
             try:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
             finally:
@@ -127,13 +147,11 @@ except ImportError:  # pragma: no cover - 原生 Windows 降级
     fcntl = None
 
 
-def map_path(project_root: str | Path, explicit: str | None = None) -> str | None:
-    """显式参数 > 环境变量 > 约定默认位置；不存在返回 None。"""
-    cand = explicit or os.environ.get(ENV_MAP)
-    if not cand:
-        default = Path(project_root) / DEFAULT_MAP_REL
-        return str(default) if default.is_file() else None
-    return cand if Path(cand).is_file() else None
+def map_path(project_root: str | Path) -> str | None:
+    """约定默认位置（§SPEC-036/定案 20：项目唯一一份 map，位置只由代码
+    决定）；不存在返回 None。"""
+    default = Path(project_root) / DEFAULT_MAP_REL
+    return str(default) if default.is_file() else None
 
 
 def default_map_path(project_root: str | Path) -> str:
@@ -246,12 +264,31 @@ def _build_gate_fail_reason(doc: dict) -> str | None:
     return None
 
 
+def _segment_exempt_from_refresh(segment: str, rerun: set[str],
+                                 dropped: set[str],
+                                 drop_bases: set[str]) -> bool:
+    """守恒豁免按身份形态分口径（C3-R24/N1，决策 16）：rerun 是「选哪些
+    脚本来跑」入口——basename 口径豁免（`-gselect` 同名一起执行，两形态
+    同豁免）；dropped 是删除面——规范 res:// 身份按**完整路径**精确豁免
+    （同名 basename 豁免会掩盖幸存者丢失），升级过渡裸 basename 身份
+    按 basename 豁免（幸存者由合并侧保留 + 判定表改写/披露）。"""
+    if segment in rerun or segment in dropped:
+        return True
+    base = Path(segment).name
+    if base in rerun:
+        return True
+    if segment.startswith("res://"):
+        return segment[len("res://"):] in dropped
+    return base in drop_bases
+
+
 def validate_refresh(before: dict, after: dict) -> None:
     """刷新产物守恒校验：失效即 fail-loud（不得静默交付失真映射）。
 
-    允许变化的边：rerun_scripts（整体替换）与 dropped_scripts（删除）；
-    其余测试身份必须原样保留——并发读-改-写导致映射失真（共享临时文件、
-    无串行化；修复后并发刷新实测零身份丢失）在此显式拒绝。"""
+    允许变化的边：rerun_scripts（整体替换）与 dropped_scripts（删除，
+    完整路径——C3-R24/N1）；其余测试身份必须原样保留——并发读-改-写
+    导致映射失真（共享临时文件、无串行化；修复后并发刷新实测零身份
+    丢失）在此显式拒绝。"""
     if after.get("schema_version") != SCHEMA_VERSION:
         raise MutationSelectionError("refresh_schema_mismatch")
     gate = _build_gate_fail_reason(after)
@@ -260,7 +297,10 @@ def validate_refresh(before: dict, after: dict) -> None:
     inc = after.get("increment") or {}
     rerun = {str(x) for x in (inc.get("rerun_scripts") or [])}
     dropped = {str(x) for x in (inc.get("dropped_scripts") or [])}
-    keep_before = _script_names(before) - rerun - dropped
+    drop_bases = {Path(d).name for d in dropped}
+    keep_before = {seg for seg in _script_names(before)
+                   if not _segment_exempt_from_refresh(seg, rerun, dropped,
+                                                       drop_bases)}
     missing = keep_before - _script_names(after)
     if missing:
         raise MutationSelectionError(
@@ -309,22 +349,55 @@ def _targets_under(roots: list[str]) -> list[str]:
                    for p in Path(r).rglob("*.gd") if p.is_file()})
 
 
-def _default_map_reuse(path: str | None, explicit: bool
-                       ) -> tuple[str | None, str | None]:
-    """约定默认/显式位置的产物复用决策（§SPEC-012 HIGH-2 判定唯一出处）。
+def _default_map_reuse(path: str | None) -> tuple[str | None, str | None]:
+    """默认位置产物的复用决策（§SPEC-012 HIGH-2 判定唯一出处）。
 
-    返回 (可复用路径, 重建原因)：可用 → (path, None)；显式产物不可用 →
-    (path, None)（只读透传，fail-loud 由 resolve_selection）；默认产物
-    不可用 → (None, 原因)（调用方原子重建）；缺失 → (None, None)。"""
+    返回 (可复用路径, 重建原因)：可用 → (path, None)；不可用 →
+    (None, 原因)（调用方原子重建）；缺失 → (None, None)。"""
     if path is None:
         return None, None
     try:
         load_map(path)
     except SelectionError as e:
-        if explicit:
-            return path, None
         return None, f"default_map_unusable: {e}"
     return path, None
+
+
+def _intolerant_tests_config() -> "dict | list | None":
+    """§SPEC-PLANFIRST 任务 1：源码契约用例的 --intolerant-tests 声明
+    豁免接线（env 单点；中断报告草稿可直接保存后经此生效）。"""
+    it_path = os.environ.get("GQT_MEASUREMENT_INTOLERANT_TESTS", "")
+    if it_path.strip():
+        return json.loads(Path(it_path.strip()).read_text(
+            encoding="utf-8"))
+    return None
+
+
+def _fail_on_red_bits(doc: dict) -> list:
+    """§SPEC-019 fail-on-red 的红证据清单：非 valid/disabled 臂（带
+    invalid_reason）、partial 臂（排除数）、基线 partial。"""
+    red_bits = []
+    for arm_name, st in (doc.get("arms_state") or {}).items():
+        if st.get("state") not in ("valid", "disabled"):
+            red_bits.append(f"{arm_name}:"
+                            f"{st.get('invalid_reason')}")
+        elif st.get("excluded_tests"):
+            red_bits.append(f"{arm_name}:partial("
+                            f"{len(st['excluded_tests'])} excluded)")
+    bfm = doc.get("baseline_failures_meta") or {}
+    if bfm.get("status") == "partial":
+        red_bits.append(f"baseline_partial:"
+                        f"{len(bfm.get('excluded_tests') or [])}")
+    return red_bits
+
+
+def _ensure_targets_exact(files: "list[str]") -> "list[str]":
+    """§SPEC-031/032（C3-R1 F1）：建图面 = 范围规则 production 宇宙——
+    直接使用绝对路径目标清单，不经 _roots_of 首层目录推导，也不落
+    targets_root_fallback 的"放大到工程根"回退（黑名单失效/根级白名单
+    漏建/单文件白名单放大三类偏差的根因）。"""
+    return sorted({str(Path(f).resolve()) if not str(f).startswith("/")
+                   else str(Path(f)) for f in files})
 
 
 def _ensure_generate(root: str, out: str, files: list[str],
@@ -340,23 +413,41 @@ def _ensure_generate(root: str, out: str, files: list[str],
     recipe, error = build_recipe(Path(root))
     if error is not None:
         raise SelectionError(f"recipe unavailable: {error}")
-    targets = _targets_under(_roots_of(files, root))
+    targets = _ensure_targets_exact(files)
+    missing = [t for t in targets if not Path(t).is_file()]
+    if missing:
+        raise SelectionError(
+            f"attribution_generate_failed: target files do not exist: "
+            f"{sorted(missing)[:6]}")
     tmp = _unique_tmp(out)
     try:
-        # §SPEC-PLANFIRST 任务 1：源码契约用例的 --intolerant-tests 声明
-        # 豁免接线（env 单点；中断报告草稿可直接保存后经此生效）
-        it_cfg = None
-        it_path = os.environ.get("GQT_MEASUREMENT_INTOLERANT_TESTS", "")
-        if it_path.strip():
-            it_cfg = json.loads(Path(it_path.strip()).read_text(
-                encoding="utf-8"))
+        it_cfg = _intolerant_tests_config()
+        # SEE-1631 §SPEC-019：auto map 构建与 measure run --test-attribution
+        # 同形态——不再前置未插桩全脸基线 GUT（全绿零额外运行）；红了按
+        # gut_full 既有懒基线语义在臂门控内分类（既有失败具名吸收标
+        # partial / 疑似插桩不耐受车道），gherkin 臂按 §SPEC-017 只对照
+        # 红 feature。臂超时沿用参数/env 来源（不做事前校准）。
+        print("mutation: auto map build without uninstrumented baseline "
+              "preflight (SEE-1631 §SPEC-019) — arm timeout from "
+              "parameter/env; red handling runs post-build via arm gates",
+              file=sys.stderr)
         measurement = run_measurement(
             root, targets, recipe, test_attribution=True,
-            attribution_out=tmp, baseline_preflight=True,
+            attribution_out=tmp,
             intolerant_config=it_cfg,
             **({"timeout_s": int(timeout_s)}
                if timeout_s is not None else {}))
         doc = load_map(tmp)
+        # §SPEC-019：显式 fail-on-red = 拒绝安装该 map 的 fail-loud
+        # （默认路径：红在臂门控内被既有失败吸收/车道化并标 partial，
+        # map 照常安装、partial 披露在场）。tmp 产物经 finally 清理。
+        from ..measurement.orchestrator import fail_on_red_baseline
+        if fail_on_red_baseline():
+            red_bits = _fail_on_red_bits(doc)
+            if red_bits:
+                raise MutationSelectionError(
+                    "fail_on_red_baseline: refusing to install auto-built "
+                    f"attribution map — red evidence: {sorted(red_bits)}")
         gate = _build_gate_fail_reason(doc)
         if gate is not None:
             # §SPEC-PREFLIGHT×PLANFIRST steer：新增失败的中断报告从
@@ -370,7 +461,6 @@ def _ensure_generate(root: str, out: str, files: list[str],
         os.replace(tmp, out)
     finally:
         Path(tmp).unlink(missing_ok=True)
-    os.environ[ENV_MAP] = out
     event = {"action": action, "map": out,
              "targets": len(targets),
              "wall_s": round(time.monotonic() - t0, 3), "ok": True}
@@ -381,26 +471,43 @@ def _ensure_generate(root: str, out: str, files: list[str],
 
 
 def ensure_map(project_root: str | Path, files: list[str],
-               timeout_s: int | None = None) -> str | None:
-    """默认自动生成/重建（mode=auto，原子写 + `<map>.lock` 串行化）；
-    显式 `--attribution-map` 只读透传绝不重建；失败台账记录后
-    fail-loud（全脸仅显式 `--select full` 审计开关）。"""
+               timeout_s: int | None = None, *,
+               force: bool = False) -> str | None:
+    """map 建图/重建阶梯的内部入口（§SPEC-029：每个项目唯一一份 map，
+    不设显式只读例外——过期同样原地重建，原子写 + `<map>.lock` 串行化）。
+    新鲜度判定与"要不要刷"的决策已单点收口 map 契约 `status`/`refresh`
+    （§SPEC-035/S2，续新只在 prepare）；不可用（旧 schema/解析失败）→
+    原子重建；失败台账记录后 fail-loud（全脸仅显式 `--select full` 审计
+    开关）。
+
+    force=True = 续新全量重建——**不删旧 map**，直接原子替换目标路径
+    （失败路径旧 map 字节不变）。"""
     root = str(Path(project_root).resolve())
     if mode() == "off":
         return map_path(root)
-    explicit = bool(os.environ.get(ENV_MAP))
-    existing, rebuild_reason = _default_map_reuse(map_path(root), explicit)
-    if existing:
-        # 可用直接复用；显式产物不可用同样原样透传（绝不重建/删除用户
-        # 指定文件——fail-loud 由 resolve_selection）。
-        return existing
+    return _ensure_map_locked(root, files, timeout_s, force)
+
+
+def _ensure_map_locked(root, files, timeout_s, force):
+    """ensure_map 主体（定案 20：项目唯一一份 map 在默认位置）。"""
+    existing, rebuild_reason = (None, "forced_rebuild") if force else \
+        _default_map_reuse(map_path(root))
+    if existing and not force:
+        # §SPEC-035/S2：新鲜度统一经 map 契约 status。
+        from .map_contract import status as _map_contract_status
+
+        if not _map_contract_status(root, files).get("fresh"):
+            existing = None
+        else:
+            return existing
     # §SPEC-012 HIGH-2：默认位置旧 schema/无效状态 → 原子重建。
     out = default_map_path(root)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     with _refresh_lock(out):
-        existing, reason = _default_map_reuse(map_path(root), explicit)
-        if existing:
+        existing, reason = (None, "forced_rebuild") if force else \
+            _default_map_reuse(map_path(root))
+        if existing and not force:
             return existing                # 双检：等锁期间可能已被生成/重建
         rebuild_reason = rebuild_reason or reason
         action = "rebuild" if rebuild_reason else "generate"
@@ -461,6 +568,14 @@ def _auto_increment(project_root: str, path: str, doc: dict,
     t0 = time.monotonic()
     with _refresh_lock(path):
         current = load_map(path)            # 锁内重读（并发写者可能已更新）
+        # §SPEC-032/D1 锁内新鲜度复检：并发对端已把 map 刷到新鲜 → 直接
+        # 合并返回（后到者不重复增量腿——多余增量腿消除）
+        from .verdict_source import assert_map_fresh
+        try:
+            assert_map_fresh(root, current, [rel])
+            return True, None
+        except Exception:  # noqa: BLE001 — 仍 stale → 继续本方增量
+            pass
         changed = sorted({rel, *(changed_extra or [])})
         drift = _tests_face_drift(root, current)
         changed = sorted(set(changed) | set(drift["changed"])
@@ -506,48 +621,81 @@ def _tests_face_drift(project_root: str, doc: dict) -> dict[str, list[str]]:
 def _fresh_recipe_hash(project_root: str) -> str | None:
     """当前树的 raw recipe hash（不含 toolchain 注入；零 godot 依赖）。
 
-    选面正确性只依赖测试面身份（gut dirs/features/harness）——toolchain
-    版本漂移不改变"谁测谁"，故不为此在每个消费入口启动 godot --version。
+    磁盘树面（R1 两面判定的第一面）。C3-R22（D3/QA-R2）：`build_recipe`
+    的 `toolchain` 版本字典（godot_version 随 `GQT_GODOT_BIN` 有无变化）
+    此前一并进哈希——pristine 面随环境漂移、无 bin 环境被判结构性失配
+    强制 full；现从哈希基中剔除 toolchain（pristine = 磁盘树面，与环境
+    无关）。工具链面由 `_current_report_recipe_hash` 承担。
     """
     from ..measurement.recipe import build_recipe, recipe_hash as _raw
     recipe, error = build_recipe(Path(project_root))
     if error is not None:
         return None
-    return _raw({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    basis = {k: v for k, v in recipe.items()
+             if k not in ("recipe_hash", "toolchain")}
+    return _raw(basis)
+
+
+@lru_cache(maxsize=8)
+def _current_report_recipe_hash_cached(project_root: str,
+                                       _godot_sel: str) -> "str | None":
+    from ..measurement.increment import _inject_toolchain
+    from ..measurement.recipe import build_recipe
+
+    recipe, error = build_recipe(Path(project_root))
+    if error is not None:
+        return None
+    injected = _inject_toolchain(Path(project_root), dict(recipe))
+    return injected.get("recipe_hash")
+
+
+def _current_report_recipe_hash(project_root: str) -> "str | None":
+    """当前树的注入域 report_recipe hash（工具链面；R1 两面判定的第二面）。
+
+    C3-R23（R1/Leader 复核）：新鲜度 = 磁盘树面（`_fresh_recipe_hash`）
+    与工具链面**同时**一致——只换 Godot/GUT/gqt 版本（或换
+    `GQT_GODOT_BIN` 指向）而磁盘树不变时必须判不新鲜。本函数与
+    orchestrator 建图同源同值（`_inject_toolchain` 重算 recipe_hash）。
+    进程内缓存键含 `GQT_GODOT_BIN` 选择值：换 bin 指向即换键，同进程
+    换环境不吃旧值；godot --version 子进程每 (root, bin) 一次，与
+    `_probe_toolchain` 的「进程内探测一次」同一设计。"""
+    return _current_report_recipe_hash_cached(
+        str(Path(project_root).resolve()),
+        os.environ.get("GQT_GODOT_BIN", ""))
 
 
 def map_preview_state(project_root: str, target_file: str) -> dict:
     """SEE-1606 §SPEC-P2：dry-run 预览的映射状态只读探测（零续新零 GUT）。
 
-    absent → 不做新鲜度计算（具名缺失直接给 map）；在场才走 `_evaluate`
-    同源判定（文件绑定 + recipe + 测试面漂移，全只读）；不可用/解析失败
-    按保守未知披露。返回 {"present", "fresh", "reason"}，reason ∈
-    {map_missing, map_unusable, map_fresh, map_stale:<eval reason>}。"""
+    §SPEC-035/S3：plan 的 map 状态来自契约 `status`（不再走旧旁路判定）——
+    absent → 不做新鲜度计算（具名缺失直接给 map）；在场才经 status 全集
+    判定（零副作用）；不可用/解析失败按保守未知披露。返回
+    {"present", "fresh", "reason"}，reason ∈
+    {map_missing, map_unusable, map_fresh, map_stale:<factor>}。"""
     path = map_path(project_root)
     if not path:
         return {"present": False, "fresh": None, "reason": "map_missing"}
     try:
-        doc = load_map(path)
+        load_map(path)
     except Exception:  # noqa: BLE001 — 探测不得失败上抛（预览零副作用）
         return {"present": True, "fresh": None, "reason": "map_unusable"}
+    from .map_contract import status
     try:
         from ..source_io import anchor_to_project_root
-        from ..timing import project_relative
         # §SPEC-ANCHOR-PREVIEW：相对目标先按 project_root 锚定（与
         # runner 同源口径）——CWD≠root 时 fresh 判定不得因 CWD 相对解析
-        # 误报 file_binding_missing_or_stale
+        # 误报 stale
         anchored = anchor_to_project_root(target_file, str(project_root))
-        rel = project_relative(project_root, anchored)
-        verdict = _evaluate(str(project_root), rel, doc)
+        st = status(str(project_root), [anchored])
     except Exception:  # noqa: BLE001 — 同上，探测失败按未知保守披露
         return {"present": True, "fresh": None, "reason": "map_unusable"}
-    fresh = bool(verdict.get("ok"))
-    if fresh:
+    if not st.get("present"):
+        return {"present": False, "fresh": None, "reason": "map_missing"}
+    if st.get("fresh"):
         return {"present": True, "fresh": True, "reason": "map_fresh"}
-    # §SPEC-ANCHOR-PREVIEW LOW-L2：stale 前缀命名修正（原误为 map_fresh:）
-    detail = f":{verdict.get('reason', 'unknown')}"
-    return {"present": True, "fresh": False,
-            "reason": f"map_stale{detail}"}
+    # §SPEC-ANCHOR-PREVIEW LOW-L2：stale 前缀命名保持稳定
+    detail = ",".join(st.get("factors") or []) or "stale"
+    return {"present": True, "fresh": False, "reason": f"map_stale:{detail}"}
 
 
 def load_map(path: str | Path) -> dict:
@@ -618,35 +766,117 @@ def arms_valid(states: dict) -> bool:
     return bool(vacuous or probes > 0)
 
 
+def _gherkin_unavailable_payload(gh_state: dict) -> dict:
+    """SEE-1631 §SPEC-015：invalid 臂的具名 unavailable 披露（行集与
+    feature key 一律不出场）。"""
+    return {"unavailable": True,
+            "state": gh_state.get("state"),
+            "invalid_reason": gh_state.get("invalid_reason"),
+            "lines": [], "feature_keys": [],
+            "consumption": ("not disclosed: invalid gherkin arm edges "
+                            "are not truth (state=%s)"
+                            % (gh_state.get("state"),))}
+
+
+def _gherkin_arm_hits(arm: dict, rel: str) -> "tuple[set[int], set[str]]":
+    """目标文件上的 gherkin 命中：(行集, 身份集)。line_to_tests 视图与
+    script_to_lines 车道并集（与全量投影同口径）。"""
+    lines: set[int] = set()
+    idents: set[str] = set()
+    for ln_s, ids in (arm.get("line_to_tests") or {}).get(rel, {}).items():
+        lines.add(int(ln_s))
+        idents.update(ids)
+    for script, by_rel in (arm.get("script_to_lines") or {}).items():
+        for ln in ((by_rel or {}).get(rel) or []):
+            lines.add(int(ln))
+            idents.add(str(script))
+    return lines, idents
+
+
+def _gherkin_disclosure(doc: dict, rel: str) -> "dict | None":
+    """SEE-1631 §SPEC-005：目标文件上的 gherkin 臂命中披露。
+
+    语义（显式披露，不静默）：gherkin scenario 身份在 GUT-only 执行模型
+    下不是可执行测试面——选面/投影保持 gut_full 单源口径不变；gherkin
+    边只做披露（命中行、feature key、身份数）。"选中 gherkin 测试如何
+    执行"属框架级决策，经 Owner 裁决前不静默丢弃、不静默扩大选面。
+    SEE-1631 §SPEC-015：gherkin 臂 state!=valid 时其边不得当命中——
+    披露转为具名 unavailable（state/invalid_reason 在场），行集与
+    feature key 一律不出场；valid 时披露不变。
+    无 gherkin 臂或目标文件无 gherkin 边 → None（报告形状零变化）。"""
+    arm = (doc.get("arms") or {}).get("gherkin")
+    if not isinstance(arm, dict):
+        return None
+    if not (arm.get("test_to_lines") or arm.get("script_to_lines")):
+        return None
+    gh_state = ((doc.get("arms_state") or {}).get("gherkin") or {})
+    if gh_state.get("state") != "valid":
+        return _gherkin_unavailable_payload(gh_state)
+    lines, idents = _gherkin_arm_hits(arm, rel)
+    if not lines:
+        return None
+    from ..measurement.attribution import _gherkin_feature_of
+
+    keys = sorted({k for k in (_gherkin_feature_of(i) for i in idents)
+                   if k})
+    return {"lines": sorted(lines), "feature_keys": keys,
+            "identities": len(idents),
+            "consumption": ("disclosed_only: gherkin scenario identities "
+                            "are not executable test faces in the GUT-only "
+                            "mutation model; selection/coverage stay "
+                            "gut_full-based")}
+
+
 def _evaluate(root: str, rel: str, doc: dict) -> dict:
-    """单次新鲜性判定 → {ok, reason, scripts, ambiguous, mapping}。"""
+    """单次新鲜性判定 → {ok, reason, scripts, ambiguous, mapping}。
+
+    §SPEC-029（Leader 复核修正）：谓词单一实现——共享
+    `verdict_source.assert_map_fresh`（recipe pristine/project_face/
+    工具链 + file_sha256 全集 + tests_face + 宇宙新增生产检出），本处
+    只保留"该文件在宇宙内且已绑定"的结构门与选面产出。"""
     mapping = {"path": None, "file_sha256_bound": False,
                "recipe_hash_ok": False, "arms_valid": arms_valid(
                    doc.get("arms_state") or {})}
     want_hash = (doc.get("file_sha256") or {}).get(rel)
     have_hash = _sha256(Path(root) / rel)
     mapping["file_sha256_bound"] = bool(want_hash) and want_hash == have_hash
-    mapping["recipe_hash_ok"] = (
-        _fresh_recipe_hash(root) is not None
-        and _fresh_recipe_hash(root) == doc.get("recipe_hash_pristine"))
-    drift = _tests_face_drift(root, doc)
-    mapping["tests_face_ok"] = not (drift["changed"] or drift["removed"])
-    mapping["tests_face_drift"] = drift
     if not mapping["arms_valid"]:
         return {"ok": False, "reason": "measurement_invalid",
                 "scripts": [], "ambiguous": [], "mapping": mapping}
     if not mapping["file_sha256_bound"]:
         return {"ok": False, "reason": "file_binding_missing_or_stale",
                 "scripts": [], "ambiguous": [], "mapping": mapping}
-    if not mapping["recipe_hash_ok"]:
-        return {"ok": False, "reason": "recipe_hash_stale",
-                "scripts": [], "ambiguous": [], "mapping": mapping}
-    if not mapping["tests_face_ok"]:
-        return {"ok": False, "reason": "tests_face_drift",
+    from .verdict_source import BaselineSourceError, assert_map_fresh
+
+    try:
+        assert_map_fresh(root, doc, [rel])
+    except BaselineSourceError as e:
+        mapping["freshness_reason"] = str(e)
+        # 既有 granular reason 契约名保持稳定（调度/契约测试单源）——
+        # 共享谓词消息 → 首因 reason 映射
+        msg = str(e)
+        if "tests_face drift" in msg:
+            reason = "tests_face_drift"
+        elif "recipe_hash_pristine stale" in msg:
+            reason = "recipe_hash_stale"
+        elif "unbuildable" in msg:
+            # C3-R28（D4）：配置面建图时可构建、现在不可构建的 granular
+            # reason（选面出口与 status 因素同一标签族——不新鲜原因全部具名）
+            reason = "recipe_unbuildable"
+        elif "report_recipe_hash drift" in msg:
+            # C3-R23（R1）：工具链面漂移的 granular reason（选面出口
+            # 与 status 因素同一标签族——不新鲜原因全部具名）
+            reason = "report_recipe_hash_drift"
+        elif "new universe file" in msg:
+            reason = "production_new_file"
+        else:
+            reason = "file_binding_missing_or_stale"
+        return {"ok": False, "reason": reason, "detail": msg,
                 "scripts": [], "ambiguous": [], "mapping": mapping}
     scripts, ambiguous = _tests_for_target(root, doc["arms"]["gut_full"], rel)
     return {"ok": True, "reason": "fresh_runtime_mapping",
-            "scripts": scripts, "ambiguous": ambiguous, "mapping": mapping}
+            "scripts": scripts, "ambiguous": ambiguous, "mapping": mapping,
+            "gherkin": _gherkin_disclosure(doc, rel)}
 
 
 def _regenerate(project_root: str, path: str, rel: str,
@@ -703,9 +933,10 @@ def _detail_of(base: dict) -> str | None:
     bits = []
     if mp:
         bits.append(f"file_sha256_bound={mp.get('file_sha256_bound')}")
-        bits.append(f"recipe_ok={mp.get('recipe_hash_ok')}")
-        bits.append(f"tests_face_ok={mp.get('tests_face_ok')}")
+        # §SPEC-029 谓词单一实现：新鲜原因随共享谓词消息具名
         bits.append(f"arms_valid={mp.get('arms_valid')}")
+        if mp.get("freshness_reason"):
+            bits.append(f"freshness={mp['freshness_reason'][:160]}")
     if base.get("ambiguous_names"):
         bits.append(f"ambiguous={base['ambiguous_names'][:3]}")
     if base.get("universe_guidance"):
@@ -754,29 +985,12 @@ def _resolve_entry_doc(root, path, target_file, base, strict) -> tuple:
     return (doc, rel), None
 
 
-def _explicit_map_source(map_path_override: str | None) -> bool:
-    """显式映射判定（`--attribution-map` / ENV_MAP）——D5 只读透传契约的
-    适用面唯一出处。"""
-    return bool(map_path_override) or bool(os.environ.get(ENV_MAP))
-
-
-def _explicit_stale_gate(explicit: bool, doc: dict, base: dict,
-                         strict: bool) -> "dict | None":
-    """D4 显式事件计数门：显式产物带 increment.event_counts_stale 时具名
-    拒绝——事件计数未重测，不得当新鲜证据消费（结构事实虽新但不是本轮
-    可认证的事件证据；零续新/零 GUT）。返回终态 base，放行返回 None。"""
-    if explicit and map_event_counts_stale(doc):
-        base["reason"] = "event_counts_stale"
-        return _finish(base, strict)
-    return None
-
-
-def _auto_renew_step(root, path, doc, rel, evaluation, *, explicit, auto,
+def _auto_renew_step(root, path, doc, rel, evaluation, *, auto,
                      renew, timeout_s, base, strict) -> "tuple[dict, dict | None]":
-    """过期映射的 auto 续新一步（D2/D5 语义固定于此）：显式产物绝不续新
-    （只读透传），renew=False（dry-run）抑制全部续新——零 GUT；续新成功
-    返回刷新后的 evaluation，续新后装载失败返回终态 base。"""
-    if evaluation["ok"] or not (auto and renew and not explicit):
+    """过期映射的 auto 续新一步（D2 语义；定案 20 后无显式只读形态）。
+    renew=False（dry-run）抑制全部续新——零 GUT；续新成功返回刷新后的
+    evaluation，续新后装载失败返回终态 base。"""
+    if evaluation["ok"] or not (auto and renew):
         return evaluation, None
     if not _resolve_renew(root, path, doc, rel, timeout_s):
         return evaluation, None
@@ -789,82 +1003,71 @@ def _auto_renew_step(root, path, doc, rel, evaluation, *, explicit, auto,
         return evaluation, _finish(base, strict)
 
 
-def _stale_decision_reason(evaluation_reason: str, *, explicit: bool,
-                           auto: bool) -> str:
-    """过期终态 reason 合成：显式产物只读透传契约要求具名 explicit_map_stale
-    （绝不原地重建）；auto 管理的默认映射标注 still_stale（续新已试无效）。"""
-    if explicit:
-        return f"explicit_map_stale:{evaluation_reason}"
+def _stale_decision_reason(evaluation_reason: str, *, auto: bool) -> str:
+    """过期终态 reason 合成：续新已试仍 stale 统一标注 still_stale。"""
     return ("auto_update_still_stale:" if auto else "") + evaluation_reason
 
 
 def _universe_target_gate(base: dict, evaluation: dict, doc: dict, rel: str,
-                          *, auto: bool, renew: bool, explicit) -> bool:
+                          *, auto: bool) -> bool:
     """SEE-1623 M10：预存映射 universe 不含目标 → 增量通道无法归类该路径
     （unknown_changed_paths 必失败且白跑一次 gut_full 臂）——零 GUT 具名
-    失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。
+    失败，指向包含该目标的重建路径（F5/组8 缺陷收口）。这道门与续新无关：
+    run 侧固定不续新（§SPEC-035/S4）后同样生效，否则宇宙外目标会退化为
+    误导性的 auto_update_still_stale。
 
     命中时写入 base（reason= target_not_in_map_universe + universe_guidance）
     并返回 True（调用方 `_finish(base, strict)` 终止）。"""
-    if (auto and renew and not explicit
+    if (auto
             and evaluation.get("reason") == "file_binding_missing_or_stale"
             and (doc.get("file_sha256") or {})
             and rel not in (doc.get("file_sha256") or {})):
         base["reason"] = "target_not_in_map_universe"
         base["universe_guidance"] = (
-            f"the existing attribution map does not bind {rel} — rebuild "
-            "the map so the target enters its universe (delete "
-            ".qa-cache/attribution-map.json and rerun, or gqt measure "
-            "map-update --changed <path>)")
+            f"the existing attribution map does not bind {rel} — refresh "
+            "the map so the target enters its universe (`gqt measure "
+            "map-update` rebuilds it in place; the map is unique and its "
+            "location is decided by code, §SPEC-036)")
         return True
     return False
 
 
 def resolve_selection(project_root: str | Path, target_file: str,
-                      map_path_override: str | None = None,
                       strict: bool = True,
                       timeout_s: int | None = None,
                       renew: bool = True) -> dict:
     """目标 → 文件级选面决策（严格模式不可用即 fail-loud）。mode=auto：
     映射过期自动增量/重建一次后重判（台账披露）；strict=False 供证书
-    归属等只读旁路（返回 full_face 描述，不抛）。
-
-    SEE-1604 D5/D4：显式映射默认路径（`--attribution-map` / ENV_MAP）只读
-    透传——过期绝不续新/重建/改写（fail-loud 具名），且拒绝 event_counts_stale
-    的增量产物；auto 管理的默认映射才走续新。renew=False（dry-run）抑制
-    全部续新（零 GUT）。语义分驻 `_explicit_stale_gate` / `_auto_renew_step`
-    / `_stale_decision_reason`。"""
+    归属等只读旁路（返回 full_face 描述，不抛）。renew=False（dry-run）
+    抑制全部续新（零 GUT）。语义分驻 `_auto_renew_step` /
+    `_stale_decision_reason`（定案 20/21：显式 map 形态已退役）。"""
     root = str(Path(project_root).resolve())
     base = {"source": "full_face", "reason": None, "tests": [],
             "tests_glob": None, "zero_ref": False, "mapping": None,
             "ambiguous_names": []}
-    path = map_path(root, map_path_override)
+    path = map_path(root)
     if path is None:
         base["reason"] = "no_attribution_map"
         return _finish(base, strict)
-    explicit = _explicit_map_source(map_path_override)
     loaded, done = _resolve_entry_doc(root, path, target_file, base, strict)
     if done is not None:
         return done
     doc, rel = loaded
-    terminal = _explicit_stale_gate(explicit, doc, base, strict)
-    if terminal is not None:
-        return terminal
     auto = mode() == "auto"
     evaluation = _evaluate(root, rel, doc)
+    base["gherkin"] = evaluation.get("gherkin")
     evaluation["mapping"]["path"] = path
-    if _universe_target_gate(base, evaluation, doc, rel,
-                             auto=auto, renew=renew, explicit=explicit):
+    if _universe_target_gate(base, evaluation, doc, rel, auto=auto):
         return _finish(base, strict)
     evaluation, terminal = _auto_renew_step(
-        root, path, doc, rel, evaluation, explicit=explicit, auto=auto,
+        root, path, doc, rel, evaluation, auto=auto,
         renew=renew, timeout_s=timeout_s, base=base, strict=strict)
     if terminal is not None:
         return terminal
     base["mapping"] = evaluation["mapping"]
     if not evaluation["ok"]:
         base["reason"] = _stale_decision_reason(
-            evaluation["reason"], explicit=explicit, auto=auto)
+            evaluation["reason"], auto=auto)
         return _finish(base, strict)
     if evaluation["ambiguous"]:
         # 同名跨脚本 → 身份不可判定：不猜（严格模式 fail-loud）
@@ -888,7 +1091,9 @@ def function_tests(project_root: str, doc: dict, rel: str,
     for identity, fids in ((doc.get("arms") or {}).get("gut_full", {})
                            .get("test_to_functions") or {}).items():
         if fid in fids:
-            names.add(identity.split("::", 1)[0])
+            # C3-R21（D2）：真建图身份脚本段是 res:// 全路径——按 basename
+            # 反查 `_test_scripts_by_name`，两形态归一。
+            names.add(Path(identity.split("::", 1)[0]).name)
     by_name = _test_scripts_by_name(str(Path(project_root).resolve()))
     scripts: list[str] = []
     ambiguous: list[str] = []
@@ -929,7 +1134,6 @@ def _line_group_load(root, target_file, file_sel) -> tuple:
 def resolve_line_group_selection(project_root: str | Path, target_file: str,
                                  lines: "list[int] | set[int]",
                                  file_selection: dict | None = None,
-                                 map_path_override: str | None = None,
                                  strict: bool = True) -> dict:
     """行集合 → 测试脚本并集 → 单一选择目录 glob（行级选面唯一入口）。
 
@@ -940,7 +1144,7 @@ def resolve_line_group_selection(project_root: str | Path, target_file: str,
     root = str(Path(project_root).resolve())
     want = {int(l) for l in lines}
     file_sel = file_selection or resolve_selection(
-        root, target_file, map_path_override, strict=strict)
+        root, target_file, strict=strict, renew=False)
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel
     doc, rel = _line_group_load(root, target_file, file_sel)
@@ -999,14 +1203,13 @@ def _fn_group_load(root, target_file, file_sel) -> tuple:
 def resolve_function_selection(project_root: str | Path, target_file: str,
                                fid: str,
                                file_selection: dict | None = None,
-                               map_path_override: str | None = None,
                                strict: bool = True) -> dict:
     """fn 级选面：fn 命中 → function_mapping；未命中 → 文件级回退
     （file_fallback，披露 function_not_in_mapping）；文件级不可用 →
     fail-loud（全脸仅显式审计开关）。"""
     root = str(Path(project_root).resolve())
     file_sel = file_selection or resolve_selection(
-        root, target_file, map_path_override, strict=strict)
+        root, target_file, strict=strict, renew=False)
     if file_sel.get("source") != "runtime_mapping" or file_sel.get("zero_ref"):
         return file_sel                      # 零引用终态 / 不可用（strict 已抛）
     doc, rel = _fn_group_load(root, target_file, file_sel)

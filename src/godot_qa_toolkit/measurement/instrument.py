@@ -168,6 +168,9 @@ def _instrument_pair(rel: str, src: str, registry: dict,
     {"parse_error": <原因>}（调用方逐文件隔离）。"""
     from gdtoolkit.parser import parser as gd_parser
 
+    from .gdtoolkit_compat import ensure_parser_cache_dir
+    ensure_parser_cache_dir()
+
     from . import prepcache
 
     tpl_sink = (f"qa-coverage-hits-{prepcache.SINK_UUID_PLACEHOLDER}"

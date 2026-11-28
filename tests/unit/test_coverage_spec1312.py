@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from godot_qa_toolkit.coverage.runner import (
@@ -138,12 +140,11 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
     import hashlib
 
     import attribution_fixtures as fx
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
 
     fx.install_recipe(project_root)
-    recipe, error = build_recipe(project_root)
-    assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：工具链面进新鲜判定——夹具携带真实注入域存储哈希
+    raw = fx.report_recipe_hash(project_root)
+    pristine = fx.pristine_recipe_hash(project_root)
     ident = "test_x.gd::test_a"
     arm = {"test_to_files": {ident: [rel]}, "script_to_files": {},
            "tests": 1, "scripts": 1, "files": 1, "pairs": 1,
@@ -156,8 +157,8 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
            "test_to_lines": {ident: {rel: list(covered_lines)}},
            "script_to_lines": {},
            "line_to_tests": {rel: {str(covered_lines[0]): [ident]}}}
-    doc = {"schema_version": "test-attribution/6",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+    doc = {"schema_version": "test-attribution/7",
+           "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
            "project_root": str(project_root), "identity": ident,
            "causal": {"enabled": False},
            "file_sha256": {rel: hashlib.sha256(
@@ -172,7 +173,10 @@ def _write_raw_map(project_root, rel, instrumentable, covered_lines,
                                        "pairs": len(covered_lines),
                                        "probes_fired": probes_fired,
                                        "vacuous": False}},
-           "notes": []}
+           "notes": [],
+           "test_verdicts": {ident: {"verdict": "green",
+                                     "classification": "pre_existing"}},
+           "feature_sha256": fx._feature_sha_of(project_root)}
     out = Path(project_root) / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")

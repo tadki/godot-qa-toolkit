@@ -136,18 +136,33 @@ class TestVerdictSemanticsUnchanged:
         r = run_mutation(str(target), str(proj), budget=2)
         assert r["summary"].get("run_error") is True
 
-    def test_suspect_on_dirty_baseline_unchanged(self, tmp_path, monkeypatch):
-        """suspect（脏 baseline ∧ 差集空）语义不变——不可证杀保守档。"""
+    def test_preexisting_red_only_survived_on_dirty_baseline(self, tmp_path, monkeypatch):
+        """SEE-1631 §SPEC-027/D7（QA 裁决）：脏 baseline ∧ 失败 ⊆ 基线红
+        → survived（pre_existing_only）；非 kill 仍不给 ok。"""
         proj, target = _write_project(tmp_path)
         glob = _materialize_selection(proj, ["test_a.gd"])
 
         def fake(root, timeout_s=60, tests_glob=None):
-            return (1, "* test_old\n[Failed] pre-existing")
+            return (1, "* test_old\n[Failed] pre-existing\n"
+                       "Run Summary\n")
+
+        monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
+        r = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
+        assert r["summary"]["survived"] == 2
+        assert r["ok"] is False
+
+    def test_no_summary_keeps_suspect(self, tmp_path, monkeypatch):
+        """反例：无收尾汇总（腿中止）→ suspect（D7 证据门）。"""
+        proj, target = _write_project(tmp_path)
+        glob = _materialize_selection(proj, ["test_a.gd"])
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            return (1, "* test_old\n[Failed] pre-existing")  # 无汇总
 
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         r = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         assert r["summary"]["suspect"] == 2
-        assert r["ok"] is False
+        assert r["summary"]["survived"] == 0
 
 
 class TestSuspectedOrphanDisclosure:

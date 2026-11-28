@@ -121,6 +121,10 @@ class TestWarmPool:
             return (1, KILL_TAIL)
 
         monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动机制
+        # （共享快照/预算重试/prefilter 复用）——显式回退 cold 源；
+        # map 源行为由 test_c2_verdict_source_see1631.py 专属覆盖。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         _seed(proj, target, {2}, {2, 5})
         r1 = run_mutation(str(target), str(proj), budget=10,
@@ -181,6 +185,10 @@ class TestCoveragePrefilterAuto:
             return (1, KILL_TAIL)
 
         monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动机制
+        # （共享快照/预算重试/prefilter 复用）——显式回退 cold 源；
+        # map 源行为由 test_c2_verdict_source_see1631.py 专属覆盖。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         r = run_mutation(str(target), str(proj), budget=10,
                          select_mode="line")
@@ -246,6 +254,10 @@ class TestKilledCertExactReuse:
             return (1, KILL_TAIL)
 
         monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动机制
+        # （共享快照/预算重试/prefilter 复用）——显式回退 cold 源；
+        # map 源行为由 test_c2_verdict_source_see1631.py 专属覆盖。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", fake)
         _seed(proj, target, {2}, {2, 5})
         r1 = run_mutation(str(target), str(proj), budget=10,

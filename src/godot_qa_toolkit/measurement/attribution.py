@@ -12,9 +12,16 @@ from pathlib import Path
 from .shadowio import _read_attr_merged, _read_registries
 
 # SEE-1587：行级主真值 schema——行事实（per-test covered line sets）是唯一
-# 主数据，file/function 视图退为派生投影；旧 /5 产物 fail-loud 拒绝（无
-# 兼容别名，消费方 load 即报 schema 不符）。
-ATTRIBUTION_SCHEMA = "test-attribution/6"
+# 主数据，file/function 视图退为派生投影；旧产物 fail-loud 拒绝（无兼容
+# 别名，消费方 load 即报 schema 不符）。SEE-1631：/7——gherkin 臂归属
+# 接入，新增 `gherkin://feature/...` 身份形态与 feature/scenario 反查视图。
+ATTRIBUTION_SCHEMA = "test-attribution/7"
+# SEE-1631：gherkin 身份规范形态（稳定、无 per-run token；feature 与
+# scenario 两级身份均可反查行事实）。生成脚本路径（含 run token）只在
+# 运行期注册表出现，收集期经 identity rewrite 映射为规范形态。
+GHERKIN_IDENTITY_PREFIX = "gherkin://feature/"
+# 生成脚本识别锚（原始身份路径含此段才参与改写/未映射计数）
+_GHERKIN_GENERATED_ANCHOR = "/gherkin/generated/"
 # 归属形态探针文本版本：插桩文本任何变化都要 bump，否则 prep 缓存会复用
 # 旧模板（缓存键含 algo 但不含探针文本本身）。SEE-1587：归属粒度进 algo
 # 键——全量与增量必须共用同一粒度键，fn 级旧条目（attr/6）与新 hit 级
@@ -40,10 +47,83 @@ def _hit_rate(value: int, total: int) -> float | None:
     return round(value / total, 6) if total else None
 
 
+def _gherkin_identity_rewrite(root: Path, groups: list,
+                              identities: dict) -> "dict | None":
+    """SEE-1631：gherkin 臂身份改写表（编译期 manifest → 稳定身份）。
+
+    groups：run_gherkin_flow 编译分组（suite_dir + keys）；identities：
+    {feature_key: [{test_name, scenario, scenario_line}, ...]}（编译期
+    捕获——suite 目录在归属读回前已被清理，manifest 不能届时再读）。
+    GUT 注册表身份的脚本段实测为裸 basename（`test_<key>.gd`，KOL 真机
+    锚定）——改写表同时收录 basename 与 res:// 全路径两种原始形态。
+    返回 {"test": {原始身份: 规范身份}, "script": {...}, "scenarios":
+    {规范身份: 明细}}；空 groups/identities 返回 None（零改写）。"""
+    if not groups or not identities:
+        return None
+    root = Path(root)
+    test_map: dict[str, str] = {}
+    script_map: dict[str, str] = {}
+    scenarios: dict[str, dict] = {}
+    for group in groups:
+        suite = Path(group["suite_dir"])
+        gen_res = None
+        try:
+            gen_res = f"res://{suite.joinpath('generated').relative_to(root).as_posix()}/test_{{key}}.gd"
+        except ValueError:
+            gen_res = None
+        for key in group.get("keys") or []:
+            entries = identities.get(key) or []
+            canon_script = f"{GHERKIN_IDENTITY_PREFIX}{key}"
+            # basename 形态（GUT 注册表实测口径）
+            script_map[f"test_{key}.gd"] = canon_script
+            if gen_res is not None:
+                script_map[gen_res.format(key=key)] = canon_script
+            for e in entries:
+                canon = f"{canon_script}::{e['test_name']}"
+                test_map[f"test_{key}.gd::{e['test_name']}"] = canon
+                if gen_res is not None:
+                    test_map[f"{gen_res.format(key=key)}::"
+                             f"{e['test_name']}"] = canon
+                scenarios[canon] = {
+                    "feature_key": key,
+                    "scenario": e["scenario"],
+                    "scenario_line": e["scenario_line"],
+                    "test_name": e["test_name"],
+                }
+    if not test_map and not script_map:
+        return None
+    return {"test": test_map, "script": script_map, "scenarios": scenarios}
+
+
+def _rewrite_ident(rw: "dict | None", ident: str) -> str:
+    """身份改写：命中改写表用规范形态；未命中保持原样（不猜不丢）。
+    未映射的 gherkin 生成脚本身份由调用方计数披露。"""
+    if rw is None:
+        return ident
+    return rw["test"].get(ident, rw["script"].get(ident, ident))
+
+
+def _is_unmapped_gherkin(rw: "dict | None", ident: str) -> bool:
+    """未映射 gherkin 生成身份（manifest 缺口的防御性披露——不猜测归属）。
+
+    识别口径：gherkin 臂的测试面全部是编译 suite 的 `test_*.gd`（GUT
+    注册表实测为裸 basename）——脚本段形如 `test_*.gd` 且不在改写表。
+    仅在改写表在场的臂（gherkin）启用；res:// 全路径含生成锚的同样计。"""
+    if rw is None:
+        return False
+    if rw["test"].get(ident) is not None or rw["script"].get(ident) is not None:
+        return False
+    script_part = str(ident).split("::", 1)[0]
+    name = script_part.rsplit("/", 1)[-1]
+    return name.startswith("test_") and name.endswith(".gd")
+
+
 def _file_lane_slots(rel: str, per_pid: dict, test_tables: dict,
-                     script_tables: dict) -> tuple:
+                     script_tables: dict,
+                     rw: "dict | None" = None) -> tuple:
     """单文件槽位归属：返回 (test 身份集, script 身份集, test 事件数,
-    script 事件数, 未归属槽位披露)。test 车道优先（窗口内身份）。"""
+    script 事件数, 未归属槽位披露)。test 车道优先（窗口内身份）。
+    SEE-1631：身份经 rw 改写为规范形态（gherkin 臂）。"""
     file_tests: set[str] = set()
     file_scripts: set[str] = set()
     test_events = 0
@@ -56,10 +136,10 @@ def _file_lane_slots(rel: str, per_pid: dict, test_tables: dict,
             tident = ttable.get(slot_idx)
             sident = stable.get(slot_idx)
             if tident is not None:
-                file_tests.add(tident)
+                file_tests.add(_rewrite_ident(rw, tident))
                 test_events += rec["cnt"].get(slot_idx, 0)
             elif sident is not None:
-                file_scripts.add(sident)
+                file_scripts.add(_rewrite_ident(rw, sident))
                 script_events += rec["cnt"].get(slot_idx, 0)
             else:
                 # 组合注册表缺失该槽位——单条披露，不按车道猜测
@@ -142,6 +222,42 @@ def _line_pair_counts(test_to_lines: dict,
                 for d in test_to_lines.values() for lines in d.values()),
             sum(len(lines)
                 for d in script_to_lines.values() for lines in d.values()))
+
+
+def _gherkin_feature_of(ident: str) -> "str | None":
+    """规范 gherkin 身份 → feature key；非规范形态返回 None。"""
+    if not str(ident).startswith(GHERKIN_IDENTITY_PREFIX):
+        return None
+    return str(ident)[len(GHERKIN_IDENTITY_PREFIX):].split("::", 1)[0]
+
+
+def _gherkin_views(test_to_lines: dict) -> dict:
+    """SEE-1631：feature/scenario 两级反查视图（行事实单源派生）。
+
+    - feature_to_lines：feature key → {rel: sorted union(scenario 行集)}
+    - line_to_features：rel → 行 → 触达 feature key（行级反查）"""
+    feature_to_lines: dict[str, dict[str, set]] = {}
+    for ident, by_rel in test_to_lines.items():
+        key = _gherkin_feature_of(ident)
+        if key is None:
+            continue
+        slot = feature_to_lines.setdefault(key, {})
+        for rel, lines in by_rel.items():
+            slot.setdefault(rel, set()).update(lines)
+    line_to_features: dict[str, dict[int, set]] = {}
+    for key, by_rel in feature_to_lines.items():
+        for rel, lines in by_rel.items():
+            lslot = line_to_features.setdefault(rel, {})
+            for ln in lines:
+                lslot.setdefault(ln, set()).add(key)
+    return {
+        "feature_to_lines": {k: {r: sorted(ls) for r, ls in sorted(v.items())}
+                             for k, v in sorted(feature_to_lines.items())},
+        "line_to_features": {rel: {str(ln): sorted(ks)
+                                   for ln, ks in sorted(by_line.items())}
+                             for rel, by_line in
+                             sorted(line_to_features.items())},
+    }
 
 
 def _line_facts_views(test_to_lines: dict, script_to_lines: dict,
@@ -322,10 +438,12 @@ def _attribution_payload(arm: str, test_to_lines: dict, script_to_lines: dict,
 def _fn_probe_line_facts(per_pid: dict, rel: str, probe_lines: list,
                          block_map: dict, test_tables: dict,
                          script_tables: dict, test_to_lines: dict,
-                         script_to_lines: dict) -> None:
+                         script_to_lines: dict,
+                         rw: "dict | None" = None) -> None:
     """单文件 `fn <probe> <slot>` 对 → 行事实（hit 级插桩下覆盖整个探针
     面）：probe → probe_lines → block_map 展开为 covered line set，slot
-    按注册表解析身份与车道（test 车道优先）。原地写入两个行事实 dict。"""
+    按注册表解析身份与车道（test 车道优先）。原地写入两个行事实 dict。
+    SEE-1631：身份经 rw 改写为规范形态（gherkin 臂）。"""
     for pid, rec in sorted(per_pid.items()):
         ttable = test_tables.get(pid, {})
         stable = script_tables.get(pid, {})
@@ -337,12 +455,14 @@ def _fn_probe_line_facts(per_pid: dict, rel: str, probe_lines: list,
             for slot_idx in sorted(slots):
                 tident = ttable.get(slot_idx)
                 if tident is not None:
-                    test_to_lines.setdefault(tident, {}).setdefault(
+                    test_to_lines.setdefault(
+                        _rewrite_ident(rw, tident), {}).setdefault(
                         rel, set()).update(lines)
                     continue
                 sident = stable.get(slot_idx)
                 if sident is not None:
-                    script_to_lines.setdefault(sident, {}).setdefault(
+                    script_to_lines.setdefault(
+                        _rewrite_ident(rw, sident), {}).setdefault(
                         rel, set()).update(lines)
 
 
@@ -351,9 +471,12 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
                           probe_lines_by_rel: "dict[str, list[int]] | None" = None,
                           block_map_by_rel: "dict[str, dict] | None" = None,
                           fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
-                          hotspot_limit: int = 20) -> dict:
+                          hotspot_limit: int = 20,
+                          identity_rewrite: "dict | None" = None) -> dict:
     """SEE-1587（line-primary）：per-file 归属证据 → 行事实 + 三条车道
-    （车道事件统计取自 per-slot cnt，量级口径披露见 notes）。"""
+    （车道事件统计取自 per-slot cnt，量级口径披露见 notes）。
+    SEE-1631：`identity_rewrite`（gherkin 臂）把生成脚本身份改写为稳定
+    feature/scenario 身份；未映射的生成身份保持原样并具名计数披露。"""
     test_tables, script_tables = registries
     test_to_lines: dict[str, dict[str, set[int]]] = {}
     script_to_lines: dict[str, dict[str, set[int]]] = {}
@@ -364,9 +487,10 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
     files_with_unattributed = 0
     unattributed_files: list[str] = []
     hotspot_counts: dict[str, dict[int, int]] = {}
+    gherkin_unmapped = 0
     for rel, per_pid in sorted(attr_by_rel.items()):
         _ft, _fs, te, se, um = _file_lane_slots(
-            rel, per_pid, test_tables, script_tables)
+            rel, per_pid, test_tables, script_tables, rw=identity_rewrite)
         test_events += te
         script_events += se
         unmapped.extend(um)
@@ -374,7 +498,12 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
         block_map = (block_map_by_rel or {}).get(rel) or {}
         _fn_probe_line_facts(per_pid, rel, probe_lines, block_map,
                              test_tables, script_tables,
-                             test_to_lines, script_to_lines)
+                             test_to_lines, script_to_lines,
+                             rw=identity_rewrite)
+        for lane in (test_to_lines, script_to_lines):
+            gherkin_unmapped += sum(
+                1 for ident in lane
+                if _is_unmapped_gherkin(identity_rewrite, ident))
         phases, counts = _file_unattributed(per_pid)
         for i, v in enumerate(phases):
             phases_total[i] += v
@@ -392,11 +521,17 @@ def build_attribution_map(arm: str, attr_by_rel: dict[str, dict[int, dict]],
                                fid_by_line_by_rel, hotspot_limit)
     derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
                                             fid_by_line_by_rel)
-    return _attribution_payload(
+    payload = _attribution_payload(
         arm, test_to_lines, script_to_lines, derived, unmapped,
         (test_events, script_events, unattributed_events), lane_total,
         phase_lane, hotspots, files_with_unattributed,
         sorted(unattributed_files))
+    if identity_rewrite is not None:
+        payload["gherkin_scenarios"] = dict(
+            identity_rewrite.get("scenarios") or {})
+        payload["gherkin_unmapped_identities"] = gherkin_unmapped
+        payload.update(_gherkin_views(test_to_lines))
+    return payload
 
 
 def _fid_by_line_from_registry(registry: dict) -> dict[int, str]:
@@ -413,10 +548,13 @@ def _fid_by_line_from_registry(registry: dict) -> dict[int, str]:
 
 def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
                          sink_by_rel, xdg_homes: list[str],
-                         prepared: "dict[str, dict] | None" = None) -> dict | None:
+                         prepared: "dict[str, dict] | None" = None,
+                         identity_rewrite: "dict | None" = None
+                         ) -> dict | None:
     """§SPEC-083：xdg 清理前读回归属证据与注册表，聚合成臂级映射；
     开关关闭时不读任何 sink、返回 None。prepared 提供探针 manifest、
-    func-registry 与块映射（行事实展开与派生视图的输入）。"""
+    func-registry 与块映射（行事实展开与派生视图的输入）。SEE-1631：
+    gherkin 臂经 identity_rewrite 把生成身份改写为稳定规范形态。"""
     if not enabled:
         return None
     attr_by_rel = {
@@ -434,7 +572,8 @@ def _collect_attribution(enabled: bool, root: Path, run_uuid: str, arm: str,
     return build_attribution_map(arm, attr_by_rel, registries,
                                  probe_lines_by_rel=probe_lines_by_rel,
                                  block_map_by_rel=block_map_by_rel,
-                                 fid_by_line_by_rel=fid_by_line_by_rel)
+                                 fid_by_line_by_rel=fid_by_line_by_rel,
+                                 identity_rewrite=identity_rewrite)
 
 
 def _tests_face_map(root: Path) -> dict[str, str]:
@@ -486,6 +625,287 @@ def _arms_state(arms: tuple[dict, ...]) -> dict:
     return out
 
 
+def _verdict_ident_key(ident: str) -> "tuple[str, str]":
+    script, name = str(ident).split("::", 1)
+    return (script.rsplit("/", 1)[-1], name)
+
+
+def _verdict_is_gherkin(ident: str) -> bool:
+    return str(ident).startswith("gherkin://")
+
+
+def _verdict_norm_gherkin(pair: str) -> str:
+    """gherkin raw 生成路径（`test_<key>.gd::<name>`）→ 规范身份
+    `gherkin://feature/<key>::<name>`；非生成路径原样返回。"""
+    import re as _re
+
+    script, name = str(pair).split("::", 1)
+    if "/gherkin/generated/" not in script.replace("\\", "/"):
+        return str(pair)
+    m = _re.search(r"test_(.+)\.gd$", script.replace("\\", "/"))
+    if not m:
+        return str(pair)
+    return f"{GHERKIN_IDENTITY_PREFIX}{m.group(1).split('/')[-1]}::{name}"
+
+
+def _verdict_collect_gut_arm(tf: dict, meta: dict,
+                             red_by_class: dict) -> None:
+    """gut_full 臂：三类红集按 basename::test 归一键归集（§SPEC-024：
+    红对全路径形态与宇宙键统一归一）。"""
+    for s, t in (meta.get("pairs") or []):
+        red_by_class["pre_existing"].add(
+            Path(str(s)).name + "::" + str(t))
+    for pair in tf.get("instrumentation_intolerant") or []:
+        sc, nm = str(pair).split("::", 1)
+        red_by_class["suspected_intolerant"].add(
+            Path(sc).name + "::" + nm)
+    for pair in (tf.get("observed_pairs") or []) \
+            + (tf.get("new_pairs") or []):
+        sc, nm = str(pair).split("::", 1)
+        red_by_class["new"].add(Path(sc).name + "::" + nm)
+
+
+def _verdict_collect_gherkin_arm(tf: dict, red_by_class: dict) -> None:
+    """gherkin 臂：三类红集按规范身份归一后归集。"""
+    red_by_class["pre_existing"] |= {
+        _verdict_norm_gherkin(p) for p in
+        (tf.get("pre_existing_failures") or [])}
+    red_by_class["suspected_intolerant"] |= {
+        _verdict_norm_gherkin(p) for p in
+        (tf.get("instrumentation_intolerant") or [])}
+    for pair in (tf.get("new_pairs") or []) \
+            + (tf.get("observed_pairs") or []):
+        red_by_class["new"].add(_verdict_norm_gherkin(pair))
+
+
+def _verdict_collect_arm(arm: dict, red_by_class: dict, universe: set,
+                         universe_script: dict) -> None:
+    """单臂：扩充行事实宇宙/宇宙脚本映射，并按臂类型归集红集。"""
+    name = arm.get("arm")
+    tf = arm.get("test_failures") or {}
+    arm_universe = (arm.get("attribution") or {}).get("test_to_lines") or {}
+    for ident in arm_universe:
+        universe.add(ident)
+        if not _verdict_is_gherkin(ident):
+            universe_script.setdefault(_verdict_ident_key(ident)[0] + "::"
+                                       + _verdict_ident_key(ident)[1],
+                                       ident.split("::", 1)[0])
+    if name == "gut_full":
+        _verdict_collect_gut_arm(tf,
+                                 arm.get("baseline_failures_meta") or {},
+                                 red_by_class)
+    elif name == "gherkin":
+        _verdict_collect_gherkin_arm(tf, red_by_class)
+
+
+def _verdict_red_scripts(arms: tuple[dict, ...]) -> dict:
+    """红键 → 原始脚本路径映射（五源红对并集：基线 meta pairs +
+    四 test_failures 源；归一键与规范身份双键）。§SPEC-030 同名碰撞
+    消歧依赖这里的完整路径。"""
+    red_script: dict[str, str] = {}
+    for arm in arms:
+        tf = arm.get("test_failures") or {}
+        meta_pairs = [(s, t) for s, t in
+                      (arm.get("baseline_failures_meta") or {})
+                      .get("pairs") or []]
+        for sc, nm in meta_pairs:
+            key = Path(str(sc)).name + "::" + str(nm)
+            red_script.setdefault(key, str(sc))
+        for pair in (tf.get("observed_pairs") or []) \
+                + (tf.get("new_pairs") or []) \
+                + (tf.get("pre_existing_failures") or []) \
+                + (tf.get("instrumentation_intolerant") or []):
+            sc, nm = str(pair).split("::", 1)
+            red_script.setdefault(Path(sc).name + "::" + nm, sc)
+            red_script.setdefault(_verdict_norm_gherkin(pair), sc)
+    return red_script
+
+
+def _verdict_universe_by_key(universe: set) -> "dict[str, list[str]]":
+    """归一键（basename::test）→ 行事实宇宙候选身份列表（gut 身份限定）。
+
+    同名 basename 碰撞（两目录同名脚本同名测试）→ 同键多候选——红集
+    发射按红对完整脚本路径消歧（§SPEC-030），不再 setdefault 静默吞并
+    （D10：绿测身份被红测分类污染的根因）。"""
+    by_key: dict[str, list[str]] = {}
+    for ident in universe:
+        if not _verdict_is_gherkin(ident):
+            sc, nm = ident.split("::", 1)
+            by_key.setdefault(Path(sc).name + "::" + nm, []).append(ident)
+    return by_key
+
+
+def _verdict_emit_reds(red_by_class: dict, universe: set,
+                       universe_by_key: dict, red_script: dict,
+                       universe_script: dict, out: dict,
+                       collisions: "list[dict] | None" = None) -> None:
+    """按车道优先级（pre_existing > suspected_intolerant > new，先到先得）
+    发射红条目：命中共宇宙按宇宙身份、未命中宇宙按 raw 键如实记红。
+
+    §SPEC-030/D10：同键多候选（同名 basename 碰撞）按红对完整脚本路径
+    消歧——只命中路径匹配的候选身份，其余候选保持绿（另一目录的绿测
+    不得并入红身份）；无路径匹配 → 按完整路径 raw 键记红并具名披露。
+    空 script 红键（解析碎片）不入表、只披露（不得默认记 new）。"""
+    for cls in ("pre_existing", "suspected_intolerant", "new"):
+        for key in sorted(red_by_class[cls]):
+            sc_full = red_script.get(key) or ""
+            candidates = universe_by_key.get(key) or []
+            if len(candidates) > 1:
+                _emit_collided(key, cls, sc_full, candidates,
+                               universe_script, out, collisions)
+                continue
+            _emit_unambiguous(key, cls, sc_full, candidates, universe,
+                              universe_script, out, collisions)
+
+
+def _emit_collided(key: str, cls: str, sc_full: str,
+                   candidates: "list[str]", universe_script: dict,
+                   out: dict, collisions: "list[dict] | None") -> None:
+    """同名碰撞（同键多候选）：按完整脚本路径消歧（§SPEC-030）——
+    命中路径匹配候选（碰撞同样具名披露，不静默）；无匹配保守全候选红
+    + 具名披露。"""
+    matched = _verdict_match_candidate(candidates, sc_full)
+    if matched is not None:
+        if matched not in out:
+            out[matched] = {"verdict": "red",
+                            "classification": cls,
+                            "script": sc_full
+                            or universe_script.get(key)
+                            or matched.split("::", 1)[0]}
+        if collisions is not None:
+            # C3-R21（D2）：路径命中也要披露碰撞——§SPEC-030 第 3 句
+            # 「消歧并披露碰撞」，静默消歧会让同 basename 事实不可见。
+            collisions.append({
+                "basename_key": key,
+                "candidates": sorted(candidates),
+                "resolved": matched,
+                "reason": "same_basename_resolved_by_path",
+            })
+        return
+    resolved = ""
+    if sc_full:
+        raw_key = f"{sc_full}::{key.split('::', 1)[1]}"
+        if raw_key not in out:
+            out[raw_key] = {"verdict": "red",
+                            "classification": cls,
+                            "script": sc_full}
+        resolved = raw_key
+    else:
+        # 无法消歧 → 保守全候选红（不得静默放绿）
+        for cand in candidates:
+            if cand in out:
+                continue
+            out[cand] = {"verdict": "red", "classification": cls,
+                         "script": universe_script.get(key)
+                         or cand.split("::", 1)[0]}
+    if collisions is not None:
+        collisions.append({
+            "basename_key": key,
+            "candidates": sorted(candidates),
+            "resolved": resolved,
+            "reason": "same_basename_no_path_match",
+        })
+
+
+def _emit_unambiguous(key: str, cls: str, sc_full: str,
+                      candidates: "list[str]", universe: set,
+                      universe_script: dict, out: dict,
+                      collisions: "list[dict] | None") -> None:
+    """单候选主链：命中宇宙按宇宙身份、未命中按 raw 键如实记红；空
+    script 红键（解析碎片）不入表、只披露（不得默认记 new）。"""
+    ident = candidates[0] if candidates else None
+    if ident is None and key in universe:
+        ident = key
+    if ident is not None:
+        if ident in out:
+            return
+        script = sc_full \
+            or universe_script.get(key) \
+            or ident.split("::", 1)[0]
+        out[ident] = {"verdict": "red", "classification": cls,
+                      "script": script}
+    elif "::" in key and key.split("::", 1)[0]:
+        if key not in out:
+            out[key] = {"verdict": "red", "classification": cls,
+                        "script": sc_full or key.split("::", 1)[0]}
+    elif collisions is not None:
+        collisions.append({
+            "basename_key": key,
+            "candidates": [],
+            "resolved": "",
+            "reason": "empty_script_red_key_disclosed_not_emitted",
+        })
+
+
+def _verdict_match_candidate(candidates: "list[str]",
+                             sc_full: str) -> "str | None":
+    """同名碰撞候选消歧：红对完整脚本路径与候选身份脚本段**精确**匹配
+    （res:// 归一后相等；basename 形态候选仅在 sc_full 以其目录前缀
+    结尾时命中——绝不按裸 basename 回退，D10 同名污染根因）。"""
+    if not sc_full:
+        return None
+    sc_norm = sc_full.removeprefix("res://")
+    for ident in candidates:
+        part_norm = str(ident).split("::", 1)[0].removeprefix("res://")
+        if part_norm == sc_norm:
+            return ident
+    # basename 宇宙形态候选：目录前缀精确后缀（/basename 结尾且更短）
+    for ident in candidates:
+        part_norm = str(ident).split("::", 1)[0].removeprefix("res://")
+        if "/" not in part_norm and sc_norm.endswith("/" + part_norm):
+            return ident
+    return None
+
+
+def _test_verdict_table(arms: tuple[dict, ...]) -> dict:
+    """verdict 表（兼容外壳）；碰撞披露走 `_verdict_identity_collisions`。"""
+    return _verdict_build_table(arms)[0]
+
+
+def _verdict_identity_collisions(arms: tuple[dict, ...]) -> "list[dict]":
+    """§SPEC-030：同名碰撞/空 script 红键具名披露（产物
+    `identity_collisions` 键）。"""
+    return _verdict_build_table(arms)[1]
+
+
+def _verdict_build_table(arms: tuple[dict, ...]) -> "tuple[dict, list]":
+    """SEE-1631 §SPEC-020/024：逐测试 verdict 表（GUT 测试与 gherkin
+    scenario 同表），身份与行事实宇宙归一。
+
+    行事实宇宙键（gut_full）为 GUT 注册表形态——真机为裸 basename
+    （`test_<file>.gd::<test>`），而红集来源（baseline_failures_meta
+    .pairs 等）为 `res://<path>::<test>` 全路径。两侧统一按
+    `basename(script)::test` 归一后再分类：
+    - `{"verdict": "green"}`——宇宙内且未命中任何红集合；
+    - `{"verdict": "red", "classification": "pre_existing"}`——既有失败
+      （基线吸收，附 script 供基线合成/物理跳过）；
+    - `{"verdict": "red", "classification": "suspected_intolerant"}`；
+    - `{"verdict": "red", "classification": "new"}`——未分类红（臂应
+      invalid、map 拒装）。
+    归一失败（红对无法对齐宇宙）不落 green 兜底——按 raw 键如实记红。"""
+    red_by_class: dict[str, set[str]] = {
+        "pre_existing": set(), "suspected_intolerant": set(), "new": set()}
+    universe: set[str] = set()
+    universe_script: dict[str, str] = {}
+    for arm in arms:
+        _verdict_collect_arm(arm, red_by_class, universe, universe_script)
+    red_script = _verdict_red_scripts(arms)
+    out: dict[str, dict] = {}
+    collisions: list[dict] = []
+    # 归一键（basename::test）→ 行事实宇宙身份（red 命中宇宙即按宇宙
+    # 身份发射；未命中宇宙 = 归一失败，按 raw 键如实记红，不落 green）
+    universe_by_key = _verdict_universe_by_key(universe)
+    # 车道优先级：pre_existing > suspected_intolerant > new（先到先得）；
+    # 发射键 = 行事实宇宙身份（归一后的规范键），未命中宇宙的红对按 raw
+    # 键如实记红（归一失败不落 green 兜底）。
+    _verdict_emit_reds(red_by_class, universe, universe_by_key, red_script,
+                       universe_script, out, collisions)
+    for ident in universe:
+        if ident not in out:
+            out[ident] = {"verdict": "green"}
+    return out, collisions
+
+
 def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
     """每目标文件的探针面（可插桩行全集）：块入口 probe_lines 经 block_map
     展开为全部块内语句起始行。Coverage Store 投影的合法跳过锚来源。"""
@@ -493,6 +913,25 @@ def _instrumentable_lines_from_prepared(prepared: dict) -> dict[str, list[int]]:
     for rel, item in (prepared or {}).items():
         out[rel] = _probe_surface_lines(item.get("probe_lines") or [],
                                         item.get("block_map") or {})
+    return out
+
+
+def _production_content_fingerprint(root: Path) -> "dict[str, str]":
+    """生产内容类文件指纹（rel→sha256；§SPEC-029 表 #5/#6）。
+
+    生产 `.gd` 之外的场景/资源/数据文本与生产 `.gd` 同类——内容变更、
+    新增、删除都判过期；二进制资产与引擎边车不纳入（表 #7）。"""
+    import hashlib
+
+    from .classify import production_content_files
+
+    out: dict[str, str] = {}
+    for rel in production_content_files(root):
+        p = Path(root) / rel
+        try:
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
     return out
 
 
@@ -505,6 +944,7 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
                           notes: list[str],
                           instrumentable_lines: "dict[str, list[int]] | None" = None,
                           baseline_meta: "dict | None" = None,
+                          feature_sha256: "dict | None" = None,
                           preflight_meta: "dict | None" = None) -> dict:
     """归属产物正文：行级主真值 + 派生视图 + 臂有效性 + 新鲜绑定
     （recipe/文件/测试面）+ 探针面（可插桩行全集）。
@@ -518,12 +958,26 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         # SEE-1581：pristine recipe hash（注入 toolchain 之前）——消费方
         # 新鲜判据用它做零 godot 依赖的现算对照
         "recipe_hash_pristine": recipe_pristine_hash,
+        # C3-R28（D4）：建图时事实——build_recipe 成功是建图前置条件，
+        # 本文件在场即证明建图时配置面可构建；新鲜度对账据此区分「建图
+        # 时可构建、现在不可构建」（具名过期）与「建图时即不可构建」
+        # （合成夹具形态，跳过 pristine 对账保持现状）。增量产物沿基线
+        # 继承同一事实。
+        "recipe_buildable": True,
         "project_root": str(project_root),
         "identity": _ATTRIBUTION_IDENTITY,
         "causal": causal_meta,
         # SEE-1581：文件级新鲜绑定（mutation 真值选面的 file hash 判据）
         "file_sha256": dict(file_sha256 or {}),
+        # §SPEC-029 表 #5/#6：生产**内容类**文件（场景/资源/数据文本）
+        # 的内容指纹——建图不插桩它们，但内容变更/新增/删除必须判过期
+        # （与生产 .gd 同一套 prod_changed/new/removed 逻辑）
+        "production_content_sha256": _production_content_fingerprint(
+            project_root),
         "target_files": list(target_files or []),
+        # C3-R15/R16（定案 4/§SPEC-016）：feature 内容指纹随产物直建
+        # 落盘（不在落盘后二次改写）；status/增量的 feature 失效面对账源。
+        "feature_sha256": dict(feature_sha256 or {}),
         # 测试面内容绑定：测试脚本内容变化同样使映射过期（recipe 不含
         # 测试内容；覆盖边却依赖它）
         "tests_face": dict(tests_face or {}),
@@ -532,6 +986,10 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         "instrumentable_lines": dict(instrumentable_lines or {}),
         "arms": arms_attr,
         "arms_state": _arms_state(arms),
+        # SEE-1631 §SPEC-020：逐测试 verdict 表（mutation 判定原图）
+        "test_verdicts": _test_verdict_table(arms),
+        # §SPEC-030：同名碰撞/空 script 红键具名披露（空列表常态键在场）
+        "identity_collisions": _verdict_identity_collisions(arms),
         "notes": notes,
     }
     if baseline_meta is not None:
@@ -556,8 +1014,14 @@ _ATTRIBUTION_NOTES = (
     "(test_to_lines / script_to_lines / line_to_tests), and file/"
     "function views are derived projections from line facts plus the "
     "source registry; lane event counts are all-probe events (not "
-    "comparable to the old fn-entry counts), and the gherkin arm "
-    "runs the plain template (attribution off by design)",
+    "comparable to the old fn-entry counts)",
+    "SEE-1631: both arms carry attribution (two-arm semantics restored "
+    "from SEE-1581 §SPEC-083); the gherkin arm rewrites its generated "
+    "suite identities to stable feature/scenario identities "
+    "(gherkin://feature/<key>::<test_name>) at collection time, with "
+    "feature_to_lines / line_to_features / gherkin_scenarios views for "
+    "reverse lookup; unmapped generated identities are kept raw and "
+    "counted in gherkin_unmapped_identities (never guessed away)",
     "every hit event is counted in exactly one lane/phase; rates use the "
     "three-lane sum as denominator — no hit is silently assigned",
     "unattributed_hotspots rank probe sites by unattributed hit events "
@@ -604,6 +1068,7 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
                          target_files: "list[str] | None" = None,
                          recipe_pristine_hash: str | None = None,
                          tests_face: "dict[str, str] | None" = None,
+                         feature_sha256: "dict | None" = None,
                          prepared: "dict[str, dict] | None" = None,
                          baseline_meta: "dict | None" = None,
                        preflight_meta: "dict | None" = None) -> dict:
@@ -630,6 +1095,7 @@ def _attribution_section(enabled: bool, arms: tuple[dict, ...],
         file_sha256, target_files, tests_face, arms, arms_attr, notes,
         instrumentable_lines=_instrumentable_lines_from_prepared(prepared),
         baseline_meta=baseline_meta,
+        feature_sha256=feature_sha256,
         preflight_meta=preflight_meta)
     artifact_path = _attribution_write_artifact(artifact, attribution_out)
     return {"test_attribution": {

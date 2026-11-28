@@ -134,7 +134,8 @@ def test_invalidation_combines_fn_edges_and_static_candidates(tmp_path: Path):
     # fn 边反查：node.gd 的函数边 → test_b；再加 test_changed 的 test_a
     assert "test_b.gd" in inv["rerun"]
     assert "test_a.gd" in inv["rerun"]
-    assert inv["dropped"] == {"test_b.gd"}
+    # C3-R24（N1）：删除面是完整 rel 路径（重跑面仍按 basename 选脚本）
+    assert inv["dropped"] == {"tests/unit/test_b.gd"}
 
 
 def test_merge_arm_replaces_by_script_and_drops():
@@ -146,8 +147,12 @@ def test_merge_arm_replaces_by_script_and_drops():
         "script_to_lines": {"test_a.gd": {
             "src_game/cell.gd": [5], "src_game/node.gd": [4]}},
     }
-    merged = _merge_arm(_baseline_arm(), fresh, dropped={"test_b.gd"},
-                        fid_by_line_by_rel=_BASELINE_FID_BY_LINE)
+    # C3-R24（N1）：dropped 完整 rel 路径；旧 basename 形态键（升级过渡）
+    # 整族已删经 legacy_families 显式给出
+    merged = _merge_arm(_baseline_arm(), fresh,
+                        dropped={"tests/unit/test_b.gd"},
+                        fid_by_line_by_rel=_BASELINE_FID_BY_LINE,
+                        legacy_families={"test_b.gd": (True, [])})
     # file 视图从合并后行事实派生：test_a 新增 node.gd 边，被删脚本边消失
     assert merged["test_to_files"]["test_a.gd::test_one"] == [
         "src_game/cell.gd", "src_game/node.gd"]
@@ -403,8 +408,9 @@ def test_increment_fallback_keeps_raw_pristine_and_includes_prod_new(
     project = _project(tmp_path)
     recipe, targets = _recipe_and_targets(project, tmp_path)
     sp.run = BareNameFakeGodot(project)
+    # C3-R22（D3）：pristine 面 = raw hash 剥离 toolchain（环境无关）。
     raw_pristine = recipe_hash({k: v for k, v in recipe.items()
-                                if k != "recipe_hash"})
+                                if k not in ("recipe_hash", "toolchain")})
     base_artifact = tmp_path / "base.attribution.json"
     run_measurement(project, targets, recipe, test_attribution=True,
                   attribution_out=str(base_artifact))

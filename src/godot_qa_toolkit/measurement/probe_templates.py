@@ -118,8 +118,14 @@ func _gqt_register(kind: String, identity: String) -> int:
 \treturn idx
 
 func _on_start_script(coll_script) -> void:
-\tvar idx: int = _gqt_register("script",
-\t\t\tstr(coll_script.get_filename_and_inner()))
+\t# §SPEC-030/D2：脚本身份用完整路径（GUT CollectedScript.path 是
+\t# res:// 全路径；get_filename_and_inner() 只给 basename——同 basename
+\t# 不同目录的同名测试会在注册表层折叠成单键，verdict 消歧与 A12
+\t# 投影归属的全路径精确全等分支都依赖完整路径）。
+\tvar sPath: String = str(coll_script.path)
+\tif sPath.is_empty():
+\t\tsPath = str(coll_script.get_filename_and_inner())
+\tvar idx: int = _gqt_register("script", sPath)
 \t_gqt_cur_script_slot = idx + 1
 \tEngine.set_meta("gqt_cov_phase", 1)
 \tEngine.set_meta("gqt_cov_slot", idx + 1)

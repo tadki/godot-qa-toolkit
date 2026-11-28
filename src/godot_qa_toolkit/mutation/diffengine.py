@@ -118,7 +118,11 @@ def _classify_by_verdict(plan: DiffPlan, m, prior: dict,
                          cert_validator) -> None:
     sid = m.stable_id
     verdict = prior.get("verdict")
-    if verdict in SKIP_VERDICTS:
+    # §SPEC-027/D7（R4）：无跳过原语车道升级的 survived（失败 ⊆ 基线红，
+    # pre_existing_only 标记）与旧 suspect 同信息量——差分复用（重跑无
+    # 增益）；普通 survived 仍重跑（RETRY 语义不变）。
+    if verdict in SKIP_VERDICTS or (verdict == "survived"
+                                    and prior.get("pre_existing_only")):
         if verdict == "killed":
             cert_check = _cert_check(prior, cert_validator)
             if cert_check is not None:
@@ -217,6 +221,10 @@ def make_entry(m, record: dict, verdict: str, streak: int,
     # SEE-1610 D2：test_face 随条目落盘（killed 场景机器面）。
     if record.get("test_face") is not None:
         entry["test_face"] = record["test_face"]
+    # §SPEC-027/D7（R4）：无跳过原语车道升级 survived 的复用标记
+    # （失败 ⊆ 基线红——与旧 suspect 同信息量，差分按 SKIP 语义复用）。
+    if record.get("pre_existing_only"):
+        entry["pre_existing_only"] = True
     return entry
 
 

@@ -96,9 +96,13 @@ class TestClassifyCleanBatch:
         assert rec["verdict"] == "killed"
         assert rec["skip_red"]["marked"] == 1
 
-    def test_no_marker_keeps_suspect(self):
-        rec = self._classify("* test_red\n[Failed]\n", ["test_red"])
-        assert rec["verdict"] == "suspect"
+    def test_no_marker_preexisting_red_survived(self):
+        # SEE-1631 §SPEC-027/D7（QA 裁决）：无 skip marker 但失败 ⊆ 基线红
+        # → survived（pre_existing_only）；skip_red 披露键仍缺席。
+        rec = self._classify("* test_red\n[Failed]\nRun Summary\n",
+                             ["test_red"])
+        assert rec["verdict"] == "survived"
+        assert rec.get("pre_existing_only") is True
         assert "skip_red" not in rec
 
 
@@ -189,7 +193,7 @@ class TestColdAbortOnUnsupportedFace:
                                           "face": "selection_dir",
                                           "requested": 1}
         cfg = captured["cfg"]
-        assert cfg["skip_red_tests"] == [["res://.gqt-attr-select/sel/test_a.gd", "test_red"]]
+        assert cfg["skip_red_tests"] == [["res://.gqt-attr-select/testsel/test_a.gd", "test_red"]]
         assert cfg["bail_enabled"] is True
 
 

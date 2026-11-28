@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -19,6 +21,66 @@ class MeasurementError(Exception):
 
 def file_key8(relpath: str) -> str:
     return hashlib.sha1(relpath.encode("utf-8")).hexdigest()[:8]
+
+
+_PROBE_LOCK_DEPTH: "dict[tuple[str, int], int]" = {}
+
+
+@contextmanager
+def probe_rw_lock(project_root: "str | Path"):
+    """C3-R14/R15（§SPEC-032③）插桩改写/恢复的项目级互斥：`<root>/
+    .qa-cache/probe-rw.lock` 上的 **flock**（与 `_refresh_lock` 同一套
+    语义）：无限等待（KOL 全量建图 190–250s 必须等得住，R14 的 120s
+    超时无锁继续会把写坏源文件的路径重新打开——退回项 1）、持有进程
+    死亡自动释放、按（锁路径, 线程 id）可重入（增量腿嵌套
+    run_measurement 取同一把锁）。fcntl 缺失平台与锁文件不可落盘形态
+    按既有口径具名披露（"要么等，要么具名失败"，不有无锁分支）。"""
+    import threading as _threading
+
+    try:
+        import fcntl as _fcntl
+    except ImportError:
+        # C3-R16（退回项 3）：原生 Windows 等无 fcntl 平台——具名披露
+        # （与 `_refresh_lock` 既有口径一致；此前的裸 import 在插桩前
+        # 直接 ModuleNotFoundError，注释承诺的披露走不到）。
+        print("probe-rw lock: fcntl unavailable on this platform — "
+              "proceeding WITHOUT mutual exclusion", file=sys.stderr)
+        yield
+        return
+
+    root = Path(project_root)
+    lock_dir = root / ".qa-cache"
+    lock_path = lock_dir / "probe-rw.lock"
+    key = (str(lock_path.resolve()), _threading.get_ident())
+    if _PROBE_LOCK_DEPTH.get(key, 0) > 0:
+        _PROBE_LOCK_DEPTH[key] += 1
+        try:
+            yield
+        finally:
+            _PROBE_LOCK_DEPTH[key] -= 1
+        return
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lf = open(lock_path, "a+")
+    except OSError as e:
+        raise MeasurementError(
+            f"probe-rw lock cannot be created at {lock_path} — refusing "
+            f"to instrument without mutual exclusion: {e}") from e
+    try:
+        _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX)
+    except OSError as e:
+        lf.close()
+        raise MeasurementError(
+            f"probe-rw lock could not be acquired at {lock_path}: {e}")
+    _PROBE_LOCK_DEPTH[key] = 1
+    try:
+        yield
+    finally:
+        _PROBE_LOCK_DEPTH[key] = 0
+        try:
+            _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
+        finally:
+            lf.close()
 
 
 def _rel_within_root(abs_path: str, root: Path) -> str:

@@ -155,6 +155,10 @@ class TestDiffDefaultOn:
             return (1, "* test_x\n\t\ttest_x [Failed]")
 
         monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动机制
+        # （共享快照/预算重试/prefilter 复用）——显式回退 cold 源；
+        # map 源行为由 test_c2_verdict_source_see1631.py 专属覆盖。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         import attribution_fixtures as _fx
         from godot_qa_toolkit.mutation import truth_select as _ts
         _fx.install_recipe(proj)
@@ -214,6 +218,10 @@ class TestBudgetOnRetryEndToEnd:
             _ts._test_scripts_by_name.cache_clear()
 
         monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动机制
+        # （共享快照/预算重试/prefilter 复用）——显式回退 cold 源；
+        # map 源行为由 test_c2_verdict_source_see1631.py 专属覆盖。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         _seed_map()
         full = mrunner.run_mutation(str(target), str(proj), budget=10,

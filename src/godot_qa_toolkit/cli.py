@@ -510,30 +510,49 @@ def _mutation_target_hint(args: argparse.Namespace) -> "str | None":
     return m.group("file") if m else raw_files[0]
 
 
-def _apply_mutation_map_flags(args: argparse.Namespace, truth_mod) -> None:
-    """映射相关 env 单点注入（§SPEC-ARGMERGE 三态 + 兼容别名）。
+def _p1_map_source_auto(args: argparse.Namespace,
+                        map_blockers: list) -> bool:
+    """SEE-1631 §SPEC-021：map 源判定基线（默认）下，map 缺失/过期是
+    prepare 可自动补齐的阻断项——不再要求显式 --auto-prepare，由
+    prepare 阶段自动续新（成功后进入 run；失败才具名 fail-loud）。"""
+    from .mutation.verdict_source import baseline_source
 
-    `--attribution-map auto|off|<path>` 三态：auto（默认，env 语义不变）、
-    off（关闭自动生成/续新，无可用映射 fail-loud）、<path>（显式产物只读
-    透传）。`--no-attribution-auto` 保留为 off 的兼容别名；env
-    GQT_ATTRIBUTION_MAP_MODE 语义不变，CLI 显式值覆盖 env。"""
-    import os as _os
-    map_arg = getattr(args, "attribution_map", None)
-    if map_arg is not None:
-        if map_arg == "auto":
-            _os.environ.pop(truth_mod.ENV_MAP, None)
-            _os.environ.pop(truth_mod.ENV_MODE, None)
-        elif map_arg == "off":
-            _os.environ.pop(truth_mod.ENV_MAP, None)
-            _os.environ[truth_mod.ENV_MODE] = "off"
-        else:
-            _os.environ[truth_mod.ENV_MAP] = str(map_arg)
-            _os.environ.pop(truth_mod.ENV_MODE, None)
-    # 兼容别名仅在主旋钮未显式给定时生效（--attribution-map 为新主旋钮）
-    if getattr(args, "attribution_auto", True) is False \
-            and map_arg is None:
-        _os.environ.pop(truth_mod.ENV_MAP, None)
-        _os.environ[truth_mod.ENV_MODE] = "off"
+    return bool(
+        map_blockers
+        and getattr(args, "select_mode", "line") != "full"
+        and baseline_source() == "map")
+
+
+def _p1_gate_continues(args: argparse.Namespace, p1: list) -> bool:
+    """P1 门放行梯：dry-run/--auto-prepare、--select full、显式 --tests、
+    无剩余 P1、目标文件不在盘上（交下游原错误契约）——任一命中即放行。"""
+    from .source_io import anchor_to_project_root as _anchor
+
+    if getattr(args, "dry_run", False) or getattr(args, "auto_prepare",
+                                                  False):
+        return False
+    if getattr(args, "select_mode", "line") == "full":
+        return False
+    if getattr(args, "tests", None):
+        return False
+    if not p1:
+        return False
+    files = list(getattr(args, "files", []) or [])
+    if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
+        return False
+    return True
+
+
+def _p1_gate_notice(args: argparse.Namespace, p1: list) -> str:
+    """P1 阻断的修复提示（定案 20 后无显式 map 只读形态）。
+
+    C3-R28（L-C/B11）：`--auto-prepare` 只出现在它真能补的问题上——
+    剩余 P1 里有 `auto_prepare_covered` 的问题才提示该旗标；补不了的
+    （如 `gutconfig_missing`）只提示修复列表本身。"""
+    if any(p.get("auto_prepare_covered") for p in p1):
+        return ("preconditions missing — fix the listed items or rerun "
+                "with --auto-prepare to build them automatically")
+    return "preconditions missing — fix the listed items first"
 
 
 def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
@@ -542,32 +561,18 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
     目标不存在时交由下游原错误契约。SEE-1623 M1：显式 `--tests` 用户
     接管测试面——映射前置对显式面不适用（此前 prepare_required 阻断，
     显式面接管语义名存实亡）。"""
-    from .source_io import anchor_to_project_root as _anchor
     p1 = [p for p in plan["problems"]
           if p.get("level") == "P1" and p.get("severity") == "warning"]
     if not p1:
         return None
-    if getattr(args, "dry_run", False) or getattr(args, "auto_prepare",
-                                                  False):
+    map_blockers = [p for p in p1
+                    if p.get("code") == "attribution_map_missing_or_stale"]
+    if _p1_map_source_auto(args, map_blockers):
+        # §SPEC-021：map 阻断项由 prepare 自动续新接管；其余 P1 照旧。
+        p1 = [p for p in p1 if p not in map_blockers]
+    if not _p1_gate_continues(args, p1):
         return None
-    if getattr(args, "select_mode", "line") == "full":
-        return None
-    if getattr(args, "tests", None):
-        return None
-    files = list(getattr(args, "files", []) or [])
-    if not all(Path(_anchor(f, args.project_root)).is_file() for f in files):
-        return None
-    # SEE-1623 M6：显式 --attribution-map 只读、绝不重建——修复提示不得
-    # 与该契约相反（此前一律建议 --auto-prepare，Harti 障碍4）。
-    _map_arg = getattr(args, "attribution_map", None)
-    if _map_arg and str(_map_arg) not in ("auto", "off"):
-        _notice = ("preconditions missing — the explicit attribution map "
-                   f"{_map_arg} is read-only and will never be rebuilt: "
-                   "fix or replace the map file, or omit --attribution-map "
-                   "to use the auto-managed map")
-    else:
-        _notice = ("preconditions missing — fix the listed items or rerun "
-                   "with --auto-prepare to build them automatically")
+    _notice = _p1_gate_notice(args, p1)
     # SEE-1623 M7：信封归一——plan 只在 summary（顶层 error/plan 键撤销），
     # failures 恒在场（§SPEC-1312 flat 契约：{tool, ok, summary, failures}）。
     return _emit({"tool": "mutation", "ok": False,
@@ -581,12 +586,14 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
 def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
     """§SPEC-PLANFIRST：默认 run 的 plan 段（静态穷查 ≤10s）。
 
-    返回早退 payload（plan_blocked / dry-run plan-only）；None = 继续。
-    """
+    返回早退 payload（plan_blocked / dry-run plan-only）；None = 继续
+    （§SPEC-032/D1：plan 落 `args._mutation_plan` 供 dispatch 复用——
+    CLI 与 executor 的重复 static_plan 收敛一处）。"""
     from .mutation.plancheck import static_plan
 
     plan = static_plan(args.project_root,
                        args.files[0] if args.files else None, args.tests)
+    args._mutation_plan = plan
     errors = [p for p in plan["problems"] if p["severity"] == "error"]
     print(f"mutation: plan {len(plan['problems'])} problem(s) "
           f"({len(errors)} error) in {plan['elapsed_s']}s",
@@ -606,7 +613,6 @@ def _plan_gate_mutation(args: argparse.Namespace) -> "dict | None":
     if p1_early is not None:
         return p1_early
     if getattr(args, "dry_run", False) \
-            and not getattr(args, "attribution_map", None) \
             and getattr(args, "select_mode", "line") != "full" and any(
                 p["code"] == "attribution_map_missing_or_stale"
                 for p in plan["problems"]):
@@ -671,28 +677,71 @@ def _usage_exit(message: str) -> int:
     return 2
 
 
-def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
-    """默认映射面的运行前准备链（非 dry-run 且 full-face / 显式 --tests
-    接管面以外）：单文件目标存在性校验 → 自动导入 → ensure_map。
+def _prepare_map_fresh(project_root: str, files: list[str],
+                       timeout_s: int) -> None:
+    """map 续新单点（§SPEC-021）：先引擎导入（prewarm，重生成
+    内容指纹内的侧车）、后续新。显式 off（单元面既定形态）不做任何
+    map 维护（不 prewarm 不续新）。prewarm 失败不阻断（LOW-5：预热失败
+    不打破统一契约——续新链自会具名失败）。"""
+    from .mutation.truth_select import mode as _map_mode
 
-    A20（SEE-1594 S5）：显式 `--select full` 是全脸审计——不需要映射，不得
-    被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file 默认路径
-    仍自动生成/复用新鲜映射；不可用 fail-loud）。
-    SEE-1623 M1：显式 `--tests` 同理——用户接管测试面，映射非必需，不触发
-    ensure_map（prepare_required/映射构建都不该拦显式面）。
+    if _map_mode() == "off":
+        return
+    from .mutation.map_contract import refresh
+    from .mutation.executor import prewarm_import
 
-    返回 rc 非 None 即终止（调用方原样返回）。"""
-    if getattr(args, "dry_run", False):
-        return None
-    full_face = getattr(args, "select_mode", "line") == "full"
-    if full_face or getattr(args, "tests", None):
-        return None
-    # SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
-    # （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig 错误）。
-    # 多文件收集失败契约（SEE-1321 LOW-6：缺失文件以 per-file error 进
-    # results）不在此拦——处理仍在 dispatch 层。
-    from .mutation.truth_select import MutationSelectionError
+    try:
+        prewarm_import(project_root)
+    except Exception as e:  # noqa: BLE001 — LOW-5 预热失败不打破
+        print(f"prewarm flow error (before refresh): {e}", file=sys.stderr)
+    refresh(project_root, files, timeout_s=timeout_s)
+
+
+def _measure_risk_map_warmup(project_root: str, files: list[str]) -> None:
+    """measure risk 首触预温（§SPEC-035/S1：map 维护只经契约 refresh——
+    建图宇宙 = 范围规则生产全集；off 模式不触碰 map，既有 off 语义不变）。
+    失败以具名异常原样上抛，由调用方转具名 JSON（台账留痕在续新链内）。"""
+    from .mutation.truth_select import mode as _map_mode
+
+    if _map_mode() == "off":
+        return
+    from .mutation.map_contract import refresh
+
+    refresh(project_root, files)
+
+
+def _map_source_prepare_early(args: argparse.Namespace,
+                              files_all: list) -> "int | None":
+    """SEE-1631 §SPEC-021：map 源判定基线（默认）下，full-face / 显式
+    --tests 入口同样要求 map 新鲜——prepare 阶段自动续新（此前这三类
+    入口提前 None 直接进 run，map 源在 loop 层具名拒绝）。"""
+    from .mutation.map_contract import MapContractError
+    from .mutation.truth_select import MutationSelectionError, SelectionError
+    from .mutation.verdict_source import BaselineSourceError
+    # C3-R13 退回1：续新失败四类（建图 / 全量重建 / 增量 / map 不可读）
+    # 在 early 这一层就转具名 JSON，零 traceback——本函数经
+    # _mapping_face_gate 调用，位于 _prepare_mapping_face 的既有 try 之外。
+    try:
+        _prepare_map_fresh(
+            str(Path(args.project_root)), files_all,
+            timeout_s=int(getattr(args, "timeout", 600) or 600))
+    except (MutationSelectionError, SelectionError) as e:
+        return _selection_error_payload(args, e)
+    except (MapContractError, BaselineSourceError) as e:
+        # §SPEC-032/C3-R3 项1：MapView 断言/refresh/续新失败 → 具名 JSON
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    return None
+
+
+def _mutation_single_target_check(args: argparse.Namespace) -> "int | None":
+    """SEE-1623 M2：单文件目标存在性校验前于映射构建/prepare 链
+    （BUG-6：不存在的目标此前先报无关 acceptance/.gutconfig 错误）。
+    多文件收集失败契约（SEE-1321 LOW-6：缺失文件以 per-file error 进
+    results）不在此拦——处理仍在 dispatch 层。"""
     from .source_io import anchor_to_project_root as _anchor_t
+
     _files = getattr(args, "files", None) or []
     _t = _files[0] if len(_files) == 1 else None
     if _t is not None:
@@ -704,21 +753,88 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
                           "summary": {"files": args.files,
                                       "error": _msg},
                           "failures": [{"reason": _msg}]})
-    # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
-    rc = _bootstrap_import_or_contract("mutation", args)
-    if rc is not None:
-        return rc
-    # SEE-1581（Owner 定稿）：默认自动生成/复用新鲜映射；不可用 fail-loud
+    return None
+
+
+def _mapping_face_gate(args: argparse.Namespace, full_face: bool,
+                       files_all: list) -> "tuple[bool, int | None]":
+    """入口早退梯（§SPEC-021 + legacy A20/M1 契约）。返回 (terminate,
+    rc)：map 源 prepare 失败终止（rc=emit 值）；map 源 prepare 后
+    full-face/显式 --tests 终止（None, None）；cold 源 full-face/显式
+    --tests 按 A20/M1 终止；其余继续准备链 (False, None)。"""
+    from .mutation.verdict_source import baseline_source
+
+    if baseline_source() == "map" and files_all:
+        rc = _map_source_prepare_early(args, files_all)
+        if rc is not None:
+            return True, rc
+        if full_face or getattr(args, "tests", None):
+            return True, None
+        return False, None
+    if full_face or getattr(args, "tests", None):
+        return True, None
+    return False, None
+
+
+def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
+    """默认映射面的运行前准备链（非 dry-run 且 full-face / 显式 --tests
+    接管面以外）：单文件目标存在性校验 → 自动导入 → 映射续新（契约
+    `refresh`，§SPEC-035/S1）。
+
+    默认（map 源，§SPEC-021）下 full-face / 显式 `--tests` 入口同样先
+    经 `_mapping_face_gate` 自动续新映射，再终止准备链（显式面不被
+    prepare_required/映射构建失败拦下）。
+    A20（SEE-1594 S5）：仅 cold 源（legacy A20 / off）下显式 `--select
+    full` 是全脸审计——不需要映射，不触发映射构建/续新，不得被无关
+    映射的生成/校验失败阻断。SEE-1623 M1 的显式 `--tests` 同理只在
+    cold 源语义下成立。
+
+    返回 rc 非 None 即终止（调用方原样返回）。"""
+    if getattr(args, "dry_run", False):
+        return None
+    full_face = getattr(args, "select_mode", "line") == "full"
+    from .mutation.truth_select import MutationSelectionError, \
+        SelectionError
+    from .mutation.map_contract import MapContractError
+    from .mutation.verdict_source import BaselineSourceError
+    _files_all = [str(f) for f in (getattr(args, "files", None) or [])]
+    # C3-R13 退回1：gate 也纳入 try——默认与 fn 入口的续新失败与
+    # full/--tests 入口同一条具名链（此前 gate 在 try 外，early 抛出的
+    # BaselineSourceError 会裸逸出 cmd_mutation 变成 traceback）。
     try:
-        _truth.ensure_map(str(Path(args.project_root)),
-                          [str(f) for f in args.files])
+        # cold 源（legacy A20/显式 --tests 契约）不预建/校验映射，同梯早退。
+        terminate, rc = _mapping_face_gate(args, full_face, _files_all)
+        if terminate:
+            return rc
+        rc = _mutation_single_target_check(args)
+        if rc is not None:
+            return rc
+        # 零配置：新鲜检出缺 `.godot` 时先自动导入一次，再建映射（fail-loud）。
+        rc = _bootstrap_import_or_contract("mutation", args)
+        if rc is not None:
+            return rc
+        # 单点收口：先引擎导入、后续新（与 full-face / --tests 入口共用）。
+        _prepare_map_fresh(
+            str(Path(args.project_root)),
+            [str(f) for f in (getattr(args, "files", None) or [])],
+            timeout_s=int(getattr(args, "timeout", 600) or 600))
     except MutationSelectionError as e:
         return _selection_error_payload(args, e)
+    except MapContractError as e:
+        # §SPEC-032/C3-R3 项1：MapView 断言/refresh 失败 → 具名 JSON
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    except BaselineSourceError as e:
+        return _emit({"tool": "mutation", "ok": False,
+                      "summary": {"error": str(e)},
+                      "failures": [{"reason": str(e)}]})
     return None
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:
     from .mutation.inject import detect_binary_kind
+    from .mutation.map_contract import MapContractError
 
     # SEE-1623 M4：数值参数校验前置（budget 0/负数此前静默假绿、负
     # timeout 瞬间超时、--lines 非法形态泄露 Python 异常）——dry-run 与
@@ -753,10 +869,11 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     # 均不受影响）；真实拉起点 spawn_godot 的 BinaryConfigError 由下方
     # 领域 JSON 出口收口。
     from .mutation.inject import BinaryConfigError
-    from .mutation.truth_select import MutationSelectionError
+    from .mutation.truth_select import MutationSelectionError, \
+        SelectionError
+    from .mutation.verdict_source import BaselineSourceError
     from .mutation import truth_select as _truth
     _truth.reset_ledger()
-    _apply_mutation_map_flags(args, _truth)
     # §SPEC-PLANFIRST：默认 run 的第一步 = plan（静态穷查 ≤10s，先于
     # import/映射构建等任何贵操作）——error 级问题即停并列问题；dry-run
     # 永不要求 map：无/旧映射时成功返回 plan 全量（problems[] 含 warning）
@@ -770,9 +887,11 @@ def cmd_mutation(args: argparse.Namespace) -> int:
     binary_kind = detect_binary_kind()
     try:
         result = _dispatch_mutation(args, binary_kind)
-    except MutationSelectionError as e:
+    except (MutationSelectionError, SelectionError) as e:
         return _selection_error_payload(args, e)
-    except BinaryConfigError as e:
+    except (BaselineSourceError, MapContractError, BinaryConfigError) as e:
+        # §SPEC-020/032/C3-R2 项1：map 判定基线不可用/MapView 构造期
+        # 断言/refresh 失败不装半成品/二进制契约——具名 JSON 零 traceback
         return _emit({"tool": "mutation", "ok": False,
                       "summary": {"error": str(e)},
                       "failures": [{"reason": str(e)}]})
@@ -828,9 +947,15 @@ def _kill_bail_flag(args: argparse.Namespace) -> bool | None:
 
 def _baseline_break_flag(args: argparse.Namespace) -> bool:
     """SEE-1623 M3：`--fail-on-red-baseline` 与 break-on-baseline-failure
-    通道合流（红基线快速失败）——编排与串行两条路径的单一出处。"""
-    return (getattr(args, "break_on_baseline_failure", False)
+    通道合流（红基线快速失败）——编排与串行两条路径的单一出处。
+    C3-R29（D7）：登记实际触发的旗标，中止文案指向真实触发者。"""
+    flag = (getattr(args, "break_on_baseline_failure", False)
             or getattr(args, "fail_on_red_baseline", False))
+    if flag and getattr(args, "fail_on_red_baseline", False) \
+            and not getattr(args, "break_on_baseline_failure", False):
+        from .mutation.runner import set_baseline_break_trigger
+        set_baseline_break_trigger("--fail-on-red-baseline")
+    return flag
 
 
 def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
@@ -875,7 +1000,9 @@ def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:
                                    "mutation", args.tests,
                                    binary_kind=binary_kind)
     result = run_mutation_files(
-        files, args.project_root, budget=args.budget,
+        files, args.project_root,
+        precomputed_plan=getattr(args, "_mutation_plan", None),
+        budget=args.budget,
         timeout_s=args.timeout, dry_run=args.dry_run,
         tests_glob=args.tests, jobs=args.jobs,
         binary_kind=binary_kind, timing_store=timing_store,
@@ -913,15 +1040,41 @@ def _run_mutation_serial(args: argparse.Namespace, binary_kind: str) -> dict:
 
     # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
     timing_store = None
+    # C3-R9 退回4（§SPEC-034）：CLI 旗标 → 环境开关只在本次 mutation
+    # 期间生效，结束恢复进程环境到操作前（此前永久写入使同进程后续
+    # 操作带上前一个命令的开关——批内顺序依赖的根因）。
+    _switches: dict = {}
+
+    def _set_switch(key: str, value: str) -> None:
+        _switches[key] = os.environ.get(key)
+        os.environ[key] = value
+
     if getattr(args, "check_baseline", False):
-        os.environ["GQT_MUTATION_CHECK_BASELINE"] = "1"
+        _set_switch("GQT_MUTATION_CHECK_BASELINE", "1")
     if getattr(args, "fail_on_red_baseline", False):
-        os.environ["GQT_MEASUREMENT_FAIL_ON_RED_BASELINE"] = "1"
+        _set_switch("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE", "1")
     if getattr(args, "intolerant_tests", None):
-        os.environ["GQT_MEASUREMENT_INTOLERANT_TESTS"] = \
-            str(args.intolerant_tests)
+        _set_switch("GQT_MEASUREMENT_INTOLERANT_TESTS",
+                    str(args.intolerant_tests))
     if getattr(args, "auto_prepare", False):
-        os.environ["GQT_MUTATION_AUTO_PREPARE"] = "1"
+        _set_switch("GQT_MUTATION_AUTO_PREPARE", "1")
+    try:
+        return _run_mutation_serial_body(args, binary_kind)
+    finally:
+        for _key, _old in _switches.items():
+            if _old is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _old
+
+
+def _run_mutation_serial_body(args: argparse.Namespace,
+                              binary_kind: str) -> dict:
+    from .mutation.runner import run_mutation
+    from .timing import TimingStore
+
+    # SEE-1356 L1：SPEC-009 dry-run 跳过 timing store 读写。
+    timing_store = None
     if not args.dry_run:
         timing_store = TimingStore(args.project_root, args.files[0],
                                    "mutation", args.tests,
@@ -1020,14 +1173,19 @@ def cmd_measure_risk(args: argparse.Namespace) -> int:
     if _perf_err is not None:
         return _emit(_perf_err)
     # SEE-1605 §SPEC-001：首触 auto 生成须一次覆盖全部请求文件的首层目录——
-    # 车道内逐文件 ensure_map 只绑定当前文件目录，跨目录文件会退化为逐车道
-    # 增量（virgin 上即 QA 实测的静默落空）。预温生成失败 = 本轮测量面不可
-    # 用，具名中止（台账已留痕），不带病进入车道循环。
+    # 逐车道各自续新只绑定当前文件目录，跨目录文件会退化为逐车道增量
+    # （virgin 上即 QA 实测的静默落空）。预温（契约 refresh）生成失败 =
+    # 本轮测量面不可用，具名中止（台账已留痕），不带病进入车道循环。
     if not args.skip_measure:
-        from .mutation.truth_select import MutationSelectionError, ensure_map
+        from .mutation.map_contract import MapContractError
+        from .mutation.truth_select import (MutationSelectionError,
+                                            SelectionError)
+        from .mutation.verdict_source import BaselineSourceError
         try:
-            ensure_map(args.project_root, [str(p) for p in paths])
-        except MutationSelectionError as e:
+            _measure_risk_map_warmup(args.project_root,
+                                     [str(p) for p in paths])
+        except (MutationSelectionError, SelectionError, MapContractError,
+                BaselineSourceError) as e:
             # §SPEC-009：具名原因同步走 stderr 披露，不得以空 stderr 仅留
             # 机器信封（stdout JSON 契约不变）。
             msg = (f"attribution map auto-generation failed: {e}; "
@@ -1167,6 +1325,56 @@ def cmd_measure_registry_diff(args: argparse.Namespace) -> int:
     return _emit(diff)
 
 
+def cmd_measure_scope(args: argparse.Namespace) -> int:
+    """§SPEC-031（R4）只读命令：范围解析结果打印（逐目录计数 + 带理由
+    排除清单 + 引用警告）——QA 在真副本上逐目录对账用（零写入零 GUT）。"""
+    from .measurement.classify import ScopeError, discover_scope
+
+    root = Path(args.project_root).resolve() if args.project_root \
+        else Path.cwd()
+    # §SPEC-031/C3-R21（LOW ①）：不存在的项目根具名失败——缺目录不是
+    # 「未配置走默认」，不得 ok=true + defaults_used。
+    if not root.is_dir():
+        print(json.dumps(
+            {"tool": "measure.scope", "ok": False,
+             "summary": {"project_root": str(root),
+                         "error": f"project root not found: {root}"}}))
+        return 1
+    try:
+        u = discover_scope(root)
+    except ScopeError as e:
+        print(json.dumps({"tool": "measure.scope", "ok": False,
+                          "summary": {"error": str(e)}}))
+        return 1
+    d = u["disclosure"]
+    payload = {"tool": "measure.scope", "ok": True,
+               "summary": {
+                   "project_root": str(root),
+                   "rules_file_present": d["rules_file_present"],
+                   "rules_sha256": d["rules_sha256"],
+                   "defaults_used": d["defaults_used"],
+                   "unconfigured_hint": d["unconfigured_hint"],
+                   "counts": d["counts"],
+                   "universe_count": d["universe_count"],
+                   "gd_count": len(u["gd"]),
+                   "production": u["production"],
+                   "non_production": u["non_production"],
+                   "test": u["test"],
+                   "non_test": u["non_test"],
+                   "per_dir_counts": d["per_dir_counts"],
+                   "gut_dirs_effective": d["gut_dirs_effective"],
+                   "gut_dirs_excluded": d["gut_dirs_excluded"],
+                   "features_excluded": d["features_excluded"],
+                   "excluded_production": d["excluded_production"],
+                   "excluded_production_stats":
+                       d["excluded_production_stats"],
+                   "excluded_reference_warnings":
+                       d["excluded_reference_warnings"],
+               }}
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_measure_suite(args: argparse.Namespace) -> int:
     from .measurement.recipe import build_recipe
 
@@ -1304,59 +1512,75 @@ def _attribution_args(args: argparse.Namespace
                       ) -> tuple[bool, str | None, bool]:
     """§SPEC-083：`--test-attribution` 开关与其产物路径的默认推导。
 
-    显式 `--test-attribution-out` 优先；否则仅在开关开启时落到
-    `<--out>.attribution.json`（默认关闭路径不产生任何路径）。
-    `--attribution-causal`（R2）依附归属开关：开关未开时忽略（不静默
-    改变默认路径行为）。"""
+    仅在开关开启时落到 `<--out>.attribution.json`（产物随报告落盘；
+    定案 20：路径参数退役）。`--attribution-causal`（R2）依附归属
+    开关：开关未开时忽略。"""
     enabled = bool(getattr(args, "test_attribution", False))
-    explicit = getattr(args, "test_attribution_out", None)
-    out = explicit or (f"{args.out}.attribution.json" if enabled else None)
+    out = f"{args.out}.attribution.json" if enabled else None
     causal = bool(getattr(args, "attribution_causal", False)) and enabled
     return enabled, out, causal
 
 
 def cmd_measure_map_update(args: argparse.Namespace) -> int:
-    import json as _json
-    from pathlib import Path as _P
-
-    from .measurement.increment import IncrementError, run_attribution_increment
-
-    rc = _resolve_project_root_or_contract(
-        "measure.map-update", args,
-        target=(args.roots[0] if getattr(args, "roots", None) else None))
+    """§SPEC-036（定案 20）：契约 `refresh` 的薄适配——不带任何路径
+    参数，一次创建 / 增量 / 全量（或报告已新鲜并说明本次是哪一种）。"""
+    rc = _resolve_project_root_or_contract("measure.map-update", args)
     if rc is not None:
         return rc
     rc = _apply_godot_bin_or_contract("measure.map-update", args)
     if rc is not None:
         return rc
+    # C3-R19（P2/要点④）：模块从 `.mutation.*` 导入（旧处理函数两处
+    # import 的模块路径都错、BaselineSourceError 未导入 → 入口整体
+    # 崩）；`mode` 取刷新前 status 的 would_refresh（空 = fresh）；续新
+    # 抛出的任何具名失败都转具名 JSON（零 traceback；旧图字节不变由
+    # 契约 refresh 的原子装填承担）。
+    from .mutation.map_contract import (
+        MapContractError, _FORCED_FULL_FACTORS, refresh, status,
+    )
+    from .mutation.truth_select import (
+        MutationSelectionError, SelectionError,
+    )
+    from .mutation.verdict_source import BaselineSourceError
+    root = str(Path(args.project_root).resolve())
+    mode = "unknown"
+    reason = None
     try:
-        recipe = _json.loads(_P(args.recipe).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        st = status(root, [])
+        mode = st.get("would_refresh") or "fresh"
+        # C3-R20（F1）：全量原因具名——结构性缺失取 status 的首个
+        # forced-full 因素；经增量腿的回退取重建后地图台账的
+        # `increment.reason`（腿内决策与 status 预言同源）。
+        reason = next((f for f in st.get("factors") or []
+                       if f.startswith(_FORCED_FULL_FACTORS)), None)
+        outcome = refresh(root, [], timeout_s=int(args.timeout))
+    except (MapContractError, BaselineSourceError, SelectionError,
+            MutationSelectionError) as e:
         return _emit({"tool": "measure.map-update", "ok": False,
-                      "summary": {"error": f"recipe load failed: {e}"},
-                      "failures": [{"reason": f"recipe load failed: {e}"}]})
-    roots = [_P(r) for r in args.roots]
-    targets = sorted({str(p) for root in roots
-                      for p in root.rglob("*.gd") if p.is_file()})
-    try:
-        report = run_attribution_increment(
-            args.project_root, targets, recipe, args.baseline,
-            [str(c) for c in args.changed], args.out,
-            timeout_s=args.timeout,
-            attribution_causal=bool(args.attribution_causal),
-            calibration_every=args.calibration_every)
-    except IncrementError as e:
-        return _emit({"tool": "measure.map-update", "ok": False,
-                      "summary": {"error": str(e), "increment_error": True},
-                      "failures": [{"reason": f"increment_error: {e}"}]})
+                      "summary": {"mode": mode, "error": str(e)},
+                      "failures": [{"reason": str(e)}]})
+    view = outcome.get("view")
+    summary = {"mode": mode,
+               "map_path": getattr(view, "map_path", None),
+               "already_fresh": outcome.get("already_fresh", False),
+               "fresh": outcome.get("fresh")}
+    if not reason and not outcome.get("already_fresh", False):
+        # C3-R28（L-A/B7）：reason 只在本次涉及重建时在场——台账里的
+        # `increment.reason` 是上一次重建的原因，`fresh` 响应（本次什么
+        # 都没做）不得回显。
+        reason = ((getattr(view, "doc", None) or {}).get("increment")
+                  or {}).get("reason")
+    if reason:
+        summary["reason"] = reason
     return _emit({"tool": "measure.map-update", "ok": True,
-                  "summary": report, "failures": []})
+                  "summary": summary,
+                  "failures": []})
 
 
 def _attribution_usable(attribution_out, run_started: float,
                         project_root: str | None = None) -> bool:
     """行映射可用性（A22 中央校验）：schema/臂执行证据/目标文件绑定/
-    recipe 全部一致才算可用；event_counts_stale 的增量产物一律不可用。
+    recipe 全部一致才算可用（定案 21：增量不可用的拒绝门作废）。
 
     union 不可认证 ≠ 产物不可用——陈旧产物不得冒充本轮可用证据。
     """
@@ -1373,22 +1597,28 @@ def _attribution_usable(attribution_out, run_started: float,
         # 中央校验 1：臂执行完整性（probes/bundles/pairs）
         if not arms_valid(doc.get("arms_state") or {}):
             return False
-        # 中央校验 2：A22——增量合并产物显式标记 event_counts_stale 的
-        # （事件计数未重测）不得冒充新鲜可用证据
-        if doc.get("increment", {}).get("event_counts_stale"):
-            return False
-        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）。
         # project_root 由调用侧显式传入（--attribution-out/--out 可指到
         # 仓库外，路径算术猜根会把校验错归因为 recipe 漂移）。
+        root = _P(project_root) if project_root \
+            else _P(attribution_out).parent.parent
+        # 中央校验 3：recipe 一致（当前树可复算同一 pristine 哈希）。
         if doc.get("recipe_hash_pristine"):
-            root = _P(project_root) if project_root \
-                else _P(attribution_out).parent.parent
             recipe, error = build_recipe(root)
             if error is not None:
                 return False
+            # C3-R22（D3）：pristine 复算与 `_fresh_recipe_hash`/orchestrator
+            # 同口径——剥离 toolchain（环境无关的磁盘树面）。
             if _raw_hash({k: v for k, v in recipe.items()
-                          if k != "recipe_hash"}) != \
+                          if k not in ("recipe_hash", "toolchain")}) != \
                     doc.get("recipe_hash_pristine"):
+                return False
+        # C3-R23（R1）：中央校验 3b——工具链面（存储注入域哈希 vs 现算）
+        # 与新鲜度入口同一现算口径；漂移 = Godot/GUT/gqt 版本或 bin 指向
+        # 变化，陈旧产物不得冒充本轮可用证据。
+        stored_report = doc.get("report_recipe_hash")
+        if isinstance(stored_report, str) and stored_report:
+            from .mutation.truth_select import _current_report_recipe_hash
+            if _current_report_recipe_hash(str(root)) != stored_report:
                 return False
         # 中央校验 4：本轮时间锚（映射文件不早于本轮开始——替代原 mtime
         # 单点判新，仍保留防止上轮产物冒充）
@@ -1827,23 +2057,6 @@ def build_parser() -> argparse.ArgumentParser:
                         "function), file (explicit calibration/fallback "
                         "view, per-file set), full (the only explicit "
                         "full-face audit; bypasses attribution)")
-    m.add_argument("--attribution-map", default=None,
-                   help="SEE-1581 + §SPEC-ARGMERGE three-state: "
-                        "'auto' (default) = auto-managed "
-                        ".qa-cache/attribution-map.json with generation/"
-                        "incremental refresh; 'off' = disable auto map "
-                        "(fail loud with no usable map); <path> = explicit "
-                        "attribution artifact (test-attribution/6, "
-                        "line-primary) used read-only as the runtime truth "
-                        "for test selection (never renewed)")
-    m.add_argument("--no-attribution-auto", dest="attribution_auto",
-                   action="store_false",
-                   help="[deprecated alias of --attribution-map off] "
-                        "disable automatic generation/incremental refresh of "
-                        "the attribution map; with no usable map present the "
-                        "run fails loud instead of falling back (build one "
-                        "first via `gqt measure map-update` or an explicit "
-                        "`gqt measure run --test-attribution`)")
     m.add_argument("--mutation-warning", type=int, default=50,
                    help="warn on stderr + summary.attention when the pre-truncation "
                         "mutation site count exceeds N (default 50, aligned with "
@@ -1922,6 +2135,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="exclusion as scope:entry:reason (repeatable; reason required)")
     cr.set_defaults(func=cmd_measure_suite)
 
+    scp = mssub.add_parser("scope", help="§SPEC-031 read-only scope "
+                           "resolution print (per-dir counts + excluded "
+                           "list with reasons; zero write)")
+    scp.add_argument("--project-root", default=None,
+                     help="Godot project root; omitted = discover from CWD")
+    scp.set_defaults(func=cmd_measure_scope)
+
     can = mssub.add_parser("run", help="dual-arm batch coverage orchestration (SEE-1546 WP3 PR-C)")
     can.add_argument("roots", nargs="+",
                      help="target .gd roots (recursive glob); arms run the "
@@ -1976,9 +2196,6 @@ def build_parser() -> argparse.ArgumentParser:
                           "the GUT test that was running, emitting a "
                           "test->file mapping artifact; default off, the "
                           "default path is byte-identical")
-    can.add_argument("--test-attribution-out", default=None,
-                     help="attribution artifact path (default: "
-                          "<--out>.attribution.json)")
     can.add_argument("--attribution-causal", action="store_true",
                      help="EXPERIMENTAL (SEE-1581 R2): also wrap "
                           "call_deferred/create_timer creation sites in "
@@ -2022,28 +2239,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     inc = mssub.add_parser(
         "map-update",
-        help="EXPERIMENTAL (SEE-1581 方向①): incremental rebuild of the "
-             "test-attribution mapping from a baseline artifact")
-    inc.add_argument("roots", nargs="+",
-                     help="target .gd roots — must be the same universe as "
-                          "the baseline artifact")
+        help="refresh the project's unique test-attribution map (thin "
+             "adapter over the map contract's refresh: create / increment "
+             "/ full, or report already-fresh; the map location is "
+             "decided by code, §SPEC-036)")
     inc.add_argument("--project-root", default=None,
-                     help="Godot project root; omitted = discover from roots/CWD")
-    inc.add_argument("--recipe", required=True,
-                     help="measurement-suite/3 JSON (same content as the "
-                          "baseline run)")
-    inc.add_argument("--baseline", required=True,
-                     help="prior attribution artifact "
-                          "(test-attribution/6, line-primary)")
-    inc.add_argument("--changed", action="append", default=[],
-                     help="changed/new/removed file path (repeatable)")
-    inc.add_argument("--out", required=True,
-                     help="incremented attribution artifact output path")
-    inc.add_argument("--timeout", type=int, default=180)
-    inc.add_argument("--calibration-every", type=int, default=5,
-                     help="force a full-face rebuild after N increments")
-    inc.add_argument("--attribution-causal", action="store_true")
-    _add_godot_bin_arg(inc)
+                     help="project root (defaults to CWD discovery)")
+    inc.add_argument("--timeout", type=int, default=600,
+                     help="refresh timeout in seconds")
+    inc.add_argument("--godot-bin", default=None,
+                     help="explicit godot binary for the toolchain probe")
     inc.set_defaults(func=cmd_measure_map_update)
 
     v = mssub.add_parser(
@@ -2165,10 +2370,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_CLI_PROC_ENV_KEYS = (
+    "GQT_MUTATION_CHECK_BASELINE",
+    "GQT_ATTRIBUTION_MAP_MODE",
+    "GQT_GODOT_BIN",
+)
+
+
 def main(argv: list[str] | None = None) -> int:
+    """C3-R9 退回4（§SPEC-034）CLI 入口层收口：一次 CLI 调用写入的进程
+    环境开关（--check-baseline / --godot-bin 的落点）
+    在调用结束（含异常）后恢复到调用前——同一进程里默认调用与显式调用
+    交错时，各自行为与在新进程里一致。"""
+    # C3-R16：gdtoolkit 语法缓存目录并发预热——进程级唯一入口（任何
+    # 子命令的第一次 parse() 之前），消除库内裸 makedirs 的并发竞争。
+    try:
+        from .measurement.gdtoolkit_compat import ensure_parser_cache_dir
+        ensure_parser_cache_dir()
+    except Exception:  # noqa: BLE001 — 预热失败不阻断命令分发
+        pass
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    saved = {k: os.environ.get(k) for k in _CLI_PROC_ENV_KEYS}
+    try:
+        return args.func(args)
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
 
 if __name__ == "__main__":

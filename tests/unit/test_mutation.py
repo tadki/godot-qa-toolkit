@@ -552,7 +552,8 @@ class TestLaunchFailureGuard:
         glob = self._materialize_selection(proj, ["test_a.gd"])
 
         def fake(root, timeout_s=60, tests_glob=None):
-            return (1, self.NOISE + "* test_old\n  [Failed] pre-existing\n")
+            return (1, self.NOISE + "* test_old\n  [Failed] pre-existing\n"
+                    "Run Summary\n")
 
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
@@ -560,9 +561,27 @@ class TestLaunchFailureGuard:
                               tests_glob=glob)
         s = result["summary"]
         assert s.get("run_error") is not True, "脏 baseline + 告警不得中止"
-        # 失败集合与 baseline 相同（差集空）→ 保守 suspect（不可证杀）
-        assert s["suspect"] == s["mutants"] > 0
+        # SEE-1631 §SPEC-027/D7（Leader 复核修正）：失败 ⊆ 基线红且整面
+        # 执行完（Run Summary 在场）→ survived（pre_existing_only）。
+        assert s["survived"] == s["mutants"] > 0
         assert s["run_errors"] == 0
+
+    def test_dirty_baseline_no_summary_stays_suspect(
+            self, tmp_path, monkeypatch):
+        """反例：失败 ⊆ 基线红但无收尾汇总（腿中止）→ suspect。"""
+        proj, target = self._write_project(tmp_path)
+        glob = self._materialize_selection(proj, ["test_a.gd"])
+
+        def fake(root, timeout_s=60, tests_glob=None):
+            return (1, self.NOISE + "* test_old\n  [Failed] pre-existing\n")
+
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project", fake)
+        result = run_mutation(str(target), str(proj), budget=3,
+                              tests_glob=glob)
+        s = result["summary"]
+        assert s["suspect"] == s["mutants"] > 0
+        assert s.get("survived", 0) == 0
 
 
 class TestSurvivorSummarySEE1416:

@@ -30,9 +30,9 @@ function_pairs/line_pairs 由合并后的行事实精确重算）。行为耦合
 from __future__ import annotations
 from ..digest import sha256_file
 
-import hashlib
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -44,6 +44,7 @@ from .attribution import (
     ATTRIBUTION_SCHEMA,
     _derive_views_from_line_facts,
     _fid_by_line_from_registry,
+    _gherkin_feature_of,
     _line_facts_views,
     _line_pair_counts,
     _probe_surface_lines,
@@ -65,6 +66,10 @@ from .orchestrator import (
 # 0.5 在中位面上让增量比全脸慢 4.3-5.2 倍，故收紧到 0.05（≈14 脚本，帽内
 # 增量仍 ≤ ~140s，保住 ≥38% 节省且留出噪声带余量）。
 DEFAULT_RERUN_FULL_FACE_RATIO = 0.05
+# SEE-1631 §SPEC-016：gherkin 臂自身的重跑比例上限（与 gut_full 同语义的
+# 经济性闸——重跑面超过基线 feature 数 × cap 时，整臂全脸回退更便宜）。
+# 校准基准待 KOL 复测由 Owner 判定；初值沿用 gut 侧实测口径。
+DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO = 0.05
 _FWD_KEYS = ("test_to_files", "test_to_functions",
              "script_to_files", "script_to_functions")
 _LINE_KEYS = ("test_to_lines", "script_to_lines")
@@ -87,17 +92,47 @@ def load_baseline(path: str | Path) -> dict:
     return baseline
 
 def _script_name_of(identity: str) -> str:
-    """测试身份 `test_x.gd::test_name` → 脚本名；脚本级身份本就是脚本名。"""
-    return identity.split("::", 1)[0]
+    """测试身份 → 脚本 basename。C3-R21（D2）：真建图身份的脚本段是
+    完整 res:// 路径（§SPEC-030 同名保留），合成夹具仍是裸 basename——
+    失效面/rerun 匹配统一按 basename 口径，两形态在此归一。"""
+    return Path(identity.split("::", 1)[0]).name
 
 def _baseline_script_names(baseline: dict) -> set[str]:
     arm = baseline["arms"]["gut_full"]
     names = {_script_name_of(i) for i in (arm.get("test_to_files") or {})}
-    names |= set(arm.get("script_to_files") or {})
+    names |= {Path(k).name for k in (arm.get("script_to_files") or {})}
     return names
 
 def _fid_file_of(fid: str) -> str:
     return fid.split("::", 1)[0]
+
+def _prod_classify_index(arm: dict) -> tuple:
+    """生产文件分类索引（SEE-1610 §SPEC-N1）：file/fn 边全集。"""
+    edge_files = (set(arm.get("file_to_tests") or {})
+                  | set(arm.get("file_to_scripts") or {}))
+    known_fids = {fid for ids in (arm.get("test_to_functions") or {}).values()
+                  for fid in ids}
+    known_fids |= {fid for ids in (arm.get("script_to_functions") or {})
+                   .values() for fid in ids}
+    return edge_files, known_fids
+
+
+def _known_test_names(arm: dict, baseline: dict) -> "set[str]":
+    """测试删除的 known 判定：身份全集 ∪ 基线测试面脚本名。
+
+    SEE-1610：行事实是主真值，身份全集须并入行事实身份；C3-R8：还须认
+    基线测试面（tests_face）——零归属边的测试（只 assert 自足的填充脚本）
+    删除时无身份可查，此前被判 unknown 触发全量重建；因素表第 6 行要求
+    按 test_removed 增量剔除。"""
+    idents = set(arm.get("test_to_functions") or {}) | set(
+        arm.get("script_to_functions") or {})
+    idents |= set(arm.get("test_to_lines") or {})
+    idents |= set(arm.get("script_to_lines") or {})
+    names = {_script_name_of(i) for i in idents}
+    names |= {Path(rel).name
+              for rel in (baseline.get("tests_face") or {})}
+    return names
+
 
 def classify_changes(root: Path, changed: list[str],
                      baseline: dict) -> dict[str, list[str]]:
@@ -108,34 +143,67 @@ def classify_changes(root: Path, changed: list[str],
     - prod：目标面内 .gd 且有基线边（file 边或 fn 边前缀）=changed，
       无基线边=new（触发全脸回退——不猜失效面），有基线边且不在盘上
       =prod_removed（SEE-1610 §SPEC-N1，清死边 + 触达面重跑）；
+    - feature（SEE-1631）：`addons/gqt_gherkin/features/*.feature` 按
+      normalize stem 对基线 gherkin 臂 feature key——在基线且在盘
+      =feature_changed、不在基线=feature_new、在基线不在盘=feature_removed；
     - 其余路径拒绝（unknown，fail-loud 不静默）。"""
     arm = baseline["arms"]["gut_full"]
-    edge_files = (set(arm.get("file_to_tests") or {})
-                  | set(arm.get("file_to_scripts") or {}))
-    known_fids = {fid for ids in (arm.get("test_to_functions") or {}).values()
-                  for fid in ids}
-    known_fids |= {fid for ids in (arm.get("script_to_functions") or {})
-                   .values() for fid in ids}
-    test_identities = set(arm.get("test_to_functions") or {}) | set(
-        arm.get("script_to_functions") or {})
-    # SEE-1610 §SPEC-N1：行事实是主真值（SEE-1587）——身份全集并入行事实
-    # 身份；否则行级基线（fn 边缺席）会把 test_changed/removed 误判
-    # unknown 被 fail-loud 拒跑。
-    test_identities |= set(arm.get("test_to_lines") or {})
-    test_identities |= set(arm.get("script_to_lines") or {})
+    edge_files, known_fids = _prod_classify_index(arm)
+    known_test_names = _known_test_names(arm, baseline)
+    feature_keys = _baseline_gherkin_feature_keys(baseline)
     out: dict[str, list[str]] = {"test_changed": [], "test_new": [],
                                  "test_removed": [], "prod_changed": [],
                                  "prod_new": [], "prod_removed": [],
+                                 "content_changed": [], "content_new": [],
+                                 "content_removed": [],
+                                 "feature_changed": [], "feature_new": [],
+                                 "feature_removed": [],
                                  "unknown": []}
+    content_fingerprints = dict(baseline.get("production_content_sha256")
+                                or {})
     for raw in changed:
         verdict = _classify_one(root, raw, edge_files, known_fids,
-                                test_identities)
+                                known_test_names, feature_keys,
+                                content_fingerprints)
         out[verdict[0]].append(verdict[1])
     return out
 
+
+_FEATURES_REL_PREFIX = "addons/gqt_gherkin/features/"
+
+
+def _baseline_gherkin_feature_keys(baseline: dict) -> set[str]:
+    """基线 gherkin 臂的 feature key 全集（feature_to_lines 权威 + 行事实
+    身份前缀反推兜底——旧增量产物可能缺 feature 视图）。"""
+    from .attribution import _gherkin_feature_of
+
+    garm = ((baseline.get("arms") or {}).get("gherkin") or {})
+    keys = set(garm.get("feature_to_lines") or {})
+    for ident in (garm.get("test_to_lines") or {}):
+        k = _gherkin_feature_of(str(ident))
+        if k:
+            keys.add(k)
+    return keys
+
+
+def _path_lifecycle(p: Path, rel: str, raw: str, known: bool,
+                    changed: str, new: str, removed: str) -> "tuple[str, str]":
+    """盘上存在性与已知集合成对的通用生命周期分类（feature/test 车道
+    共用）：盘上+已知=changed、盘上+未知=new、已删+已知=removed、
+    其余=unknown。"""
+    if p.is_file():
+        return (changed if known else new), rel
+    if known:
+        return removed, rel
+    return "unknown", raw
+
+
 def _classify_one(root: Path, raw: str, edge_files: set[str],
                   known_fids: set[str],
-                  test_identities: set[str]) -> tuple[str, str]:
+                  known_test_names: set[str],
+                  feature_keys: "set[str] | None" = None,
+                  content_fingerprints: "set[str] | None" = None
+                  ) -> tuple[str, str]:
     p = Path(raw)
     if not p.is_absolute():
         p = root / p
@@ -144,14 +212,33 @@ def _classify_one(root: Path, raw: str, edge_files: set[str],
         rel = str(p.relative_to(root))
     except ValueError:
         return "unknown", raw
+    # SEE-1631：gherkin feature 单根（addons/gqt_gherkin/features/*.feature）
+    if rel.startswith(_FEATURES_REL_PREFIX) and p.suffix == ".feature":
+        from ..gherkin.addon import normalize_feature_key
+
+        key = normalize_feature_key(p.stem)
+        known = key in (feature_keys or set())
+        return _path_lifecycle(p, rel, raw, known,
+                               "feature_changed", "feature_new",
+                               "feature_removed")
     name = p.name
     if rel.startswith("tests/") and name.startswith("test_"):
-        known = any(_script_name_of(i) == name for i in test_identities)
-        if p.is_file():
-            return ("test_changed" if known else "test_new"), rel
-        if known:
-            return "test_removed", rel
-        return "unknown", raw
+        known = name in known_test_names
+        return _path_lifecycle(p, rel, raw, known,
+                               "test_changed", "test_new", "test_removed")
+    # C3-R9 退回1 + Owner 裁定：非脚本生产内容（因素表第 1 行"与脚本
+    # 同一套逻辑"）——在盘且在指纹：哈希变 = content_changed（增量重跑
+    # 静态引用触达面）、不在指纹 = content_new（第 2 行具名全量回退）；
+    # 已删 = content_removed（第 3 行：剔除指纹与死边，不重跑）。
+    # 生产 .gd 删除不在此列（上方 prod 分支 = prod_removed，触达面重跑）
+    if p.suffix != ".gd" and rel in (content_fingerprints or {}):
+        if not p.is_file():
+            return "content_removed", rel
+        import hashlib as _hl
+
+        have = _hl.sha256(p.read_bytes()).hexdigest()
+        return ("content_changed"
+                if have != content_fingerprints[rel] else "content_new"), rel
     prod = _classify_prod_entry(p, rel, edge_files, known_fids)
     if prod is not None:
         return prod
@@ -195,14 +282,17 @@ def _line_fact_touchers(arm: dict, rel: str) -> set[str]:
             touch.add(_script_name_of(identity))
     for script, by_rel in (arm.get("script_to_lines") or {}).items():
         if rel in by_rel:
-            touch.add(script)
+            touch.add(Path(script).name)
     return touch
 
 
 def compute_invalidation(root: Path, baseline: dict,
                          classes: dict[str, list[str]],
                          index: dict | None) -> dict:
-    """失效面 → {rerun, dropped, sources}（sources 记录每个候选的来源）。"""
+    """失效面 → {rerun, dropped, feature_rerun, sources}（sources 记录每个
+    候选的来源）。SEE-1631：feature_rerun = gherkin 臂失效面（feature
+    变更键 ∪ 行事实触达生产变更的 feature 键）——非空即触发具名全脸
+    回退（gherkin 行事实重绑，不交付半成品）。"""
     arm = baseline["arms"]["gut_full"]
     rerun: set[str] = set()
     dropped: set[str] = set()
@@ -219,7 +309,9 @@ def compute_invalidation(root: Path, baseline: dict,
         explicit_rerun.add(name)
         sources.setdefault(name, []).append(f"test_changed:{rel}")
     for rel in classes["test_removed"]:
-        dropped.add(Path(rel).name)
+        # C3-R24（N1/决策 16）：删除面必须是完整路径身份——收 basename
+        # 会在同名碰撞下把幸存脚本的边与判定一并清掉
+        dropped.add(rel)
         sources.setdefault(Path(rel).name, []).append(f"test_removed:{rel}")
     for rel in classes["prod_changed"]:
         touch = set(fid_to_tests.get(rel, set()))
@@ -241,21 +333,418 @@ def compute_invalidation(root: Path, baseline: dict,
         for name in static:
             sources.setdefault(name, []).append(f"static:{rel}")
         rerun |= static
+    # C3-R9 Owner 裁定（因素表第 1 行）：非脚本内容**修改**与脚本同一套
+    # 逻辑——重跑面与 gherkin 触达 feature 见 _content_changed_face。
+    content_feature_keys: set[str] = set()
+    for rel in classes.get("content_changed", []):
+        rerun |= _content_changed_rerun(root, rel, arm, index, sources)
+        content_feature_keys |= _content_feature_keys(root, baseline, rel,
+                                                      index)
+    feature_rerun = _gherkin_invalidation_surface(baseline, classes)
+    # C3-R9：非脚本内容修改的生产消费者 .gd 触达的 feature 键并入
+    feature_rerun |= content_feature_keys
     return {"rerun": rerun, "dropped": dropped, "sources": sources,
-            "explicit_rerun": explicit_rerun}
+            "explicit_rerun": explicit_rerun, "feature_rerun": feature_rerun}
+
+
+def _content_changed_rerun(root: Path, rel: str, arm: dict,
+                           index: dict | None,
+                           sources: dict) -> "set[str]":
+    """C3-R9 Owner 裁定（因素表第 1 行）：非脚本内容**修改**与脚本同一套
+    逻辑——重跑面 = 静态直连消费者测试 ∪ 消费该内容的生产 .gd 的触达
+    测试。无引用者 → 具名警告、零重跑。"""
+    rerun: set[str] = set()
+    static = _static_candidates(root, rel, index)
+    for name in static:
+        sources.setdefault(name, []).append(f"content_static:{rel}")
+    rerun |= static
+    from ..mutation.gdself import query_consumers as _qc
+
+    out_q = _qc(str(root), "res://" + rel, Path(root), index=index)
+    prod_gds = {c["res"].removeprefix("res://")
+                for c in out_q.get("consumers") or []
+                if str(c.get("res", "")).endswith(".gd")
+                and not str(c["res"]).startswith("res://tests/")}
+    for gd in prod_gds:
+        # C3-R26（D1/因素表第 1 行）：触达反查按**行事实双车道**（与
+        # prod_removed 的 _line_fact_touchers 同源：test 车道 + script
+        # 车道，basename 归一）——真实建图里 script 车道通常为空
+        # （KOL 真图 script_to_lines 0 : test_to_lines 208），单查
+        # file_to_scripts 会漏掉主流形态（test 体内消费）的触达测试。
+        touch = _line_fact_touchers(arm, gd)
+        for name in touch:
+            sources.setdefault(name, []).append(f"content_prod:{gd}")
+        rerun |= touch
+    return rerun
+
+
+def _content_feature_keys(root: Path, baseline: dict, rel: str,
+                          index: dict | None) -> "set[str]":
+    """content_changed 的 gherkin 触达 feature 键 = 消费该内容的生产 .gd
+    行事实所在的 feature 键。"""
+    from ..mutation.gdself import query_consumers as _qc
+
+    out_q = _qc(str(root), "res://" + rel, Path(root), index=index)
+    prod_gds = {c["res"].removeprefix("res://")
+                for c in out_q.get("consumers") or []
+                if str(c.get("res", "")).endswith(".gd")
+                and not str(c["res"]).startswith("res://tests/")}
+    garm = (baseline.get("arms") or {}).get("gherkin") or {}
+    out: set[str] = set()
+    for key, by_rel in (garm.get("feature_to_lines") or {}).items():
+        if prod_gds & set(by_rel or {}):
+            out.add(key)
+    return out
+
+
+def _gherkin_toucher_feature_keys(garm: dict,
+                                  changed_rels: set[str]) -> set[str]:
+    """基线 gherkin 臂中行事实触达 changed_rels 的 feature 键集。
+
+    feature 视图在场 → 按视图逐 key 判定；视图缺席（旧产物兜底）→
+    按行事实身份前缀反推。"""
+    out: set[str] = set()
+    f2l = garm.get("feature_to_lines") or {}
+    for key, by_rel in f2l.items():
+        if changed_rels & set(by_rel or {}):
+            out.add(key)
+    if not f2l:
+        from .attribution import _gherkin_feature_of
+
+        for ident, by_rel in (garm.get("test_to_lines") or {}).items():
+            if changed_rels & set(by_rel or {}):
+                k = _gherkin_feature_of(str(ident))
+                if k:
+                    out.add(k)
+    return out
+
+
+def _gherkin_invalidation_surface(baseline: dict,
+                                  classes: dict[str, list[str]]
+                                  ) -> set[str]:
+    """SEE-1631 §SPEC-016（Owner 裁决：增量对齐 gut_full）：gherkin 臂
+    重跑 feature 键集 = feature 变更键 ∪ 新增 feature 键 ∪ 基线 gherkin
+    行事实触达 prod_changed/prod_removed 的 feature 键。非空 → 只重跑
+    这些 feature（其余原样继承）；超比例上限才整臂具名回退。"""
+    from ..gherkin.addon import normalize_feature_key
+
+    out: set[str] = set()
+    for rel in classes.get("feature_changed", []):
+        out.add(normalize_feature_key(Path(rel).stem))
+    for rel in classes.get("feature_new", []):
+        out.add(normalize_feature_key(Path(rel).stem))
+    garm = (baseline.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict) or not garm:
+        return out
+    changed_rels = set(classes.get("prod_changed") or []) | set(
+        classes.get("prod_removed") or [])
+    out |= _gherkin_toucher_feature_keys(garm, changed_rels)
+    return out
+
+
+def _baseline_gherkin_dropped(baseline: dict,
+                              classes: dict[str, list[str]]) -> set[str]:
+    """SEE-1631 §SPEC-016：删除 feature 键集（边剔除、无重跑）。"""
+    from ..gherkin.addon import normalize_feature_key
+
+    out: set[str] = set()
+    for rel in classes.get("feature_removed", []):
+        out.add(normalize_feature_key(Path(rel).stem))
+    return out
+
+def _gherkin_facts_by_identity(facts: "dict | None",
+                               skip_feature_keys: set[str]) -> dict:
+    """按 feature key 过滤拷贝行事实（身份 → {rel: [lines] } 浅拷贝，
+    行列表独立复制；skip 命中身份所属 feature 的整身份剔除）。"""
+    from .attribution import _gherkin_feature_of
+
+    out: dict = {}
+    for i, by_rel in (facts or {}).items():
+        if _gherkin_feature_of(str(i)) in skip_feature_keys:
+            continue
+        out[i] = {r: list(ls) for r, ls in by_rel.items()}
+    return out
+
+
+def _merged_line_facts(sources: "list[dict]",
+                       removed_rels: set[str]) -> "dict[str, dict[str, set]]":
+    """多源行事实同键合并（先到先建槽位，removed_rels 的边剔除）。"""
+    merged: dict[str, dict[str, set]] = {}
+    for src in sources:
+        for i, by_rel in src.items():
+            slot = merged.setdefault(i, {})
+            for r, ls in by_rel.items():
+                if r in removed_rels:
+                    continue
+                slot.setdefault(r, set()).update(ls)
+    return merged
+
+
+def _gherkin_scenarios_of_kept(scenarios: "dict | None",
+                               skip_feature_keys: set[str]) -> dict:
+    """按 feature key 过滤 scenario 视图（skip 命中身份所属 feature 的
+    整条剔除；值原样保留引用——与全量产物同口径）。"""
+    from .attribution import _gherkin_feature_of
+
+    return {i: v for i, v in (scenarios or {}).items()
+            if _gherkin_feature_of(str(i)) not in skip_feature_keys}
+
+
+def _merge_gherkin_arm(baseline_gherkin: "dict | None",
+                       fresh: "dict | None",
+                       rerun_keys: set[str],
+                       dropped_keys: set[str],
+                       removed_rels: set[str]) -> "dict | None":
+    """SEE-1631 §SPEC-016：gherkin 臂增量合并（与 gut_full 同口径）。
+
+    重跑 feature 的身份整体替换为 fresh；删除 feature 与被删除生产文件
+    触达的边剔除；其余 feature 原样继承（行事实逐位不变）。行事实是主
+    真值——feature/scenario 视图与计数从合并后行事实单源重算。基线无
+    gherkin 臂 → fresh 原样（无重跑键时 None）。"""
+    keep_skip = rerun_keys | dropped_keys
+    base_facts = _gherkin_facts_by_identity(
+        (baseline_gherkin or {}).get("test_to_lines"), keep_skip)
+    base_script_facts = _gherkin_facts_by_identity(
+        (baseline_gherkin or {}).get("script_to_lines"), keep_skip)
+    fresh_facts = _gherkin_facts_by_identity(
+        (fresh or {}).get("test_to_lines"), set())
+    fresh_script_facts = _gherkin_facts_by_identity(
+        (fresh or {}).get("script_to_lines"), set())
+    test_to_lines = _merged_line_facts([base_facts, fresh_facts],
+                                       removed_rels)
+    script_to_lines = _merged_line_facts([base_script_facts,
+                                          fresh_script_facts], removed_rels)
+    if not test_to_lines and not script_to_lines:
+        return None
+    from .attribution import (
+        _derive_views_from_line_facts,
+        _line_pair_counts,
+    )
+
+    derived = _derive_views_from_line_facts(test_to_lines, script_to_lines,
+                                            None)
+    scenarios = _gherkin_scenarios_of_kept(
+        (baseline_gherkin or {}).get("gherkin_scenarios"), keep_skip)
+    scenarios.update({i: v for i, v in ((fresh or {}).get(
+        "gherkin_scenarios") or {}).items()})
+    line_pairs, script_line_pairs = _line_pair_counts(test_to_lines,
+                                                      script_to_lines)
+    unmapped = int(((fresh if fresh is not None else baseline_gherkin)
+                    or {}).get("gherkin_unmapped_identities") or 0)
+    return _gherkin_arm_out(derived, test_to_lines, script_to_lines,
+                            scenarios, unmapped, line_pairs,
+                            script_line_pairs)
+
+
+def _gherkin_arm_out(derived: dict, test_to_lines: dict, script_to_lines: dict,
+                     scenarios: dict, unmapped: int, line_pairs: int,
+                     script_line_pairs: int) -> dict:
+    """合并后派生数据 → gherkin 臂 payload（与全量相同的序列化出口：
+    derived 内是 set 形态，直接落盘会 JSON 爆炸——SEE-1587 口径：视图
+    永不裸奔）。"""
+    from .attribution import (
+        _attribution_view_block,
+        _line_facts_views,
+    )
+
+    return {
+        **_attribution_view_block(derived),
+        **_line_facts_views(test_to_lines, script_to_lines,
+                            derived["line_to_tests"]),
+        "feature_to_lines": _gherkin_views_from_lines(test_to_lines),
+        "line_to_features": _line_to_features_view(test_to_lines),
+        "gherkin_scenarios": scenarios,
+        "gherkin_unmapped_identities": unmapped,
+        "tests": len(derived["test_to_files"]),
+        "scripts": len(derived["script_to_files"]),
+        "files": len(derived["file_to_tests"]),
+        "pairs": sum(len(v) for v in derived["test_to_files"].values()),
+        "script_pairs": sum(len(v) for v in derived["script_to_files"]
+                            .values()),
+        "function_pairs": sum(len(v) for v in derived["test_to_functions"]
+                              .values()),
+        "line_pairs": line_pairs,
+        "script_line_pairs": script_line_pairs,
+    }
+
+
+def _gherkin_views_from_lines(test_to_lines: dict) -> dict:
+    """合并后行事实 → feature_to_lines（单源重算，与全量口径一致）。"""
+    from .attribution import _gherkin_views
+
+    return _gherkin_views(test_to_lines)["feature_to_lines"]
+
+
+def _line_to_features_view(test_to_lines: dict) -> dict:
+    from .attribution import _gherkin_views
+
+    return _gherkin_views(test_to_lines)["line_to_features"]
+
+
+def _identity_script_segment(identity) -> str:
+    """身份 → 脚本段（test 身份取 `::` 前段；script 车道键无 `::` 时取
+    整键）。"""
+    return str(identity).partition("::")[0]
+
+
+def _legacy_family_state(dropped_rels: "set[str] | None",
+                         tests_face: "dict | None") -> dict:
+    """C3-R24（N1/§SPEC-038⑤）：删除面的升级过渡家族态——basename →
+    (族是否全删, 幸存 rel 列表)。旧 basename 形态身份无法按路径定向：
+    唯一幸存者可改写规范形态，多幸存者无法消歧只能披露，整族全删才可
+    剔除。`tests_face` 兼容基线面与删除后合并面两种口径（幸存者按
+    `rel not in dropped_rels` 判定，两口径同结果）。"""
+    out: dict[str, tuple] = {}
+    for rel in dropped_rels or ():
+        base = Path(rel).name
+        if base in out:
+            continue
+        survivors = [r for r in (tests_face or {})
+                     if Path(r).name == base and r not in dropped_rels]
+        out[base] = (not survivors, survivors)
+    return out
+
 
 def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
-                       replace_names: set[str], name_of) -> dict:
-    """同语义合并：dropped 删边 + replace_names 整体替换 + 其余身份原样
-    保留 + fresh 注入。"""
+                       replace_segments: set[str], replace_bases: set[str],
+                       legacy_dead_bases: "set[str] | None") -> dict:
+    """同语义合并：dropped 删边（完整路径身份精确匹配；升级过渡旧
+    basename 键仅整族已删才剔除）+ replace 整体替换（规范键按完整路径、
+    旧键按 basename——D4 升级过渡语义不回退）+ 其余身份原样保留 +
+    fresh 注入。C3-R24（N1/决策 16）：basename 只是「选哪些脚本来跑」
+    的入口，不得反向放大到边面。"""
     base = {}
     for identity, value in (arm.get(key) or {}).items():
-        if name_of(identity) in dropped or name_of(identity) in replace_names:
+        sc = _identity_script_segment(identity)
+        if sc.startswith("res://"):
+            if sc[len("res://"):] in dropped or sc in replace_segments:
+                continue
+        elif Path(sc).name in replace_bases \
+                or (legacy_dead_bases
+                    and Path(sc).name in legacy_dead_bases):
             continue
         base[identity] = value
     for identity, value in (fresh.get(key) or {}).items():
         base[identity] = value
     return base
+
+
+def _canonicalize_one_family_entry(merged: dict, ident: str, nm: str,
+                                   fam: tuple, collisions:
+                                   "list[dict] | None") -> None:
+    """单个旧 basename 条目的删除家族处置（原样搬动的三分支）——唯一
+    幸存者改写规范形态（幸存者判定保留、产物单一形态）；多幸存者无法
+    消歧原样保留 + 具名披露；整族已删兜底剔除。"""
+    _dead, survivors = fam
+    full_survivors = [f"res://{r}" for r in survivors]
+    if len(full_survivors) == 1:
+        canon = f"{full_survivors[0]}::{nm}"
+        if canon not in merged and ident in merged:
+            merged[canon] = merged.pop(ident)
+            if collisions is not None:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": sorted({ident, canon}),
+                    "resolved": canon,
+                    "reason": "legacy_basename_identity_"
+                              "canonicalized_after_delete",
+                })
+    elif len(full_survivors) > 1:
+        if collisions is not None:
+            collisions.append({
+                "basename_key": ident,
+                "candidates": sorted(full_survivors),
+                "resolved": "",
+                "reason": "legacy_basename_identity_ambiguous_after_delete",
+            })
+    elif ident in merged:
+        merged.pop(ident, None)
+        if collisions is not None:
+            collisions.append({
+                "basename_key": ident,
+                "candidates": sorted({ident}),
+                "resolved": "",
+                "reason": "legacy_basename_identity_dropped_with_family",
+            })
+
+
+def _canonicalize_deleted_families(merged: dict, families: dict,
+                                   collisions: "list[dict] | None") -> None:
+    """C3-R24（N1/§SPEC-038⑤）：删除家族的旧 basename 条目处置——唯一
+    幸存者改写规范形态（幸存者判定保留、产物单一形态）；多幸存者无法
+    消歧原样保留 + 具名披露；整族已删兜底剔除（_verdict_drop_removed
+    已删时此处为空转）。"""
+    for ident in list(merged):
+        sc, _, nm = str(ident).partition("::")
+        if not nm or sc.startswith("res://") \
+                or sc.startswith("gherkin://"):
+            continue
+        fam = families.get(Path(sc).name)
+        if fam is None:
+            continue
+        _canonicalize_one_family_entry(merged, ident, nm, fam, collisions)
+
+
+def _disclose_unresolvable_legacy(merged: dict, tests_by_base: dict,
+                                  collisions: "list[dict] | None") -> None:
+    """tests_face/宇宙都恢复不出规范路径的旧 basename 条目原样保留并具名
+    披露（不静默丢证据，C3-R22 D4/QA-R2）。C3-R25（N8）：gherkin://
+    身份不属于旧 basename 形态，不得进披露。"""
+    for ident in list(merged):
+        sc, _, nm = str(ident).partition("::")
+        if not nm or sc.startswith("res://") \
+                or sc.startswith("gherkin://"):
+            continue
+        if not (tests_by_base.get(Path(sc).name) or []):
+            if collisions is not None:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": [],
+                    "resolved": "",
+                    "reason": "legacy_basename_identity_kept_no_canonical_path",
+                })
+
+
+def _canonical_verdict_dedup(merged: dict, tests_face: "dict[str, str] | None",
+                             arm_identities: "list[str] | None",
+                             collisions: "list[dict] | None",
+                             legacy_families: "dict | None" = None) -> None:
+    """C3-R22（D4/QA-R2）：按规范身份（完整 res:// 路径）去重——升级
+    过渡（旧 basename 形态基线 × 新 res:// 形态钩子）的增量合并会把同
+    一物理测试的两种身份键并存。同 basename::name 的旧 basename 条目
+    在规范条目在场时剔除（守恒：重跑重算应替换）；tests_face/宇宙都
+    恢复不出规范路径的旧条目原样保留并具名披露（不静默丢证据）。
+    两目录同名测试的规范身份互异，不受影响（D2 不回退）。
+    C3-R24（N1/§SPEC-038⑤）：删除家族——唯一幸存者的旧 basename 条目
+    改写规范形态（幸存者判定保留、产物单一形态）；多幸存者无法消歧
+    原样保留 + 具名披露；整族已删兜底剔除。"""
+    tests_by_base, _idents_by_base = _verdict_identity_index(tests_face,
+                                                             arm_identities)
+    replaced: list[tuple[str, str]] = []
+    for ident in list(merged):
+        sc, _, nm = str(ident).partition("::")
+        if not nm or sc.startswith("res://") \
+                or sc.startswith("gherkin://"):
+            continue  # 已是规范形态 / gherkin 身份
+        base = Path(sc).name
+        twin = next((f"{full}::{nm}" for full in tests_by_base.get(base, [])
+                     if f"{full}::{nm}" in merged and full != sc), None)
+        if twin is not None:
+            merged.pop(ident, None)
+            replaced.append((ident, twin))
+    if collisions is not None:
+        for legacy, twin in replaced:
+            collisions.append({
+                "basename_key": legacy,
+                "candidates": sorted({legacy, twin}),
+                "resolved": twin,
+                "reason": "legacy_basename_identity_replaced_by_canonical",
+            })
+        _disclose_unresolvable_legacy(merged, tests_by_base, collisions)
+    _canonicalize_deleted_families(merged,
+                                   legacy_families
+                                   if legacy_families is not None else {},
+                                   collisions)
 
 def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
                         removed_rels: set[str]) -> tuple[dict, dict]:
@@ -267,23 +756,42 @@ def _purge_removed_rels(test_to_lines: dict, script_to_lines: dict,
                 for i, by_rel in by_ident.items()}
     return strip(test_to_lines), strip(script_to_lines)
 
+def _replace_surface_and_dead(fresh: dict,
+                              legacy_families: "dict | None"
+                              ) -> "tuple[set[str], set[str], set[str] | None]":
+    """替换面与升级过渡死族（C3-R24/N1/决策 16）：规范 res:// 键按完整
+    路径替换；旧 basename 键沿用 basename 口径——D4 升级过渡语义不回退；
+    整族已删的 basename 集来自删除家族态（basename 只是「选哪些脚本」
+    入口，不得反向放大到边面）。"""
+    replace_segments = {_identity_script_segment(i) for i in
+                        (fresh.get("test_to_files") or {})}
+    replace_segments |= {_identity_script_segment(k) for k in
+                         (fresh.get("script_to_files") or {})}
+    replace_bases = {Path(s).name for s in replace_segments}
+    dead_bases = {base for base, (dead, _surv)
+                  in (legacy_families or {}).items() if dead} or None
+    return replace_segments, replace_bases, dead_bases
+
+
 def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
                fid_by_line_by_rel: "dict[str, dict[int, str]] | None" = None,
-               removed_rels: "set[str] | None" = None) -> dict:
-    """按脚本名替换/删边合并一张臂级映射；行事实同语义合并（重跑脚本
+               removed_rels: "set[str] | None" = None,
+               legacy_families: "dict | None" = None) -> dict:
+    """按身份替换/删边合并一张臂级映射；行事实同语义合并（重跑脚本
     整体替换、删除脚本删边、其余身份原样保留），file/function 视图与
     line→tests 反查从合并后行事实单源重算（SEE-1587：视图永不独立拼接）。
     `removed_rels`（SEE-1610 §SPEC-N1）＝已删除生产文件：从合并后行事实
     purge 该文件的全部边（触达身份已整体替换，purge 是死边兜底）。
+    `legacy_families`（C3-R24/§SPEC-038⑤）＝删除面升级过渡家族态。
     结构性统计精确重算。"""
-    replace_names = {_script_name_of(i) for i in
-                     (fresh.get("test_to_files") or {})}
-    replace_names |= set(fresh.get("script_to_files") or {})
+    replace_segments, replace_bases, dead_bases = \
+        _replace_surface_and_dead(fresh, legacy_families)
     test_to_lines = _merged_identities(
-        "test_to_lines", arm, fresh, dropped, replace_names,
-        lambda i: i.split("::", 1)[0])
+        "test_to_lines", arm, fresh, dropped, replace_segments,
+        replace_bases, dead_bases)
     script_to_lines = _merged_identities(
-        "script_to_lines", arm, fresh, dropped, replace_names, lambda i: i)
+        "script_to_lines", arm, fresh, dropped, replace_segments,
+        replace_bases, dead_bases)
     if removed_rels:
         test_to_lines, script_to_lines = _purge_removed_rels(
             test_to_lines, script_to_lines, removed_rels)
@@ -325,7 +833,9 @@ def _merge_arm(arm: dict, fresh: dict, dropped: set[str],
 def _increment_decision(root: Path, recipe: dict, baseline: dict,
                         changed_files: list[str], since_full: int,
                         calibration_every: int,
-                        rerun_full_face_ratio: float) -> tuple:
+                        rerun_full_face_ratio: float,
+                        gherkin_rerun_full_face_ratio: float =
+                        DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO) -> tuple:
     """增量资格判定：hash 守恒 + 变更分类 + 失效计算 + fallback 仲裁。
     `recipe` 是已注入 toolchain 的配方（hash 判据用）。
     返回 (classes, invalidation, rerun, reason)。"""
@@ -353,9 +863,14 @@ def _increment_decision(root: Path, recipe: dict, baseline: dict,
     explicit = set(invalidation.get("explicit_rerun") or ())
     rerun = explicit | {n for n in invalidation["rerun"] if n in known}
     ratio = (len(rerun & known) / len(known)) if known else 0.0
+    gherkin_known = len(_baseline_gherkin_feature_keys(baseline))
     reason = _fallback_reason(hash_ok, classes, since_full,
                               calibration_every, ratio,
-                              rerun_full_face_ratio)
+                              rerun_full_face_ratio,
+                              feature_rerun=invalidation.get(
+                                  "feature_rerun") or set(),
+                              gherkin_known=gherkin_known,
+                              gherkin_ratio_cap=gherkin_rerun_full_face_ratio)
     return classes, invalidation, rerun, reason
 
 def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
@@ -384,20 +899,166 @@ def _increment_emit(root: Path, out_path, artifact: dict, merged: dict,
     }
 
 
-def run_attribution_increment(project_root: str | Path,
+def _deleted_family_state(baseline: dict, dropped_rels: "set[str]") -> dict:
+    """删除面升级过渡家族态（C3-R24/N1）：从**基线**测试面现算（基线面
+    含被删 rel，幸存者判定不受合并面新增同名脚本干扰）。"""
+    return _legacy_family_state(dropped_rels,
+                                baseline.get("tests_face") or {})
+
+
+def run_attribution_increment(project_root: "str | Path",
                               target_files: list[str], recipe: dict,
                               baseline_path: str | Path,
                               changed_files: list[str],
-                              out_path: str | Path,
+                              out_path: "str | Path",
                               *, timeout_s: int = 180,
                               attribution_causal: bool = False,
                               calibration_every: int = 5,
                               rerun_full_face_ratio: float
-                              = DEFAULT_RERUN_FULL_FACE_RATIO) -> dict:
-    """增量重建主入口（含产物落盘与 provenance）。"""
-    t0 = time.monotonic()
-    root = Path(project_root).resolve()
+                              = DEFAULT_RERUN_FULL_FACE_RATIO,
+                              gherkin_rerun_full_face_ratio: float
+                              = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO,
+                              gherkin_arm_full_reason: "str | None" = None
+                              ) -> dict:
+    """C3-R14（§SPEC-032③）插桩互斥外壳：增量腿同样把插桩文本写进源
+    树，与测量臂共用 `<root>/.qa-cache/probe-rw.lock` 串行化。
+    `gherkin_arm_full_reason`（C3-R28/D5）：refresh 阶梯判定 feature 面
+    自身需要全量时强制走臂级重建（reason 具名随台账）。"""
+    from .backup import probe_rw_lock
+
+    with probe_rw_lock(project_root):
+        return _run_attribution_increment_locked(
+            project_root, target_files, recipe, baseline_path,
+            changed_files, out_path, timeout_s=timeout_s,
+            attribution_causal=attribution_causal,
+            calibration_every=calibration_every,
+            rerun_full_face_ratio=rerun_full_face_ratio,
+            gherkin_rerun_full_face_ratio=gherkin_rerun_full_face_ratio,
+            gherkin_arm_full_reason=gherkin_arm_full_reason)
+
+
+def _load_baseline_with_conservation(baseline_path: str | Path) -> dict:
+    """C3-R14（§SPEC-025）表守恒入口检查：基线缺 `test_verdicts` 键 →
+    增量会补出空表冒充守恒（MapView 的"表在场"检查反而通过）。
+    具名拒绝，走全量。"""
     baseline = load_baseline(baseline_path)
+    if "test_verdicts" not in (baseline or {}):
+        raise IncrementError(
+            "incremental rebuild refused: baseline map is missing "
+            "`test_verdicts` (§SPEC-025 table conservation) — rebuild "
+            "the attribution map from scratch")
+    return baseline
+
+
+def _arm_full_gate(reason: str,
+                   forced: "str | None") -> "tuple[str | None, str]":
+    """臂级闸（C3-R28/D5 零行为拆分）：refresh 阶梯强制（缺
+    `feature_sha256` 键）或 feature 重跑面超自身比例上限 → 臂级全量
+    （reason 具名随台账，GUT 臂零进程原样继承）；其余回退原因维持
+    两臂全量（GUT 侧因素 / 周期校准）。"""
+    if forced:
+        return str(forced), "incremental"
+    if reason == "gherkin_rerun_surface_too_large_fallback":
+        return reason, "incremental"
+    return None, reason
+
+
+def _gherkin_rerun_surface(root: Path, invalidation: dict,
+                           arm_full_reason: "str | None") -> "set[str]":
+    """gherkin 重跑面（零行为拆分）：失效面；臂级全量 = 全部盘上
+    feature（同一盘上检测源）。"""
+    if not arm_full_reason:
+        return set(invalidation.get("feature_rerun") or [])
+    from ..mutation.verdict_source import _features_disk_sha256
+
+    return set(_features_disk_sha256(root))
+
+
+def _gherkin_leg_run(root: Path, gherkin_rerun: "set[str]", templates: dict,
+                     recipe: dict, causal: bool, timeout_s: int
+                     ) -> "tuple[dict | None, list[dict], float, str | None]":
+    """gherkin 腿调用。C3-R31（决策 25/§SPEC-039）：腿失败（预检 / 编译 /
+    适配器 / suite 一族——全量重建会记该臂 invalid 的同一族）不抛出、
+    不降级——返回该臂 invalid 的具名原因，由调用方把 feature 臂记为
+    invalid + 原因（GUT 臂原样继承、命令成功、地图回到新鲜）；
+    `run_gherkin_increment_leg` 的其余异常原样抛出（fail-loud）。"""
+    if not gherkin_rerun:
+        return None, [], 0.0, None
+    from .increment_runner import run_gherkin_increment_leg
+    from ..coverage.evidence import make_run_uuid
+    from ..gherkin.addon import AddonError
+    from ..gherkin.run import GherkinRunError
+    from ..gherkin.suite import SuiteError
+
+    t_gh = time.monotonic()
+    try:
+        fresh_gherkin, gh_executions = run_gherkin_increment_leg(
+            root, sorted(gherkin_rerun), templates, recipe, causal,
+            make_run_uuid(), timeout_s)
+    except (GherkinRunError, SuiteError, AddonError) as e:
+        reason = f"feature arm rebuild failed: {type(e).__name__}: {e}"
+        print(f"measure: feature arm invalid — {reason}; GUT arm "
+              f"results kept (decision 25: arms decoupled)", file=sys.stderr)
+        return None, [], 0.0, reason
+    return fresh_gherkin, gh_executions, round(time.monotonic() - t_gh, 3), \
+        None
+
+
+def _gherkin_renewal_section(
+        baseline: dict, root: Path, arm_targets: "list[str]",
+        recipe: dict, classes: dict, invalidation: dict,
+        removed: "set[str]", arm_full_reason: "str | None",
+        timeout_s: int, causal: bool
+        ) -> "tuple[dict, set[str], set[str], dict | None, list[dict], float, dict | None, str | None]":
+    """gherkin 臂增量段（C3-R28/D5 拆分；C3-R31/决策 25 臂解耦）：重跑面
+    → 腿 → 合并。返回 (invalidation, gherkin_rerun, gherkin_dropped,
+    fresh_gherkin, gh_executions, gh_exec_s, merged_gherkin,
+    arm_invalid_reason)——arm_invalid_reason 非空 = feature 臂本轮
+    invalid（具名原因随 arms_state 披露），GUT 臂与判定表原样继承。"""
+    gherkin_rerun = _gherkin_rerun_surface(root, invalidation,
+                                           arm_full_reason)
+    gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
+    templates = prepare_attr_templates(root, arm_targets, recipe, causal)
+    fresh_gherkin, gh_executions, gh_exec_s, arm_invalid_reason = \
+        _gherkin_leg_run(root, gherkin_rerun, templates, recipe, causal,
+                         timeout_s)
+    if arm_invalid_reason:
+        return (invalidation, set(), set(), None, [], 0.0, None,
+                arm_invalid_reason)
+    baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
+    if isinstance(baseline_gherkin, dict) and baseline_gherkin or \
+            fresh_gherkin:
+        merged_gherkin = _merge_gherkin_arm(
+            baseline_gherkin, fresh_gherkin,
+            rerun_keys=gherkin_rerun, dropped_keys=gherkin_dropped,
+            removed_rels=removed)
+    else:
+        merged_gherkin = None
+    invalidation = {**invalidation,
+                    "gherkin_rerun": sorted(gherkin_rerun),
+                    "gherkin_dropped": sorted(gherkin_dropped)}
+    return (invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin,
+            gh_executions, gh_exec_s, merged_gherkin, None)
+
+
+def _run_attribution_increment_locked(
+        project_root: str | Path, target_files: list[str],
+        recipe: dict, baseline_path: str | Path,
+        changed_files: list[str], out_path: str | Path,
+        *, timeout_s: int = 180,
+        attribution_causal: bool = False,
+        calibration_every: int = 5,
+        rerun_full_face_ratio: float
+        = DEFAULT_RERUN_FULL_FACE_RATIO,
+        gherkin_rerun_full_face_ratio: float
+        = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO,
+        gherkin_arm_full_reason: "str | None" = None
+        ) -> dict:
+    """增量重建主入口（含产物落盘与 provenance）。C3-R14：插桩互斥
+    外壳 + §SPEC-025 表守恒入口检查。"""
+    root = Path(project_root).resolve()
+    baseline = _load_baseline_with_conservation(baseline_path)
+    t0 = time.monotonic()
     # D1：先存 raw recipe（toolchain 注入前）。回退全脸重建必须用它——
     # run_measurement 自行注入并据此计算 pristine hash；若传已注入配方，
     # pristine 会被写成注入域 hash → 映射永久"不新鲜"自锁。
@@ -407,7 +1068,9 @@ def run_attribution_increment(project_root: str | Path,
     since_full = int(prev.get("increments_since_full") or 0)
     classes, invalidation, rerun, reason = _increment_decision(
         root, recipe, baseline, changed_files, since_full, calibration_every,
-        rerun_full_face_ratio)
+        rerun_full_face_ratio, gherkin_rerun_full_face_ratio)
+    gherkin_arm_full_reason, reason = _arm_full_gate(
+        reason, gherkin_arm_full_reason)
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
@@ -420,22 +1083,74 @@ def run_attribution_increment(project_root: str | Path,
     arm_targets = [t for t in target_files if Path(t).is_file()]
     arm_exec_s, fresh, executions, fid_by_line_by_rel = _run_increment_arm(
         root, arm_targets, recipe, rerun, timeout_s, attribution_causal)
+    # C3-R24（N1/§SPEC-038⑤）：升级过渡家族态从**基线**测试面现算
+    # （基线面含被删 rel，幸存者判定不受合并面新增同名脚本干扰）。
+    legacy_families = _deleted_family_state(baseline,
+                                            set(invalidation["dropped"]))
     merged = _merge_arm(baseline["arms"]["gut_full"], fresh,
                         invalidation["dropped"], fid_by_line_by_rel,
-                        removed_rels=removed)
+                        removed_rels=removed,
+                        legacy_families=legacy_families)
+    # SEE-1631 §SPEC-016：gherkin 臂增量腿——只重跑失效 feature（与
+    # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
+    # （与 gut 重跑同一插桩文本单源）。
+    invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin, \
+        gh_executions, gh_exec_s, merged_gherkin, arm_invalid_reason = \
+        _gherkin_renewal_section(
+            baseline, root, arm_targets, recipe, classes, invalidation,
+            removed, gherkin_arm_full_reason, timeout_s, attribution_causal)
+    # SEE-1631 §SPEC-025：verdict 表守恒——重跑身份按新执行结果重算
+    # （脚本级执行账 out 解析失败名），未重跑身份原样继承，删除剔除。
+    # C3-R6：新测试身份补表需要**合并后**的 tests_face（新文件的完整
+    # 路径只在合并面里——基线面没有新文件）
+    face_after = _merged_tests_face(root, baseline, classes)
+    merge_collisions: list = []
+    merged_verdicts = _merged_test_verdicts(
+        baseline, executions or [], rerun, invalidation["dropped"], removed,
+        _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
+        gherkin_rerun, gherkin_dropped,
+        tests_face=face_after,
+        arm_identities=sorted((merged.get("test_to_lines") or {}).keys()),
+        collisions=merge_collisions,
+        legacy_families=legacy_families,
+        gherkin_identities=sorted(
+            k for k in ((merged_gherkin or {}).get("test_to_lines") or {})
+            if _gherkin_feature_of(str(k)) in gherkin_rerun))
+    if arm_invalid_reason:
+        # C3-R31（决策 25/§SPEC-039）：feature 臂 invalid——其判定行
+        # 不出场（GUT 臂判定与 arms_state 原样继承）。
+        merged_verdicts = {
+            k: v for k, v in (merged_verdicts or {}).items()
+            if not str(k).startswith("gherkin://")}
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
-        executions)
+        executions, merged_gherkin=merged_gherkin,
+        gh_exec_s=gh_exec_s, gh_executions=gh_executions,
+        merged_verdicts=merged_verdicts, merge_collisions=merge_collisions,
+        gherkin_arm_full_reason=gherkin_arm_full_reason,
+        gherkin_arm_invalid_reason=arm_invalid_reason)
     return _increment_emit(root, out_path, artifact, merged, classes, rerun,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
                      calibration_every: int, ratio: float,
-                     ratio_cap: float) -> str:
+                     ratio_cap: float,
+                     feature_rerun: "set | frozenset" = frozenset(),
+                     gherkin_known: int = 0,
+                     gherkin_ratio_cap: float =
+                     DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO) -> str:
+    """SEE-1631 §SPEC-016（Owner 裁决）：feature 失效面走增量重跑，不再
+    一刀切整臂回退；仅当 gherkin 重跑面超自身比例上限（增量不比整臂便宜）
+    时具名回退。既有回退条件（hash 失配/新增产品文件/校准到期/gut 比例
+    上限）不变。"""
     if not hash_ok:
         return "hash_mismatch_fallback"
-    if classes["prod_new"]:
+    if classes["prod_new"] or classes.get("content_new"):
+        # 因素表第 2 行：生产内容新增（含非脚本内容）无基线边、不猜失效面
+        # → 具名全量回退（C3-R9 Owner 裁定：修改走增量、新增仍全量）
         return "new_prod_file_fallback"
+    if gherkin_known and len(feature_rerun) > gherkin_known * gherkin_ratio_cap:
+        return "gherkin_rerun_surface_too_large_fallback"
     if since_full >= calibration_every:
         return "calibration_due_fallback"
     if ratio > ratio_cap:
@@ -482,22 +1197,623 @@ def _group_fresh_edges(inc_arm: dict) -> dict:
                     for k, v in (inc_arm.get(key) or {}).items()}
     return out
 
+def _strip_lines_by_rel(by_ident: "dict | None",
+                        removed_rels: set[str]) -> dict:
+    """行事实剔除已删除生产文件的边（行列表 sorted 拷贝，身份原序保留）。"""
+    return {i: {r: sorted(ls) for r, ls in by_rel.items()
+                if r not in removed_rels}
+            for i, by_rel in (by_ident or {}).items()}
+
+
+def _strip_fids_by_rel(by_ident: "dict | None",
+                       removed_rels: set[str]) -> dict:
+    """fn 视图剔除已删除生产文件的 fid（fid 列表 sorted 拷贝）。"""
+    return {i: sorted(f for f in (fids or [])
+                      if _fid_file_of(f) not in removed_rels)
+            for i, fids in (by_ident or {}).items()}
+
+
+def _dropping_empty(mapping: dict) -> dict:
+    """丢弃空值条目（列表/字典视图共用的收尾过滤，顺序保留）。"""
+    return {k: v for k, v in mapping.items() if v}
+
+
+def _file_lists_dropping_empty(by_ident: "dict | None",
+                               removed_rels: set[str]) -> dict:
+    """file 列表剔除已删除生产文件并丢弃空列表身份（与既有全量口径一致）。"""
+    stripped = {i: sorted(f for f in (files or [])
+                          if f not in removed_rels)
+                for i, files in (by_ident or {}).items()}
+    return _dropping_empty(stripped)
+
+
+def _rel_keyed_dropping_removed(mapping: "dict | None",
+                                removed_rels: set[str]) -> dict:
+    """rel 键视图（file_to_* / line_to_*）剔除已删除生产文件的键。"""
+    return {r: v for r, v in (mapping or {}).items()
+            if r not in removed_rels}
+
+
+def _carried_gherkin_arm(baseline: dict,
+                         removed_rels: set[str]) -> dict:
+    """SEE-1631 §SPEC-004：增量产物的 gherkin 臂继承（无 feature 失效面）。
+
+    身份稳定原样继承；已删除生产文件的边全视图剔除（行事实/file 反查/
+    fn 视图/feature 视图/计数），不残留死边。基线无 gherkin 臂 → 空
+    dict（arms.gherkin 键不出场）。"""
+    garm = (baseline.get("arms") or {}).get("gherkin")
+    if not isinstance(garm, dict) or not garm:
+        return {}
+    out = {k: v for k, v in garm.items()
+           if k not in ("test_to_lines", "script_to_lines", "line_to_tests",
+                        "test_to_files", "script_to_files", "file_to_tests",
+                        "file_to_scripts", "test_to_functions",
+                        "script_to_functions", "feature_to_lines",
+                        "line_to_features")}
+
+    test_to_lines = _strip_lines_by_rel(garm.get("test_to_lines"),
+                                        removed_rels)
+    script_to_lines = _strip_lines_by_rel(garm.get("script_to_lines"),
+                                          removed_rels)
+    test_to_files = _file_lists_dropping_empty(garm.get("test_to_files"),
+                                               removed_rels)
+    script_to_files = _file_lists_dropping_empty(garm.get("script_to_files"),
+                                                 removed_rels)
+    file_to_tests = _rel_keyed_dropping_removed(garm.get("file_to_tests"),
+                                                removed_rels)
+    file_to_scripts = _rel_keyed_dropping_removed(garm.get("file_to_scripts"),
+                                                  removed_rels)
+    test_to_functions = _dropping_empty(
+        _strip_fids_by_rel(garm.get("test_to_functions"), removed_rels))
+    script_to_functions = _dropping_empty(
+        _strip_fids_by_rel(garm.get("script_to_functions"), removed_rels))
+    line_to_tests = _rel_keyed_dropping_removed(garm.get("line_to_tests"),
+                                                removed_rels)
+    feature_to_lines = _dropping_empty(
+        _strip_lines_by_rel(garm.get("feature_to_lines"), removed_rels))
+    line_to_features = _rel_keyed_dropping_removed(
+        garm.get("line_to_features"), removed_rels)
+    out.update({
+        "test_to_lines": test_to_lines, "script_to_lines": script_to_lines,
+        "line_to_tests": line_to_tests,
+        "test_to_files": test_to_files, "script_to_files": script_to_files,
+        "file_to_tests": file_to_tests, "file_to_scripts": file_to_scripts,
+        "test_to_functions": test_to_functions,
+        "script_to_functions": script_to_functions,
+        "feature_to_lines": feature_to_lines,
+        "line_to_features": line_to_features,
+        "pairs": sum(len(v) for v in test_to_files.values()),
+        "script_pairs": sum(len(v) for v in script_to_files.values()),
+        "function_pairs": sum(len(v) for v in test_to_functions.values()),
+        "line_pairs": sum(len(ls) for by_rel in test_to_lines.values()
+                          for ls in by_rel.values()),
+        "script_line_pairs": sum(len(ls) for by_rel in script_to_lines.values()
+                                 for ls in by_rel.values()),
+    })
+    return out
+
+
+def _effective_targets(baseline: dict, root: Path,
+                       removed: set[str]) -> list[str]:
+    """SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
+    target_files 存储格式随入口不同）。"""
+    removed_abs = {str((root / r).resolve()) for r in removed}
+    return [t for t in (baseline.get("target_files")
+                        or sorted((baseline.get("file_sha256") or {})))
+            if t not in removed and str(Path(t).resolve()) not in removed_abs]
+
+
+def _carried_gherkin_state(baseline: dict,
+                           carried_gherkin: "dict | None") -> dict:
+    """SEE-1631 §SPEC-016：arms_state.gherkin 状态原样继承（invalid 不被
+    洗白），pairs 按合并后行事实重算。"""
+    gh_state_out = dict((baseline.get("arms_state") or {}).get("gherkin")
+                        or {})
+    if carried_gherkin:
+        gh_state_out["pairs"] = int(carried_gherkin.get("pairs") or 0)
+    return gh_state_out
+
+
+def _increment_arms_block(baseline: dict, merged: dict, classes: dict,
+                          carried_gherkin: "dict | None") -> dict:
+    """arms 块：gut_full 保守并集 + gherkin 臂按存在性出场。
+
+    SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
+    ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
+    SEE-1631 §SPEC-016：gherkin 臂 feature 粒度增量——重跑键整体替换、
+    其余原样继承（不因增量被静默清空）；超比例上限才具名整臂回退
+    （行事实由全脸重建重绑）。"""
+    arms: dict = {"gut_full": {
+        **merged,
+        "unattributed_files": sorted(
+            set((baseline.get("arms", {}).get("gut_full") or {})
+                .get("unattributed_files") or [])
+            | set(classes.get("prod_changed") or [])
+            | set(classes.get("prod_new") or []))}}
+    if carried_gherkin:
+        arms["gherkin"] = carried_gherkin
+    return arms
+
+def _drop_removed_test_identities(merged: dict, dropped_rels: set,
+                                  dead_bases: "set[str] | None") -> None:
+    """C3-R24（N1）：删除测试脚本按完整路径身份剔除；升级过渡旧 basename
+    键仅整族已删才剔除（幸存在场保留，改写/披露归
+    _canonical_verdict_dedup）。"""
+    for ident in list(merged):
+        sc = str(ident).partition("::")[0]
+        if sc.startswith("gherkin://"):
+            continue
+        if sc.startswith("res://"):
+            if sc[len("res://"):] in dropped_rels:
+                del merged[ident]
+        elif dead_bases and Path(sc).name in dead_bases:
+            del merged[ident]
+
+
+def _verdict_drop_removed(merged: dict, dropped_scripts: set,
+                          removed_rels: set,
+                          legacy_families: "dict | None" = None) -> None:
+    """§SPEC-025：删除剔除——删除测试脚本按**完整路径身份**精确生效
+    （C3-R24/N1：同名幸存者不受牵连）；删除生产文件（res:// rel）触达
+    的身份从表中删除。"""
+    dropped_rels = set(dropped_scripts or set())
+    dead_bases = {base for base, (dead, _surv)
+                  in (legacy_families or {}).items() if dead} or None
+    _drop_removed_test_identities(merged, dropped_rels, dead_bases)
+    for rel in removed_rels or set():
+        for ident in list(merged):
+            sc = str(ident).split("::", 1)[0]
+            if sc.startswith("res://") and sc[len("res://"):] == rel:
+                del merged[ident]
+
+
+def _verdict_per_script(executions: list[dict]) -> dict:
+    """重跑脚本执行账：脚本 basename → (rc, 解析失败名集, 脚本限定失败对,
+    实际执行脚本头集)。C3-R23（V1）：同名碰撞下 `-gselect` 按 basename
+    可能选中多个物理脚本——账必须携带脚本级证据（失败对 + 执行头）才能
+    逐脚本归因，不能只按名字并集。C3-R24（N2/§SPEC-038⑥）：证据在
+    截断之前从完整输出提取并随执行账保存（evidence 键），此处优先消费；
+    out 允许截断只作披露，不再从尾部重解析——部分截断不得把本轮转红
+    的同名前脚本记成绿。旧形态账（无 evidence 键）回退解析 out。"""
+    from ..mutation.gutrun import (
+        _parse_failing_tests, executed_script_headers,
+        parse_failures_with_scripts,
+    )
+
+    per_script: dict[str, tuple] = {}
+    for r in executions or []:
+        script = str(r.get("script") or "")
+        if not script:
+            continue
+        b = Path(script).name
+        ev = r.get("evidence")
+        if isinstance(ev, dict):
+            failing = {str(x) for x in ev.get("failing") or []}
+            pairs = {(str(s), str(n)) for s, n in (ev.get("pairs") or [])}
+            executed = {str(x) for x in ev.get("executed") or []}
+        else:
+            out = r.get("out") or ""
+            failing = _parse_failing_tests(out)
+            pairs = parse_failures_with_scripts(out)
+            executed = executed_script_headers(out)
+        rc_raw = r.get("rc")
+        # C3-R25（N6）：执行异常（rc 缺失 / error 在场——超时、二进制
+        # 拉起失败、GUT runner 缺失）不得折成 rc=0 放绿：按失败计（保守
+        # 整脚本红，既有红不洗白），与 gherkin 腿「缺失 rc 当失败」
+        # （_gherkin_rerun_all_passed）同口径；错误文本随执行账
+        # （rerun_executions / rerun_execution_errors）具名披露。
+        if rc_raw is None or r.get("error"):
+            rc = 1
+        else:
+            rc = int(rc_raw)
+        per_script[b] = (rc, failing, pairs, executed)
+    return per_script
+
+
+def _script_scoped_failed(script: str, name: str, rc: int,
+                          failing: "set[str]", pairs: set,
+                          executed: set) -> bool:
+    """C3-R23（V1）：单身份失败判定按脚本级证据归因。
+
+    - script 是完整 `res://` 路径且运行流带脚本头：只有它自己的失败对
+      判红；Run Summary 通配仅在无任何具体脚本证据时保守红（摘要段是
+      运行流的复制，具体证据在场时不得外溢到同名脚本）；有失败对但
+      该名字无任何失败对时取保守方向——失败名集在场即红（C3-R24/N4：
+      两套解析器不一致不得记绿）；其余 → 绿；
+    - 无脚本头（旧形态/输出截断只剩摘要）或裸 basename 身份（升级过渡
+      无法定向）：保守名集合并集（与 0d14f98 行为一致，不放宽）；
+    - 第五形态（C3-R26/D2）：有账、rc=0、零执行证据（无脚本头、无失败
+      对、无失败名——典型：GUT `Failed to load script … Parse error`
+      零测试执行）= 不可归因：不能确认脚本真的执行过，保守整脚本红，
+      不得按 rc==0 放绿（假 kill 方向）。"""
+    # 第五形态先于一切归因分支（rc=0 且证据全空对两种身份形态同判）
+    if rc == 0 and not executed and not pairs and not failing:
+        return True
+    if script.startswith("res://") and executed:
+        if (script, name) in pairs:
+            return True
+        if ("*", name) in pairs:
+            concrete = {n for (s, n) in pairs if s != "*"}
+            return name not in concrete
+        if pairs:
+            return name in failing
+        return (name in failing) if failing else (rc != 0)
+    return (name in failing) if failing else (rc != 0)
+
+
+def _verdict_recompute_rerun(merged: dict, per_script: dict) -> None:
+    """重跑身份按脚本执行账**逐测试**重算（§SPEC-025/D8，R4）：
+    失败名可解析时按名判定——通过的测试不得随脚本级 rc 整体标红；
+    失败名空且 rc!=0 = 不可归因（输出不可解析/崩溃）保守整脚本红
+    （不得无证据放绿）；red 分类沿基线（pre_existing 不被无依据改写
+    为 new）；基线绿而本轮失败 = new。
+    C3-R23（V1）：同名碰撞下按脚本头证据逐脚本归因——重跑腿未执行的
+    物理脚本基线判定原样继承，不被同名脚本的执行账改写。"""
+    for ident in list(merged):
+        sc = str(ident).split("::", 1)[0]
+        b = Path(sc).name
+        acct = per_script.get(b)
+        if acct is None:
+            continue
+        rc, failing, pairs, executed = acct
+        if executed and sc.startswith("res://") and sc not in executed:
+            continue
+        name = str(ident).split("::", 1)[1]
+        failed = _script_scoped_failed(sc, name, rc, failing, pairs,
+                                       executed)
+        if not failed:
+            merged[ident] = {"verdict": "green"}
+            continue
+        prior = merged.get(ident) or {}
+        cls = (prior.get("classification")
+               if prior.get("verdict") == "red" else None) \
+            or "new"
+        merged[ident] = {"verdict": "red", "classification": cls,
+                         "script": prior.get("script") or sc}
+
+
+def _drop_gherkin_dropped(merged: dict, gherkin_dropped: set) -> None:
+    """§SPEC-028：gherkin_dropped 的 feature 身份从表剔除（零行为拆分）。"""
+    if not gherkin_dropped:
+        return
+    from .attribution import _gherkin_feature_of
+
+    for ident in list(merged):
+        if _gherkin_feature_of(str(ident)) in gherkin_dropped:
+            del merged[ident]
+
+
+def _gherkin_rerun_all_passed(fresh_gherkin: dict) -> bool:
+    """§SPEC-028：重跑腿**全部**执行账判定——任一 rc!=0 都算失败
+    （多分片/多 rep 各算一账）；零执行账 = 失败（不落 green）。
+    C3-R26（D2）第五形态：rc=0 且零 scenario 执行证据（执行脚本头
+    空集——GUT 空收集/解析失败零测试执行）= 不可归因，不得按 rc==0
+    放绿；缺 `executed_scripts` 键的旧形态账按既有 rc 口径（不回溯）。"""
+    execs = fresh_gherkin.get("executions") or []
+    # rc=0 是合法成功值——falsy 陷阱（`0 or 1`）会把成功当失败
+    return bool(execs) and all(
+        int(r.get("rc") if r.get("rc") is not None else 1) == 0
+        for r in execs) and all(
+        r.get("executed_scripts") is None or r.get("executed_scripts")
+        for r in execs)
+
+
+def _gherkin_failing_tests(fresh_gherkin: dict) -> "set[str] | None":
+    """§SPEC-025/D8（R4）·C3-R27（D3）：重跑腿逐名失败名集合——与规范
+    身份第二段**同一命名空间**（编译测试名；全部执行账并集——多分片/
+    多 rep 任一失败都算）。执行账带 `failing_tests`（截断前
+    `_parse_failing_tests` 提取）时返回该集合；缺席（旧形态账）返回
+    None = 无法归因，调用方保守整键处理。执行账的 `failing_scenarios`
+    是 scenario 名（`scenario_of_test` 桥回写），与身份段不同命名空间
+    ——不得在此比对（D3 根因：两空间永不相等，失败场景被强制 green
+    且增量路径无法恢复）。"""
+    failing: set[str] = set()
+    seen = False
+    for r in (fresh_gherkin.get("executions") or []):
+        ft = r.get("failing_tests")
+        if ft is None:
+            continue
+        seen = True
+        failing |= {str(x) for x in ft}
+    return failing if seen else None
+
+
+def _gherkin_leg_exec_source(fresh_gherkin: "dict | None",
+                             gh_executions: "list[dict] | None"
+                             ) -> "dict | None":
+    """§SPEC-028/D14（R5）：gherkin 腿执行账来源（failing_scenarios 所在
+    ——fresh_gherkin 臂字典无 executions 键，真实 map-update 路径此前整
+    腿保守红）。"""
+    gh_leg_execs = list(gh_executions or [])
+    if fresh_gherkin is not None and not gh_leg_execs:
+        gh_leg_execs = list(fresh_gherkin.get("executions") or [])
+    if gh_leg_execs or fresh_gherkin is not None:
+        return {"executions": gh_leg_execs}
+    return None
+
+def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
+                           gherkin_rerun: set,
+                           identities: "list[str] | None" = None) -> None:
+    """gherkin 重跑键（feature_changed/new）：**逐名**按重跑腿**全部**
+    执行账判定（多分片/多 rep 任一失败都算失败）——失败名与身份第二段
+    **同一命名空间**（编译测试名 `failing_tests`，C3-R27/D3；执行账的
+    `failing_scenarios` 是 scenario 名命名空间，不在此比对）：通过身份
+    green（不得随 feature 级 rc 整体标红）；失败或不一致 → red，分类沿
+    基线（pre_existing/suspected_intolerant 保持 §SPEC-017 车道，基线绿
+    而失败 = new）。失败名缺失（旧形态账）**或空集**（腿失败但零可归因
+    名——不可归因）保守整键红（N6）。`gherkin_dropped` 的剔除由
+    `_merged_test_verdicts` 无条件消费（D9）。`identities`（C3-R28/D5）：
+    重跑臂的规范身份清单——新 feature 的身份不在基线表，按腿账补表
+    （§SPEC-025 语义完备性：新增 feature 的判定必须进表）。"""
+    from .attribution import _gherkin_feature_of
+
+    gh_ok = _gherkin_rerun_all_passed(fresh_gherkin)
+    failing_tests = _gherkin_failing_tests(fresh_gherkin)
+    idents = [i for i in (identities or []) if i not in merged] \
+        + list(merged)
+    for ident in idents:
+        key = _gherkin_feature_of(str(ident))
+        if key is None or key not in gherkin_rerun:
+            continue
+        if gh_ok:
+            merged[ident] = {"verdict": "green"}
+            continue
+        # 失败腿：编译测试名（身份第二段，`failing_tests` 同命名空间）
+        # 逐名判定（通过的测试名不标红）；失败名缺失（旧形态账）**或
+        # 空集**（腿失败但零可归因名——不可归因）都保守整键红（C3-R25/N6：
+        # 不得按空集逐名放绿，与 gut 腿「rc!=0 无失败名 = 保守红」对齐）。
+        test_name = str(ident).split("::", 1)[1] \
+            if "::" in str(ident) else ""
+        failed = (not failing_tests) or test_name in failing_tests
+        if not failed:
+            merged[ident] = {"verdict": "green"}
+            continue
+        prior = merged.get(ident) or {}
+        cls = (prior.get("classification")
+               if prior.get("verdict") == "red" else None) or "new"
+        merged[ident] = {"verdict": "red", "classification": cls,
+                         "script": prior.get("script")
+                         or str(ident).split("::", 1)[0]}
+
+
+def _verdict_identity_index(
+        tests_face: "dict[str, str] | None",
+        arm_identities: "list[str] | None") -> "tuple[dict, dict]":
+    """脚本 basename → res:// 完整路径表 与 basename → 宇宙身份表。"""
+    tests_by_base: dict[str, list[str]] = {}
+    for rel in (tests_face or {}):
+        base = Path(rel).name
+        tests_by_base.setdefault(base, []).append("res://" + rel)
+    idents_by_base: dict[str, list[str]] = {}
+    for ident in arm_identities or []:
+        sc, _, nm = str(ident).partition("::")
+        if nm:
+            idents_by_base.setdefault(Path(sc).name,
+                                      []).append(str(ident))
+    return tests_by_base, idents_by_base
+
+
+def _verdict_case_a_concrete(merged: dict, full_paths: "list[str]",
+                             pairs: set) -> "set[str]":
+    """Case A 具体归因腿：脚本头证据在场时按 (script, name) 建规范形态
+    red；摘要通配（无具体证据的失败名）保守全路径红。返回已归因名集。"""
+    concrete = sorted({(s, n) for (s, n) in pairs if s != "*"})
+    concrete_names = {n for _s, n in concrete}
+    wild = sorted({n for (s, n) in pairs if s == "*"} - concrete_names)
+    for (s, n) in concrete:
+        ident = f"{s}::{n}"
+        if ident not in merged:
+            merged[ident] = {"verdict": "red", "classification": "new",
+                             "script": s}
+    for n in wild:
+        for fp in full_paths:
+            ident = f"{Path(fp).name}::{n}"
+            if ident not in merged:
+                merged[ident] = {"verdict": "red", "classification": "new",
+                                 "script": fp}
+    return concrete_names | set(wild)
+
+
+def _verdict_case_a_failures(merged: dict, full_paths: "list[str]",
+                             failing: "set[str]", pairs: set,
+                             executed: set) -> None:
+    """Case A：执行账失败名（宇宙外身份）→ red 进表。C3-R23（V1）：有
+    脚本头证据按 (script, name) 具体归因——同名碰撞下不再给未失败的
+    另一目录同名脚本凭空建红；Run Summary 通配（无具体证据）与无头
+    （旧输出形态）失败名保守全路径红。"""
+    if executed and pairs:
+        attributed = _verdict_case_a_concrete(merged, full_paths, pairs)
+        residual = [n for n in sorted(failing) if n not in attributed]
+    else:
+        residual = sorted(failing)
+    for fp in full_paths:
+        base = Path(fp).name
+        for name in residual:
+            ident = f"{base}::{name}"
+            if ident not in merged:
+                merged[ident] = {"verdict": "red",
+                                 "classification": "new",
+                                 "script": fp}
+
+
+def _verdict_add_new_identities(merged: dict, per_script: dict,
+                                rerun_scripts: "set[str]",
+                                tests_face: "dict[str, str] | None",
+                                arm_identities: "list[str] | None") -> None:
+    """重跑脚本里的新身份进判定表（§SPEC-025 宇宙覆盖 + C3-R6 Case A/B）。
+
+    绿：行事实宇宙（merged.test_to_lines）里基线表没有的新身份 →
+    `{"verdict": "green"}`（C3-R7：判定表必须覆盖行事实宇宙——通过测试
+    不得从产物消失；51de7e3 行为恢复）。红：执行账（per_script 解析的
+    失败名）→ red——不触达产品代码的测试没有归属事实（Case A）也要进表；
+    `script` 字段 = `res://` 完整路径（`tests_face` 按 basename 反查——
+    与全量建图条目同形态，物理跳过按完整路径命中；C3-R6 Case B）。"""
+    tests_by_base, idents_by_base = _verdict_identity_index(
+        tests_face, arm_identities)
+
+    for script_base, (rc, failing, pairs, executed) in per_script.items():
+        if script_base not in rerun_scripts:
+            continue
+        full_paths = tests_by_base.get(script_base, [])
+        full = full_paths[0] if full_paths else None
+        # 宇宙新身份：逐测试判定（与 _verdict_recompute_rerun 同口径——
+        # 失败名可解析时只看 name in failing，脚本内其余通过测试记 green；
+        # 全部不可解析（无失败名且 rc!=0）才整脚本保守红。C3-R8 退回2：
+        # 此前 rc!=0 把同脚本其余新身份全记红 → mutation 把可杀的 mutant
+        # 报成存活。C3-R23（V1）：同名碰撞按脚本级证据归因；重跑腿未
+        # 执行的物理脚本不凭空补表（基线继承面负责）
+        for ident in idents_by_base.get(script_base, []):
+            if ident in merged:
+                continue
+            sc = str(ident).partition("::")[0]
+            name = str(ident).partition("::")[2]
+            if executed and sc.startswith("res://") and sc not in executed:
+                continue
+            failed = _script_scoped_failed(sc, name, rc, failing, pairs,
+                                           executed)
+            if not failed:
+                merged[ident] = {"verdict": "green"}
+            else:
+                # script 字段 = 身份自己的完整路径（V1：同名碰撞下
+                # full_paths[0] 是另一个目录的脚本，不得张冠李戴）
+                merged[ident] = {"verdict": "red",
+                                 "classification": "new",
+                                 "script": (sc if sc.startswith("res://")
+                                            else (full or sc))}
+        # 执行账失败名（宇宙外身份，Case A）→ red（归因见
+        # _verdict_case_a_failures）
+        _verdict_case_a_failures(merged, full_paths, failing, pairs,
+                                 executed)
+
+
+def _merged_test_verdicts(baseline: dict, executions: list[dict],
+                          rerun_scripts: set[str],
+                          dropped_scripts: set[str],
+                          removed_rels: set[str],
+                          fresh_gherkin: "dict | None",
+                          gherkin_rerun: set[str],
+                          gherkin_dropped: set[str],
+                          tests_face: "dict[str, str] | None" = None,
+                          arm_identities: "list[str] | None" = None,
+                          collisions: "list[dict] | None" = None,
+                          legacy_families: "dict | None" = None,
+                          gherkin_identities: "list[str] | None" = None
+                          ) -> "dict | None":
+    """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
+
+    - 基线表原样继承（未重跑身份逐位不变）；
+    - 重跑脚本的身份按脚本执行账重算：rc==0 且无解析失败名 → green；
+      有失败名 → red/new（增量形态新树的失败如实记 new）；
+    - gherkin 重跑键（feature_changed/new）随重跑腿执行账逐名重算
+      （C3-R27/D3：按与身份段同命名空间的编译测试名 `failing_tests`——
+      通过 green，失败 red 分类沿基线，失败名缺失或空集保守整键红 N6）；
+    - 删除测试脚本（完整路径身份，C3-R24/N1）与删除生产文件触达的
+      身份剔除。
+    C3-R22（D4）：规范身份去重——升级过渡（旧 basename 形态基线 × 新
+    res:// 形态身份）的同物理测试双键并存剔除（删旧留新 + 具名披露）。
+    `legacy_families`（C3-R24/§SPEC-038⑤）＝删除面升级过渡家族态；
+    缺省时按 (dropped_scripts, tests_face) 现算。
+    基线无表（旧产物）→ None（消费方按缺表具名 fail-loud）。"""
+    base = baseline.get("test_verdicts")
+    if not isinstance(base, dict):
+        return None
+    families = legacy_families
+    if families is None:
+        families = _legacy_family_state(dropped_scripts, tests_face)
+    merged = dict(base)
+    _verdict_drop_removed(merged, dropped_scripts, removed_rels, families)
+    # §SPEC-028/D9（R4）：gherkin_dropped 剔除无条件消费——只删不重跑的
+    # 轮次（fresh_gherkin=None）同样必须剔除（C2-R3 曾把它锁在
+    # fresh_gherkin 门内，真实 map-update 端到端未生效）。
+    _drop_gherkin_dropped(merged, gherkin_dropped)
+    per_script = _verdict_per_script(executions)
+    _verdict_recompute_rerun(merged, per_script)
+    _verdict_add_new_identities(merged, per_script, rerun_scripts,
+                               tests_face, arm_identities)
+    if fresh_gherkin is not None:
+        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun,
+                               identities=gherkin_identities)
+    _canonical_verdict_dedup(merged, tests_face, arm_identities, collisions,
+                             legacy_families=families)
+    return merged
+
+
+def _rerun_error_disclosure(executions: "list[dict] | None") -> "list[dict]":
+    """C3-R25（N6）/C3-R26（D2）：执行异常与不可归因账的具名披露——
+    超时 / 拉起失败 / rc 缺失 / rc=0 且零执行证据，对应脚本的判定已按
+    保守方向记红。"""
+    out: "list[dict]" = []
+    for r in executions or []:
+        script = str(r.get("script") or "")
+        err = r.get("error")
+        if err or r.get("rc") is None:
+            out.append({"script": script,
+                        "error": str(err or "rc missing")})
+            continue
+        ev = r.get("evidence")
+        if (int(r.get("rc") or 0) == 0 and isinstance(ev, dict)
+                and not (ev.get("executed") or ev.get("pairs")
+                         or ev.get("failing"))):
+            out.append({"script": script,
+                        "error": "unattributable: rc=0 with zero "
+                                 "execution evidence (no script headers, "
+                                 "no failure pairs, no failing names)"})
+    return out
+
+
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               root: Path, classes: dict, rerun_list: list[str],
                               invalidation: dict, since_full: int,
                               arm_exec_s: float,
-                              executions: list[dict] | None = None) -> dict:
+                              executions: list[dict] | None = None,
+                              merged_gherkin: "dict | None" = None,
+                              gh_exec_s: float = 0.0,
+                              gh_executions: "list[dict] | None" = None,
+                              merged_verdicts: "dict | None" = None,
+                              merge_collisions: "list[dict] | None" = None,
+                              gherkin_arm_full_reason: "str | None" = None,
+                              gherkin_arm_invalid_reason: "str | None" = None
+                              ) -> dict:
     removed = set(classes.get("prod_removed") or [])
-    # SEE-1610 §SPEC-N1：target 面剔除已删除文件（abs/rel 双形态匹配——
-    # target_files 存储格式随入口不同）。
-    removed_abs = {str((root / r).resolve()) for r in removed}
-    targets = [t for t in (baseline.get("target_files")
-                           or sorted((baseline.get("file_sha256") or {})))
-               if t not in removed and str(Path(t).resolve()) not in removed_abs]
+    # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
+    # gherkin 臂，arms.gherkin 键不出场）；删除生产文件触达的 gherkin 边
+    # 同步 purge。
+    # C3-R31（决策 25/§SPEC-039）：feature 臂本轮 invalid → 行事实不出场
+    # （arms.gherkin 缺省、判定表无 gherkin:// 行），GUT 臂原样继承。
+    carried_gherkin = merged_gherkin
+    if carried_gherkin is None:
+        carried_gherkin = _carried_gherkin_arm(baseline, removed)
+    if gherkin_arm_invalid_reason:
+        carried_gherkin = None
+    # C3-R31（§SPEC-039）：判定表无 gherkin:// 行——invalid 臂的判定
+    # 不出场（装配点保证产物形态，任一调用方一致）。
+    merged_verdicts = merged_verdicts if merged_verdicts is not None else \
+        dict(baseline.get("test_verdicts") or {})
+    if gherkin_arm_invalid_reason:
+        merged_verdicts = {k: v for k, v in merged_verdicts.items()
+                           if not str(k).startswith("gherkin://")}
+    targets = _effective_targets(baseline, root, removed)
+    gh_state_out = _carried_gherkin_state(baseline, carried_gherkin)
+    if gherkin_arm_invalid_reason:
+        gh_state_out = {"state": "invalid",
+                        "invalid_reason": gherkin_arm_invalid_reason}
+    elif gherkin_arm_full_reason and carried_gherkin:
+        # C3-R31（§SPEC-039）：臂级全量腿成功 → 该臂状态按本轮真实结果
+        # 重算（invalid 不被永久钉死；键集与全量成功臂一致）。
+        gh_state_out = {"state": "valid", "invalid_reason": None,
+                        "invalid_evidence": None, "excluded_tests": [],
+                        "pairs": int(carried_gherkin.get("pairs") or 0)}
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
         "recipe_hash_pristine": baseline.get("recipe_hash_pristine"),
+        # C3-R28（D4）：建图时事实沿基线继承（配置面可构建性由全量重建
+        # 重新写入；增量不改写）
+        "recipe_buildable": baseline.get("recipe_buildable"),
+        # C3-R15（定案 4/§SPEC-016）：feature 内容指纹随增量产物前进，
+        # 供 status/增量的 feature 失效面对账（per-feature 重跑通道）。
+        "feature_sha256": (recipe.get("gherkin_face") or {})
+        .get("feature_sha256") or {},
         "project_root": str(root),
         "identity": baseline.get("identity"),
         "causal": baseline.get("causal"),
@@ -506,36 +1822,104 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "tests_face": _merged_tests_face(root, baseline, classes),
         "instrumentable_lines": _merged_instrumentable_lines(root, baseline,
                                                              classes),
-        "arms": {"gut_full": {
-            **merged,
-            # SEE-1610 D1：增量产物无法重测未归属事件——保守并集（基线名单
-            # ∪ 本轮变更/新增文件）供 test 筛选闭包整文件面判定。
-            "unattributed_files": sorted(
-                set((baseline.get("arms", {}).get("gut_full") or {})
-                    .get("unattributed_files") or ())
-                | set(classes.get("prod_changed") or [])
-                | set(classes.get("prod_new") or []))}},
-        "arms_state": dict(baseline.get("arms_state") or {}),
+        # §SPEC-029 表 #5/#6（C3-R5 项1）：生产内容指纹——场景/资源/数据
+        # 文本与生产 .gd 同类，增量产物必须携带（否则续新后第一条命令即
+        # 报"116 new universe files"）。按当前树现算（内容变更/新增/删除
+        # 同一套逻辑）。
+        "production_content_sha256": _merged_production_content(
+            root, baseline, classes),
+        # SEE-1631 §SPEC-021/025：arms 块（tidy 拆分 _increment_arms_block）
+        # + verdict 表守恒（未重跑身份原样继承、重跑身份按新执行结果重算、
+        # 删除剔除；缺表 = 消费方具名 fail-loud，不得当空红集）。
+        "arms": _increment_arms_block(baseline, merged, classes,
+                                      carried_gherkin),
+        "test_verdicts": merged_verdicts if merged_verdicts is not None
+        else dict(baseline.get("test_verdicts") or {}),
+        # C3-R22（D4）：升级过渡的规范身份去重披露（旧 basename 条目被
+        # 规范条目替换 / 无法恢复的旧条目保留）——与全量建图的
+        # identity_collisions 同键（空列表常态键在场）。
+        "identity_collisions": list(merge_collisions or []),
+        "arms_state": {**dict(baseline.get("arms_state") or {}),
+                       **({"gherkin": gh_state_out}
+                          if (carried_gherkin or gherkin_arm_invalid_reason)
+                          else {})},
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),
-        "increment": {
-            "mode": "incremental",
-            "base_recipe_hash": baseline.get("report_recipe_hash"),
-            "changed_files": classes,
-            "rerun_scripts": rerun_list,
-            "dropped_scripts": sorted(invalidation["dropped"]),
-            "rerun_sources": invalidation["sources"],
-            "increments_since_full": since_full + 1,
-            "calibration_policy": ("full face every N increments or on "
-                                   "hash mismatch / new prod file / "
-                                   "oversized rerun surface (deleted prod "
-                                   "files stay incremental: edge purge + "
-                                   "toucher rerun, SEE-1610 §SPEC-N1)"),
-            "event_counts_stale": True,
-            "arm_exec_s": arm_exec_s,
-            "rerun_executions": executions or [],
-        },
+        "increment": _increment_ledger(
+            baseline, classes, rerun_list, invalidation, since_full,
+            arm_exec_s, gh_exec_s, gh_executions, executions,
+            gherkin_arm_full_reason),
     }
+
+
+def _increment_ledger(baseline: dict, classes: dict, rerun_list: list[str],
+                      invalidation: dict, since_full: int, arm_exec_s: float,
+                      gh_exec_s: float, gh_executions: "list[dict] | None",
+                      executions: "list[dict] | None",
+                      gherkin_arm_full_reason: "str | None") -> dict:
+    """增量台账块（C3-R28 零行为拆分）。D5：臂级全量时 mode/reason 携带
+    具名原因（feature 臂重建；对外响应 mode 仍取 status 预言的
+    full/increment）、`increments_since_full` 归零。"""
+    return {
+        "mode": gherkin_arm_full_reason or "incremental",
+        "reason": gherkin_arm_full_reason,
+        "base_recipe_hash": baseline.get("report_recipe_hash"),
+        "changed_files": classes,
+        "rerun_scripts": rerun_list,
+        "dropped_scripts": sorted(invalidation["dropped"]),
+        "rerun_sources": invalidation["sources"],
+        "gherkin_rerun_features": sorted(
+            invalidation.get("gherkin_rerun") or []),
+        "gherkin_dropped_features": sorted(
+            invalidation.get("gherkin_dropped") or []),
+        "increments_since_full": 0 if gherkin_arm_full_reason
+        else since_full + 1,
+        "calibration_policy": ("full face every N increments or on "
+                               "hash mismatch / new prod file / "
+                               "oversized rerun surface (deleted prod "
+                               "files stay incremental: edge purge + "
+                               "toucher rerun, SEE-1610 §SPEC-N1); "
+                               "gherkin features rerun per invalidation "
+                               "surface, own ratio cap (SEE-1631 "
+                               "§SPEC-016)"),
+        "event_counts_stale": True,
+        "arm_exec_s": arm_exec_s,
+        "gherkin_leg_exec_s": gh_exec_s,
+        "gherkin_leg_executions": gh_executions or [],
+        "rerun_executions": executions or [],
+        # C3-R25（N6）：执行异常的具名披露（对应脚本判定已保守记红）
+        "rerun_execution_errors": _rerun_error_disclosure(executions),
+    }
+
+def _merged_production_content(root: Path, baseline: dict,
+                               classes: dict) -> "dict[str, str]":
+    """生产内容指纹继承（§SPEC-029 表 #5/#6）：基线指纹 + 变更/新增
+    重算 + 删除剔除；范围不可闭合时继承基线（不归零）。"""
+    import hashlib
+
+    from .classify import production_content_files, ScopeError
+
+    face = dict(baseline.get("production_content_sha256") or {})
+    try:
+        content = production_content_files(root)
+    except ScopeError:
+        return face
+    for rel in content:
+        p = Path(root) / rel
+        if not p.is_file():
+            face.pop(rel, None)
+            continue
+        face[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    for rel in classes.get("prod_removed", []):
+        face.pop(rel, None)
+    # C3-R9 退回1：已删除的非脚本内容文件不再在盘上（上面的重算循环扫
+    # 不到它们）——陈旧指纹条目必须剔除，否则装填后复检永不过期
+    on_disk = set(content)
+    for rel in list(face):
+        if rel not in on_disk:
+            face.pop(rel, None)
+    return face
+
 
 def _merged_tests_face(root: Path, baseline: dict,
                        classes: dict) -> dict:

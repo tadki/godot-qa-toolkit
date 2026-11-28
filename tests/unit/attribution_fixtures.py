@@ -34,6 +34,48 @@ def install_recipe(project_root) -> None:
     ensure_addon_metadata(project_root)
 
 
+def _feature_sha_of(project_root: Path) -> dict:
+    """盘上 features/*.feature 的 {key: sha256}（normalize 与建图同口径）。"""
+    import hashlib as _hl
+
+    feats = Path(project_root) / "addons" / "gqt_gherkin" / "features"
+    if not feats.is_dir():
+        return {}
+    out: dict = {}
+    for path in sorted(feats.glob("*.feature")):
+        key = path.stem.replace("-", "_")
+        h = _hl.sha256()
+        h.update(path.read_bytes())
+        out[key] = h.hexdigest()
+    return out
+
+
+
+def pristine_recipe_hash(project_root) -> str:
+    """C3-R22（D3）：pristine 面 = 磁盘树 raw hash，**不含 toolchain**
+    （godot_version 随 GQT_GODOT_BIN 有无变化，与 `_fresh_recipe_hash`
+    的剥离口径一致）——两段式 build_recipe + 剥离哈希。"""
+    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+
+    recipe, error = build_recipe(project_root)
+    assert error is None, error
+    return recipe_hash({k: v for k, v in recipe.items()
+                        if k not in ("recipe_hash", "toolchain")})
+
+
+def report_recipe_hash(project_root) -> str:
+    """C3-R23（R1）：工具链面 = 注入域存储哈希（与 orchestrator 建图
+    同一现算：`_current_report_recipe_hash`，含 toolchain）。fresh 路径
+    现在同样比对工具链面，夹具必须携带真实存储哈希——占位哈希会被判
+    不新鲜（Leader 复核口径：修夹具，不用「fresh 不探测」放行）。"""
+    from godot_qa_toolkit.mutation.truth_select import \
+        _current_report_recipe_hash
+
+    stored = _current_report_recipe_hash(str(project_root))
+    assert stored, "注入域哈希必须可计算（recipe 不可构建）"
+    return stored
+
+
 def write_map(project_root: Path,
               target_tests: dict[str, list[str]]) -> str:
     """target_tests: 目标文件 rel → 触达它的测试身份列表（`脚本名::测试名`）。
@@ -41,12 +83,11 @@ def write_map(project_root: Path,
     空列表 = 干净的"零引用"（映射说无测试 → 零引用短路）。
     SEE-1587：/6 形态——行事实为主真值（每个 (identity, rel) 边合成一行
     事实 [2]），file/function 视图按派生口径随行事实一致。"""
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     install_recipe(project_root)
     recipe, error = build_recipe(project_root)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items()
-                       if k != "recipe_hash"})
+    raw = report_recipe_hash(project_root)
     arm = {"test_to_files": {}, "script_to_files": {},
            "tests": 0, "scripts": 0, "files": 0, "pairs": 0,
            "function_pairs": 0, "test_to_functions": {},
@@ -78,18 +119,22 @@ def write_map(project_root: Path,
             tests_face[str(gd.relative_to(project_root))] = hashlib.sha256(
                 gd.read_bytes()).hexdigest()
     doc = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "report_recipe_hash": raw,
-        "recipe_hash_pristine": raw,
+        "recipe_hash_pristine": pristine_recipe_hash(project_root),
         "project_root": str(project_root),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},
         "file_sha256": shas,
         "target_files": sorted(shas),
         "tests_face": tests_face,
+        # C3-R16：feature 内容指纹（map 必带——status 的 feature 失效
+        # 面对账源；缺键 = 具名 missing 因素走全量重建的新契约）。
+        "feature_sha256": _feature_sha_of(project_root),
+        "test_verdicts": {},
         "instrumentable_lines": instrumentable,
         "arms": {"gut_full": arm},
-        # SEE-1587 D3：真实 /6 产物携带执行完整性证据；零引用（pairs=0）
+        # SEE-1587 D3：真实产物携带执行完整性证据；零引用（pairs=0）
         # 属合法空面——probes_fired>0 证明测试确已执行。
         "arms_state": {"gut_full": {"state": "valid",
                                     "invalid_reason": None,
@@ -114,13 +159,12 @@ def line_facts_map(project_root: Path,
 
     instrumentable：rel → 可插桩行集（缺省 [2, 3]）；probes：执行证据。
     写合法 test-attribution/6 到指定路径（缺省约定默认位置），返回路径。"""
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     project_root = Path(project_root)
     install_recipe(project_root)
     recipe, error = build_recipe(project_root)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items()
-                       if k != "recipe_hash"})
+    raw = report_recipe_hash(project_root)
     rels = sorted({r for by_rel in facts.values() for r in by_rel}
                   | set(instrumentable or {}))
     shas = {rel: hashlib.sha256((project_root / rel).read_bytes())
@@ -148,14 +192,18 @@ def line_facts_map(project_root: Path,
     arm["tests"] = len(arm["test_to_files"])
     arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     doc = {
-        "schema_version": "test-attribution/6",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "schema_version": "test-attribution/7",
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine_recipe_hash(project_root),
         "project_root": str(project_root),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},
         "file_sha256": shas,
         "target_files": sorted(shas),
         "tests_face": _tests_face_of(project_root),
+        # C3-R16：feature 内容指纹（map 必带——status 的 feature 失效
+        # 面对账源；缺键 = 具名 missing 因素走全量重建的新契约）。
+        "feature_sha256": _feature_sha_of(project_root),
+        "test_verdicts": {},
         "instrumentable_lines": instrumentable or {rel: [2, 3]
                                                    for rel in rels},
         "arms": {"gut_full": arm},

@@ -156,11 +156,13 @@ def _map_doc(proj: Path, target: Path,
              extra_script_lines: "dict[str, dict[int, list[int]]] | None" = None
              ) -> dict:
     """构造与磁盘绑定的 /6 映射（行事实主真值；含 tests_face/file_sha256）。"""
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    import attribution_fixtures
+    from godot_qa_toolkit.measurement.recipe import build_recipe
     recipe, error = build_recipe(proj)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items()
-                       if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = attribution_fixtures.report_recipe_hash(proj)
+    pristine = attribution_fixtures.pristine_recipe_hash(proj)
     rel = str(target.resolve().relative_to(proj.resolve()))
     test_to_lines: dict[str, dict[str, list[int]]] = {}
     for ln, idents in line_to_tests.items():
@@ -190,12 +192,17 @@ def _map_doc(proj: Path, target: Path,
     }
     inst = sorted({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
     return {
-        "schema_version": "test-attribution/6",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "schema_version": "test-attribution/7",
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(proj), "identity": "res://script::test_name",
         "causal": {"enabled": False},
         "file_sha256": {rel: hashlib.sha256(
             target.read_bytes()).hexdigest()},
+
+        # C3-R16/R18：map 必带 verdict 表与 feature 指纹。C3-R20 迁移
+        # （B）：指纹按目录实算——夹具有 demo.feature，空集会被判 new 漂移。
+        "test_verdicts": {},
+        "feature_sha256": attribution_fixtures._feature_sha_of(proj),
         "target_files": [rel], "tests_face": face,
         "instrumentable_lines": {rel: inst},
         "arms": {"gut_full": arm},
@@ -494,7 +501,8 @@ def test_prefilter_stale_map_falls_back_unfiltered_with_reasons(tmp_path):
         scripts=["res://tests/unit/test_a.gd"])
     assert cov is None and inst is None
     assert state == "store_miss"
-    assert "file binding stale" in (reason or "")
+    # C3-R20 迁移：stale 原因经契约视图具名（内容面因素文案）
+    assert "target file drift" in (reason or "")
 
 
 def test_prefilter_identity_drift_reason_kept_in_fallback(tmp_path):
@@ -540,7 +548,7 @@ def test_projection_requires_full_res_identity():
     selection 精确匹配（选面侧 `_line_script_sets` 的名字解析含同名歧义
     披露，属另一机制，不受投影侧影响）。"""
     doc = {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
         "recipe_hash_pristine": "pristine-1",
         "file_sha256": {}, "tests_face": {}, "instrumentable_lines": {},
         "arms_state": {"gut_full": {"state": "valid", "bundles": 1,

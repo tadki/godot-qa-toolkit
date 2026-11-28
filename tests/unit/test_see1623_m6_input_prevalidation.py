@@ -86,6 +86,9 @@ class TestTestsGlobPrevalidation:
 class TestExplicitMapNotice:
     def test_explicit_map_notice_never_suggests_auto_prepare(
             self, tmp_path, monkeypatch):
+        """C3-R20 迁移（定案 20）：显式地图入口退役——map 源下 map 阻断
+        由 prepare 自动续新接管，prepare_required 的 notice 不再因显式
+        地图而出场（旧"显式只读、--auto-prepare 不适用"形态随入口退役）。"""
         import godot_qa_toolkit.cli as cli
 
         captured: dict = {}
@@ -95,21 +98,20 @@ class TestExplicitMapNotice:
             return 1
 
         monkeypatch.setattr(cli, "_emit", fake_emit)
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
         target = tmp_path / "calc.gd"
         target.write_text("extends RefCounted\n")
         args = type("A", (), {
             "files": [str(target)], "project_root": str(tmp_path),
             "dry_run": False, "auto_prepare": False,
-            "select_mode": "line", "tests": None,
-            "attribution_map": str(tmp_path / "broken-map.json")})()
+            "select_mode": "line", "tests": None})()
         plan = {"problems": [
             {"severity": "warning", "code": "attribution_map_missing_or_stale",
              "level": "P1", "evidence": {}, "fix": "x",
              "auto_prepare_covered": True}]}
-        cli._p1_prepare_gate(args, plan)
-        notice = captured["summary"]["notice"]
-        assert "--auto-prepare" not in notice
-        assert "read-only" in notice
+        rc = cli._p1_prepare_gate(args, plan)
+        assert rc is None, "map 源下 map 阻断由 prepare 接管，不进 prepare_required"
+        assert "notice" not in captured, "map 阻断不再向用户出修复 notice"
 
     def test_auto_map_notice_keeps_auto_prepare_suggestion(
             self, tmp_path, monkeypatch):

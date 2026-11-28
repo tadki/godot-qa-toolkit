@@ -21,7 +21,7 @@ import pytest
 
 import godot_qa_toolkit.mutation.inject as inject
 import attribution_fixtures as fx
-from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+from godot_qa_toolkit.measurement.recipe import build_recipe
 from godot_qa_toolkit.mutation import coverlink
 
 TARGET = "utils/t.gd"
@@ -52,7 +52,9 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
     """facts: 完整 res:// 身份 → {目标 rel: 行集}。写成合法 test-attribution/6。"""
     recipe, error = build_recipe(proj)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = fx.report_recipe_hash(proj)
+    pristine = fx.pristine_recipe_hash(proj)
     rel = TARGET
     arm = {"test_to_files": {}, "script_to_files": {}, "tests": 0,
            "scripts": 0, "files": 1, "pairs": 0, "function_pairs": 0,
@@ -75,8 +77,8 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
     arm["tests"] = len(arm["test_to_files"])
     arm["pairs"] = sum(len(v) for v in arm["test_to_files"].values())
     return {
-        "schema_version": "test-attribution/6",
-        "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        "schema_version": "test-attribution/7",
+        "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
         "project_root": str(proj),
         "identity": "res://script::test_name",
         "causal": {"enabled": False},
@@ -85,6 +87,11 @@ def _map_doc(proj, facts: "dict[str, dict[str, list[int]]]", *,
         "target_files": [rel],
         "tests_face": _tests_face(proj),
         "instrumentable_lines": {rel: [2, 3]},
+        # C3-R16/R18：map 必带 feature 内容指纹与 verdict 表（缺键 =
+        # 具名 missing 因素走全量重建的新契约）。C3-R20 迁移（B）：指纹
+        # 按目录实算——夹具项目有 demo.feature，写空集会被判 new 漂移。
+        "test_verdicts": {},
+        "feature_sha256": fx._feature_sha_of(proj),
         "arms": {"gut_full": arm},
         "arms_state": {"gut_full": {"state": "valid", "invalid_reason": None,
                                     "bundles": 1, "pairs": arm["pairs"],
@@ -210,16 +217,19 @@ class TestA06ResolvedMapPath:
     显式 map 与默认 map 不串线。"""
 
     def test_explicit_map_beats_default_map(self, tmp_path):
+        """C3-R20 迁移（定案 20 / A06）：显式 map 退役——selection 已解析
+        路径只作披露，投影 doc 一律取自契约视图（默认位置的唯一地图），
+        外来路径不串线（P3 契约视图单一入口）。"""
         proj = _proj(tmp_path)
         default_doc = _map_doc(proj, {UNIT: {TARGET: [2]}})
         _write_map(default_doc, Path(proj) / ".qa-cache"
                    / "attribution-map.json")
-        explicit_doc = _map_doc(proj, {UNIT: {TARGET: [3]}})
-        explicit_path = _write_map(explicit_doc, Path(proj) / ".qa-cache"
-                                   / "other-map.json")
+        foreign_doc = _map_doc(proj, {UNIT: {TARGET: [3]}})
+        foreign_path = _write_map(foreign_doc, Path(proj) / ".qa-cache"
+                                  / "other-map.json")
         cov, inst, reason, source = _resolve(proj, [UNIT],
-                                             map_path=explicit_path)
-        assert cov == {3}, f"must project from the resolved map: {reason}"
+                                             map_path=foreign_path)
+        assert cov == {2}, f"doc must come from the contract view: {reason}"
         assert source == "projection_live"
 
     def test_default_map_used_when_no_path_given(self, tmp_path):

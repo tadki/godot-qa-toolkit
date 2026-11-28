@@ -215,6 +215,7 @@ def _guard_baseline(root: str, project_root: str) -> tuple[bool, str]:
 def run_mutation_files(
     files: list[str],
     project_root: str,
+    precomputed_plan: "dict | None" = None,
     budget: int = 50,
     timeout_s: int = 600,
     dry_run: bool = False,
@@ -240,8 +241,12 @@ def run_mutation_files(
     """
     # §SPEC-PLANFIRST：默认 run 的第一步 = plan（静态穷查 ≤10s）——
     # error 级问题即停并列问题（不跑任何重活）；无问题自动进入 prepare。
-    from .plancheck import static_plan
-    plan = static_plan(project_root, files[0] if files else None, tests_glob)
+    # §SPEC-032/D1：CLI 已跑过 plan 时直接复用（收敛重复 static_plan）
+    plan = precomputed_plan
+    if plan is None:
+        from .plancheck import static_plan
+        plan = static_plan(project_root, files[0] if files else None,
+                           tests_glob)
     plan_errors = [p for p in plan["problems"] if p["severity"] == "error"]
     print(f"mutation: plan {len(plan['problems'])} problem(s) "
           f"({len(plan_errors)} error) in {plan['elapsed_s']}s"
@@ -383,7 +388,8 @@ def _gate_zero_ref(files, project_root, tests_glob, dry_run, total,
     selection_meta: dict = {}
     if tests_glob is None and not dry_run:
         derived, selection_meta = _auto_scan_tests_glob_meta(
-            files[0], project_root, select_mode=select_mode)
+            files[0], project_root, select_mode=select_mode,
+            allow_renew=False)
         if derived is None:
             terminal = _zero_ref_terminal(files[0], total, selection_meta)
             if terminal is not None:
@@ -687,6 +693,17 @@ def _settled_all_uncovered(file: str, records: list[dict],
         "failures": records,
     }
 
+def _red_map_from_snapshots(baselines: dict) -> "set[tuple[str, str]]":
+    """map 源 chunk 基线 → 脚本限定红集合（零行为拆分）。"""
+    from .gutrun import parse_failures_with_scripts
+
+    out: set[tuple[str, str]] = set()
+    for snap in baselines.values():
+        out |= {(scr, name) for scr, name in
+                parse_failures_with_scripts(str(snap.get("tail") or ""))
+                if scr and scr != "*"}
+    return out
+
 def _build_chunks(files: list[str], project_root: str, budget: int,
                   timeout_s: int, tests_glob: str | None, jobs: int,
                   binary_kind: str | None = None,
@@ -718,9 +735,45 @@ def _build_chunks(files: list[str], project_root: str, budget: int,
     # A19（SEE-1594 S5）：baseline 共享判定必须使用实际生效的 select_mode
     # （缺省 full 会把自动选面 glob 判成 None → 多文件 baseline 不共享 →
     # chunk 退串行）。
-    baselines, baseline_failures = _precompute_baselines(
-        files, project_root, timeout_s, tests_glob, clock=clock,
-        knob_state=knob_state, select_mode=select_mode)
+    # SEE-1631 §SPEC-020：判定基线单一真源——默认读 map verdict 表合成
+    # 快照（零冷启动）；`GQT_MUTATION_BASELINE_SOURCE=cold` 显式回退旧
+    # 冷启动路径。map 缺失/过期/与树不一致 → BaselineSourceError 具名
+    # fail-loud（不静默退化全脸）。
+    from .verdict_source import baseline_source
+    from .runner import _synthesized_map_baseline
+
+    if baseline_source() == "map":
+        # §SPEC-032/D1：基线合成单点（runner._synthesized_map_baseline；
+        # 防线保留：chunk 红集合填充仍在此处）——按目标文件逐个合成
+        # 同源快照池（files 多文件 = 多 glob 键共享同一 map）
+        baselines: dict = {}
+        for f in files:
+            syn = _synthesized_map_baseline(
+                Path(project_root) / f, project_root,
+                tests_glob if tests_glob else f)
+            if syn is not None:
+                baselines[tests_glob if tests_glob else f] = syn
+        if not baselines:
+            from .verdict_source import map_baseline_snapshots
+            baselines, _ = map_baseline_snapshots(
+                files, project_root, tests_glob, select_mode=select_mode)
+        baseline_failures = {}
+        # §SPEC-027/D7（R4）：map 源 chunk 基线同步填充脚本限定红集合
+        # （runner._BASELINE_RED_MAP）——worker 腿 skip_red_tests 与
+        # 同名豁免判定都消费它；此前只有 _loop_baseline 实测路径填充，
+        # worker 分支红测不跳过 → 红测失败被计 kill（canary 兜底整批
+        # 作废）。合成 tail 带 res:// 脚本头，qualified 解析逐位可用。
+        from . import runner as _runner_mod
+        _runner_mod._BASELINE_RED_MAP |= _red_map_from_snapshots(baselines)
+        print("mutation: verdict baseline sourced from attribution map "
+              "(§SPEC-020; cold start skipped)", file=sys.stderr)
+    else:
+        print("mutation: verdict baseline via legacy cold start "
+              "(GQT_MUTATION_BASELINE_SOURCE=cold, disclosed)",
+              file=sys.stderr)
+        baselines, baseline_failures = _precompute_baselines(
+            files, project_root, timeout_s, tests_glob, clock=clock,
+            knob_state=knob_state, select_mode=select_mode)
     run_id = new_run_id()
     chunks: list[dict] = []
     settled: list[dict] = []
@@ -855,6 +908,12 @@ def _inject_one(r: dict, ctx: dict) -> None:
         _inject_reused(r, ctx)
     _inject_uncovered(r, s, ctx)
     _inject_diff_disclosure(s, ctx)
+    # C3-R29（D7）：中止就是失败——run_error 中止形态（基线脏中止 /
+    # 启动失败 / 超时中止等）的 ok 由中止契约承载，整个计数收尾跳过
+    # （中止信封无计数键；并行/cold 通道下中止计数全 0 → ok 曾被翻真、
+    # exit 0，违反 §SPEC-033 退出语义）。串行路径本就不经此收尾。
+    if s.get("run_error"):
+        return
     total = s["mutants"]
     s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0
     r["ok"] = (s["survived"] == 0 and s["timeout"] == 0

@@ -74,16 +74,19 @@ class _BaselineDirtyFailure(Exception):
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str,
-                          select_mode: str = "full") -> str | None:
+                          select_mode: str = "full",
+                          allow_renew: bool = True) -> str | None:
     """SPEC-001：目标 → 选面 glob（SEE-1581：运行时映射；full=显式全脸）。
 
     SEE-1581：自动选面唯一出处委托 _auto_scan_tests_glob_meta（运行时
-    真值映射；A10 后静态强度选面已退役）。
+    真值映射；A10 后静态强度选面已退役）。§SPEC-035/S4：run 侧调用点显式
+    传 allow_renew=False（续新只在 prepare）。
     """
     from godot_qa_toolkit.mutation import runner as _r
 
     glob, _meta = _r._auto_scan_tests_glob_meta(file_path, project_root,
-                                                select_mode=select_mode)
+                                                select_mode=select_mode,
+                                                allow_renew=allow_renew)
     return glob
 
 
@@ -145,7 +148,10 @@ def _auto_scan_tests_glob_meta(file_path: str,
     meta = {"source": sel["source"], "reason": sel["reason"],
             "mapping": sel.get("mapping"), "tests": sel.get("tests", []),
             "zero_ref": sel.get("zero_ref", False),
-            "ambiguous_names": sel.get("ambiguous_names", [])}
+            "ambiguous_names": sel.get("ambiguous_names", []),
+            # SEE-1631 §SPEC-005：gherkin 臂命中披露（消费方式具名，
+            # 选面可执行集保持 gut_full 口径不变）
+            "gherkin": sel.get("gherkin")}
     if sel["source"] == "runtime_mapping" and not sel.get("zero_ref"):
         print(f"mutation: runtime-mapping selection for {file_path} -> "
               f"{len(sel['tests'])} test script(s)", file=sys.stderr)
@@ -243,10 +249,18 @@ def _sm_inject(m, slot, target_rel, target_res, original_src, project_root,
         # SEE-1610 §SPEC-IMPL：test 级 allowlist 从 runner per-run 上下文
         # 取（_ACTIVE_ALLOW_TESTS；beacon 兜底腿不下发——宿主无该原语）。
         allow = getattr(_runner_mod, "_ACTIVE_ALLOW_TESTS", None)
+        # §SPEC-032/D13（Leader 修正）：skip 对脚本身份映射到 wrapper
+        # 完整路径（collector 只见 wrapper；basename 相同的另一个目录
+        # 同名脚本不会被误跳——D10 语义保持）
+        from pathlib import Path as _P
+        wrapper_by_base = {_P(w).name: w for w in (direct_scripts or [])}
+        skip_pairs = []
+        for scr, nm in (red_pairs or []):
+            skip_pairs.append((wrapper_by_base.get(_P(scr).name, scr), nm))
         cfg_path = directdrive.write_direct_cfg(
             slot.root, target_res, mutant_sha, auto_name, direct_scripts,
             sorted(baseline_failures or ()), bail_enabled=bail_enabled,
-            skip_red_tests=list(red_pairs or ()), allow_tests=allow)
+            skip_red_tests=skip_pairs, allow_tests=allow)
     else:
         cfg_path = beacon.write_beacon_cfg(slot.root, target_res, mutant_sha,
                                            auto_name)

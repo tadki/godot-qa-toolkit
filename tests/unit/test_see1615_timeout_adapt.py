@@ -44,21 +44,13 @@ def test_all_shards_timeout_rejects_run():
 
 
 def test_resolve_arm_timeout_priority(monkeypatch):
-    """自适应超时优先级：显式 env > 预检 wall_s 校准 x4 > 传入默认。"""
+    """SEE-1631 §SPEC-019：超时来源两档——显式 env > 传入默认（预检
+    wall_s 校准源随前置基线退役，参数签名不再收 wall_s）。"""
     monkeypatch.delenv("GQT_MEASUREMENT_ARM_TIMEOUT_S", raising=False)
-    # 无历史 → 传入默认
-    assert mo.resolve_arm_timeout(180, None) == (180, None)[0] or True
-    eff, src = mo.resolve_arm_timeout(180, None)
+    eff, src = mo.resolve_arm_timeout(180)
     assert eff == 180 and "parameter" in src
-    # 预检校准：wall 61.2s ×4 = 244.8 → 245 > 180
-    eff, src = mo.resolve_arm_timeout(180, 61.2)
-    assert eff == 245 and "preflight_calibrated" in src
-    # 传入值更大 → max 保持
-    eff, src = mo.resolve_arm_timeout(600, 61.2)
-    assert eff == 600
-    # 显式 env 最高优先
     monkeypatch.setenv("GQT_MEASUREMENT_ARM_TIMEOUT_S", "77")
-    eff, src = mo.resolve_arm_timeout(600, 61.2)
+    eff, src = mo.resolve_arm_timeout(600)
     assert eff == 77 and "explicit env" in src
 
 

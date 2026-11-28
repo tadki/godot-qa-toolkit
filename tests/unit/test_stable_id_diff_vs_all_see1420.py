@@ -162,6 +162,9 @@ class TestDiffVsMutateAllConsistency:
         monkeypatch.setenv("GQT_ATTRIBUTION_MAP_MODE", "auto")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         _seed_map()
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动
+        # 判定链——显式回退 cold 源（map 源行为有专属新测试）。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         full = mrunner.run_mutation(str(target), str(proj), budget=10,
                                     tests_glob="res://tests/",
                                     reuse_coverage=False)
@@ -169,6 +172,9 @@ class TestDiffVsMutateAllConsistency:
         # 差分 + 预算截断：改 two 的函数体 → retry 3，budget=2 → untouched 1
         target.write_text(src.replace("return a + 2", "return a + 20"))
         _seed_map()
+        # SEE-1631 §SPEC-020 映射：本测试主体为 legacy 冷启动
+        # 判定链——显式回退 cold 源（map 源行为有专属新测试）。
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         monkeypatch.setattr(mrunner, "_run_gut_on_project", mk_kill_all())
         r2 = mrunner.run_mutation(str(target), str(proj), budget=2,
                                   tests_glob="res://tests/",

@@ -157,7 +157,8 @@ def _baseline_doc(recipe_hash_val: str) -> dict:
                   "test_b.gd::tb": {"src_game/cell.gd": [5, 7],
                                     "src_game/node.gd": [4]}}
     return {
-        "schema_version": "test-attribution/6",
+        "schema_version": "test-attribution/7",
+        "test_verdicts": {},
         "report_recipe_hash": recipe_hash_val,
         "recipe_hash_pristine": "pristine-1",
         "project_root": "",
@@ -392,7 +393,7 @@ def test_increment_fallback_artifact_is_line_primary(tmp_path, monkeypatch):
         project, targets, recipe, base_path, ["src_game/brand_new.gd"], out)
     assert report["mode"] == "new_prod_file_fallback"
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["schema_version"] == "test-attribution/6"
+    assert doc["schema_version"] == "test-attribution/7"
     arm = doc["arms"]["gut_full"]
     assert arm["test_to_lines"]["res://tests/unit/test_game.gd::test_ok"]
     # SEE-1604 D1：new_prod_file_fallback 必须把 classes.prod_new 并入重建
@@ -409,7 +410,10 @@ def test_increment_fallback_artifact_is_line_primary(tmp_path, monkeypatch):
 
 
 def test_merge_arm_drops_deleted_script_line_facts():
-    """删除脚本 → 其 test 车道与 script 车道行事实连同反查一并删除。"""
+    """删除脚本 → 其 test 车道与 script 车道行事实连同反查一并删除。
+
+    C3-R24（N1）：dropped 是完整 rel 路径；本夹具为旧 basename 形态键
+    （升级过渡），整族已删经 legacy_families 显式给出。"""
     from godot_qa_toolkit.measurement.increment import _merge_arm
 
     arm = {
@@ -418,7 +422,8 @@ def test_merge_arm_drops_deleted_script_line_facts():
     }
     merged = _merge_arm(arm,
                         {"test_to_lines": {}, "script_to_lines": {}},
-                        dropped={"test_b.gd"})
+                        dropped={"tests/test_b.gd"},
+                        legacy_families={"test_b.gd": (True, [])})
     assert merged["test_to_lines"] == {}
     assert merged["script_to_lines"] == {}
     assert merged["line_to_tests"] == {}

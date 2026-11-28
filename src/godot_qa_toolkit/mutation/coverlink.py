@@ -196,22 +196,28 @@ def _projection_binding(doc: dict, rel: str) -> dict | None:
     return binding
 
 
-def _projection_map_reject(
-        root: Path, doc: dict, rel: str,
-        current_recipe_pristine: "str | None",
-        tests_face: "dict | None") -> "str | None":
-    """行事实投影的前置校验链（写侧，逐项顺序与原因文案保持稳定）：
-    map schema / 臂有效性 / 目标文件 sha / recipe pristine / 测试面摘要 /
-    探针面。任一失配返回拒绝原因——消费侧回退不过滤；通过返回 None。"""
-    from ..measurement.attribution import ATTRIBUTION_SCHEMA
-    from .truth_select import arms_valid
+def _projection_toolchain_drift(root: Path, doc: dict) -> "str | None":
+    """C3-R23（R1）：投影前置的工具链面对账（与 status/assert_map_fresh
+    同一现算与缓存）。存储 report_recipe_hash 与现算注入域不一致 →
+    具名拒绝原因；一致或不可判（缺席/recipe 不可构建）→ None。"""
+    stored = doc.get("report_recipe_hash")
+    if not (isinstance(stored, str) and stored):
+        return None
+    from ..mutation.truth_select import _current_report_recipe_hash
 
-    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
-        return (f"attribution map schema "
-                f"{doc.get('schema_version')!r} != "
-                f"{ATTRIBUTION_SCHEMA!r}")
-    if not arms_valid(doc.get("arms_state") or {}):
-        return "attribution map arms invalid"
+    computed = _current_report_recipe_hash(str(root))
+    if computed is None or computed == stored:
+        return None
+    return (f"attribution map toolchain face drift "
+            f"(report_recipe_hash stored {stored[:12]} != "
+            f"computed {str(computed)[:12]})")
+
+
+def _projection_reject_recipe(root: Path, doc: dict, rel: str,
+                              current_recipe_pristine: "str | None"
+                              ) -> "str | None":
+    """投影前置校验链的 recipe 段（目标文件 sha / pristine / 工具链面）。
+    任一失配返回拒绝原因；通过返回 None。"""
     try:
         file_sha = sha256_file(root / rel)
     except OSError as e:
@@ -223,6 +229,32 @@ def _projection_map_reject(
         return "current recipe hash unavailable"
     if doc.get("recipe_hash_pristine") != current_recipe_pristine:
         return "attribution map recipe drift"
+    # C3-R23（R1）：工具链面与新鲜度入口同口径——漂移即拒绝投影
+    # （消费侧回退不过滤，宁多跑不假过滤）。
+    return _projection_toolchain_drift(root, doc)
+
+
+def _projection_map_reject(
+        root: Path, doc: dict, rel: str,
+        current_recipe_pristine: "str | None",
+        tests_face: "dict | None") -> "str | None":
+    """行事实投影的前置校验链（写侧，逐项顺序与原因文案保持稳定）：
+    map schema / 臂有效性 / 目标文件 sha / recipe pristine / 工具链面 /
+    测试面摘要 / 探针面。任一失配返回拒绝原因——消费侧回退不过滤；
+    通过返回 None。"""
+    from ..measurement.attribution import ATTRIBUTION_SCHEMA
+    from .truth_select import arms_valid
+
+    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
+        return (f"attribution map schema "
+                f"{doc.get('schema_version')!r} != "
+                f"{ATTRIBUTION_SCHEMA!r}")
+    if not arms_valid(doc.get("arms_state") or {}):
+        return "attribution map arms invalid"
+    recipe_reason = _projection_reject_recipe(root, doc, rel,
+                                              current_recipe_pristine)
+    if recipe_reason is not None:
+        return recipe_reason
     face_now = tests_face if tests_face is not None else current_tests_face(
         str(root))
     if tests_face_digest(doc.get("tests_face") or {}) != tests_face_digest(
@@ -594,32 +626,39 @@ def coverage_prefilter_summary(source, uncovered, covered_executed) -> dict:
 def _prefilter_resolve_map(project_root, map_path, reasons) -> tuple:
     """map_path 三态解析（A06/S2.1）：未传哨兵 → 默认解析；显式 None →
     显式跳过并披露（绝不重猜默认 map）；路径 → 原样消费。返回 (resolved,
-    doc_or_None)。两层共享同一次映射加载（A05 合并读取）。"""
-    from . import truth_select as _truth
+    doc_or_None)。两层共享同一次映射加载（A05 合并读取）。
+
+    C3-R19（P3/要点③）：doc 一律取自契约视图、视图只取一次——已解析
+    路径的裸装载（read_doc_at）退役（它把文件路径当项目根裸装载，任何
+    路径都抛 BaselineSourceError；地图唯一、位置由代码决定，selection
+    链的路径即契约默认位置）。"""
+    from .map_contract import MapContractError, view as _mc_view
 
     root = str(Path(project_root).resolve())
     doc: dict | None = None
-    if map_path is _UNRESOLVED_MAP:
-        resolved = _truth.map_path(root)
-        if not resolved:
-            reasons.append("no attribution map for projection")
-    elif map_path is MAP_PATH_METADATA_INCONSISTENT:
+    resolved: "str | None" = None
+    if map_path is MAP_PATH_METADATA_INCONSISTENT:
         resolved = None
         reasons.append("selection metadata inconsistent: source="
                        "runtime_mapping without resolved map path — "
                        "map-derived coverage prefilter skipped")
-    elif map_path:
-        resolved = map_path
+    elif map_path is _UNRESOLVED_MAP or map_path:
+        try:
+            v = _mc_view(root)
+            doc = v.doc
+            resolved = v.map_path if map_path is _UNRESOLVED_MAP \
+                else map_path
+        except MapContractError as e:  # noqa: BLE001 — 不可用即下沉披露
+            resolved = None if map_path is _UNRESOLVED_MAP else map_path
+            reasons.append(
+                f"no attribution map for projection: {e}"
+                if map_path is _UNRESOLVED_MAP
+                else f"attribution map unusable: {e}")
     else:
         resolved = None
         reasons.append("selection resolved no attribution map (explicit "
                        "--tests override) — map-derived coverage prefilter "
                        "skipped")
-    if resolved:
-        try:
-            doc = _truth.load_map(resolved)
-        except Exception as e:  # noqa: BLE001 — 不可用即下沉，不吞掉原因
-            reasons.append(f"attribution map unusable: {e}")
     return resolved, doc
 
 

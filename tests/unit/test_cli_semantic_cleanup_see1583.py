@@ -26,7 +26,7 @@ ALLOWED_TOOLS = {
     "gherkin", "mutation",
     "measure.suite", "measure.run", "measure.diagnose", "measure.map-update",
     "measure.coverage", "measure.complexity", "measure.arch", "measure.parity",
-    "measure.registry-diff", "measure.risk",
+    "measure.registry-diff", "measure.risk", "measure.scope",
 }
 
 TOOL_LITERAL = re.compile(r'"tool":\s*"([^"]+)"')
@@ -102,7 +102,7 @@ class TestHandlerAndDest:
         assert by_dest.get("gherkin_command") == {"compile", "run", "mutate"}
         assert by_dest.get("measure_command") == {
             "suite", "run", "diagnose", "map-update", "coverage", "complexity",
-            "arch", "parity", "registry-diff", "risk"}
+            "arch", "parity", "registry-diff", "risk", "scope"}
         assert "accept_command" not in by_dest
         assert "registry_command" not in by_dest
 
@@ -160,8 +160,8 @@ class TestMachineContract:
 
         assert RECIPE_VERSION == "measurement-suite/3"
         assert REPORT_VERSION == "measurement-report/3"
-        assert ATTRIBUTION_SCHEMA == "test-attribution/6"
-        assert SCHEMA_VERSION == "test-attribution/6"
+        assert ATTRIBUTION_SCHEMA == "test-attribution/7"
+        assert SCHEMA_VERSION == "test-attribution/7"
 
 
 class TestStaleTextCleanup:

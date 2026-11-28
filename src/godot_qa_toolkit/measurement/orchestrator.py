@@ -27,7 +27,6 @@ import re
 import shutil
 import stat as stat_module
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -515,8 +514,13 @@ def _measure_inputs(project_root, target_files, recipe, baseline_failures,
     if not target_files:
         raise MeasurementError("no target files given")
     from .recipe import recipe_hash as _pristine_recipe_hash
+    # C3-R22（D3/QA-R2）：pristine 面 = 磁盘树 raw hash，**不含 toolchain**
+    # （godot_version 随 GQT_GODOT_BIN 有无变化）——与
+    # truth_select._fresh_recipe_hash 的剥离口径一致，pristine 在无 bin
+    # 环境不得结构性失配。
     pristine_recipe_hash = _pristine_recipe_hash(
-        {k: v for k, v in recipe.items() if k != "recipe_hash"})
+        {k: v for k, v in recipe.items()
+         if k not in ("recipe_hash", "toolchain")})
     if inject_toolchain:
         recipe = _inject_toolchain(root, recipe)
     return {
@@ -569,14 +573,12 @@ ENV_ACCEPTANCE_DISABLED_RETIRED = "GQT_MEASUREMENT_ACCEPTANCE_DISABLED"
 _ENV_ARM_TIMEOUT_S = "GQT_MEASUREMENT_ARM_TIMEOUT_S"
 
 
-def resolve_arm_timeout(requested_timeout_s: int,
-                        preflight_wall_s: "float | None" = None
-                        ) -> "tuple[int, str]":
-    """§SPEC-TIMEOUT-ADAPT：分片 GUT 超时自适应。
+def resolve_arm_timeout(requested_timeout_s: int) -> "tuple[int, str]":
+    """§SPEC-TIMEOUT-ADAPT：分片 GUT 超时来源。
 
-    优先级：显式 env GQT_MEASUREMENT_ARM_TIMEOUT_S > 预检 wall_s 校准
-    （wall × 安全系数 4，向上取整；无预检=无校准源）> 传入默认。
-    返回 (effective_timeout_s, source)。"""
+    SEE-1631 §SPEC-019：映射构建入口不再前置未插桩基线——预检 wall_s
+    校准源退役。优先级：显式 env GQT_MEASUREMENT_ARM_TIMEOUT_S > 传入
+    默认。返回 (effective_timeout_s, source)。"""
     import os as _os
     raw = _os.environ.get(_ENV_ARM_TIMEOUT_S, "").strip()
     if raw:
@@ -585,19 +587,19 @@ def resolve_arm_timeout(requested_timeout_s: int,
                                       f"{_ENV_ARM_TIMEOUT_S}={raw}")
         except ValueError:
             pass
-    if preflight_wall_s:
-        calibrated = max(requested_timeout_s,
-                         int(-(-preflight_wall_s * 4.0 // 1)))
-        return calibrated, (f"preflight_calibrated x4 "
-                            f"(baseline wall_s={preflight_wall_s})")
     return requested_timeout_s, f"parameter timeout_s={requested_timeout_s}s"
 
 
+GHERKIN_PAUSED_DISCLOSURE = ("disabled_pending_atomization — "
+                             "restored after SEE-1619 (shared-"
+                             "process shards); env override "
+                             "GQT_MEASUREMENT_GHERKIN_DISABLED=0")
+
+
 def gherkin_arm_disabled() -> bool:
-    """gherkin 臂暂停（§SPEC-PLANFIRST 任务 2 / SEE-1624 D-n3 改名）——
-    映射构建与默认测量路径不执行 gherkin 臂；统一披露
-    disabled_pending_atomization。恢复：设 GQT_MEASUREMENT_GHERKIN_DISABLED=0。
-    默认暂停（缺省=1）。
+    """SEE-1631（Owner 命令）：默认双臂恢复——原子化已完成，暂停理由消失；
+    缺省（无 env）执行 gherkin 臂。显式 GQT_MEASUREMENT_GHERKIN_DISABLED=1
+    保留为诊断回退（披露语义不变）；=0 与缺省同义。
 
     旧 env 名（GQT_MEASUREMENT_ACCEPTANCE_DISABLED）已退役：若仍被设置
     → 具名 fail-loud（MeasurementError），不静默忽略也不继续按新名判定。"""
@@ -607,9 +609,9 @@ def gherkin_arm_disabled() -> bool:
     if ENV_ACCEPTANCE_DISABLED_RETIRED in _os.environ:
         raise MeasurementError(
             f"{ENV_ACCEPTANCE_DISABLED_RETIRED} is retired — use "
-            f"{ENV_GHERKIN_DISABLED}=0 to restore the gherkin arm "
+            f"{ENV_GHERKIN_DISABLED}=1 to pause the gherkin arm "
             f"(fail-loud: the retired name is never ignored silently)")
-    return _os.environ.get(ENV_GHERKIN_DISABLED, "1").strip() \
+    return _os.environ.get(ENV_GHERKIN_DISABLED, "0").strip() \
         not in ("", "0", "false")
 _BASELINE_TOP_N = 10
 
@@ -621,41 +623,6 @@ def fail_on_red_baseline() -> bool:
     import os as _os
     return _os.environ.get(ENV_FAIL_ON_RED_BASELINE, "").strip() \
         not in ("", "0", "false")
-
-
-def run_baseline_preflight(root, recipe, timeout_s):
-    """§SPEC-PREFLIGHT P1/P2/P4：映射构建路径的基线臂前置预检。
-
-    未插桩基线 GUT 先跑（同面、零探针）：红即 MeasurementError 具名短停
-    （阶段 baseline_preflight + 总数 + top-N 测试名）——不进插桩臂、不写
-    map、不跑 acceptance；放行（--allow-red-baseline）或绿时把基线结果
-    复用给 arms（P4——baseline_failures 非 None，懒获取不再发生）。"""
-    pairs, meta = _acquire_lazy_baseline(
-        root, _gutconfig_face_args(recipe), timeout_s)
-    if pairs:
-        top = sorted(pairs)[:_BASELINE_TOP_N]
-        named = ", ".join(f"{s}::{t}" for s, t in top)
-        if fail_on_red_baseline():
-            raise MeasurementError(
-                f"baseline_preflight_red: uninstrumented baseline GUT has "
-                f"{len(pairs)} failing test pair(s) (stage="
-                f"baseline_preflight, face={meta.get('face')}, "
-                f"wall_s={meta.get('wall_s')}) — named failures (top-"
-                f"{len(top)} of {len(pairs)}): {named}")
-        # 默认（PLANFIRST 口径）：红测试按名排除、继续构建——映射标
-        # partial、excluded_tests 具名披露（arms 按基线吸收，非静默）
-        meta = {**meta, "status": "partial", "excluded_tests": sorted(
-            [list(p) for p in pairs])}
-        print(f"measure: baseline_preflight RED — {len(pairs)} failing "
-              f"pair(s) (wall_s={meta.get('wall_s')}) EXCLUDED by name "
-              f"(top-{len(top)}: {named}); mapping marked partial, run "
-              f"continues (fail-on-red available via "
-              f"{ENV_FAIL_ON_RED_BASELINE})", file=sys.stderr)
-    else:
-        meta = {**meta, "status": "green"}
-        print(f"measure: baseline_preflight green (wall_s="
-              f"{meta.get('wall_s')}) — reused for arms", file=sys.stderr)
-    return sorted(pairs), meta
 
 
 def _measure_arms(root, recipe, prepared, *, timeout_s, test_attribution,
@@ -717,6 +684,7 @@ def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
                          recipe_hash, root, attribution_out,
                          attribution_causal, causal_sites,
                          pristine_recipe_hash,
+                         feature_sha256: "dict | None" = None,
                          preflight_meta: "dict | None" = None) -> dict:
     """归属节（file_sha256 派生 + _attribution_section）。"""
     _file_sha = {rel: sha256_text(item["src"])
@@ -728,6 +696,7 @@ def _measure_attribution(arm_a, arm_b, prepared, *, test_attribution,
         target_files=sorted(prepared.keys()),
         recipe_pristine_hash=pristine_recipe_hash,
         tests_face=_tests_face_map(root),
+        feature_sha256=feature_sha256,
         prepared=prepared,
         baseline_meta=(arm_a.get("baseline_failures_meta")
                        or arm_b.get("baseline_failures_meta")),
@@ -751,21 +720,32 @@ def _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
     return report
 
 
-def run_measurement(project_root: str | Path, target_files: list[str],
-                  recipe: dict, *, gherkin_keys: list[str] | None = None,
-                  probe_keys: list[str] | None = None, timeout_s: int = 180,
-                  evidence_out: str | None = None, inject_toolchain: bool = True,
-                  scope_roots: list[str] | None = None, block_compress: bool = True,
-                  shard_width: int = 6, gherkin_shards: int = 4,
-                  shard_log_dir: str | None = None,
-                  stability_baseline: str | None = None,
-                  baseline_failures: "set[tuple[str, str]] | None" = None,
-                  intolerant_config: dict | None = None,
-                  gherkin_repeats: int = 3, test_attribution: bool = False,
-                  attribution_out: str | None = None,
-                  attribution_causal: bool = False, arms_parallel: bool = False,
-                  gherkin_adaptive: bool = False,
-                  baseline_preflight: bool = False) -> dict:
+def run_measurement(project_root: "str | Path",
+                    target_files: list[str], recipe: dict, **kwargs) -> dict:
+    """C3-R14（§SPEC-032③）：插桩互斥外壳——测量臂把插桩文本写进源树、
+    结束才恢复，并发两个测量进程交错注入/恢复会写坏源文件（QA D-NEW-1
+    实碰）。全程持 `<root>/.qa-cache/probe-rw.lock`，后到者整段排队。"""
+    from .backup import probe_rw_lock
+
+    with probe_rw_lock(project_root):
+        return _run_measurement_locked(project_root, target_files, recipe,
+                                       **kwargs)
+
+
+def _run_measurement_locked(project_root: str | Path, target_files: list[str],
+                            recipe: dict, *, gherkin_keys: list[str] | None = None,
+                            probe_keys: list[str] | None = None, timeout_s: int = 180,
+                            evidence_out: str | None = None, inject_toolchain: bool = True,
+                            scope_roots: list[str] | None = None, block_compress: bool = True,
+                            shard_width: int = 6, gherkin_shards: int = 4,
+                            shard_log_dir: str | None = None,
+                            stability_baseline: str | None = None,
+                            baseline_failures: "set[tuple[str, str]] | None" = None,
+                            intolerant_config: dict | None = None,
+                            gherkin_repeats: int = 3, test_attribution: bool = False,
+                            attribution_out: str | None = None,
+                            attribution_causal: bool = False, arms_parallel: bool = False,
+                            gherkin_adaptive: bool = False) -> dict:
     """measurement 双源批式编排，产出 measurement-report/3（分解见
     _measure_inputs/_measure_stage/_measure_arms/_measure_crap/_measure_emit）。"""
     from ..mutation.stagetiming import StageClock
@@ -776,40 +756,20 @@ def run_measurement(project_root: str | Path, target_files: list[str],
                               baseline_failures, intolerant_config,
                               inject_toolchain)
     root = inp["root"]
-    # §SPEC-PREFLIGHT P1/P4：映射构建路径（baseline_preflight=True）且未
-    # 显式提供基线时——基线臂前置，红即具名短停；绿/放行则复用结果
-    # （arms 收到 baseline_failures，懒获取不再发生）。既有 measure 调用
-    # （默认 False）语义零变化。
-    _pf_meta = None
     timeout_source = f"parameter timeout_s={timeout_s}s"
-    if baseline_preflight and baseline_failures is None:
-        with clock.stage("baseline_preflight"):
-            baseline_failures, _pf_meta = run_baseline_preflight(
-                root, inp["recipe"], timeout_s)
-        # §SPEC-TIMEOUT-ADAPT：自适应分片超时——预检 wall_s 为校准源
-        # （显式 env > 校准 x4 > 传入值），来源随 pf_meta 披露
-        timeout_s, timeout_source = resolve_arm_timeout(
-            timeout_s, (_pf_meta or {}).get("wall_s"))
-        _pf_meta = {**(_pf_meta or {}), "arm_timeout_s": timeout_s,
-                    "arm_timeout_source": timeout_source}
-        print(f"measure: arm timeout {timeout_s}s "
-              f"(source: {timeout_source})", file=sys.stderr)
-        # 生效基线通道是 baseline_pairs（_gate_ctx 的 effective 来源）——
-        # 预检结果必须双写（failures 供 meta 判定，pairs 供吸收判定）
-        inp["baseline_pairs"] = {tuple(p) for p in baseline_failures}
+    # SEE-1631 §SPEC-019：映射构建入口不再前置未插桩全脸基线 GUT——
+    # 与 measure run --test-attribution 同形态（直接插桩，红了走既有
+    # 懒基线/对照分类）；臂超时沿用参数/env 来源，不做事前校准。
     with clock.stage("instrument_prepare"):
         st = _measure_stage(
             root, target_files, inp["recipe_hash"], block_compress,
             test_attribution, attribution_causal, evidence_out, scope_roots)
     with clock.stage("gut_full_arm"):
         if gherkin_arm_disabled():
-            # §SPEC-PLANFIRST 任务 2（Owner 决定）：acceptance 臂暂停——
-            # 占位臂 state=disabled；恢复条件 SEE-1619 原子化改造后共享
-            # 进程分片（env GQT_MEASUREMENT_GHERKIN_DISABLED=0）。
-            # SEE-1623 H4：暂停契约与归属模式解耦——此前写成
-            # `acceptance_disabled() and test_attribution`，普通路径落入
-            # 双臂执行（额外成本 + 无关失败劫持 exit + 披露缺位），显式
-            # env=1 亦被无视。
+            # SEE-1631：显式诊断暂停（GQT_MEASUREMENT_GHERKIN_DISABLED=1）
+            # ——占位臂 state=disabled；默认路径已恢复双臂（原子化完成）。
+            # SEE-1623 H4：暂停契约与归属模式解耦的历史保留——显式暂停
+            # 时无论归属开关如何都只跑 gut_full 单臂。
             from .arms import run_arm
             arm_a = run_arm(
                 "gut_full", root=Path(root), recipe=inp["recipe"],
@@ -862,9 +822,10 @@ def run_measurement(project_root: str | Path, target_files: list[str],
         arm_a, arm_b, st["prepared"], test_attribution=test_attribution,
         recipe_hash=inp["recipe_hash"], root=root,
         attribution_out=attribution_out, attribution_causal=attribution_causal,
-        preflight_meta=_pf_meta,
         causal_sites=st["causal_sites"],
-        pristine_recipe_hash=inp["pristine_recipe_hash"])
+        pristine_recipe_hash=inp["pristine_recipe_hash"],
+        feature_sha256=(recipe.get("gherkin_face") or {})
+        .get("feature_sha256") or {})
     report = _measure_emit(root, inp, st, arm_a, arm_b, unions, gated_arms,
                          comparable_reason, crap, stability_baseline, perf,
                          attr_section)
@@ -872,10 +833,7 @@ def run_measurement(project_root: str | Path, target_files: list[str],
     clock.add("total", time.monotonic() - t_total)
     report["stage_timings"] = clock.disclosure()
     if gherkin_arm_disabled():
-        report["gherkin_arm"] = ("disabled_pending_atomization — "
-                                    "restored after SEE-1619 (shared-"
-                                    "process shards); env override "
-                                    "GQT_MEASUREMENT_GHERKIN_DISABLED=0")
+        report["gherkin_arm"] = GHERKIN_PAUSED_DISCLOSURE
     return report
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SCRIPT_HEADER_RE = re.compile(r"^res://\S+\.gd$")
@@ -912,8 +870,15 @@ def _parse_failing_pairs(gut_output: str) -> set[tuple[str, str]]:
 
 def _gutconfig_face_args(recipe: dict) -> list[str]:
     """gut_full 臂的同面无插桩参数：与分片计划同源（recipe gut_face
-    dirs 的并集）；空 dirs = GUT 读 .gutconfig 缺省面（不传 -gdir）。"""
+    dirs 的并集）；空 dirs = GUT 读 .gutconfig 缺省面（不传 -gdir）。
+    §SPEC-031（R4）：recipe exclusions 的 gut_dir 黑名单在此**真正执行**
+    （此前只进哈希无人消费）——被排除目录不进 -gdir 面。"""
     dirs = list((recipe.get("gut_face") or {}).get("dirs") or [])
+    excluded = {str(x.get("entry") or "").strip("/")
+                for x in (recipe.get("exclusions") or [])
+                if x.get("scope") == "gut_dir"}
+    if excluded:
+        dirs = [d for d in dirs if d.strip("/") not in excluded]
     return [("-gdir=" + ",".join(dirs))] if dirs else []
 
 def _acquire_lazy_baseline(project_root: Path, gut_args: list[str],

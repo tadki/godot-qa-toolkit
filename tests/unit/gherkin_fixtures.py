@@ -113,6 +113,11 @@ def ensure_addon_metadata(project: Path) -> None:
     addon = project / "addons" / "gqt_gherkin"
     addon.mkdir(parents=True, exist_ok=True)
     (addon / "features").mkdir(parents=True, exist_ok=True)
+    # §SPEC-031（R4）：插件标记（真实插件形态）——范围默认排除②依据
+    # plugin.cfg 识别编辑器/工具插件（无标记会被当生产内容进宇宙）。
+    if not (addon / "plugin.cfg").is_file():
+        (addon / "plugin.cfg").write_text(
+            "[plugin]\nname=\"GQTGherkin\"\n", encoding="utf-8")
     s = addon / "schema.json"
     if not s.is_file():
         s.write_text(_json.dumps(VALID_SCHEMA, ensure_ascii=False, indent=2),

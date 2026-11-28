@@ -60,7 +60,8 @@ def _write_zero_ref_project(tmp_path: Path, source: str = GD_TARGET) -> tuple[st
     (proj / "unrelated.gd").write_text("extends RefCounted\n")
     target = proj / "calc.gd"
     target.write_text(source)
-    write_map(proj, {"calc.gd": []})
+    # §SPEC-029：宇宙全集绑定（unrelated.gd 进 file_sha256）
+    write_map(proj, {"calc.gd": [], "unrelated.gd": []})
     return str(proj), str(target)
 
 

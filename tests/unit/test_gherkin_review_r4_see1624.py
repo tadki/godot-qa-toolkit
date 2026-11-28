@@ -362,6 +362,9 @@ def test_old_acceptance_env_fails_loud_new_env_works(monkeypatch) -> None:
     monkeypatch.setenv("GQT_MEASUREMENT_GHERKIN_DISABLED", "0")
     assert orch.gherkin_arm_disabled() is False
     monkeypatch.delenv("GQT_MEASUREMENT_GHERKIN_DISABLED")
+    # SEE-1631：缺省=双臂恢复；显式 env=1 才暂停
+    assert orch.gherkin_arm_disabled() is False
+    monkeypatch.setenv("GQT_MEASUREMENT_GHERKIN_DISABLED", "1")
     assert orch.gherkin_arm_disabled() is True
 
 

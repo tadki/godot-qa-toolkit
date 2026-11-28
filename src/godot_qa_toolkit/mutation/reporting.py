@@ -121,11 +121,16 @@ def _baseline_skip_unsupported_result(file: str, names: list[str],
     }
 
 
-def _break_on_baseline_result(file: str, names: list[str]) -> dict:
+def _break_on_baseline_result(file: str, names: list[str],
+                              trigger: str = "--break-on-baseline-failure"
+                              ) -> dict:
     """SEE-1606 P2：`--break-on-baseline-failure` 的基线脏中止契约。
 
     与 baseline 超时/启动失败同档（run_error 中止形态），但带具名基线
     失败清单供机器消费；此路径零 mutant GUT。
+    C3-R29（D7）：`trigger` = 实际触发的旗标（`--fail-on-red-baseline`
+    与 break-on-baseline-failure 通道合流后，文案必须指向真实触发者，
+    不得硬编码另一旗标名）。
     """
     failures = sorted(names)
     return {
@@ -135,15 +140,15 @@ def _break_on_baseline_result(file: str, names: list[str]) -> dict:
             "file": file,
             "run_error": True,
             "error": (f"baseline has {len(failures)} failing test(s) and "
-                      "--break-on-baseline-failure is set"),
+                      f"{trigger} is set"),
             "break_on_baseline_failure": True,
             "baseline_dirty": True,
             "baseline_failures": len(failures),
             "baseline_failure_names": failures,
         },
         "failures": [{
-            "reason": ("baseline failures present with "
-                       f"--break-on-baseline-failure: {failures[:3]}")}],
+            "reason": (f"baseline failures present with {trigger}: "
+                       f"{failures[:3]}")}],
     }
 
 
@@ -437,6 +442,73 @@ def _record_invalid_mutants(src: str, mutants: list,
     return results, len(invalid)
 
 
+def _baseline_skip_removed(tail: str) -> int:
+    """SEE-1631 §SPEC-027：从 GUT 输出尾部解析物理跳过证据（skip_red /
+    test_face 标记）→ 被物理移除的红测数（0 = 无证据）。"""
+    from .killbail import parse_skip_red_marker, parse_test_face_marker
+
+    skip = parse_skip_red_marker(tail)
+    face = parse_test_face_marker(tail)
+    removed = 0
+    if skip and int(skip.get("marked") or 0) >= 1:
+        removed = int(skip.get("marked") or 0)
+    elif face and int(face.get("removed") or 0) >= 1:
+        removed = int(face.get("removed") or 0)
+    return removed
+
+
+def _worker_leg_skip_removed(leg) -> int:
+    """SEE-1631 §SPEC-027：worker 腿结构化物理跳过证据（skip_red/allow
+    的 removed/marked 上限）→ 被移除红测数（解析失败按 0）。"""
+    skip_info = getattr(leg, "skip_red_info", None) or {}
+    face_info = getattr(leg, "allow_info", None) or {}
+    try:
+        return max(int(skip_info.get("marked") or 0),
+                   int(skip_info.get("removed") or 0),
+                   int(face_info.get("removed") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _script_qualified_new(tail: str, bare: "set[str]",
+                          baseline_failures: "set[str]") -> "set[str]":
+    """§SPEC-P2-R1-D2：同名脚本限定豁免（runner 每轮写入的脚本限定红
+    集合；空 = 无脚本标题 → 回退裸名差集语义）。Run Summary 段（脚本
+    上下文丢失，记作 ("*", n)）不计入新失败——同名基线红不得误判为
+    mutant 新失败（QA 假 kill 根因）。"""
+    lazy = None
+    try:
+        from . import runner as _runner_mod
+        lazy = getattr(_runner_mod, "_BASELINE_RED_MAP", None)
+    except Exception:
+        lazy = None
+    red_map = lazy if lazy else None
+    if not red_map:
+        return bare - baseline_failures
+    from .gutrun import parse_failures_with_scripts
+    # §SPEC-032/D13（Leader 修正）：观测脚本 wrapper→original 经 runner
+    # face 映射还原完整路径后与基线红集合（完整路径）精确比较
+    try:
+        from . import runner as _rm
+        face_map = getattr(_rm, "_FACE_SCRIPT_BY_BASENAME", {}) or {}
+    except Exception:
+        face_map = {}
+    qualified = parse_failures_with_scripts(tail)
+    if qualified:
+        return {n for s, n in qualified
+                if s != "*" and (_face_resolve(s, face_map), n)
+                not in red_map}
+    return bare - baseline_failures
+
+
+def _face_resolve(observed: str, face_map: "dict[str, str]") -> str:
+    """观测脚本 → 原脚本完整路径（wrapper basename 映射；无命中原样）。"""
+    from pathlib import Path as _P
+    if not face_map:
+        return observed
+    return face_map.get(_P(observed).name, observed)
+
+
 def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                          baseline_failures: set[str], baseline_dirty: bool) -> dict:
     """单 mutant run 结果分类（killed/survived/suspect/run_error）。
@@ -457,29 +529,7 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                               f"tests passed after {m.kind} {m.original}→{m.mutated}",
                               src=None)
     bare = _parse_failing_tests(tail)
-    # §SPEC-P2-R1-D2：同名脚本限定豁免（runner 每轮写入的脚本限定红集合；
-    # 空 = 无脚本标题 → 回退裸名差集语义）。
-    lazy = None
-    try:
-        from . import runner as _runner_mod
-        lazy = getattr(_runner_mod, "_BASELINE_RED_MAP", None)
-    except Exception:
-        lazy = None
-    red_map = lazy if lazy else None
-    if red_map:
-        from .gutrun import parse_failures_with_scripts
-        qualified = parse_failures_with_scripts(tail)
-        if qualified:
-            # D2-R1：Run Summary 段（脚本上下文丢失，记作 ("*", n)）是运行
-            # 流同名失败的重复回显——不计入新失败，否则同名基线红被误判为
-            # mutant 新失败（QA 假 kill 根因）。
-            new_names = {n for _s, n in qualified
-                         if _s != "*" and (_s, n) not in red_map}
-        else:
-            new_names = bare - baseline_failures
-    else:
-        new_names = bare - baseline_failures
-    new_failures = new_names
+    new_failures = _script_qualified_new(tail, bare, baseline_failures)
     if new_failures:
         return _mutant_record(m, "killed",
                               f"new failures after {m.kind} {m.original}→{m.mutated}: "
@@ -487,7 +537,32 @@ def _classify_mutant_run(m: Mutant, rc: int, tail: str,
                               src=None)
     # SPEC-010 suspect 标签：baseline 脏 ∧ 差集空——无法区分「测试没抓住 mutant」
     # 与「测试根本没跑到该区域」，保守标记（不计 killed 也不计 survived）。
+    # SEE-1631 §SPEC-027：baseline_skip 物理跳过生效（红测已被物理移除）
+    # 时，空差集 = 真实存活——判 survived（不落 suspect），冷/worker 两个
+    # 车道同语义。
     if baseline_dirty:
+        removed = _baseline_skip_removed(tail)
+        if removed >= 1:
+            return _mutant_record(
+                m, "survived",
+                f"baseline_skip applied (physically skipped {removed} red "
+                f"test(s)) with empty diff after {m.kind} "
+                f"{m.original}→{m.mutated} — real survival", src=None)
+        # SEE-1631 §SPEC-027/D7（Leader 复核修正）：无跳过原语的车道
+        # （beacon 兜底腿/降级冷腿——宿主不下发 skip_red）失败集 ⊆ 基线
+        # 红 **且整面执行完**（GUT 收尾汇总在场）→ 真实存活；拿不到整面
+        # 证据（引擎崩溃/看门狗杀/提前退出——绿杀手可能根本没执行）保持
+        # suspect（Harti 加固语义不变）。新失败仍 killed（判定不削弱）。
+        if bare and bare.issubset(baseline_failures) \
+                and "Run Summary" in tail:
+            rec = _mutant_record(
+                m, "survived",
+                f"only pre-existing red failures after {m.kind} "
+                f"{m.original}→{m.mutated} (no skip primitive on this "
+                f"leg; full face completed) — real survival", src=None)
+            # 差分复用标记：与旧 suspect 同信息量（重跑无增益）
+            rec["pre_existing_only"] = True
+            return rec
         return _mutant_record(m, "suspect",
                               f"dirty baseline ∧ empty diff after {m.kind} "
                               f"{m.original}→{m.mutated} — cannot distinguish "
@@ -696,15 +771,23 @@ def _script_aware_new(failing_names, failing_scripts, baseline_names,
     - map 为 None（旧路径/无脚本标题）或腿无脚本标题 → 回退裸名差集。"""
     if baseline_red_map is None or not failing_scripts:
         return failing_names - baseline_names
-    base_map = baseline_red_map or set()
+    try:
+        from . import runner as _rm
+        face_map = getattr(_rm, "_FACE_SCRIPT_BY_BASENAME", {}) or {}
+    except Exception:
+        face_map = {}
     new = set()
     for name in failing_names:
         # D2-R1：通配 ("*", name) 条目是 Run Summary 的重复回显，不授予
         # 豁免——只有「脚本归属 + 名」精确命中基线红的失败才是既有失败；
         # 其它（含同名绿脚本 killer 的失败）都是真新失败 → killed。
-        covered = any((scr, name) in base_map
-                      for scr, n in failing_scripts
-                      if n == name and scr != "*")
+        # §SPEC-032/D13（Leader 修正）：观测 wrapper→original 映射后按
+        # 完整路径精确豁免（D10：同名绿测不得被 basename 豁免误伤）。
+        covered = any(
+            (_face_resolve(scr, face_map), name) in
+            {(s2, n2) for s2, n2 in (baseline_red_map or set())}
+            for scr, n in failing_scripts
+            if n == name and scr != "*")
         if not covered:
             new.add(name)
     return new
@@ -771,6 +854,17 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
             m, "run_error",
             f"no GUT run stream evidence for {tag} — worker leg "
             f"ran 0 tests (face glob matched no test scripts)", src=src)
+    # SEE-1631 §SPEC-027：baseline_skip 物理跳过生效（结构化证据
+    # removed/marked>=1）且 fail_count==0（红测已被物理移除）→ survived
+    # 具名跳过原因；无跳过证据时维持既有 fail_count==0 早退语义。
+    if baseline_dirty:
+        removed = _worker_leg_skip_removed(leg)
+        if removed >= 1 and leg.fail_count == 0:
+            return _mutant_record(
+                m, "survived",
+                f"baseline_skip applied (physically skipped {removed} red "
+                f"test(s)) after {tag} (worker leg) — real survival",
+                src=src)
     if leg.fail_count == 0:
         return _mutant_record(
             m, "survived", f"tests passed after {tag} (worker leg)", src=src)
@@ -782,6 +876,20 @@ def _classify_worker_leg_impl(m, leg, baseline_failures, baseline_dirty,
         return _leg_killed_record(m, new_failures, ownership_fn,
                                   project_root, src)
     if baseline_dirty:
+        # SEE-1631 §SPEC-027：baseline_skip 物理跳过生效（结构化
+        # skip_red/test_face 证据在场且 removed/marked>=1）→ 空差集 =
+        # 真实存活（不落 suspect），worker 车道与冷车道同语义。
+        removed = _worker_leg_skip_removed(leg)
+        if removed >= 1:
+            return _mutant_record(
+                m, "survived",
+                f"baseline_skip applied (physically skipped {removed} red "
+                f"test(s)) with empty diff after {tag} (worker leg) — "
+                f"real survival", src=src)
+        # §SPEC-027/D7（Leader 复核修正）：worker 腿拿不到整面执行完的
+        # 结构化证据（无 tail/无选面规模）→ 失败 ⊆ 基线红保持 suspect
+        # （Harti 语义：无法区分"没抓住"与"没跑到"）；跳过生效的升级走
+        # 上方 skip_red_info 具名通道。
         return _mutant_record(
             m, "suspect",
             f"dirty baseline ∧ empty diff after {tag} (worker leg)", src=src)

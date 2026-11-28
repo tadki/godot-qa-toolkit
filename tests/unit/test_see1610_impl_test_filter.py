@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+import attribution_fixtures
+
 from godot_qa_toolkit.mutation import killbail
 from godot_qa_toolkit.mutation import truth_select as _ts  # noqa: F401 — 先导破环
 from godot_qa_toolkit.mutation.truth_lines import line_identity_sets
@@ -375,17 +377,31 @@ def _fixture_project(tmp_path):
     return proj, target
 
 
+def _feature_sha_1610(proj):
+    """feature 指纹按目录实算（无 features 目录 → 空表，契约形状仍成立）。"""
+    import hashlib
+
+    feats = proj / "addons" / "gqt_gherkin" / "features"
+    if not feats.is_dir():
+        return {}
+    return {p.stem.replace("-", "_"):
+            hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(feats.glob("*.feature"))}
+
+
 def _write_line_map_1610(proj, target):
     """行事实 /6 映射：4/7→test_a、7 兼 test_b、10→test_b；script 车道
     test_b 触达行 10；unattributed_files 含目标仅作选面不变性对照
     （D1 回退：名单不再触发整文件面，无 scope 键）。"""
     import hashlib
     import json
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     recipe, err = build_recipe(proj)
     assert err is None, err
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = attribution_fixtures.report_recipe_hash(proj)
+    pristine = attribution_fixtures.pristine_recipe_hash(proj)
     rel = str(target.resolve().relative_to(proj.resolve()))
     line_to_tests = {4: ["test_a.gd::t1"],
                      7: ["test_a.gd::t1", "test_b.gd::t2"],
@@ -406,8 +422,8 @@ def _write_line_map_1610(proj, target):
                                 for ln, ids in line_to_tests.items()}},
         "unattributed_files": [rel],
     }
-    doc = {"schema_version": "test-attribution/6",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+    doc = {"schema_version": "test-attribution/7",
+           "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
            "project_root": str(proj), "identity": "res://script::test_name",
            "causal": {"enabled": False},
            "file_sha256": {rel: hashlib.sha256(
@@ -417,7 +433,12 @@ def _write_line_map_1610(proj, target):
            "arms": {"gut_full": arm},
            "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
                                        "pairs": 1}},
-           "notes": []}
+           "notes": [],
+           # C3-R20 迁移（B）：契约认可的地图带判定表与 feature 指纹
+           "test_verdicts": {i: {"verdict": "green",
+                                 "classification": "pre_existing"}
+                             for i in test_to_lines},
+           "feature_sha256": _feature_sha_1610(proj)}
     out = proj / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")

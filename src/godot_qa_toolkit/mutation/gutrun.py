@@ -98,3 +98,31 @@ def _parse_failing_tests(gut_output: str) -> set[str]:
         if "[Failed]" in line and current:
             failing.add(current)
     return failing
+
+
+def executed_script_headers(gut_output: str) -> set[str]:
+    """C3-R23（V1）：运行流里实际执行脚本的 `res://` 头集合（与
+    parse_failures_with_scripts 同一识别规则）。执行账按脚本归因的
+    「谁真的跑了」证据——同名碰撞下 `-gselect` 按 basename 可能选中
+    多个物理脚本，只有头集能区分；无头（旧形态/截断只剩摘要）→ 空集
+    （调用方按保守并集回退，不放宽既有方向）。"""
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    out: set[str] = set()
+    for raw in gut_output.splitlines():
+        stripped = ansi.sub("", raw).replace("\r", "").strip()
+        if stripped.startswith("res://") and ".gd" in stripped:
+            out.add(stripped)
+    return out
+
+
+def script_evidence(gut_output: str) -> dict:
+    """C3-R24（N2/§SPEC-038⑥）：截断前一次性提取的脚本级执行证据——
+    执行的脚本头集、(script, name) 失败对、失败名集（JSON 友好形态，
+    随执行账保存）。增量重跑的执行账必须在**完整输出**上解析（部分
+    截断会把前一脚本的头/失败切掉，同名前脚本被误判「未执行」继承旧
+    判定 = 假 kill 方向）；out 允许截断只作披露。三个解析器单源复用，
+    识别规则不另起一份。"""
+    return {"executed": sorted(executed_script_headers(gut_output)),
+            "pairs": sorted([s, n] for s, n in
+                            parse_failures_with_scripts(gut_output)),
+            "failing": sorted(_parse_failing_tests(gut_output))}

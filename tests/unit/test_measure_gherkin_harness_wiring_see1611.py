@@ -36,7 +36,10 @@ def _stub_flow(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(arms, "run_validator_preflight",
                         lambda root, **k: {"ok": True})
     monkeypatch.setattr(arms, "compile_keys_to_suite",
-                        lambda project_root, keys, suite_dir: None)
+                        lambda project_root, keys, suite_dir:
+                        {"keys": list(keys), "suite_dir": str(suite_dir),
+                         "manifests": {k: {"attribution": []}
+                                       for k in keys}})
     monkeypatch.setattr(arms, "replay_check",
                         lambda project_root, key, *, suite_dir=None: {})
     monkeypatch.setattr(arms, "_snapshot_main", lambda r: {})
@@ -96,6 +99,9 @@ def test_flow_keeps_contract_intact_across_compile_and_run(
 
     def fake_compile(project_root, keys, suite_dir):
         seen["during_compile"] = dest.read_bytes() == before
+        # SEE-1631 sync：_compile_into 读 manifests 捕获身份
+        return {"keys": list(keys), "suite_dir": str(suite_dir),
+                "manifests": {k: {"attribution": []} for k in keys}}
 
     def fake_run_arm(name, **kw):
         seen["during_run"] = dest.read_bytes() == before
@@ -159,6 +165,9 @@ def test_flow_uses_shared_suite_groups(tmp_path, monkeypatch):
 
     def fake_compile(project_root, keys, suite_dir):
         compiles.append((list(keys), Path(suite_dir)))
+        # SEE-1631 sync：_compile_into 读 manifests 捕获身份
+        return {"keys": list(keys), "suite_dir": str(suite_dir),
+                "manifests": {k: {"attribution": []} for k in keys}}
 
     def fake_run_arm(name, **kw):
         concurrency_seen["value"] = kw.get("concurrency")

@@ -127,7 +127,9 @@ class TestIntraFileJobs:
         from pathlib import Path as _P
         from attribution_fixtures import write_map
         rel = _P(files[0]).resolve().relative_to(_P(proj).resolve()).as_posix()
-        write_map(_P(proj), {rel: ["test_save.gd::test_ok"]})
+        # §SPEC-029：宇宙全集绑定（other.gd 进 file_sha256）
+        write_map(_P(proj), {rel: ["test_save.gd::test_ok"],
+                             "other.gd": []})
         baselines = {"n": 0}
         monkeypatch.setattr(executor, "_worker_pool", _SerialPool)
         monkeypatch.setattr(

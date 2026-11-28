@@ -1,0 +1,746 @@
+"""SEE-1631 §SPEC-020：mutation 判定基线的单一真源——attribution map 的
+逐测试 verdict 表。
+
+`baseline_source()`：`GQT_MUTATION_BASELINE_SOURCE` ∈ {map（默认）, cold}。
+map 模式下 `_precompute_baselines` 不再冷启动 GUT——按 map 的 verdict 表
+合成与既有快照同形的 baseline（rc/tail/elapsed），全部下游（`_loop_baseline`
+复用、`_parse_failing_tests`、`_BASELINE_RED_MAP`、worker baseline_failures、
+自适应超时锚）零改动消费。map 缺失/过期/与当前树不一致 → 具名
+`BaselineSourceError` fail-loud（不静默退化全脸）；cold 为显式 opt-out。
+parity 门（首 mutant 双通道预检）与 re-canary/cold 回退链保持原语义；
+map 源下 parity 失配由 runner 升级为具名 fail-loud（见 runner）。
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ENV_BASELINE_SOURCE = "GQT_MUTATION_BASELINE_SOURCE"
+
+_SNAPSHOT_SOURCE = "map"
+
+
+class BaselineSourceError(Exception):
+    """map 源基线不可用（缺失/过期/与当前树不一致）——具名 fail-loud。"""
+
+
+def baseline_source() -> str:
+    raw = os.environ.get(ENV_BASELINE_SOURCE, "map").strip().lower()
+    return raw if raw in ("map", "cold") else "map"
+
+
+def _load_map_doc(project_root: str) -> dict:
+    from .truth_select import (
+        MutationSelectionError, SelectionError, load_map, map_path,
+    )
+
+    path = map_path(Path(project_root).resolve())
+    if not path:
+        raise BaselineSourceError(
+            "baseline_source=map: no attribution map at the default path — "
+            "run any gqt command with preparation (e.g. `gqt measure "
+            "map-update`) to build it (fail-loud: silent full-face "
+            "fallback is forbidden by §SPEC-020)")
+    try:
+        return load_map(path)
+    except SelectionError as e:
+        # F4（C3-R1）：SelectionError（坏 JSON/解析失败）与
+        # MutationSelectionError 同样具名转 BaselineSourceError——
+        # CLI 全链零 traceback（消费方只消费具名形态）
+        raise BaselineSourceError(
+            f"baseline_source=map: attribution map unusable: {e}") from e
+
+
+def _assert_map_schema(doc: dict) -> None:
+    from ..measurement.attribution import ATTRIBUTION_SCHEMA
+
+    if doc.get("schema_version") != ATTRIBUTION_SCHEMA:
+        raise BaselineSourceError(
+            f"baseline_source=map: schema {doc.get('schema_version')!r} "
+            f"!= {ATTRIBUTION_SCHEMA!r}")
+
+
+def _assert_map_arm_valid(doc: dict) -> None:
+    states = doc.get("arms_state") or {}
+    if not states or all(st.get("state") != "valid"
+                         for st in states.values()):
+        summary = {k: st.get("state") for k, st in states.items()}
+        raise BaselineSourceError(
+            f"baseline_source=map: no valid measurement arm in map "
+            f"(arms_state={summary})")
+
+
+def _assert_recipe_pristine(project_root: str, doc: dict) -> None:
+    from .truth_select import _fresh_recipe_hash
+
+    pristine = _fresh_recipe_hash(str(Path(project_root).resolve()))
+    if pristine is not None and pristine != doc.get("recipe_hash_pristine"):
+        raise BaselineSourceError(
+            "baseline_source=map: recipe_hash_pristine stale vs current "
+            "tree — rebuild the map")
+    if pristine is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：建图时事实（recipe_buildable）证明配置面在建图
+        # 时可构建，现在 build_recipe 失败 = 配置面被删除/损坏/不可解析
+        # ——具名过期，不得静默判新鲜（§SPEC-029：配置面任一变化具名
+        # 全量）。
+        raise BaselineSourceError(
+            "baseline_source=map: recipe unbuildable from the current "
+            "tree — the map was built from a buildable recipe face "
+            "(recipe_buildable) but the recipe can no longer be built "
+            "(config face deleted/corrupted/unparseable since the build, "
+            "e.g. .gutconfig.json) — restore the config, then full "
+            "rebuild")
+    # pristine=None 且无建图事实（合成夹具/建图时即不可构建）→ 跳过该
+    # 项保持现状（其余门仍在）
+
+
+def _assert_report_recipe_hash(project_root: str, doc: dict) -> None:
+    """C3-R23（R1）：工具链面对账——地图存储的注入域 `report_recipe_hash`
+    必须与现算（含 toolchain 注入）一致；漂移 = 建图后 Godot/GUT/gqt
+    版本或 `GQT_GODOT_BIN` 指向变化 → 具名 fail-loud（决策 7：工具链
+    三版本变化 → 全量）。存储值缺席 → 跳过（与
+    `_assert_recipe_pristine` 的 None 容错同口径；磁盘树面由 pristine
+    门独立把守）。"""
+    from .truth_select import _current_report_recipe_hash
+
+    stored = doc.get("report_recipe_hash")
+    if not (isinstance(stored, str) and stored):
+        return
+    computed = _current_report_recipe_hash(str(Path(project_root).resolve()))
+    if computed is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：工具链面同一判别——建图时可构建、现在不可构建
+        # → 具名过期，不得静默跳过。
+        raise BaselineSourceError(
+            "baseline_source=map: report_recipe_hash unbuildable — "
+            "recipe buildable at map build time (stored "
+            f"{stored[:12]}) cannot be built from the current tree "
+            "(config face deleted/corrupted/unparseable since the "
+            "build) — restore the config, then full rebuild")
+    if computed is not None and computed != stored:
+        raise BaselineSourceError(
+            "baseline_source=map: report_recipe_hash drift — stored "
+            f"{stored[:12]} != computed {str(computed)[:12]} "
+            "(toolchain/environment changed since the map was built) — "
+            "rebuild the map")
+
+
+def _assert_tests_face(project_root: str, doc: dict) -> None:
+    """测试面集合对账：map 记录的测试文件与**当前** GUT 测试面**双向**
+    比对——多了（新增测试文件）或少了（删除）都判过期（C3-R4 项1：新增
+    红测必须被续新跑进去，否则 full 面把新测失败当新失败 → 假 kill）。"""
+    import hashlib
+
+    from ..mutation.coverlink import current_tests_face
+
+    face = doc.get("tests_face") or {}
+    drift = []
+    for rel, want in face.items():
+        p = Path(project_root) / rel
+        if not p.is_file():
+            drift.append(f"removed:{rel}")
+            continue
+        have = hashlib.sha256(p.read_bytes()).hexdigest()
+        if have != want:
+            drift.append(f"changed:{rel}")
+    try:
+        current = current_tests_face(project_root)
+    except Exception:  # noqa: BLE001 — 探测失败按无新增处理（不误报）
+        current = {}
+    for rel in sorted(set(current) - set(face)):
+        drift.append(f"added:{rel}")
+    if drift:
+        raise BaselineSourceError(
+            f"baseline_source=map: tests_face drift — {sorted(drift)[:6]}")
+
+
+def _assert_target_files(project_root: str, doc: dict,
+                         files: list[str]) -> None:
+    import hashlib
+
+    root = Path(project_root).resolve()
+    shas = doc.get("file_sha256") or {}
+    # §SPEC-029：内容面 = file_sha256 **全集** 对账（不再只查被查询文件
+    # ——D11 盲区根因）+ 树内新增生产 .gd 检出（分类清单驱动）。
+    for rel, want in shas.items():
+        p = root / rel
+        if not p.is_file():
+            raise BaselineSourceError(
+                f"baseline_source=map: measured target removed — {rel}")
+        have = hashlib.sha256(p.read_bytes()).hexdigest()
+        if have != want:
+            raise BaselineSourceError(
+                f"baseline_source=map: target file drift — {rel}")
+    for raw in files:
+        p = Path(raw)
+        rel = str(p.resolve().relative_to(root)) if p.is_absolute() \
+            else str(p)
+        want = shas.get(rel)
+        if want and p.is_file():
+            have = hashlib.sha256(p.read_bytes()).hexdigest()
+            if have != want:
+                raise BaselineSourceError(
+                    f"baseline_source=map: target file drift — {rel}")
+    _assert_no_new_production(root, doc)
+
+
+def _assert_no_new_production(root: Path, doc: dict) -> None:
+    """§SPEC-029 表 #2/#5/#6：生产内容指纹对账——生产 `.gd` 之外的
+    场景/资源/数据文本与生产 `.gd` 同类（内容变更/新增/删除都判过期）；
+    指纹缺失（旧产物无 `production_content_sha256`）→ 回落按
+    `file_sha256` 的 `.gd` 目标面比对（不误报）。
+
+    §SPEC-029 表 #4：非生产文件不触发刷新。"""
+    from ..measurement.classify import (
+        ScopeError, production_content_files,
+    )
+
+    try:
+        content_files = production_content_files(root)
+    except ScopeError as e:
+        raise BaselineSourceError(
+            f"baseline_source=map: {e}") from e
+    fingerprint = doc.get("production_content_sha256")
+    if isinstance(fingerprint, dict) and fingerprint:
+        drift = _content_fingerprint_drift(root, fingerprint, content_files)
+        if drift:
+            raise BaselineSourceError(
+                f"baseline_source=map: production content drift — "
+                f"{sorted(drift)[:6]}")
+        return
+    # 旧产物（无内容指纹）→ 仅按目标 .gd 面比对，避免误报
+    shas = doc.get("file_sha256") or {}
+    known = {("res://" + rel) for rel in shas}
+    test_face = {("res://" + rel)
+                 for rel in (doc.get("tests_face") or {})}
+    new = [u for u in content_files
+           if ("res://" + u) not in known
+           and ("res://" + u) not in test_face]
+    if new:
+        raise BaselineSourceError(
+            f"baseline_source=map: {len(new)} new universe file(s) not in "
+            f"map (map freshness covers the scope universe, "
+            f"§SPEC-029/031) — {sorted(new)[:6]}")
+
+
+def _content_fingerprint_drift(root: Path, fingerprint: dict,
+                               content_files: "list[str]") -> "list[str]":
+    """内容指纹漂移清单（内容变 / 文件被删 / 新增未登记）。"""
+    import hashlib
+
+    drift: list[str] = []
+    for rel, want in fingerprint.items():
+        p = root / rel
+        if not p.is_file():
+            drift.append(f"removed:{rel}")
+            continue
+        try:
+            have = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if have != want:
+            drift.append(f"changed:{rel}")
+    drift.extend(f"added:{rel}" for rel in sorted(content_files)
+                 if rel not in fingerprint)
+    return drift
+
+
+def assert_map_fresh(project_root: str, doc: dict, files: list[str]) -> None:
+    """map 与当前树一致性门（§SPEC-029 谓词单一实现；mutation 基线路径
+    与 truth_select._evaluate/coverage 选面同源调用）：schema/臂执行证据/
+    recipe pristine（磁盘树面）+ report_recipe_hash（工具链面，C3-R23
+    R1 两面判定）/file_sha256 全集/tests_face/宇宙新增生产检出——任一
+    失配即具名 fail-loud。"""
+    _assert_map_schema(doc)
+    _assert_map_arm_valid(doc)
+    _assert_recipe_pristine(project_root, doc)
+    _assert_report_recipe_hash(project_root, doc)
+    _assert_tests_face(project_root, doc)
+    _assert_target_files(project_root, doc, files)
+
+
+# 兼容别名（模块内历史调用点）
+_assert_fresh = assert_map_fresh
+
+
+def _red_entries(doc: dict) -> "dict[str, tuple[str, str]]":
+    """mutation 判定只消费可执行测试面（gut_full：`res://` 全路径与测试
+    脚本 basename 两种形态；gherkin 身份不可执行、只披露不参与）。
+
+    §SPEC-025：/7 产物缺 `test_verdicts` 键 = 表不守恒——具名 fail-loud，
+    不得当空红集静默放行（旧 /6 产物已被 schema 门拒绝）。"""
+    if "test_verdicts" not in doc:
+        raise BaselineSourceError(
+            "baseline_source=map: /7 attribution map is missing "
+            "`test_verdicts` (verdict table not conserved; §SPEC-025) — "
+            "rebuild the map")
+    out: dict[str, tuple[str, str, str]] = {}
+    # C3-R10：测试面清单 basename → 完整路径反查（verdict 表绿测条目本
+    # 无 script 键；毒化/增量补表的红测回退裸 basename 时经测试面恢复
+    # 目录信息，否则 --tests 目录前缀过滤把红对误滤空）
+    registry: dict[str, str] = {}
+    for rel in (doc.get("tests_face") or {}):
+        registry.setdefault(Path(str(rel)).name, "res://" + str(rel))
+    for ident, entry in (doc.get("test_verdicts") or {}).items():
+        if str(ident).startswith("gherkin://"):
+            continue
+        if entry.get("verdict") == "red":
+            # §SPEC-030/D10：script 分量优先取表内完整路径（同名碰撞按
+            # 完整路径消歧——基线合成不得按 basename 把另一目录绿杀手
+            # 误跳过）；表内无 script 回退归属注册表（裸 basename 宇宙）
+            # 再回退身份段规范为 `res://` 形态。
+            script = str(entry.get("script") or "")
+            if not script:
+                script = registry.get(str(ident).split("::", 1)[0], "")
+            if not script:
+                script = str(ident).split("::", 1)[0]
+            if not script.startswith("res://"):
+                script = "res://" + script
+            out[ident] = (entry.get("classification") or "new",
+                          script,
+                          str(ident).split("::", 1)[1]
+                          if "::" in str(ident) else "")
+    return out
+
+
+def _synthesize_tail(red_pairs: "set[tuple[str, str]]") -> str:
+    """合成 GUT 输出形态的 tail：`res://script` 头 + `* test` + `[Failed]`
+    行——`_parse_failing_tests` / `parse_failures_with_scripts` 逐位可解析
+    （下游零改动消费）。"""
+    lines: list[str] = []
+    by_script: dict[str, list[str]] = {}
+    for (script, name) in sorted(red_pairs):
+        # §SPEC-032/D13：header 用 res://<basename>——合成身份与行选面
+        # wrapper / 失败差集三处按 basename 对齐（header 需 res:// + .gd
+        # 才被 parse_failures_with_scripts 识别为脚本标题行）
+        by_script.setdefault(script if script.startswith("res://")
+                             else f"res://{script}", []).append(name)
+    for script, names in sorted(by_script.items()):
+        lines.append(script)  # script 已是 res://<original>（完整路径）
+        for name in names:
+            lines.append(f"* {name}")
+            lines.append(f"[Failed] {name}")
+    lines.append("Run Summary")
+    for script, names in sorted(by_script.items()):
+        for name in names:
+            lines.append(f"- {name}")
+            lines.append(f"[Failed] {name}")
+    return "\n".join(lines) + "\n"
+
+
+def map_baseline_snapshots(files: list[str], project_root: str,
+                           tests_glob: str | None,
+                           select_mode: str = "full") -> "tuple[dict, dict]":
+    """map verdict 表 → per-glob 合成基线快照（与 `_run_baseline_snapshot`
+    同形：{rc, tail, elapsed}；elapsed=0 → 自适应超时锚回落参数值）。
+
+    返回 (baselines, failures)：baselines 键与既有消费一致（scoped glob /
+    None=全量面）；failures 恒空（map 源不产生"尝试失败"——不可用直接
+    fail-loud）。tests_glob 过滤：None = 全部 gut 身份；非 None = 脚本
+    前缀在 glob 目录内的身份。"""
+    doc = _load_map_doc(project_root)
+    _assert_fresh(project_root, doc, files)
+    reds = _red_entries(doc)
+    prefix = None
+    if tests_glob:
+        base = str(tests_glob)
+        if base.startswith("res://"):
+            base = base[len("res://"):]
+        # 选面目录只承载选中脚本的 wrapper（wrapper 名 = 原脚本名）——
+        # 按 basename 对应，不做目录前缀过滤（prefix 保持 None）。
+        if ".gqt-attr-select/" not in base:
+            prefix = base.rstrip("/") + "/"
+    face_pairs: set[tuple[str, str]] = set()
+    prefix_res = "res://" + prefix if prefix is not None else None
+    for ident, (_cls, script, name) in reds.items():
+        rel = script[len("res://"):] if script.startswith("res://") else script
+        # C3-R10：裸 basename 回退（绿测条目无 script 键）统一规范为
+        # res:// 形态再比对目录前缀——否则 --tests 目录选面的红对被
+        # 误滤空（基线 tail 缺红测 → parity 期望集恒空 → 负对照失效）
+        rel_res = rel if rel.startswith("res://") else "res://" + rel
+        if prefix_res is not None and not rel_res.startswith(prefix_res):
+            continue
+        # §SPEC-032/D13（Leader 修正）：脚本身份 = 完整路径；行选面
+        # wrapper 由 skip 下发前按 basename 映射回原脚本完整路径（见
+        # runhelp 直驱 cfg 组装；同名歧义由选择目录具名拒绝）
+        face_pairs.add((script, name))
+    baselines: dict = {}
+    tail = _synthesize_tail(face_pairs)
+    key = tests_glob if tests_glob is not None else None
+    baselines[key] = {"rc": (1 if face_pairs else 0), "tail": tail,
+                      "elapsed": 0.0, "source": _SNAPSHOT_SOURCE,
+                      "red_names": sorted(n for _s, n in face_pairs),
+                      "red_pairs": sorted(face_pairs)}
+    return baselines, {}
+
+
+
+
+def _sha_drift(root: Path, rel: str, want: "str | None",
+               changed: "set[str]", drift: "set[str]") -> None:
+    """单文件 sha 对账（缺失/漂移 → drift 分类；零行为拆分）。"""
+    import hashlib
+
+    p = root / rel
+    if not p.is_file():
+        # C3-R8：删除类漂移同属增量变更面（因素表第 3/6 行）——只记 drift
+        # 会让 refresh 无变更可续（删除+新增同批永不自愈），或删除单独
+        # 触发全量重建；进变更面后由增量按 test_removed/prod_removed 剔除
+        changed.add(rel)
+        drift.add(f"removed:{rel}")
+        return
+    have = hashlib.sha256(p.read_bytes()).hexdigest()
+    if have != want:
+        changed.add(rel)
+        drift.add(f"changed:{rel}")
+
+
+def _map_drift(doc: dict, project_root: str, files: list[str]
+               ) -> "tuple[list[str], list[str]]":
+    """map 与当前树的漂移分类 → (增量可续新的变更路径, 全部漂移描述)。
+
+    增量可续新 = 目标生产文件 sha 漂移 + tests_face（测试脚本）sha 漂移
+    + **新增**测试脚本与**新增/变更**生产内容文件（§SPEC-029 表 #1/#2/#5/#6：
+    新增测试必须跑、生产内容与生产 .gd 同一套逻辑）；
+    recipe pristine 失配 / 结构性缺失 → 只能全脸重建（增量列表为空但
+    漂移描述在场）。"""
+    import hashlib
+
+    root = Path(project_root).resolve()
+    changed: set[str] = set()
+    drift: set[str] = set()
+    shas = doc.get("file_sha256") or {}
+    face = doc.get("tests_face") or {}
+
+    # 目标生产文件（显式 files 优先，其余取 map 记录面）
+    targets = {rel: want for rel, want in shas.items()}
+    for raw in files:
+        p = Path(raw)
+        rel = str(p.resolve().relative_to(root)) if p.is_absolute() \
+            else str(raw)
+        # C3-R28（L-B）：非绝对路径原样保留——`str(Path(raw))` 的 POSIX
+        # 折叠会把 `res://…` 收成 `res:/…`（因素文案丢斜杠）。
+        targets[rel] = shas.get(rel)
+    for rel, want in targets.items():
+        _sha_drift(root, rel, want, changed, drift)
+    for rel, want in face.items():
+        _sha_drift(root, rel, want, changed, drift)
+
+    # §SPEC-029 表 #1/#2/#5/#6：生产内容全集对账（场景/资源/数据文本
+    # 与生产 .gd 同类；新增 → 变更面；内容变 → 变更面）
+    _content_drift(root, doc, changed, drift)
+    # §SPEC-029 表 #8：新增测试脚本 → 变更面（必须被续新跑进去）
+    _new_test_drift(root, doc, changed, drift)
+    # C3-R14（定案 4/§SPEC-016 表 #8 feature 面）：feature 内容指纹
+    # 漂移进变更面（增量走 feature_changed/feature_rerun 通道）——
+    # feature 编辑已不触发 recipe pristine（见 recipe.recipe_hash），
+    # 没有这条漂移检测 feature 编辑会既不增量也不重建（静默漏更新）。
+    _feature_drift(root, doc, changed, drift)
+    return sorted(changed), sorted(drift)
+
+
+def _features_disk_sha256(root: Path) -> "dict[str, tuple[str, str]]":
+    """盘上 feature 内容指纹（key 归一化与 sha256 与失效面对账的唯一
+    实现）：key → (盘上 rel, hexdigest)；features 目录缺失 → 空表。"""
+    import hashlib as _hl
+
+    features_dir = root / "addons" / "gqt_gherkin" / "features"
+    disk_sha: "dict[str, tuple[str, str]]" = {}
+    if not features_dir.is_dir():
+        return disk_sha
+    for path in sorted(features_dir.glob("*.feature")):
+        key = path.stem.replace("-", "_")
+        rel = path.relative_to(root).as_posix()
+        h = _hl.sha256()
+        h.update(path.read_bytes())
+        disk_sha[key] = (rel, h.hexdigest())
+    return disk_sha
+
+
+def _feature_drift(root: Path, doc: dict, changed: "set[str]",
+                   drift: "set[str]") -> None:
+    """feature 内容指纹对账：`gherkin_face.feature_sha256` vs 盘上
+    `addons/gqt_gherkin/features/*.feature`。新增 → 变更面；内容变 →
+    变更面；删除 → 只记 drift（gherkin dropped 身份由增量产物的
+    dropped 清单与 §SPEC-028 断言处理）。基线无 feature_sha256（旧
+    产物）→ 保守跳过（不误报，等首次全量重建补齐）。"""
+    features_dir = root / "addons" / "gqt_gherkin" / "features"
+    baseline_sha = doc.get("feature_sha256")
+    if not isinstance(baseline_sha, dict):
+        if features_dir.is_dir() and any(features_dir.glob("*.feature")):
+            # C3-R16：缺键 + 项目有 feature → 具名漂移（走一次全量重建
+            # 补指纹，不得静默当新鲜）。
+            drift.add("feature_sha256 missing from map — full rebuild "
+                      "required")
+        return
+    if not features_dir.is_dir():
+        return
+    # 以盘上文件为遍历主体：changed 用盘上 rel（key→rel 反推有损——
+    # normalize 把 `-` 折成 `_`，反向不可逆），删除只记 drift。
+    disk_sha = _features_disk_sha256(root)
+    seen_keys: set[str] = set()
+    for key, (rel, got) in sorted(disk_sha.items()):
+        seen_keys.add(key)
+        want = baseline_sha.get(key)
+        if want is None:
+            drift.add(f"feature_new:{key}")
+            changed.add(rel)
+        elif got != want:
+            drift.add(f"feature_changed:{key}")
+            changed.add(rel)
+    for key in sorted(set(baseline_sha) - seen_keys):
+        drift.add(f"feature_removed:{key}")
+        # C3-R28（D5/决策 20）：删除也进变更面——feature 臂增量（身份与
+        # 边剔除、不重跑）。合成规范 rel：normalize 无损回到同一 key，
+        # classify 按基线 key 判 feature_removed。
+        changed.add(f"addons/gqt_gherkin/features/{key}.feature")
+
+
+def _content_removal_drift(root: Path, fingerprint: dict,
+                           changed: "set[str]", drift: "set[str]") -> None:
+    """C3-R9 退回1：非脚本生产内容删除同属增量变更面（因素表第 3 行）——
+    只记 drift 会让 refresh 无变更可续或装填后复检永不过期（重复执行也
+    不自愈）。增量侧按 content_removed 剔除指纹，不重跑。"""
+    for rel in sorted(fingerprint):
+        if rel not in changed and rel not in drift and \
+                not (root / rel).is_file():
+            changed.add(rel)
+            drift.add(f"removed:{rel}")
+
+
+def _content_drift(root: Path, doc: dict, changed: "set[str]",
+                   drift: "set[str]") -> None:
+    """生产内容全集对账（§SPEC-029 表 #1/#2/#5/#6）：新增 → 变更面；
+    内容变更 → 变更面。旧产物（无内容指纹）按目标面比对不误报。"""
+    import hashlib
+
+    from ..measurement.classify import (
+        ScopeError, production_content_files,
+    )
+
+    try:
+        content_files = production_content_files(root)
+    except ScopeError as e:
+        raise BaselineSourceError(f"{e}") from e
+    fingerprint = doc.get("production_content_sha256")
+    if not (isinstance(fingerprint, dict) and fingerprint):
+        shas = doc.get("file_sha256") or {}
+        face = doc.get("tests_face") or {}
+        for rel in content_files:
+            if rel in shas or rel in face:
+                continue
+            changed.add(rel)
+            drift.add(f"new:{rel}")
+        return
+    for rel in sorted(content_files):
+        if rel not in fingerprint:
+            changed.add(rel)
+            drift.add(f"new:{rel}")
+            continue
+        p = root / rel
+        if not p.is_file():
+            continue
+        try:
+            have = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if have != fingerprint[rel]:
+            changed.add(rel)
+            drift.add(f"changed:{rel}")
+    _content_removal_drift(root, fingerprint, changed, drift)
+
+
+def _new_test_drift(root: Path, doc: dict, changed: "set[str]",
+                    drift: "set[str]") -> None:
+    """新增测试脚本 → 变更面（§SPEC-029 表 #8：新增测试必须跑）。"""
+    try:
+        from ..mutation.coverlink import current_tests_face
+        current_face = current_tests_face(root)
+    except Exception:  # noqa: BLE001 — 探测失败按无新增处理
+        current_face = {}
+    face = doc.get("tests_face") or {}
+    for rel in sorted(set(current_face) - set(face)):
+        changed.add(rel)
+        drift.add(f"new_test:{rel}")
+
+
+def _production_universe(project_root: str, files: list[str]) -> list[str]:
+    """§SPEC-029：默认建图宇宙 = 范围规则 `.gd` 子集（§SPEC-031 v8
+    白/黑名单驱动）；显式 roots 仅作窄宇宙诊断。规则不闭合 → 具名
+    fail-loud。"""
+    from ..measurement.classify import ScopeError, gd_universe
+
+    root = Path(project_root).resolve()
+    try:
+        # §SPEC-032/D12：map 模块对外路径单一口径 = 绝对路径（classify
+        # 的 res:// 形态只在 classify API 内部；此前 res:// 漏转换导致
+        # ensure_map 锚出 <root>/res:/... → 宇宙为空 → 建图必败）
+        return [str(root / rel.removeprefix("res://"))
+                for rel in gd_universe(root)]
+    except ScopeError as e:
+        raise BaselineSourceError(f"{e}") from e
+
+
+def _prepare_build_missing(project_root: str, files: list[str],
+                           timeout_s: int) -> str:
+    """阶梯第一级：map 缺失 → `ensure_map` 全脸自动建图（measure run
+    同形态；宇宙 = §SPEC-031 清单 production 全集）。"""
+    from .truth_select import MutationSelectionError, ensure_map
+
+    build_files = _production_universe(project_root, files)
+    print("mutation prepare: attribution map missing — building "
+          f"(universe={len(build_files)} production .gd, §SPEC-021/029)",
+          file=sys.stderr)
+    try:
+        ensure_map(project_root, build_files, timeout_s=timeout_s)
+    except MutationSelectionError as e:
+        raise BaselineSourceError(
+            f"prepare renewal failed (map build): {e}") from e
+    return _verify_prepared(project_root, build_files)
+
+
+def _prepare_drift_state(doc: dict, project_root: str,
+                         files: list[str]) -> "tuple[list[str], bool]":
+    """map 在场漂移分类：增量可续新面 + pristine 失配并入漂移列表。
+    返回 (drift, pristine_ok)。"""
+    from .truth_select import _fresh_recipe_hash
+
+    changed, drift = _map_drift(doc, project_root, files)
+    pristine_ok = True
+    pristine = _fresh_recipe_hash(str(Path(project_root).resolve()))
+    if pristine is not None and pristine != doc.get("recipe_hash_pristine"):
+        pristine_ok = False
+        drift.append("recipe_hash_pristine")
+    if pristine is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：配置面建图时可构建、现在不可构建 → 并入漂移面
+        # （refresh 阶梯据此走全量腿；全量腿在 recipe 构建处具名失败）。
+        pristine_ok = False
+        drift.append("recipe_unbuildable")
+    return changed, drift, pristine_ok
+
+
+def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
+                               changed: list[str], timeout_s: int,
+                               gherkin_arm_full_reason: "str | None" = None
+                               ) -> None:
+    """增量续新（只重跑失效面）：目标面取自基线 target_files（建图时
+    的测量宇宙），recipe 由当前树现场构建（build_recipe 单源）。
+    §SPEC-029 表 #5：不可归因变更（`uid://`/动态 load/非 .gd——
+    increment 的 unknown_changed_paths 具名判定）→ 具名全量重建
+    （不作为用户可见错误）。"""
+    from .truth_select import load_map
+    from ..measurement.increment import (
+        IncrementError, run_attribution_increment,
+    )
+    from ..measurement.recipe import build_recipe
+
+    # C3-R14（§SPEC-025 表守恒）：基线缺 `test_verdicts` 键时增量续新
+    # 会把它"补"成一张空表——表在场检查反而通过、静默消费。具名拒绝，
+    # 走全量重建（结构性缺失不可增量）。
+    if "test_verdicts" not in (doc or {}):
+        raise BaselineSourceError(
+            "incremental renewal refused: baseline map is missing "
+            "`test_verdicts` (§SPEC-025) — incremental would fabricate "
+            "an empty table; full rebuild required")
+    root = Path(project_root).resolve()
+    recipe, error = build_recipe(root)
+    if error is not None:
+        raise BaselineSourceError(
+            f"prepare renewal failed (recipe build): {error}")
+    targets = [str(root / t) for t in (doc.get("target_files") or [])]
+    targets = [t for t in targets if Path(t).is_file()]
+    if not targets:
+        raise BaselineSourceError(
+            "prepare renewal failed: no measurable targets in map")
+    # C3-R3/R5 项2：增量产物先写唯一 tmp → **校验通过后**原子替换目标
+    # （旧 map 字节在任一失败路径下不变；此前"先替换后校验"，校验失败
+    # 时目标已被换成不新鲜产物——与报错文字矛盾）
+    # C3-R14（D1 唯一临时产物）：固定名 `.renew-tmp` 在并发下会被对端
+    # `finally` unlink 掉——败者 FileNotFoundError 且旧图字节被误动。
+    # 带进程唯一后缀，清理仍由本进程 finally 承担。
+    import os as _os
+    import uuid as _uuid
+
+    tmp = f"{path}.renew-tmp.{_os.getpid()}.{_uuid.uuid4().hex[:8]}"
+    try:
+        run_attribution_increment(
+            project_root, targets, recipe, path, changed, tmp,
+            timeout_s=timeout_s,
+            gherkin_arm_full_reason=gherkin_arm_full_reason)
+        import os as _os
+        tmp_doc = load_map(tmp)
+        assert_map_fresh(project_root, tmp_doc, targets)
+        _os.replace(tmp, path)
+    except IncrementError as e:
+        if "unknown_changed_paths" in str(e):
+            print("mutation prepare: changed path(s) not attributable "
+                  "(non-.gd / uid:// / dynamic load) — named full "
+                  "rebuild (§SPEC-029 #5)", file=sys.stderr)
+            return _prepare_full_rebuild(project_root, targets, path,
+                                         timeout_s)
+        raise BaselineSourceError(
+            f"prepare renewal failed (increment): {e}") from e
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def _prepare_full_rebuild(project_root: str, files: list[str], path: str,
+                          timeout_s: int) -> None:
+    """全脸重建（measure run 同形态；recipe pristine 失配/结构性漂移
+    不可增量）——宇宙 = §SPEC-031 清单 production 全集（§SPEC-029）。
+
+    C3-R3 项2：**不删旧 map**——ensure_map(force=True) 直接原子替换
+    默认位置目标路径；生成/校验失败时旧 map 字节不变。"""
+    from .truth_select import MutationSelectionError, ensure_map
+
+    build_files = _production_universe(project_root, files)
+    try:
+        ensure_map(project_root, build_files, timeout_s=timeout_s,
+                   force=True)
+    except MutationSelectionError as e:
+        raise BaselineSourceError(
+            f"prepare renewal failed (rebuild): {e}") from e
+
+
+def prepare_map_for_baseline(project_root: str, files: list[str],
+                             timeout_s: int = 600) -> str:
+    """§SPEC-021/032：map 源判定基线的 prepare（薄适配器）——阶梯本体
+    已收口 `map_contract.refresh`（D1：create/increment/full 决策、锁内
+    复检、装填后校验单源）；本适配器只返回可用 map 路径。"""
+    from .map_contract import refresh
+    from .truth_select import SelectionError as _SelErr
+
+    try:
+        refresh(project_root, files, timeout_s=timeout_s)
+    except _SelErr as e:
+        # F4：装/检阶段的 SelectionError（坏 JSON 等）→ 具名
+        # BaselineSourceError（CLI 零 traceback）
+        raise BaselineSourceError(str(e)) from e
+    # 旧防线保留（与契约装填后校验同向——verify 具名口径沿用）
+    return _verify_prepared(project_root, files)
+
+
+def _verify_prepared(project_root: str, files: list[str]) -> str:
+    """续新后一致性复检：失配即具名 fail-loud（不静默进入 run）。"""
+    from .truth_select import load_map, map_path
+
+    path = map_path(Path(project_root).resolve())
+    if not path:
+        raise BaselineSourceError(
+            "prepare renewal produced no map at the default path")
+    try:
+        doc = load_map(path)
+        _assert_fresh(project_root, doc, files)
+    except Exception as e:
+        # 异常类型分类（MutationSelectionError 等）在此无差异披露——
+        # 两路同文，收敛为单一具名出口（疑似未完成的分类意图，已登记
+        # 交 Leader 复核）。
+        raise BaselineSourceError(
+            f"prepare renewal still inconsistent: {e}") from e
+    states = doc.get("arms_state") or {}
+    if not states or all(st.get("state") not in ("valid", "disabled")
+                         for st in states.values()):
+        raise BaselineSourceError(
+            "prepare renewal produced a map without a valid arm")
+    return path

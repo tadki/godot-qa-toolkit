@@ -257,9 +257,14 @@ def _core_setup(file_path, project_root, tests_glob, binary_kind,
     # SEE-1604 D2：dry-run 抑制映射续新（allow_renew=False）——清点操作
     # 绝不拉起全链 GUT；陈旧/自锁映射降级未圈定清点。
     with clock.stage("test_scan"):
+        # §SPEC-032/D1：run 阶段不再自己续新 map（prepare 后再漂移 →
+        # 既有具名失败、零 mutant）——renew 固定 False
         tests_glob, selection_meta = _resolve_auto_glob(
             tests_glob, str(path), project_root, selection_meta,
-            select_mode=select_mode, allow_renew=not dry_run)
+            select_mode=select_mode, allow_renew=False)
+    global _FACE_SCRIPT_BY_BASENAME
+    _FACE_SCRIPT_BY_BASENAME = {
+        Path(t).name: t for t in (selection_meta.get("tests") or [])}
     original_src = path.read_text(encoding="utf-8")
     kind = binary_kind or detect_binary_kind()
     target_res_early = _res_path_of(str(path), str(project_root))
@@ -668,10 +673,15 @@ def _run_mutation_core(file_path: str, project_root: str, budget: int = 50,
     _ACTIVE_ALLOW_TESTS = None
     _ta = (selection_meta or {}).get("tests_allow") or {}
     if _ta and killbail.resolve_test_filter():
+        # C3-R21（D2）：宿主 face 过滤按收集脚本 basename 匹配（选择
+        # wrapper 与原件同名）——真建图身份的脚本段是 res:// 全路径，
+        # 统一归一为 basename 下发（合成夹具的裸 basename 不受影响）。
         _ACTIVE_ALLOW_TESTS = (
-            [[str(i).partition("::")[0], str(i).partition("::")[2]]
+            [[Path(str(i).partition("::")[0]).name,
+              str(i).partition("::")[2]]
              for i in (_ta.get("identities") or [])]
-            + [[str(s2), "*"] for s2 in (_ta.get("script_lane") or [])])
+            + [[Path(str(s2)).name, "*"]
+               for s2 in (_ta.get("script_lane") or [])])
     global _ACTIVE_ALLOW_SCOPE
     _ACTIVE_ALLOW_SCOPE = str(_ta.get("scope") or "line") if _ta else None
     scoped = tests_glob is not None
@@ -754,6 +764,9 @@ _LEG_TIMEOUT_FLOOR = 120
 # 由 _loop_baseline 每轮重置；供（1）宿主红测跳过配对（2）同名列 kill 判
 # 定的保守豁免。空集 = 基线流无脚本标题可解析 → 回退裸名语义。
 _BASELINE_RED_MAP: set[tuple[str, str]] = set()
+# §SPEC-032/D13：行选面 wrapper basename → 原脚本 res:// 完整路径
+# （选择目录物化保名；同名歧义由选择目录具名拒绝——see1581）
+_FACE_SCRIPT_BY_BASENAME: dict[str, str] = {}
 
 # SEE-1610 §SPEC-IMPL：本 run 的 test 级 allowlist（selection_meta.tests_allow
 # 解析产物：[script, name] / [script, "*"]）。None = 本腿不启用过滤（开关
@@ -762,6 +775,16 @@ _BASELINE_RED_MAP: set[tuple[str, str]] = set()
 _ACTIVE_ALLOW_TESTS: list | None = None
 # 闭包形态（"line"|"file"；None=未启用）。file = 归因有损文件的整文件面。
 _ACTIVE_ALLOW_SCOPE: str | None = None
+# C3-R29（D7）：基线脏中止的实际触发旗标（--fail-on-red-baseline 与
+# --break-on-baseline-failure 通道合流共用一出口；CLI 派发时按真实旗标
+# 设置，库内直调保持旧默认文案）。
+_BASELINE_BREAK_TRIGGER: str = "--break-on-baseline-failure"
+
+
+def set_baseline_break_trigger(flag: str) -> None:
+    """CLI 派发单点：登记实际触发的基线脏中止旗标（D7 文案指向真实者）。"""
+    global _BASELINE_BREAK_TRIGGER
+    _BASELINE_BREAK_TRIGGER = flag
 
 def _run_single_mutant(m: Mutant, path, project_root: str, original_src: str,
                        backup: str, tests_glob: str | None, seq: int,
@@ -869,13 +892,70 @@ def _run_cold_legs(path, project_root, original_src, backup, mutants,
                                            scopes or {}, time.time()))
     return raw_pairs
 
+def _synthesized_map_baseline(path, project_root, tests_glob):
+    """SEE-1631 §SPEC-020：判定基线单一真源——map 源时由 verdict 表合成
+    既有形状的快照（下游解析/判定零改动）；非 map 源/显式 off 返回 None
+    （冷启动照旧）。
+
+    §SPEC-021：prepare 阶段（CLI）已自动续新；此处为库内直调兜底——
+    合成前再校验一致性，漂移即具名 fail-loud（不静默退化、run 期零续新，
+    §SPEC-032 ④：D1 run 只读）。引擎重新导入已在 CLI prepare 链中先于
+    refresh 完成（C3-R11 退回2 根因修复：侧车纳入 map 指纹）。"""
+    from .truth_select import mode as _map_mode
+    from .verdict_source import (
+        BaselineSourceError, baseline_source, map_baseline_snapshots,
+    )
+
+    if baseline_source() != "map" or _map_mode() == "off":
+        return None
+    try:
+        syn, _fail = map_baseline_snapshots(
+            [str(path)], project_root, tests_glob)
+    except BaselineSourceError as e:
+        raise BaselineSourceError(
+            f"loop baseline: {e}") from e
+    snap = syn.get(tests_glob) or syn.get(None)
+    if snap is None:
+        raise BaselineSourceError(
+            "loop baseline: map produced no baseline snapshot "
+            f"for glob {tests_glob!r}")
+    print("mutation: verdict baseline sourced from attribution "
+          "map (§SPEC-020; cold start skipped)", file=sys.stderr)
+    return snap
+
+
+def _worker_branch_baseline(baseline_failures, baseline_dirty,
+                            red_pairs) -> tuple:
+    """C3-R10 退回4：chunk 路径 baseline_failures 恒空（map 红集经
+    executor 填入 _BASELINE_RED_MAP，ProcessPool 子进程全局不复用）——
+    map 红集非空时视同基线脏并填充失败集/红对，让 worker parity 门拿到
+    真实期望集（负对照：map 谎报红 → 整批作废）。"""
+    from .verdict_source import baseline_source as _bs
+
+    wf_baseline_failures = baseline_failures
+    wf_dirty = baseline_dirty
+    wf_red_pairs = red_pairs
+    if _bs() == "map" and _BASELINE_RED_MAP:
+        if not wf_baseline_failures:
+            wf_baseline_failures = {n for _s, n in _BASELINE_RED_MAP}
+        if not wf_red_pairs:
+            wf_red_pairs = sorted(_BASELINE_RED_MAP)
+        wf_dirty = True
+    return wf_baseline_failures, wf_dirty, wf_red_pairs
+
+
 def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
                    precomputed_baseline, timeout_factor,
                    break_on_baseline_failure: bool = False) -> tuple:
     """workdir 备份 + baseline 实测/复用 + 自适应 timeout 锚 + 启动失败守卫。
-    baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。"""
+    判定基线优先复用调用方预取的快照（地图源判定基线，§SPEC-021/决策 6
+    单一真源）；无快照时才实测——实测 rc/tail 是判定语义锚；快照
+    elapsed 只喂预算锚。"""
     backup_path = os.path.join(workdir, "original.gd")
     shutil.copy2(str(path), backup_path)
+    if precomputed_baseline is None:
+        precomputed_baseline = _synthesized_map_baseline(
+            path, project_root, tests_glob)
     if precomputed_baseline is not None:
         baseline_rc = int(precomputed_baseline["rc"])
         baseline_tail = str(precomputed_baseline["tail"])
@@ -905,15 +985,22 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
     # 零 mutant GUT（对齐 Stryker break-on-initial-test-failure=true）。
     if break_on_baseline_failure and baseline_failures:
         raise _BaselineDirtyFailure(baseline_failures)
+    # SEE-1631 §SPEC-022（Owner 终裁）：map 新鲜且与当前树一致时，跑
+    # mutant 之前不执行任何未插桩全脸基线/验证运行——判定基线 = map
+    # verdict 表（树一致性已在合成前 fail-loud 门承担）。残余通道内不
+    # 一致由既有 parity 门 / re-canary / 失配整批作废守护兜底。
+    # C3-R10 退回4：合成基线在函数内部生成时回传给调用方——否则
+    # _map_parity_gate 拿到的 precomputed_baseline 仍是 None，--select
+    # full 入口的"map 与实跑分歧整批作废"负对照失效。
     return baseline_failures, bool(baseline_failures), baseline_reused, \
-        baseline_elapsed
+        baseline_elapsed, precomputed_baseline
 
 def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                baseline_failures, baseline_dirty, slot, auto_name, target_rel,
                target_res, kind, idpack, exec_scheme_resolved, worker_channel,
                reporter, store2, prior_entries, scopes, clock, slot_info,
                t_slot, kill_bail=False, direct_scripts=None,
-               red_pairs=None) -> list:
+               red_pairs=None, baseline_snapshot: dict | None = None) -> list:
     """beacon 播种 → worker/冷腿执行 → 槽归还断言与 slot_sync 计时。"""
     ownership_holder: list = []
 
@@ -937,14 +1024,17 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
             directdrive.seed_direct_host(slot.root)
         if use_worker:
             from .worker_channel import execute_worker_branch
+            wf_baseline_failures, wf_dirty, wf_red_pairs = \
+                _worker_branch_baseline(baseline_failures, baseline_dirty,
+                                        red_pairs)
             with clock.stage("per_mutant"):
                 raw_pairs, fatal_events = execute_worker_branch(
                     path, project_root, original_src, mutants, tests_glob,
-                    baseline_failures, baseline_dirty, slot, auto_name,
+                    wf_baseline_failures, wf_dirty, slot, auto_name,
                     target_rel, target_res, kind, reporter, store2,
                     prior_entries, scopes, _ownership,
                     timings_out=timings_out, kill_bail=kill_bail,
-                    tests_scripts=direct_scripts, red_pairs=red_pairs,
+                    tests_scripts=direct_scripts, red_pairs=wf_red_pairs,
                     baseline_red_map=_BASELINE_RED_MAP,
                     allow_tests=_ACTIVE_ALLOW_TESTS,
                     expected_scheme=exec_scheme_resolved)
@@ -984,6 +1074,82 @@ def _test_filter_disclosure(active_allow) -> dict:
         # SEE-1610 D1：闭包形态（file = 归因有损文件整文件面回退）。
         "scope": _ACTIVE_ALLOW_SCOPE if at else None}
 
+def _map_parity_gate(slot_info: dict, precomputed_baseline) -> None:
+    """SEE-1631 §SPEC-020：map 源判定基线下 parity 门失配 = "map 说绿
+    而执行红（或反之）"被实跑证伪——整批作废、具名 fail-loud（不得
+    降级继续产出批量假 kill）。冷源（legacy）维持原降级语义。"""
+    if not baseline_snapshot_from_map(precomputed_baseline):
+        return
+    for ev in slot_info.get("worker_fatal_events") or []:
+        if str(ev).startswith("mode parity gate"):
+            from .verdict_source import BaselineSourceError
+
+            raise BaselineSourceError(
+                "baseline_map_mismatch: attribution-map verdict "
+                "baseline diverged from real execution "
+                f"(parity gate) — batch invalidated: {ev}")
+
+
+def _mutant_slot_disclosures(slot_info: dict, idpack: dict, slot,
+                             baseline_dirty: bool, baseline_failures,
+                             break_on_baseline_failure: bool,
+                             bail_effective, bail_face, kill_bail,
+                             bail_scripts) -> None:
+    """slot_info 判定与披露字段登记（键序与既有产物形状逐项一致）。"""
+    slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
+    slot_info["slot_mode"] = slot.mode
+    slot_info["freshness"] = list(slot.freshness)
+    # SEE-1606 P2：基线失败登记披露（默认继续跑；失败测试不参与 kill
+    # 判定——判定侧 `- baseline_failures` 差集保证）。
+    slot_info["baseline_dirty"] = baseline_dirty
+    slot_info["baseline_failures"] = len(baseline_failures)
+    slot_info["baseline_failure_names"] = sorted(baseline_failures)
+    slot_info["break_on_baseline_failure"] = bool(
+        break_on_baseline_failure)
+    slot_info["kill_bail"] = bail_effective
+    slot_info["kill_bail_face"] = bail_face
+    slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
+    slot_info["kill_bail_scripts"] = (
+        len(bail_scripts) if bail_scripts is not None else None)
+    # SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
+    # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
+    slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
+
+
+def _map_reds_dirty(red_map) -> bool:
+    """C3-R10 退回4：chunk/worker 路径的 baseline_failures 恒空（map 红
+    集经 executor 填入 _BASELINE_RED_MAP）——map 红集非空时视同基线脏，
+    启用 skip 与 parity 门（负对照：map 谎报红 → parity 腿全脸实测绿 →
+    失配整批作废）。"""
+    from .verdict_source import baseline_source as _bs
+
+    return _bs() == "map" and bool(red_map)
+
+
+class _SkipDecision:
+    """skip/parity 门判定结果（C3-R10 退回4：dirty_eff 单点判定）。"""
+
+    def __init__(self, dirty, worker_host, bail_scripts, skip_applied):
+        self.dirty = dirty
+        self.worker_host = worker_host
+        self.bail_scripts = bail_scripts
+        self.skip_applied = skip_applied
+
+
+def _skip_decision(baseline_failures, red_map, dirty_eff, bail_scripts,
+                   identity, face_kind=None):
+    """§SPEC-P2-R1：冷通道无法物理跳过红测试的面（显式目录/全脸/缺
+    gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。"""
+    worker_host = (dirty_eff and (identity or {}).get("exec_scheme")
+                   == WORKER_SCHEME)
+    if dirty_eff and bail_scripts is None and not worker_host:
+        face_kind = face_kind or "unsupported_explicit_or_full"
+        raise _BaselineSkipUnsupportedFace(
+            sorted(baseline_failures) or sorted(red_map), face_kind)
+    skip_applied = dirty_eff and (bail_scripts is not None or worker_host)
+    return _SkipDecision(dirty_eff, worker_host, bail_scripts, skip_applied)
+
+
 def _run_mutant_loop(
     path, project_root: str, original_src: str, backup: str,
     mutants: list[Mutant], tests_glob: str | None, timeout_s: int,
@@ -1003,18 +1169,20 @@ def _run_mutant_loop(
         # 实跑重解析漂移即具名失败（零 baseline 支付、零槽写入）。
         _preflight_route_check(identity, project_root, path, worker_channel)
         (baseline_failures, baseline_dirty, baseline_reused,
-         baseline_elapsed) = _loop_baseline(workdir, path, project_root,
-                                            tests_glob, timeout_s,
-                                            precomputed_baseline,
-                                            timeout_factor,
-                                            break_on_baseline_failure)
+         baseline_elapsed, precomputed_baseline) = _loop_baseline(
+            workdir, path, project_root,
+            tests_glob, timeout_s,
+            precomputed_baseline,
+            timeout_factor,
+            break_on_baseline_failure)
         clock = clock or StageClock()
         # SEE-1606 §SPEC-P3：kill 即退有效开关在此解析（env/flag 单点），
         # 直驱脚本清单按面判定一次并贯穿 cold/worker 两条腿路径。
         bail_effective = killbail.resolve_kill_bail(kill_bail)
-        dirty = bool(baseline_failures)
+        dirty_eff = (bool(baseline_failures)
+                     or _map_reds_dirty(_BASELINE_RED_MAP))
         bail_scripts, bail_face, bail_gut_ok = _cold_direct_decision(
-            bail_effective, str(project_root), tests_glob, dirty=dirty)
+            bail_effective, str(project_root), tests_glob, dirty=dirty_eff)
         # SEE-1606 §SPEC-PERF1：历史杀手优先排序（仅置换清单，verdict 语义
         # 不变；缺失历史确定性原序；env 可关断）。
         bail_scripts = _ordered_bail_scripts(
@@ -1023,46 +1191,30 @@ def _run_mutant_loop(
         # gut.gd）+ 基线脏 → 具名拒绝；worker 通道（可控宿主）不受限。
         # §SPEC-P1：通道判读消费权威 scheme（不再重解析——preflight 门已
         # 保证 setup 权威与实跑一致）。
-        worker_host = (dirty and (identity or {}).get("exec_scheme")
-                       == WORKER_SCHEME)
-        if dirty and bail_scripts is None and not worker_host:
-            raise _BaselineSkipUnsupportedFace(
-                sorted(baseline_failures), bail_face)
-        skip_applied = dirty and (bail_scripts is not None or worker_host)
+        skip = _skip_decision(baseline_failures, _BASELINE_RED_MAP,
+                              dirty_eff, bail_scripts, identity,
+                              face_kind=bail_face)
         (slot, idpack, auto_name, target_rel, target_res, scheme,
          slot_info, t_slot) = _loop_slot(
             project_root, path, detect_binary_kind(), identity, tests_glob,
             worker_channel, targeted_only, clock)
-        red_pairs = sorted(_BASELINE_RED_MAP) if (dirty and skip_applied) \
-            else []
+        red_pairs = sorted(_BASELINE_RED_MAP) if skip.skip_applied else []
         raw_pairs = _loop_legs(
             path, project_root, original_src, backup, mutants, tests_glob,
             baseline_failures, baseline_dirty, slot, auto_name, target_rel,
             target_res, detect_binary_kind(), idpack, scheme, worker_channel,
             reporter, store2, prior_entries, scopes, clock, slot_info, t_slot,
-            bail_effective, bail_scripts, red_pairs)
-        slot_info["inject_scheme"] = idpack.get("inject_scheme", INJECT_SCHEME)
-        slot_info["slot_mode"] = slot.mode
-        slot_info["freshness"] = list(slot.freshness)
-        # SEE-1606 P2：基线失败登记披露（默认继续跑；失败测试不参与 kill
-        # 判定——判定侧 `- baseline_failures` 差集保证）。
-        slot_info["baseline_dirty"] = baseline_dirty
-        slot_info["baseline_failures"] = len(baseline_failures)
-        slot_info["baseline_failure_names"] = sorted(baseline_failures)
-        slot_info["break_on_baseline_failure"] = bool(
-            break_on_baseline_failure)
-        slot_info["kill_bail"] = bail_effective
-        slot_info["kill_bail_face"] = bail_face
-        slot_info["kill_bail_disabled_by"] = killbail.disabled_by(kill_bail)
-        slot_info["kill_bail_scripts"] = (
-            len(bail_scripts) if bail_scripts is not None else None)
-        # SEE-1610 §SPEC-JSON：test_filter 摘要披露（开关 + 实际下发规模；
-        # 逐腿 kept/removed/whole_script_fallback 在 verdict.test_face）。
-        slot_info["test_filter"] = _test_filter_disclosure(_ACTIVE_ALLOW_TESTS)
-        if dirty:
+            bail_effective, bail_scripts, red_pairs,
+            baseline_snapshot=precomputed_baseline)
+        _map_parity_gate(slot_info, precomputed_baseline)
+        _mutant_slot_disclosures(
+            slot_info, idpack, slot, baseline_dirty, baseline_failures,
+            break_on_baseline_failure, bail_effective, bail_face, kill_bail,
+            bail_scripts)
+        if skip.dirty:
             slot_info["baseline_skip"] = _baseline_skip_slot_info(
-                slot_info, dirty=dirty, skip_applied=skip_applied,
-                worker_host=worker_host, bail_face=bail_face,
+                slot_info, dirty=skip.dirty, skip_applied=skip.skip_applied,
+                worker_host=skip.worker_host, bail_face=bail_face,
                 bail_scripts=bail_scripts,
                 requested=len(baseline_failures))
         if any(v["verdict"] == "survived" for _, v in raw_pairs):
@@ -1103,6 +1255,12 @@ def _baseline_skip_disclosure(*, dirty: bool, skip_applied: bool,
         out["degraded"] = True
         out["degrade_reason"] = degrade_reason or "worker_degraded_cold"
     return out
+
+
+def baseline_snapshot_from_map(precomputed_baseline: dict | None) -> bool:
+    """SEE-1631 §SPEC-020：当前判定基线是否来自 attribution map。"""
+    return bool(precomputed_baseline
+                and precomputed_baseline.get("source") == "map")
 
 
 def _worker_degraded_state(slot_info: dict) -> tuple[bool, str | None]:
@@ -1222,8 +1380,11 @@ def _run_mutant_loop_with_aborts(path, project_root, original_src, backup,
     except _BaselineDirtyFailure as e:
         # SEE-1606 P2：显式 --break-on-baseline-failure 下的基线脏中止。
         # 默认路径不走这里（继续跑 + 失败测试退出 kill 判定）。
+        # C3-R29（D7）：文案指向实际触发的旗标（--fail-on-red-baseline
+        # 与本旗标通道合流后共用此出口）。
         from .reporting import _break_on_baseline_result
-        return _break_on_baseline_result(str(path), e.names)
+        return _break_on_baseline_result(str(path), e.names,
+                                         trigger=_BASELINE_BREAK_TRIGGER)
     except _BaselineSkipUnsupportedFace as e:
         # §SPEC-P2-R1：基线脏 ∧ 冷通道面无法物理跳过 → 具名拒绝（结构性
         # 限制的最小可执行方案：拒绝，不退回「跑了但不算」）。

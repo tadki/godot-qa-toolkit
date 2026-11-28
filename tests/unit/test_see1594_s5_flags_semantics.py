@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 REPO = Path(__file__).resolve().parents[2]
@@ -75,14 +77,24 @@ class TestA19SharedBaseline:
 
 class TestA20FullFaceNoPrebuild:
     def test_full_face_skips_map_bootstrap(self, tmp_path, monkeypatch):
-        """A20：--select full 无映射也不阻断——ensure_map 不被调用。"""
+        """A20（SEE-1631 §SPEC-021/022 映射）：cold 源下 --select full
+        仍不预建/校验映射（原契约）；map 源（默认）下判定基线 = map，
+        full 面同样走 prepare 自动续新（ensure_map 被调用一次）。"""
         from godot_qa_toolkit import cli
-        from godot_qa_toolkit.mutation import truth_select as _truth
+        from godot_qa_toolkit.mutation import map_contract as _mc
+        from godot_qa_toolkit.mutation.verdict_source import (
+            ENV_BASELINE_SOURCE,
+        )
         calls = {"ensure": 0}
 
         def boom(*a, **k):
             calls["ensure"] += 1
-            raise _truth.MutationSelectionError("unrelated_map_failure")
+            # C3-R13 退回1：注入 BaselineSourceError 族（refresh 内部步
+            # 建图/重建/增量失败的真实类型）——不得靠换异常类型绕过
+            from godot_qa_toolkit.mutation.verdict_source import (
+                BaselineSourceError,
+            )
+            raise BaselineSourceError("unrelated_map_failure")
 
         proj = tmp_path / "proj"
         (proj / "src_game").mkdir(parents=True)
@@ -97,7 +109,9 @@ class TestA20FullFaceNoPrebuild:
 
         monkeypatch.setattr(cli, "_bootstrap_import_or_contract",
                             lambda *a, **k: None)
-        monkeypatch.setattr(_truth, "ensure_map", boom)
+        # C3-R12：prepare 续新收口单点 _prepare_map_fresh——判据不变：
+        # prepare 自动续新必须发生。
+        monkeypatch.setattr(cli, "_prepare_map_fresh", boom)
         monkeypatch.setattr(
             cli, "_dispatch_mutation",
             lambda args, kind: {"tool": "mutation", "ok": True,
@@ -107,10 +121,25 @@ class TestA20FullFaceNoPrebuild:
             "mutation", str(proj / "src_game" / "cell.gd"),
             "--project-root", str(proj), "--select", "full",
         ])
+        # cold 源（legacy）：A20 原契约——full 不预建不校验
+        monkeypatch.setenv(ENV_BASELINE_SOURCE, "cold")
         rc = cli.cmd_mutation(args)
         assert calls["ensure"] == 0, (
-            "A20：显式 full 不得预建/校验映射")
+            "cold 源：显式 full 不得预建/校验映射")
         assert rc == 0
+        # map 源（§SPEC-020/021 默认）：full 面同样走 prepare 自动续新
+        monkeypatch.setenv(ENV_BASELINE_SOURCE, "map")
+        from godot_qa_toolkit.mutation.truth_select import map_path as _mp
+
+        _mp_file = _mp(Path(proj))
+        if _mp_file and Path(_mp_file).is_file():
+            Path(_mp_file).unlink()
+        calls["ensure"] = 0
+        rc = cli.cmd_mutation(args)
+        assert calls["ensure"] == 1, (
+            "map 源：full 面判定基线 = map，prepare 自动续新必须发生")
+
+
 
 
 class TestA22CentralFreshness:
@@ -120,10 +149,13 @@ class TestA22CentralFreshness:
         map_file = root / ".qa-cache" / "attribution-map.json"
         map_file.parent.mkdir(parents=True, exist_ok=True)
         recipe, error = build_recipe(root)
-        raw = recipe_hash({k: v for k, v in recipe.items()
-                           if k != "recipe_hash"}) if error is None else "rh"
+        raw = (recipe_hash({k: v for k, v in recipe.items()
+                            if k != "recipe_hash"})
+               if error is None else "rh")
+        pristine = (attribution_fixtures.pristine_recipe_hash(root)
+                    if error is None else "rh")
         doc = {"schema_version": "test-attribution/6",
-               "recipe_hash_pristine": raw,
+               "recipe_hash_pristine": pristine,
                "arms_state": {"gut_full": {"state": "valid", "bundles": 1,
                                            "pairs": 1, "probes_fired": 100,
                                            "vacuous": False}},

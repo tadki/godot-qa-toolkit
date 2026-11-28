@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import attribution_fixtures
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 
@@ -115,7 +117,7 @@ class TestH3BranchLineMapping:
         import json
 
         import attribution_fixtures as fx
-        from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+        from godot_qa_toolkit.measurement.recipe import build_recipe
         import godot_qa_toolkit.coverage.runner as c
 
         proj, target = _write_project(tmp_path, target_src=self.GD)
@@ -125,12 +127,14 @@ class TestH3BranchLineMapping:
         fx.install_recipe(proj)
         recipe, error = build_recipe(proj)
         assert error is None
-        raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+        # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+        raw = fx.report_recipe_hash(proj)
+        pristine = fx.pristine_recipe_hash(proj)
         rel = "target.gd"  # _write_project 的目标名
         covered = [5]  # false 路径：else 头行 4 + else 体行 5 覆盖；行 3 未覆盖
         doc = {
-            "schema_version": "test-attribution/6",
-            "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+            "schema_version": "test-attribution/7",
+            "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
             "project_root": str(proj), "identity": "test_x.gd::test_a",
             "causal": {"enabled": False},
             "file_sha256": {rel: hashlib.sha256(
@@ -155,7 +159,10 @@ class TestH3BranchLineMapping:
                                         "invalid_reason": None, "bundles": 1,
                                         "pairs": 1, "probes_fired": 2,
                                         "vacuous": False}},
-            "notes": []}
+            "notes": [],
+            "test_verdicts": {"test_x.gd::test_a": {
+                "verdict": "green", "classification": "pre_existing"}},
+            "feature_sha256": fx._feature_sha_of(proj)}
         (proj / ".qa-cache").mkdir()
         (proj / ".qa-cache" / "attribution-map.json").write_text(
             json.dumps(doc, ensure_ascii=False), encoding="utf-8")
@@ -282,7 +289,28 @@ class TestH5SuspectGatesOk:
         from godot_qa_toolkit.mutation.runner import run_mutation
 
         proj, target = _write_project(tmp_path)
-        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n    [Failed]: boom\n")
+        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n"
+                    "    [Failed]: boom\nRan 2 tests.\nRun Summary\n")
+        monkeypatch.setattr(
+            "godot_qa_toolkit.mutation.runner._run_gut_on_project",
+            lambda root, timeout_s=60, tests_glob=None: dirty,
+        )
+        glob = _materialize_selection(proj, ["test_a.gd"])
+        result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
+        # SEE-1631 §SPEC-027/D7（QA 裁决 + Leader 复核修正）：无跳过原语
+        # 车道失败 ⊆ 基线红且整面执行完（Run Summary 在场）→ survived；
+        # 非 kill 不给 ok=true。
+        assert result["summary"].get("survived", 0) > 0
+        assert result["ok"] is False, "survived still gates ok (not killed)"
+
+    def test_no_full_face_evidence_stays_suspect(self, tmp_path, monkeypatch):
+        """反例：失败 ⊆ 基线红但无收尾汇总（腿中止）→ 保持 suspect
+        （绿杀手可能根本没执行——不可判真实存活）。"""
+        from godot_qa_toolkit.mutation.runner import run_mutation
+
+        proj, target = _write_project(tmp_path)
+        dirty = (1, "---- 1 failing tests ----\n* test_old_flaky\n"
+                    "    [Failed]: boom\n")  # 无 Run Summary
         monkeypatch.setattr(
             "godot_qa_toolkit.mutation.runner._run_gut_on_project",
             lambda root, timeout_s=60, tests_glob=None: dirty,
@@ -290,7 +318,7 @@ class TestH5SuspectGatesOk:
         glob = _materialize_selection(proj, ["test_a.gd"])
         result = run_mutation(str(target), str(proj), budget=2, tests_glob=glob)
         assert result["summary"].get("suspect", 0) > 0
-        assert result["ok"] is False, "suspect must gate ok (cannot prove killed)"
+        assert result["summary"].get("survived", 0) == 0
 
 
 class TestH6BudgetZeroNoBaseline:

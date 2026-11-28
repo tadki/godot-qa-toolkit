@@ -124,6 +124,9 @@ class LazyScenarioGodot:
             return self._resp(0, self._acceptance_flow(cmd, k.get("env") or {}))
         if "-gpre_run_script=" in cmd:
             self._write_sinks(k.get("env") or {})
+            if self.scenario == "green":
+                # SEE-1631 §SPEC-019：全绿场景（插桩零失败）
+                return self._resp(0, _FAIL_FLOW.replace("[Failed]", "[Passed]"))
             return self._resp(1, _FAIL_FLOW)
         # 懒基线运行（无插桩无钩子）
         self.lazy_calls.append(argv)
@@ -228,7 +231,13 @@ class TestS63LazyBaselineRunMeasurement:
         assert gut["test_failures"]["new"] == []
         assert "res://tests/unit/test_game.gd::test_font_row" \
             in gut["test_failures"]["instrumentation_intolerant"]
-        assert report["ok"] is False  # union 空（暂停契约），非臂门禁
+        # SEE-1631：默认双臂恢复——ok 跟随 gherkin 臂有效性（无 Godot
+        # 形态下 validator 预检缺二进制 → 臂具名 invalid → union 未认证；
+        # suspected 车道判定（上方断言）不依赖 union 结果）
+        gherkin_arm = next((a for a in report["arms"]
+                            if isinstance(a, dict)
+                            and a.get("arm") == "gherkin"), {})
+        assert report["ok"] is (gherkin_arm.get("state") == "valid")
 
     def test_acquisition_fail_fail_loud(self, project, tmp_path, capsys):
         """基线获取失败（无运行流）→ 具名 stderr、臂保持 invalid，
@@ -381,23 +390,73 @@ class TestS63EnsureMapEntry:
         doc = json.loads(Path(out).read_text(encoding="utf-8"))
         assert (doc["arms_state"]["gut_full"]["state"]) == "valid"
         meta = doc.get("baseline_failures_meta")
-        # §SPEC-PREFLIGHT：基线臂前置后，基线经预检结果显式传 arms（P4
-        # 零懒获取）——meta 为 explicit_param（含 pairs+sha，信息不倒退；
-        # 未插桩获取事实由 stderr 预检摘要承载）
-        assert meta and meta["method"] == "explicit_param"
-        assert meta["count"] >= 0 and "pairs" in meta
+        # SEE-1631 §SPEC-019：无前置预检——既有失败在臂门控内经懒基线
+        # 吸收（meta method=uninstrumented_run lazy=True，含 pairs），并
+        # 标 partial（excluded_tests 具名在场）
+        assert meta and meta["method"] == "uninstrumented_run"
+        assert meta.get("lazy") is True
+        assert meta.get("count", 0) >= 1 and "pairs" in meta
+        assert meta.get("status") == "partial", \
+            "既有失败吸收 = 基线 meta 标 partial"
 
-    def test_ensure_map_new_failure_fail_loud(self, project, tmp_path,
-                                               monkeypatch):
+    def test_ensure_map_all_green_no_preflight_uninstrumented_run(
+            self, project, tmp_path, monkeypatch):
+        """SEE-1631 §SPEC-019 进程账（全绿场景）：构建第一个 gut_cmdln
+        调用即插桩形态，零前置未插桩 GUT、零懒获取；臂超时沿用参数来源
+        （无预检校准）。"""
         monkeypatch.delenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE",
-                       raising=False)
+                           raising=False)
+        monkeypatch.setenv("GQT_MEASUREMENT_ARM_TIMEOUT_S", "123")
+        fake = LazyScenarioGodot(project, scenario="green")
+        sp.run = fake
+        from godot_qa_toolkit.mutation.truth_select import ensure_map
+        out = ensure_map(project, _targets(project))
+        assert out and Path(out).is_file()
+        gut_calls = [a for a in fake.calls
+                     if "gut_cmdln.gd" in " ".join(a)]
+        assert gut_calls, "至少一次插桩 GUT"
+        assert "-gpre_run_script=" in " ".join(gut_calls[0]), \
+            "首个 GUT 必须是插桩形态（无前置未插桩基线）"
+        assert fake.lazy_calls == [], "全绿场景零懒获取"
+        doc = json.loads(Path(out).read_text(encoding="utf-8"))
+        assert doc["arms_state"]["gut_full"]["state"] == "valid"
+        bfm = doc.get("baseline_failures_meta")
+        assert bfm is None, "全绿构建无基线 meta（§SPEC-019 无预检）"
+
+    def test_ensure_map_fail_on_red_refuses_install(self, project,
+                                                    tmp_path, monkeypatch):
+        """SEE-1631 §SPEC-019：显式 fail-on-red = 拒绝安装该 map 的
+        fail-loud（默认路径是吸收标 partial 照常安装）；约定路径零残留。"""
+        monkeypatch.setenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE", "1")
+        fake = LazyScenarioGodot(project, scenario="absorb")
+        sp.run = fake
+        from godot_qa_toolkit.mutation.truth_select import (
+            MutationSelectionError, ensure_map)
+
+        with pytest.raises(MutationSelectionError) as ei:
+            ensure_map(project, _targets(project))
+        assert "fail_on_red_baseline" in str(ei.value)
+        default_map = project / ".qa-cache" / "attribution-map.json"
+        assert not default_map.exists(), "拒绝安装 = 约定路径零残留"
+
+    def test_ensure_map_new_failure_routes_to_intolerance_lane(
+            self, project, tmp_path, monkeypatch, capsys):
+        """SEE-1631 §SPEC-019/017：插桩红 + 未插桩绿 = 疑似插桩不耐受——
+        具名车道 + 声明草稿（stderr），臂保持 valid，map 照常安装（不再
+        建图期 fail-loud）。"""
+        monkeypatch.delenv("GQT_MEASUREMENT_FAIL_ON_RED_BASELINE",
+                           raising=False)
         fake = LazyScenarioGodot(project, scenario="new_failure")
         sp.run = fake
         from godot_qa_toolkit.mutation.truth_select import ensure_map
-        from godot_qa_toolkit.mutation.truth_select import (
-            MutationSelectionError)
-        with pytest.raises(MutationSelectionError):
-            ensure_map(project, _targets(project))
+        out = ensure_map(project, _targets(project))
+        assert out and Path(out).is_file()
+        doc = json.loads(Path(out).read_text(encoding="utf-8"))
+        assert doc["arms_state"]["gut_full"]["state"] == "valid", \
+            "疑似插桩不耐受车道：臂保持 valid"
+        err = capsys.readouterr().err
+        assert "--intolerant-tests" in err, "声明草稿 stderr 披露"
+        assert "test_font_row" in err, "车道声明草稿具名红对"
 
 
 def test_report_version_pinned():

@@ -56,7 +56,7 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
                  arms_state=None):
     """在约定默认位置写入 /6 行级主真值映射（含完整绑定包；arms_state
     可注入畸形形态供哨兵测试）。"""
-    from godot_qa_toolkit.measurement.recipe import build_recipe, recipe_hash
+    from godot_qa_toolkit.measurement.recipe import build_recipe
 
     fx_install = fx
     from godot_qa_toolkit.measurement import recipe as _recipe_mod
@@ -64,7 +64,9 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
     fx_install.install_recipe(proj)
     recipe, error = build_recipe(proj)
     assert error is None, error
-    raw = recipe_hash({k: v for k, v in recipe.items() if k != "recipe_hash"})
+    # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+    raw = fx.report_recipe_hash(proj)
+    pristine = fx.pristine_recipe_hash(proj)
     rel = "utils/t.gd"
     ident = IDENT_A
     if arms_state is None:
@@ -89,8 +91,8 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
             gd.read_bytes()).hexdigest()
         for gd in sorted(proj.rglob("tests/**/*.gd"))
     }
-    doc = {"schema_version": "test-attribution/6",
-           "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+    doc = {"schema_version": "test-attribution/7",
+           "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
            "project_root": str(proj), "identity": ident,
            "causal": {"enabled": False},
            "file_sha256": {rel: hashlib.sha256(
@@ -100,7 +102,11 @@ def _install_map(proj: Path, covered_lines, *, probes_fired=640,
            "instrumentable_lines": {rel: [2, 3]},
            "arms": {"gut_full": arm},
            "arms_state": arms_state,
-           "notes": []}
+           "notes": [],
+           # C3-R20 迁移（B）：契约认可的地图带判定表与 feature 指纹
+           "test_verdicts": {ident: {"verdict": "green",
+                                     "classification": "pre_existing"}},
+           "feature_sha256": fx._feature_sha_of(proj)}
     out = proj / ".qa-cache" / "attribution-map.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
@@ -151,6 +157,16 @@ def test_incremental_refresh_used_on_stale(tmp_path, monkeypatch):
 
     monkeypatch.setenv(truth.ENV_MODE, "auto")
     monkeypatch.setattr(truth, "_auto_increment", fake_increment)
+    # §SPEC-035/S4：续新归 refresh 契约（resolve_selection 固定 renew=False）
+    # ——stale 由 coverage 的 ensure 单一委托 refresh 走增量，不再由 resolve
+    # 侧续新；此处以桩驱动 refresh 完成增量重装。
+    from godot_qa_toolkit.mutation import map_contract as _mc
+
+    def fake_refresh(root, files, timeout_s=600):
+        fake_increment(root, None, None, files[0] if files else None)
+        return {"fresh": True, "already_fresh": False, "view": None}
+
+    monkeypatch.setattr(_mc, "refresh", fake_refresh)
 
     out = project_file_coverage(str(proj), str(target), binary_kind="linux")
     assert calls["n"] == 1, "stale map must go through incremental refresh, not re-GUT"
@@ -257,15 +273,15 @@ class TestMalformedArmsState:
     def _write_map_with_arms(self, proj, arms_state):
         import hashlib
 
-        from godot_qa_toolkit.measurement.recipe import (build_recipe,
-                                                          recipe_hash)
+        from godot_qa_toolkit.measurement.recipe import build_recipe
         import attribution_fixtures as fx
 
         fx.install_recipe(proj)
         recipe, error = build_recipe(proj)
         assert error is None, error
-        raw = recipe_hash({k: v for k, v in recipe.items()
-                           if k != "recipe_hash"})
+        # C3-R23（R1）：夹具携带真实注入域存储哈希（工具链面进新鲜判定）
+        raw = fx.report_recipe_hash(proj)
+        pristine = fx.pristine_recipe_hash(proj)
         rel = "utils/t.gd"
         ident = IDENT_A
         tests_face = {
@@ -273,8 +289,8 @@ class TestMalformedArmsState:
                 gd.read_bytes()).hexdigest()
             for gd in sorted(proj.rglob("tests/**/*.gd"))
         }
-        doc = {"schema_version": "test-attribution/6",
-               "report_recipe_hash": raw, "recipe_hash_pristine": raw,
+        doc = {"schema_version": "test-attribution/7",
+               "report_recipe_hash": raw, "recipe_hash_pristine": pristine,
                "project_root": str(proj), "identity": ident,
                "causal": {"enabled": False},
                "file_sha256": {rel: hashlib.sha256(
@@ -294,7 +310,11 @@ class TestMalformedArmsState:
                    "script_to_lines": {},
                    "line_to_tests": {rel: {"2": [ident]}}}},
                "arms_state": arms_state,
-               "notes": []}
+               "notes": [],
+               # C3-R20 迁移（B）：契约键齐备（畸形面只注入 arms_state）
+               "test_verdicts": {ident: {"verdict": "green",
+                                         "classification": "pre_existing"}},
+               "feature_sha256": fx._feature_sha_of(proj)}
         out = proj / ".qa-cache" / "attribution-map.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")

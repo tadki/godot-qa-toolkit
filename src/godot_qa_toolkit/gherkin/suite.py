@@ -116,6 +116,7 @@ def compile_keys_to_suite(project_root: str | Path, keys: list[str],
     root = Path(project_root)
     suite_dir = Path(suite_dir)
     selected = sorted({normalize_feature_key(k) for k in keys})
+
     # DEF-B：多 key 单次调用的 out_dir 校验**只做一次**（在写入任何 key 之前）
     # ——逐 key 复检会被同批产物触发 "out_dir must be empty"。
     reason = out_dir_error(suite_dir, root)

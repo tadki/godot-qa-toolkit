@@ -84,10 +84,12 @@ def _plan_resolve_gate(tests_glob, f, project_root, selection_meta,
     attention = _warn_site_scale(f, raw_total, mutation_warning)
     selection_meta = dict(selection_meta or {})
     with clock.stage("test_scan"):
+        # §SPEC-032/D1：run 阶段零续新（prepare 专用）
         glob, selection_meta = _resolve_auto_glob(tests_glob, f,
                                                   project_root,
                                                   selection_meta,
-                                                  select_mode=select_mode)
+                                                  select_mode=select_mode,
+                                                  allow_renew=False)
     # 负/零 budget 与零位点同态：无执行面即 no_sites（jobs=0 契约），
     # 不得触发 baseline/prewarm。
     if raw_total <= 0 or budget <= 0:
@@ -425,11 +427,12 @@ def _line_map_sets(f, project_root, selection_meta, executed_list) -> tuple:
             "line_group_chunks: source=runtime_mapping without a resolved "
             "map path — refusing to re-guess the default attribution map")
     rel = _res_path_of(f, project_root).removeprefix("res://")
+    # C3-R18（定案 22）：doc 装载走契约只读视图（零裸读/零路径查找）。
+    from .map_contract import MapContractError, view as _mc_view
+
     try:
-        doc = truth_select.load_map(
-            mapping_path) if mapping_path else truth_select.load_map(
-                truth_select.map_path(str(Path(project_root).resolve())))
-    except Exception as e:  # noqa: BLE001 — 不可用即 fail-loud（不静默回退）
+        doc = _mc_view(str(Path(project_root).resolve())).doc
+    except MapContractError as e:  # noqa: BLE001 — 不可用即 fail-loud
         raise truth_select.MutationSelectionError(
             "line_selection_map_unusable", str(e)) from e
     by_line = truth_select._line_script_sets(
@@ -710,10 +713,11 @@ def _provision_farm_slot(project_root: str,
 
 
 def _auto_scan_tests_glob(file_path: str, project_root: str,
-                          select_mode: str = "full") -> str | None:
+                          select_mode: str = "full",
+                          allow_renew: bool = True) -> str | None:
     """父层推导 scoped glob（与 worker 侧 run_mutation 内推导同口径）。"""
     from .runner import _auto_scan_tests_glob as _runner_scan
-    return _runner_scan(file_path, project_root)
+    return _runner_scan(file_path, project_root, allow_renew=allow_renew)
 
 
 def _baseline_globs(files, project_root, tests_glob, clock: StageClock,
@@ -733,7 +737,8 @@ def _baseline_globs(files, project_root, tests_glob, clock: StageClock,
                 from .truth_select import MutationSelectionError
                 try:
                     g = _auto_scan_tests_glob(f, project_root,
-                                              select_mode=select_mode)
+                                              select_mode=select_mode,
+                                              allow_renew=False)
                 except MutationSelectionError as e:
                     print(f"baseline pre-run: selection unavailable for "
                           f"{f} ({e}) — skipping shared baseline for this "

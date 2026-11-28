@@ -105,6 +105,7 @@ class TestExplicitTestsSkipEnsureMap:
         import godot_qa_toolkit.mutation.truth_select as ts
         monkeypatch.setattr(ts, "ensure_map",
                             lambda *a, **k: called.append(1))
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "cold")
         monkeypatch.setattr(cli, "_dispatch_mutation",
                             lambda *a, **k: {"tool": "mutation", "ok": True,
                                              "summary": {}, "failures": []})
@@ -115,4 +116,55 @@ class TestExplicitTestsSkipEnsureMap:
         buf = io.StringIO()
         with redirect_stdout(buf):
             cli.cmd_mutation(args)
-        assert called == [], "显式 --tests 不得触发映射构建"
+        # SEE-1631 §SPEC-021/022 映射：cold 源下原契约保留（显式 --tests
+        # 零映射构建成本）；map 源（默认）由下方新用例覆盖。
+        assert called == [], "cold 源：显式 --tests 不得触发映射构建"
+
+    def test_ensure_map_called_for_explicit_tests_under_map_source(
+            self, tmp_path, monkeypatch, capsys):
+        """SEE-1631 §SPEC-021：map 源（默认）下显式 --tests 入口同样
+        prepare 自动续新——判定基线 = map，不再豁免。"""
+        from contextlib import redirect_stdout
+
+        import godot_qa_toolkit.cli as cli
+        import godot_qa_toolkit.mutation.truth_select as ts
+
+        root = tmp_path / "proj"
+        (root / "src").mkdir(parents=True)
+        (root / "tests" / "gut").mkdir(parents=True)
+        (root / "project.godot").write_text(
+            'config_version=5\n[application]\nconfig/name="m1"\n')
+        (root / "src" / "calc.gd").write_text(
+            "extends RefCounted\n\nfunc add(a, b):\n\treturn a + b\n")
+        (root / "tests" / "gut" / "test_calc.gd").write_text(
+            "extends GutTest\nfunc test_a() -> void:\n"
+            "\tassert_true(true)\n")
+        (root / "addons" / "gut").mkdir(parents=True)
+        (root / "addons" / "gut" / "gut_cmdln.gd").write_text("# stub\n")
+
+        called: list = []
+        import io
+        from contextlib import redirect_stdout
+
+        # C3-R12：prepare 续新收口单点 _prepare_map_fresh（内部经
+        # map_contract.refresh；S1：ensure_map 不再被消费方直接调用）。
+        import godot_qa_toolkit.mutation.map_contract as mc
+
+        monkeypatch.setattr(mc, "refresh",
+                            lambda *a, **k: called.append(1))
+        # conftest 的单元形态默认 MAP_MODE=off；本用例要验证 map 源续新，
+        # 显式放开（与 GQT_MUTATION_BASELINE_SOURCE=map 配套）。
+        monkeypatch.setattr(ts, "mode", lambda: "auto")
+
+        monkeypatch.setenv("GQT_MUTATION_BASELINE_SOURCE", "map")
+        monkeypatch.setattr(cli, "_dispatch_mutation",
+                            lambda *a, **k: {"tool": "mutation", "ok": True,
+                                             "summary": {}, "failures": []})
+        args = cli.build_parser().parse_args([
+            "mutation", str(root / "src" / "calc.gd"),
+            "--project-root", str(root), "--tests", "res://tests/gut",
+            "--budget", "1"])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.cmd_mutation(args)
+        assert called == [1], "map 源：显式 --tests 也走 prepare 自动续新"

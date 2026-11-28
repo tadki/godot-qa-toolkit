@@ -1016,8 +1016,9 @@ def test_real_cli_missing_godot_clean_env_emits_tool_json(
         "TMPDIR": str(tmp_path / "tmp"),
         "LANG": "C.UTF-8",
     }
-    (tmp_path / "home").mkdir()
-    (tmp_path / "tmp").mkdir()
+    # C3-R16：同测试可能多次调用 helper（每次都重设干净 env）——幂等。
+    (tmp_path / "home").mkdir(exist_ok=True)
+    (tmp_path / "tmp").mkdir(exist_ok=True)
     recipe, err = build_recipe(project)
     assert err is None
     recipe_path = tmp_path / "recipe.json"
@@ -1260,8 +1261,9 @@ def _spawn_clean_env(tool_args, project, tmp_path, extra_env=None):
            "PYTHONPATH": str(REPO / "src")}
     if extra_env:
         env.update(extra_env)
-    (tmp_path / "home").mkdir()
-    (tmp_path / "tmp").mkdir()
+    # C3-R16：同测试可能多次调用 helper（每次都重设干净 env）——幂等。
+    (tmp_path / "home").mkdir(exist_ok=True)
+    (tmp_path / "tmp").mkdir(exist_ok=True)
     proc = sp.run(
         [sys.executable, "-m", "godot_qa_toolkit.cli", *tool_args,
          "--project-root", str(project)],

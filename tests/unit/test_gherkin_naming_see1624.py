@@ -180,14 +180,18 @@ def _adapter_hash(project: Path) -> str:
     return recipe["gherkin_face"]["adapter_source_sha256"]
 
 
-def test_adapter_fingerprint_covers_feature_bytes(project: Path) -> None:
+def test_adapter_fingerprint_excludes_feature_bytes(project: Path) -> None:
+    """C3-R14（定案 4/§SPEC-016）：feature 字节从 adapter 指纹摘出——
+    feature 编辑走 per-feature 增量通道（gherkin_face.feature_sha256
+    失效面），不再触发 wholesale 失配 = 全量重建。adapter `.gd` 代码
+    字节仍进指纹（test_adapter_fingerprint_covers_domain_and_validator_gd）。"""
     write_feature(project, "demo")
     before = _adapter_hash(project)
     feat = project / "addons" / "gqt_gherkin" / "features" / "demo.feature"
     feat.write_text(
         feat.read_text(encoding="utf-8") + "\n# touched\n",
         encoding="utf-8")
-    assert _adapter_hash(project) != before
+    assert _adapter_hash(project) == before
 
 
 def test_adapter_fingerprint_covers_domain_and_validator_gd(

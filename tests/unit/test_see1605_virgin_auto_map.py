@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from godot_qa_toolkit.mutation import truth_select as ts
 from godot_qa_toolkit.mutation.truth_select import ensure_map, load_map
 
-SCHEMA = "test-attribution/6"
+SCHEMA = "test-attribution/7"
 
 ELIGIBLE_A = "func a():\n\treturn 1\n"
 ELIGIBLE_B = "func b():\n\treturn 2\n"
@@ -48,8 +48,16 @@ def _mk_virgin(root: Path) -> Path:
         ELIGIBLE_A, encoding="utf-8")
     (root / "systems" / "economy" / "lcps_calculator.gd").write_text(
         ELIGIBLE_B, encoding="utf-8")
+    # C3-R1 F1：建图面 = production 宇宙（精确目标）——测试须真实触达
+    # 目标，探针才有点火证据（此前靠 root 回退把测试文件自身当目标，
+    # 探针证据是假的；F1 修正后该夹具必须真实触达）
     (root / "tests" / "unit" / "test_game.gd").write_text(
-        "extends GutTest\nfunc test_ok() -> void:\n\tassert_true(true)\n",
+        'extends GutTest\nconst A = preload("res://autoload/'
+        'economy_manager.gd")\n'
+        'const B = preload("res://systems/economy/lcps_calculator.gd")\n'
+        "func test_ok() -> void:\n"
+        "\tassert_eq(A.new().a(), 1)\n"
+        "\tassert_eq(B.new().b(), 2)\n",
         encoding="utf-8")
     feats = root / "addons" / "gqt_gherkin" / "features"
     feats.mkdir(parents=True)
@@ -85,6 +93,16 @@ def _fresh_doc(root: Path, targets: list[str]) -> dict:
         "arms_state": {"gut_full": {
             "bundles": 1, "pairs": 2, "probes_fired": 3, "state": "valid"}},
         "instrumentable_lines": {rel: [2] for rel in rels},
+        # §SPEC-032（C3-R1）：契约 MapView 构造期断言要求 verdict 表在场
+        "test_verdicts": {
+            "res://tests/unit/test_game.gd::test_ok": {"verdict": "green"}},
+        # C3-R20 迁移（B）：feature 指纹按目录实算（项目带 demo.feature，
+        # 缺键会被判 feature_sha256_missing → 不新鲜 → 车道 run_error）
+        "feature_sha256": {
+            p.stem.replace("-", "_"):
+                hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted((Path(root) / "addons" / "gqt_gherkin"
+                             / "features").glob("*.feature"))},
     }
     return doc
 

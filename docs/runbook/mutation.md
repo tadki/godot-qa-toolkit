@@ -25,7 +25,10 @@ default non-dry-run path):
    executing them.
 2. **prepare** — performs the work plan disclosed: import cache warm-up,
    attribution-map build / incremental refresh, baseline preflight, warm pool
-   provisioning. Anything that fails here is named (`route_drift`,
+   provisioning. A missing or stale attribution map is renewed here on its
+   own; `--auto-prepare` is only needed for the other auto-preparable blocker
+   (the import cache), and without it such a blocker stops the run as
+   `prepare_required`. Anything that fails here is named (`route_drift`,
    `baseline_preflight_red`, `suspected_instrumentation_intolerance`,
    `plan_blocked` if a plan error surfaced late, …) instead of collapsing
    into a generic `run_error`.
@@ -35,7 +38,12 @@ default non-dry-run path):
 `--dry-run` therefore does **not** require an attribution map. When no usable
 map exists, the response is `ok=true`, `selection_mode=plan_only`, and the
 plan's `problems[]` contains an `attribution_map_missing_or_stale` warning
-describing the work a real run will pay for; nothing is renewed, imported, or
+describing the work a real run will pay for. That problem's `evidence` is the
+map's read-only status — `present`, `fresh`, `reason` (the named stale
+factors, such as `content: … target file drift — <file>` or
+`report_recipe_hash: stored … != computed …`), `would_refresh`
+(`create` / `increment` / `full`) and `last_cost` — and its `fix` names
+`gqt measure map-update --project-root .`; nothing is renewed, imported, or
 censused. Pass `--select full` or an explicit `--tests` to preview sites
 without a map. Dry-run is read-only and is not poisoned by an earlier run's
 route state; a spurious `route_drift` does not block it, while a genuine
@@ -55,13 +63,15 @@ not silent.
 - `<root>/addons/gut/gut_cmdln.gd` exists; a resolvable Godot binary
   (`--godot-bin` > `GQT_GODOT_BIN` > PATH).
 - With `--tests` omitted, selection uses the line-primary runtime truth map
-  (`test-attribution/6`): per-test/per-script covered line sets are the primary
-  facts; file/function views are derived from them. By default the map is
-  auto-managed at `.qa-cache/attribution-map.json` and regenerated or
-  incrementally refreshed when missing or stale. You can instead pass an
-  explicit read-only artifact with `--attribution-map`, or build one with
-  `gqt measure map-update`; an explicit schema mismatch fails loud without an
-  automatic rebuild.
+  (`test-attribution/7`): per-test/per-script covered line sets are the primary
+  facts; file/function views are derived from them. Each project has exactly one
+  map, at `.qa-cache/attribution-map.json`; its location is decided by code and
+  no flag or environment variable selects another file. Preparation renews it
+  when missing or stale — no `--auto-prepare` needed for that — and the run then
+  reads it. `gqt measure map-update --project-root .` refreshes it explicitly.
+  `GQT_ATTRIBUTION_MAP_MODE=off` suppresses that renewal for diagnostics: an
+  existing fresh map is still consumed, a missing one is a named error instead
+  of being built.
 
 ## Typical examples
 
@@ -87,8 +97,11 @@ gqt mutation src/save/save_manager.gd --project-root . --lines 10-20,30,35-40
 # Parallelism (default jobs = max(2, cpu//2)); force serial with --jobs 1
 gqt mutation <file> --project-root . --jobs 8
 
+# Refresh the project's attribution map ahead of a run (optional; preparation
+# renews it automatically when it is missing or stale)
+gqt measure map-update --project-root .
+
 # Opt-outs for troubleshooting
-gqt mutation <file> --project-root . --no-attribution-auto
 gqt mutation <file> --project-root . --no-reuse-coverage
 GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 ```
@@ -116,9 +129,8 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   `no_mapped_tests`, preserving the fair rerun channel.
 - Freshness: the map must match the current recipe, target-file sha256 and test
   face, and contain execution-integrity evidence. Zero tests or no probe
-  evidence is not a valid empty map. In auto mode a missing, stale, or old-schema
-  map is regenerated or incrementally refreshed once, then re-judged; an
-  explicit `--attribution-map` remains read-only and fails loud on mismatch.
+  evidence is not a valid empty map. Preparation renews a missing, stale, or
+  old-schema map once and re-judges it; a still-unusable map fails loud.
   Auto builds gate on new test failures only (§SPEC-060a): pre-existing
   failures are absorbed by a lazily acquired uninstrumented baseline (one
   extra same-face GUT run, triggered only when the instrumented arm observed
@@ -129,9 +141,6 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   was not used. This face does not require an attribution map and bypasses the
   map-ensure/P1 prepare gate. A missing explicit glob is a plan error
   (`tests_glob_target_missing`) before any GUT leg.
-- An explicit `--attribution-map` stays read-only. Its preparation guidance
-  names repairing or replacing the map; it never suggests `--auto-prepare`,
-  which would contradict that read-only contract.
 - `summary.selection_mode` is the **effective** face, one of `line` / `fn` /
   `file` / `full` / `lines` / `mutation` / `explicit_tests` (caliper beats
   explicit `--tests`, which beats `--select`). When line/fn slicing is capped
@@ -191,6 +200,14 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   `validation` / `generated_dirs`), `prewarm` (`decision` / `reason` /
   `import_calls` / `probe_s` / `import_wall_s`), `stage_reconciliation`
   (`wall_s` / `attributed_s` / `unexplained_s` / `over_attributed_s`).
+- Map keys: `test_selection.source=runtime_mapping` names the project's
+  attribution map actually used in `test_selection.mapping` (`path` —
+  `<root>/.qa-cache/attribution-map.json` — plus `file_sha256_bound` and
+  `arms_valid`); `test_selection.reason` is `line_mapping_fresh` on a real
+  run and `fresh_runtime_mapping` on a dry-run. Two test scripts with the same
+  basename make selection refuse by name (`selection_error=true`,
+  `selection_reason=ambiguous_test_names`, and the offending basenames in
+  `error=ambiguous_test_names: … ambiguous=[…]`) instead of guessing.
 - `execution_plan` is a read-only five-group view (`selection`, `route`,
   `budget`, `diff`, `preconditions`) on normal and dry-run reports. Dry-run also
   emits `execution_plan_meta`: derived/observed/runtime partitions, a `plan_id`
@@ -268,7 +285,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   `generated_dirs_missing` / `proof_drift_rebuild` / …). A four-level beacon
   proves the engine actually executed the mutant.
 - Coverage prefilter resolves in order: persisted `/2` projection → live
-  projection from the fresh `/6` map. The projection uses the scripts carried
+  projection from the fresh `/7` map. The projection uses the scripts carried
   by the actual `tests_glob`; it adds no second instrumentation or GUT run.
   The retired manual `/1` layer is never read; source, test-face, recipe,
   schema, binary or identity drift invalidates the affected layer and is
@@ -309,7 +326,7 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
   remaining host poll is the worker's 10ms req/STOP filesystem rendezvous,
   which has no one-shot filesystem event API.
 
-## Command reference (aligned with v0.4.2 `--help`)
+## Command reference (aligned with the current `--help` output)
 
 `gqt mutation [<files...>] [--project-root <root>] [all options]`
 
@@ -321,15 +338,15 @@ GQT_MUTATION_WORKER=0 gqt mutation <file> --project-root .
 | `--timeout <s>` | 600 | Single GUT wall-clock limit (must be ≥1); default equals the budget cap so autoload-scale file-union faces (~77s measured on KOL) no longer trip the baseline-snapshot timeout and its documented serial downgrade. Zero or negative values are usage errors: exit `2`, no stdout JSON |
 | `--dry-run` | off | Run the static plan only; zero GUT, map renewal, import or census unless `--check-baseline` explicitly requests the one read-only baseline leg. The plan response carries `problems[]` (severity/code/evidence/fix per finding) and `estimated_costs`, plus the diff-estimate, `execution_plan` / `execution_plan_meta` views. A missing or stale attribution map does not block the dry-run: the response is `ok=true` with `selection_mode=plan_only` and the plan's `problems[]` records `attribution_map_missing_or_stale` as a warning. Error-class problems abort as `plan_blocked`. Existing selection fail-loud semantics still apply when a usable map is present and `--dry-run` is asked to enumerate sites. Caliper addressing is applied before estimation, so `mutants` / `executed_estimate` equal the selected site count; an entirely site-less `--lines` request or stale `--mutation` id fails with the same named error as a real run |
 | `--check-baseline` | off (`not_checked`) | In dry-run/plan-only form, run one uninstrumented baseline GUT and disclose `summary.static_preconditions.baseline_health`; without this flag no baseline leg runs |
-| `--auto-prepare` | off | Automatically prepare P1 blockers disclosed by the plan; explicit read-only attribution-map guidance never recommends this flag |
+| `--auto-prepare` | off | Automatically prepare the P1 prepare-blockers the tool can build itself (the import cache). The attribution map is renewed by preparation regardless of this flag; without it a remaining blocker stops the run as `prepare_required` |
 | `--intolerant-tests <path>` | omitted | JSON declaring instrumentation-intolerant tests and coverage limitations; auto-build interruption reports provide a ready-to-save draft |
 | `--fail-on-red-baseline` | off | Fail fast on a red uninstrumented baseline; shares the same abort channel as `--break-on-baseline-failure` |
 | `--tests <res://glob>` | omitted = line-primary truth-map selection | Explicit test subset; takes over from the mapping, discloses `explicit_tests`, and does not require map ensure/P1 preparation. A missing glob is rejected during plan as `tests_glob_target_missing`, before any GUT leg |
 | `--jobs <n>` | `max(2, cpu//2)` | Worker pool size (must be ≥1) for per-file AND per-mutant slicing; `--jobs 1` forces the serial file-union boundary; sites ≤ jobs falls back to serial automatically. Single-file output stays flat for every `--jobs` value. Zero or negative values are usage errors: exit `2`, no stdout JSON |
 | `--resume` | **retired** (SEE-1594 A13) | Removed: differential reuse is automatic whenever a v2 manifest exists |
 | `--select {line,fn,file,full}` | `line` | line = test-set signature groups; fn/file = explicit calibration/fallback views; full = explicit full-face audit. The reported `selection_mode` also uses `lines` / `mutation` for calipers and `explicit_tests` when `--tests` takes over |
-| `--attribution-map <path>` | auto-managed `.qa-cache/attribution-map.json` | Explicit `test-attribution/6` line-primary artifact; read-only pass-through, schema mismatch fails loud without rebuild |
-| `--no-attribution-auto` | off | Disable automatic map generation/incremental refresh; with no usable map the run fails loud |
+| `--attribution-map <path>` | **retired** | Removed: the map is unique per project at `.qa-cache/attribution-map.json` and no flag selects another file; passing it is an argparse usage error (exit `2`, no stdout JSON) |
+| `--no-attribution-auto` | **retired** | Removed: renewal belongs to preparation; `GQT_ATTRIBUTION_MAP_MODE=off` is the diagnostic switch that suppresses it |
 | `--mutation-warning <n>` | 50 | Warn on stderr + `summary.attention` when the pre-truncation site count exceeds N |
 | `--timeout-factor <f>` | 2.0 | Adaptive per-mutant timeout = `max(timeout, baseline×f+1)`; only widened, never tightened |
 | `--no-kill-bail` | off (bail ON) | SEE-1606 P3, aligns with Stryker `disableBail`: with bail on, a mutant's selection face runs the selection face in script order inside ONE engine process in chunks of 32 scripts (cold one-shot direct-drive host for materialized selection dirs / single-script faces; in-session sequencing for the resident worker) and stops after the first chunk containing a failure NEW vs baseline — killing legs save the remaining chunks (≤31-script overshoot bound; chunking chosen by measurement: per-script calls made a 286-script survivor leg 2.69× slower, C=32 gives 0.81×) (`GQT_KILL_BAIL scripts=k/n new_fail=<test>`); verdicts unchanged (difference-set semantics). Unsupported faces (explicit `--tests` dir / `--select full`), missing real `gut.gd`, flag or env `GQT_MUTATION_KILL_BAIL=0` disable bail with named `kill_bail_face` / `kill_bail_disabled_by` disclosure — never a silent fallback |

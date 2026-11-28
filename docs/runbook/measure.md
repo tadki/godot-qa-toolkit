@@ -1,4 +1,4 @@
-# measure — measurement chain (suite / run / diagnose / map-update)
+# measure — measurement chain (suite / scope / run / diagnose / map-update)
 
 ## When to use
 
@@ -9,9 +9,14 @@
   restored, active arms' line sets are unioned into the same report. With
   `--test-attribution`, the run also records per-test/per-script covered lines
   as the primary attribution facts.
+- Print the project's scope resolution — which files count as production,
+  non-production, tests, and non-tests under the `.gqt-scope.json` rules
+  (`measure scope`, read-only, no GUT).
 - Diagnose per-feature acceptance timing.
-- Incrementally rebuild the line-primary attribution map (`test-attribution/6`)
-  that mutation selection and Coverage Store projection depend on.
+- Refresh the project's single test-attribution map (`test-attribution/7`),
+  the line-primary fact store behind mutation verdicts, selection and the
+  Coverage Store projection. `measure map-update` creates, increments, or
+  fully rebuilds it, or reports that it is already fresh.
 
 ## Plan-first flow
 
@@ -103,27 +108,28 @@ gqt measure run autoload systems --project-root . --recipe recipe.json --out rep
 
 # Produce the line-primary attribution map (the truth source behind mutation).
 # The same measured line facts later project mutation's Coverage Store without
-# another instrumentation or GUT pass.
+# another instrumentation or GUT pass. The artifact lands next to the report
+# as <out>.attribution.json; its path is disclosed as summary.attribution_map.
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json \
-  --test-attribution --test-attribution-out attribution-map.json
+  --test-attribution
 
 # 3) Per-feature timing diagnostics
 gqt measure diagnose autoload systems --project-root . --recipe recipe.json \
   --features feature_a,feature_b --out diagnose.json
 
-# 4) Incremental attribution rebuild (roots must match the baseline universe)
-# --changed accepts changed/new/removed paths. Removing a production file with
-# baseline edges is `prod_removed`: its dead edges are purged and tests that
-# touched it plus depth-1 static consumers are rerun.
-gqt measure map-update autoload systems --project-root . --recipe recipe.json \
-  --baseline attribution-map.json --changed systems/example.gd \
-  --out attribution-map.v2.json
+# 4) Refresh the project's unique attribution map. No map paths are passed:
+# the map lives at .qa-cache/attribution-map.json and the tool decides whether
+# to create, increment, or fully rebuild it (or reports it already fresh).
+gqt measure map-update --project-root .
+
+# Print the scope resolution the map universe is built over (read-only)
+gqt measure scope --project-root .
 ```
 
 ## Output & exit codes
 
-- `tool` is `measure.suite` / `measure.run` / `measure.diagnose` /
-  `measure.map-update` respectively.
+- `tool` is `measure.suite` / `measure.scope` / `measure.run` /
+  `measure.diagnose` / `measure.map-update` respectively.
 - suite: `measurement-suite/3`, with `gut_face`, `gherkin_face`,
   `toolchain`, `exclusions`, `recipe_hash` (identical content hashes
   identically across paths). `gherkin_face` requires `features`, `count`,
@@ -150,16 +156,63 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   forms, an invalid union or arm exits **1** with
   `reason="union invalid or arms invalid"`; stale map files alone do not make
   an attribution run usable.
-- map-update: a `test-attribution/6` artifact; changed production files replace
-  their related line facts, changed tests replace the whole test identity, and
-  file/function/reverse views are recomputed from the merged lines. A deleted
-  production file with baseline edges is `prod_removed`: its line facts and
-  derived edges are purged, tests that touched it plus depth-1 static consumers
-  are rerun, and its target/file-hash/instrumentable entries are removed.
-  Non-`.gd` paths and deleted files without baseline edges are `unknown` and
-  rejected by name (`IncrementError`); they never become a silent zero-rerun
-  disclosure bucket. `--calibration-every` (default 5) forces a full rebuild
-  after N increments.
+- scope: `summary` carries `rules_file_present`, `rules_sha256`,
+  `defaults_used`, `unconfigured_hint`, `counts` (per class: `production`,
+  `non_production`, `test`, `non_test`), `universe_count`, `gd_count`, the four
+  full class lists (`production`, `non_production`, `test`, `non_test`), plus
+  `per_dir_counts`, `gut_dirs_effective`, `gut_dirs_excluded`,
+  `features_excluded`, `excluded_production`, `excluded_production_stats`, and
+  `excluded_reference_warnings`. Without `.gqt-scope.json` the generic default
+  applies (`defaults_used=true`) and `unconfigured_hint` names it. A missing
+  project root is a named failure (`project root not found`, exit `1`).
+- map-update: `summary.mode` is what the map's status predicted before the
+  refresh — `create` / `increment` / `full` / `fresh` — with `map_path`,
+  `already_fresh` and `fresh` alongside. `reason` appears only when a full
+  rebuild was involved: it is the first structural factor that forced one (for
+  example `recipe: … recipe_hash_pristine stale vs current tree — rebuild the
+  map`) or, for a fallback decided inside the increment leg, the map ledger's
+  `increment.reason` (one of `hash_mismatch_fallback`,
+  `new_prod_file_fallback`, `calibration_due_fallback`,
+  `rerun_surface_too_large_fallback`,
+  `gherkin_rerun_surface_too_large_fallback`). A `fresh` response echoes the
+  `reason` its ledger still carries. A failed refresh returns `ok=false` with
+  `summary.mode` plus `summary.error` (exit `1`); the old map's bytes are left
+  untouched.
+- The refreshed artifact is `test-attribution/7`. Its `test_verdicts` table
+  holds one entry per test identity — green entries are `{"verdict": "green"}`,
+  red entries are `{"verdict": "red", "classification":
+  "pre_existing" | "suspected_intolerant" | "new", "script": …}` — and
+  `identity_collisions` discloses, per `basename_key`, how a red key that
+  arrived under a bare script basename or without a script was handled:
+  `same_basename_resolved_by_path` (one of the `candidates` matched the full
+  script path and became `resolved`), `same_basename_no_path_match` (no path
+  match — every candidate is written red), or
+  `empty_script_red_key_disclosed_not_emitted` (a bare test-name echo with an
+  empty script is disclosed only and never enters the table). Test identities
+  are full `res://` script paths
+  (`res://tests/unit/affix/test_affix_factory.gd::test_q3…`), never bare
+  basenames; Gherkin identities read
+  `gherkin://feature/<feature key>::<compiled test name>`, where the second
+  segment is the compiled test name (`_ident(scenario, index)` plus the
+  zero-padded case ordinal) — not the scenario name.
+- After a create, increment, or full refresh the map is current and usable, so
+  `measure map-update`, `measure coverage`, `measure risk`, and `mutation`
+  consume it directly. An increment ledger (`increment`) records `mode`,
+  `increments_since_full`, `calibration_policy`, `changed_files` (the
+  test/production/content/feature change classes),
+  `rerun_scripts`/`dropped_scripts`, `rerun_executions` and
+  `gherkin_leg_executions`, plus `event_counts_stale` as a disclosure that the
+  hit-event counters were not re-measured.
+- A Gherkin increment leg's execution account carries `rc`, `shard`,
+  `executed_scripts`, `failing_tests`, `failing_scenarios`, `out` and `error`.
+  Verdicts are written back per identity from `failing_tests`, which lives in
+  the same namespace as the identity's second segment (compiled test names):
+  a scenario that ran and failed stays red, one that passed goes green, and the
+  baseline classification is carried over. `failing_scenarios` holds scenario
+  names and is execution-account disclosure only — it is never compared
+  against identities. When the leg failed but no failing name can be
+  attributed (`failing_tests` absent or empty), every identity of that feature
+  key is written red.
 - exit `0` = complete execution (including a usable attribution map whose
   union is uncertified, or a valid ordinary GUT-only run while acceptance is
   paused); `1` = verdict/validation failure; `2` = argument error. On
@@ -181,8 +234,8 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - Attribution usability requires real execution evidence: no bundle, zero tests,
   or zero probes without `vacuous` is invalid. A legitimate empty face remains
   usable when probes fired or the measured surface is genuinely vacuous. An
-  invalid map fails loud; auto mode rebuilds instead of consuming a false empty
-  truth.
+  invalid map fails loud; the next preparation renews it instead of consuming
+  a false empty truth.
 - **Empty test face / zero execution evidence**: each `gut_full` arm discloses
   `collected_scripts` and `execution_stream`. Zero collected scripts →
   `invalid_reason=empty_test_face`; scripts were collected but no GUT test
@@ -255,11 +308,49 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
 - The W4 probe (default `aidomain_integration`) records measured wall clock
   into `performance.gherkin_probe`; `measure risk --performance-file`
   accepts externally fed measurements.
-- The `/6` attribution map stores `test_to_lines`, `script_to_lines`,
+- One map per project, at `.qa-cache/attribution-map.json`. Its location is
+  decided by code: no flag or environment variable points the tool at another
+  file, and the retired spellings `--attribution-map`, `--no-attribution-auto`,
+  `--test-attribution-out`, the `map-update` positional roots, and its
+  `--recipe` / `--baseline` / `--changed` / `--out` / `--calibration-every` /
+  `--attribution-causal` arguments are argparse usage errors (exit `2`, no
+  stdout JSON). `mutation`, `measure coverage`, `measure risk`, and `measure
+  map-update` renew the map during preparation and only read it while running.
+- The map's status is a read-only probe inside the tool (zero renewal, zero
+  GUT, zero import, zero writes), not a CLI command. It returns `present`,
+  `fresh`, `factors`, `would_refresh`, `scope`, and `last_cost`, and
+  `would_refresh` always equals what the refresh then does (`create` /
+  `increment` / `full`). Every stale factor is named by prefix — `schema:`,
+  `arms:`, `recipe:`, `tests_face:`, `content:`, `test_verdicts:`,
+  `feature_sha256:`, `feature_sha256_missing:`, `report_recipe_hash:`,
+  `view:`, `increment_not_eligible:`. Users meet them through
+  `mutation --dry-run`: the `attribution_map_missing_or_stale` plan problem
+  carries them as `evidence.reason`, with `evidence.would_refresh` and
+  `evidence.last_cost`.
+- `GQT_ATTRIBUTION_MAP_MODE=off` is the diagnostic switch that suppresses
+  automatic map renewal: an existing fresh map is still consumed, but a
+  missing map is a named error (`no_attribution_map`, or
+  `prepare renewal produced no map at the default path` from
+  `measure map-update`) instead of being built.
+- Scope rules live in `<root>/.gqt-scope.json`. `production.include` is a
+  whitelist of `{kind: dir|file|ext, value}` entries; `production.exclude` is
+  a blacklist whose every entry carries a `reason`; the test whitelist is read
+  from `.gutconfig.json` and the gherkin features directory, never configured
+  twice. `tests.exclude` (`dir` or `feature` kinds, each with a `reason`)
+  really removes those tests from the face — `measure scope` reports them under
+  `gut_dirs_excluded` / `features_excluded` and lists the files as `non_test`.
+  An absent rules file is legal: the generic default applies (everything
+  non-hidden is production; gutconfig dirs and features are tests) and
+  `measure scope` says so in `unconfigured_hint`. A misspelled path, an empty
+  whitelist, an exclude without a reason, or an unreadable file is a named
+  failure (exit `1`). The rules file is bound into the recipe, so changing it
+  makes the map stale (`recipe:` plus `report_recipe_hash:` factors, full
+  rebuild). The map universe is the full set these rules resolve.
+- The `/7` attribution map stores `test_to_lines`, `script_to_lines`,
   `line_to_tests`, and the instrumentable line surface. File/function views are
   derived from those lines plus the source registry, not independently measured.
 - Mutation projects the scripts in its actual `tests_glob` into a
-  `see1420-coverage/2` entry from the same `/6` facts. A persisted projection —
+  `see1420-coverage/2` entry from the same `/7` facts. A persisted projection —
   bound to the current map's content and execution evidence (SEE-1594 A05) —
   or a fresh map can serve the prefilter without another instrumentation pass;
   binding drift invalidates the projection and is disclosed.
@@ -267,15 +358,19 @@ gqt measure map-update autoload systems --project-root . --recipe recipe.json \
   prefilter no longer reads it, and no writer produces it. Leftover `/1`
   files on disk are rejected by schema. Coverage answers come from the
   line-level map (single source of truth).
-- Schema upgrades are fail-loud. Auto-managed old or unusable maps are rebuilt;
-  an explicit old-schema `--attribution-map` is rejected without being rewritten.
+- Schema upgrades are fail-loud: an old-schema or otherwise unusable map is
+  judged not fresh and rebuilt by the next preparation.
 - The internal `DEFAULT_RERUN_FULL_FACE_RATIO` is `0.05`: if the candidate
-  rerun scripts exceed 5% of the baseline script face, map-update falls back to
-  a full-face rebuild. This was calibrated on a warm KOL copy (824 files / 285
+  rerun scripts exceed 5% of the baseline script face, the refresh falls back
+  to a full rebuild, reported as `reason: rerun_surface_too_large_fallback`.
+  This was calibrated on a warm KOL copy (824 files / 285
   scripts): incremental cost was approximately `16.16s + 8.878s × rerun
   scripts`, full-face cost was `223–227s`, and the crossover was about 23.6
   scripts (8.3%). The 5% cap estimates about 140.5s at the boundary, below the
   225.25s full-face midpoint and with noise-band headroom.
+- The Gherkin leg has its own `0.05` cap
+  (`gherkin_rerun_surface_too_large_fallback`), and a full calibration rebuild
+  is due once `increments_since_full` reaches 5 (`calibration_due_fallback`).
 - Each arm carries `unattributed_files`: production files with unattributed
   hits, for which test-window attribution is lossy. Incremental artifacts carry
   the union of the baseline list and this round's changed/new production files.
@@ -315,7 +410,7 @@ document instead of mixing old and new rounds.
   uncertified-by-design, and MEASURED only proves acceptance-arm validity plus
   round completeness plus the speed gate.
 
-## Command reference (aligned with v0.4.2 `--help`)
+## Command reference (aligned with the current `--help` output)
 
 ### measure suite
 
@@ -326,6 +421,19 @@ document instead of mixing old and new rounds.
 | `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
 | `--out <path>` | `./recipe.json` | Recipe JSON output path |
 | `--exclude <scope:entry:reason>` | repeatable | Exclude a GUT dir or acceptance feature; an empty reason fails loud |
+
+### measure scope
+
+`gqt measure scope [--project-root <root>]`
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--project-root <root>` | discover from CWD | Target Godot project root; an explicit value that does not exist is a named failure (exit `1`) |
+
+Read-only and zero-write: prints the four class lists and counts produced by
+`.gqt-scope.json`, the per-directory counts, the excluded entries with their
+reasons, and any reference warnings. Output keys are listed under
+[Output & exit codes](#output--exit-codes).
 
 ### measure run
 
@@ -354,8 +462,7 @@ they are argparse usage errors (exit `2`, no stdout JSON).
 | `--gherkin-shards <n>` | 4 | Acceptance parallel shard count |
 | `--shard-log-dir <dir>` | omitted | Retain per-shard full logs and raw sink copies |
 | `--evidence-dir <dir>` | omitted | Per-arm `coverage-evidence/2` bundle + run record output dir |
-| `--test-attribution` | off | Emit a line-primary `test-attribution/6` artifact with per-test/per-script covered lines, reverse lookup, derived file/function views and execution evidence. When off, no attribution artifact is written; while acceptance is paused the ordinary run uses the documented single-arm exit semantics |
-| `--test-attribution-out <path>` | `<--out>.attribution.json` | Attribution artifact path |
+| `--test-attribution` | off | Emit a line-primary `test-attribution/7` artifact with per-test/per-script covered lines, reverse lookup, derived file/function views, a `test_verdicts` table, `identity_collisions` disclosure and execution evidence. When off, no attribution artifact is written; while acceptance is paused the ordinary run uses the documented single-arm exit semantics. The artifact path is `<--out>.attribution.json`, decided by the tool and disclosed as `summary.attribution_map` |
 | `--attribution-causal` | off | Also wrap `call_deferred/create_timer` creation sites so their callbacks are attributed to the creating test; requires `--test-attribution` |
 | `--gherkin-adaptive` | off | Run acceptance reps round-by-round and stop early once the line-set union stabilises (bound stays `--gherkin-repeats`) |
 | `--arms-parallel` | off | Run gut_full and acceptance arms concurrently; the timing baseline must be redefined when enabled |
@@ -395,17 +502,17 @@ For per-shard raw GUT logs, pass `--shard-log-dir <dir>` and follow the files:
 
 ### measure map-update
 
-`gqt measure map-update <roots...> [--project-root <root>] --recipe <recipe.json> --baseline <map.json> [--changed <path>] --out <map.json> [--timeout 180] [--calibration-every 5] [--attribution-causal] [--godot-bin <path>]`
+`gqt measure map-update [--project-root <root>] [--timeout 600] [--godot-bin <path>]`
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `<roots...>` (positional) | required | Target `.gd` roots — must be the same universe as the baseline artifact |
-| `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins and invalid values fail loud |
-| `--recipe <path>` | required | `measurement-suite/3` JSON (same content as the baseline run) |
-| `--baseline <path>` | required | Prior line-primary attribution artifact (`test-attribution/6`) |
-| `--changed <path>` | omitted, repeatable | Changed/new/removed file path |
-| `--out <path>` | required | Incremented attribution artifact output path |
-| `--timeout <s>` | 180 | Per-leg GUT timeout seconds |
-| `--calibration-every <n>` | 5 | Force a full-face rebuild after N increments |
-| `--attribution-causal` | off | Causal attribution lane |
-| `--godot-bin <path>` | omitted | Per-command Godot binary override |
+| `--project-root <root>` | discover from CWD | Target Godot project root; explicit value wins |
+| `--timeout <s>` | 600 | Refresh timeout in seconds |
+| `--godot-bin <path>` | omitted | Godot binary for the toolchain probe |
+
+A thin adapter over the map contract's refresh: one call creates, increments,
+or fully rebuilds the project's unique map, or reports it already fresh. No
+map paths are taken and no change list is supplied — the refresh derives the
+invalidation surface from the map's own bindings (recipe and toolchain hash,
+test face, production and feature content). The `summary` keys and the
+increment ledger are described under [Output & exit codes](#output--exit-codes).

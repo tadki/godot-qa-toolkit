@@ -38,7 +38,9 @@ the target path or CWD, and fail loudly if none exists.
   Explicit line ranges and stable-id reruns use the same line-level mapping;
   function/file views remain explicit calibration and fallback options. An
   unusable map fails loudly, while the full face runs only under `--select
-  full`. Mutants execute in disk shadow slots (your real repo is never written),
+  full`. Each project keeps exactly one attribution map at
+  `.qa-cache/attribution-map.json`; preparation renews it whenever it is
+  missing or stale, and `gqt measure map-update` refreshes it on demand. Mutants execute in disk shadow slots (your real repo is never written),
   differential resume re-runs only unproven verdicts, and kills are judged as
   newly-failing test sets, never by exit codes.
 - **Measurement, one instrumentation pass.** `measure suite` builds
@@ -52,6 +54,12 @@ the target path or CWD, and fail loudly if none exists.
   instrumentation or GUT pass.
 - **Guards and self-checks.** A Pure Core architecture guard, CC parity,
   registry snapshot diffs, and `gqt doctor` for editable-install consistency.
+- **Scope rules, not guesses.** An optional `.gqt-scope.json` whitelists the
+  production files and blacklists them with reasons; test discovery reuses
+  `.gutconfig.json` and the gherkin features directory instead of a second
+  configuration. `gqt measure scope` prints the resolved production /
+  non-production / test / non-test classes, and the rules file is bound into
+  the attribution map's freshness.
 
 ## The CLI
 
@@ -61,7 +69,7 @@ Four top-level entries — the whole surface fits on one screen:
 gqt
 ├─ gherkin compile / run / mutate          # Gherkin acceptance pipeline
 ├─ mutation                                # mutation testing (truth-map selection)
-├─ measure suite / run / diagnose / map-update
+├─ measure suite / scope / run / diagnose / map-update
 │           coverage / complexity / arch
 │           parity / registry-diff / risk  # measurement & diagnostic lanes
 └─ doctor                                  # editable-install self-check
@@ -139,6 +147,10 @@ gqt measure risk src/save/save_manager.gd --project-root . --report shadow-repor
 # Measurement (acceptance paused by default) → CRAP records
 gqt measure suite --project-root . --out recipe.json
 gqt measure run autoload systems --project-root . --recipe recipe.json --out report.json
+
+# Refresh the project's attribution map / print the scope classes it is built over
+gqt measure map-update --project-root .
+gqt measure scope --project-root .
 ```
 
 ## Output & exit codes

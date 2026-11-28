@@ -142,7 +142,11 @@ def test_d2_merged_verdicts_recompute_and_inherit():
         "test_gone.gd::test_removed": {"verdict": "green"},
     }}
     executions = [
-        {"script": "/p/tests/unit/test_a.gd", "rc": 0, "out": "ok"},
+        # C3-R26（D2）：真跑通过的账带脚本头与通过标记（零执行证据 =
+        # 保守红第五形态）
+        {"script": "/p/tests/unit/test_a.gd", "rc": 0,
+         "out": "res://tests/unit/test_a.gd\n* test_kept\n"
+                "* test_rerun_green\nRun Summary\n"},
     ]
     merged = _merged_test_verdicts(
         baseline, executions, rerun_scripts={"test_a.gd"},

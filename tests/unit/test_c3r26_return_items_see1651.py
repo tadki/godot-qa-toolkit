@@ -124,3 +124,107 @@ def test_matrix_content_change_test_body_form_real_godot(tmp_path,
     sources = inc.get("rerun_sources") or {}
     assert any("content_prod:prod_user.gd" in s
                for s in (sources.get("test_data_user.gd") or [])), sources
+
+
+# ───────────────── D2：执行账第五形态（rc=0 + 零执行证据） ─────────────────
+def test_d2_rc0_zero_execution_evidence_never_green():
+    """单元（Revy 的注入账形态）：GUT `Failed to load script … Parse
+    error` 零测试执行 → 执行账 rc=0、证据全空 → 该脚本全部身份保守红，
+    不得继承绿（2858dbb 上按 rc==0 放绿 → 双身份 green，本测为红）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+    from godot_qa_toolkit.measurement.increment_runner import \
+        _execution_record
+
+    a = "res://tests/x/test_a.gd::test_one"
+    b = "res://tests/x/test_a.gd::test_two"
+    out = ("Godot Engine v4.6.2.stable.official.\n"
+           "Failed to load script res://tests/x/test_a.gd with error "
+           "\"Parse Error: Unexpected end of expression\".\n")
+    rec = _execution_record("test_a.gd", 0, out)
+    assert rec["evidence"]["executed"] == [], rec["evidence"]
+    assert rec["evidence"]["failing"] == [], rec["evidence"]
+    baseline = {"test_verdicts": {
+        a: {"verdict": "green"},
+        b: {"verdict": "green"},
+    }}
+    merged = _merged_test_verdicts(
+        baseline, [rec], {"test_a.gd"}, set(), set(),
+        None, set(), set(),
+        tests_face=_face(["tests/x/test_a.gd"]),
+        arm_identities=[a, b], collisions=[])
+    assert merged.get(a, {}).get("verdict") == "red", merged
+    assert merged.get(b, {}).get("verdict") == "red", merged
+
+
+def test_d2_gherkin_rc0_zero_evidence_never_green():
+    """单元（两腿口径对齐）：gherkin 重跑腿 rc=0 且零 scenario 执行证据
+    （executed_scripts 空集——GUT 空收集/解析失败形态）→ 不得按 rc==0
+    放绿（2858dbb 上 _gherkin_rerun_all_passed 只看 rc → green，本测为
+    红）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+
+    ident = "gherkin://feature/demo::s::1"
+    baseline = {"test_verdicts": {ident: {"verdict": "green"}}}
+    fresh_gherkin = {"executions": [{
+        "rc": 0, "failing_scenarios": [], "executed_scripts": [],
+        "out": "Godot Engine v4.6.2.stable.official.\n"}]}
+    merged = _merged_test_verdicts(
+        baseline, [], set(), set(), set(),
+        fresh_gherkin, {"demo"}, set(),
+        tests_face=None, arm_identities=[], collisions=[])
+    assert merged.get(ident, {}).get("verdict") == "red", merged
+
+
+def test_d2_gut_rc0_with_headers_still_green_not_regressed():
+    """守卫（不误伤真实通过）：rc=0 且脚本头在场（GUT 真实打印 res://
+    头）→ 仍按逐测试判定放绿——第五形态只覆盖零执行证据。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+    from godot_qa_toolkit.measurement.increment_runner import \
+        _execution_record
+
+    a = "res://tests/x/test_ok.gd::test_pass"
+    out = ("res://tests/x/test_ok.gd\n"
+           "* test_pass\n"
+           "Run Summary\n")
+    rec = _execution_record("test_ok.gd", 0, out)
+    baseline = {"test_verdicts": {a: {"verdict": "green"}}}
+    merged = _merged_test_verdicts(
+        baseline, [rec], {"test_ok.gd"}, set(), set(),
+        None, set(), set(),
+        tests_face=_face(["tests/x/test_ok.gd"]),
+        arm_identities=[a], collisions=[])
+    assert merged.get(a, {}).get("verdict") == "green", merged
+
+
+def test_matrix_parse_error_no_green_real_godot(tmp_path, monkeypatch):
+    """真机（D2 主流形态）：真实 GUT 对注入 GDScript 解析错误的脚本
+    `Failed to load script` 零测试执行 → 刷新后该脚本身份不得继承绿、
+    披露具名、续新成功且随后报 fresh（Revy 在 KOL 真图坐实的形态）。"""
+    root = _v1._build_same_name_project(tmp_path / "r26-parse")
+    _v1._build_map(root, monkeypatch)
+    map_file = root / ".qa-cache" / "attribution-map.json"
+    victim = root / "tests" / "fill" / "test_calc_00.gd"
+    victim_ident = "res://tests/fill/test_calc_00.gd::test_add_00"
+    before = json.loads(map_file.read_text(encoding="utf-8"))
+    assert (before.get("test_verdicts") or {}).get(
+        victim_ident, {}).get("verdict") == "green", victim_ident
+    victim.write_text(
+        victim.read_text(encoding="utf-8")
+        + "\nfunc broken(:\n", encoding="utf-8")
+    from godot_qa_toolkit.mutation.map_contract import refresh
+
+    out = refresh(str(root), ["calc_sign.gd"], timeout_s=500)
+    assert out.get("fresh") is True, out
+    doc = json.loads(map_file.read_text(encoding="utf-8"))
+    inc = doc.get("increment") or {}
+    assert inc.get("mode") == "incremental", inc
+    assert inc.get("rerun_scripts") == ["test_calc_00.gd"], inc
+    table = doc.get("test_verdicts") or {}
+    assert table.get(victim_ident, {}).get("verdict") == "red", \
+        table.get(victim_ident)
+    errors = inc.get("rerun_execution_errors") or []
+    assert any("test_calc_00.gd" in str(e.get("script") or "")
+               and "zero execution evidence" in str(e.get("error") or "")
+               for e in errors), errors
+    out2 = refresh(str(root), ["calc_sign.gd"], timeout_s=500)
+    assert out2.get("fresh") is True, out2

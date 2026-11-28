@@ -138,7 +138,9 @@ def test_gut_rerun_passes_green():
                               "classification": "pre_existing"},
     }
   # C3-R23（V1）：执行账四元组 (rc, 失败名集, 脚本限定失败对, 执行脚本头集)
-    per_script = {"test_a.gd": (0, set(), set(), set())}
+    # C3-R26（D2）：真跑通过的账必须带执行脚本头（零执行证据 = 保守红）
+    per_script = {"test_a.gd": (0, set(), set(),
+                                {"res://tests/unit/test_a.gd"})}
     _verdict_recompute_rerun(merged, per_script)
     assert merged["test_a.gd::test_x"] == {"verdict": "green"}
 

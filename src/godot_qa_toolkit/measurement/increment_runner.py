@@ -287,12 +287,17 @@ def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
         # C3-R24（N2）：失败名在截断之前从完整输出提取——截断尾部可能
         # 把失败名切掉，failing_scenarios 空集会把失败 scenario 记绿。
         # C3-R25（N5）：gutrun 在 mutation/ 包——measurement 包内的
-        # `from .gutrun` 是错误相对导入，GUT 一跑完即 ModuleNotFoundError
-        from ..mutation.gutrun import _parse_failing_tests
+        # `from .gutrun` 是错误相对导入，GUT 一跑完即 ModuleNotFoundError。
+        # C3-R26（D2）：执行脚本头同在截断前提取——rc=0 且零执行证据
+        # （空收集/解析失败零测试执行）的第五形态判定依据。
+        from ..mutation.gutrun import _parse_failing_tests, \
+            executed_script_headers
         executions.append({"shard": gen_res, "rc": r.returncode,
                            "out": full_out[-4000:],
                            "failing_tests": sorted(
                                _parse_failing_tests(full_out)),
+                           "executed_scripts": sorted(
+                               executed_script_headers(full_out)),
                            "error": None})
     finally:
         for abs_path, original in started_files.items():

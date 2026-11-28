@@ -1325,7 +1325,14 @@ def _script_scoped_failed(script: str, name: str, rc: int,
       该名字无任何失败对时取保守方向——失败名集在场即红（C3-R24/N4：
       两套解析器不一致不得记绿）；其余 → 绿；
     - 无脚本头（旧形态/输出截断只剩摘要）或裸 basename 身份（升级过渡
-      无法定向）：保守名集合并集（与 0d14f98 行为一致，不放宽）。"""
+      无法定向）：保守名集合并集（与 0d14f98 行为一致，不放宽）；
+    - 第五形态（C3-R26/D2）：有账、rc=0、零执行证据（无脚本头、无失败
+      对、无失败名——典型：GUT `Failed to load script … Parse error`
+      零测试执行）= 不可归因：不能确认脚本真的执行过，保守整脚本红，
+      不得按 rc==0 放绿（假 kill 方向）。"""
+    # 第五形态先于一切归因分支（rc=0 且证据全空对两种身份形态同判）
+    if rc == 0 and not executed and not pairs and not failing:
+        return True
     if script.startswith("res://") and executed:
         if (script, name) in pairs:
             return True
@@ -1383,11 +1390,15 @@ def _drop_gherkin_dropped(merged: dict, gherkin_dropped: set) -> None:
 def _gherkin_rerun_all_passed(fresh_gherkin: dict) -> bool:
     """§SPEC-028：重跑腿**全部**执行账判定——任一 rc!=0 都算失败
     （多分片/多 rep 各算一账）；零执行账 = 失败（不落 green）。
-"""
+    C3-R26（D2）第五形态：rc=0 且零 scenario 执行证据（执行脚本头
+    空集——GUT 空收集/解析失败零测试执行）= 不可归因，不得按 rc==0
+    放绿；缺 `executed_scripts` 键的旧形态账按既有 rc 口径（不回溯）。"""
     execs = fresh_gherkin.get("executions") or []
     # rc=0 是合法成功值——falsy 陷阱（`0 or 1`）会把成功当失败
     return bool(execs) and all(
         int(r.get("rc") if r.get("rc") is not None else 1) == 0
+        for r in execs) and all(
+        r.get("executed_scripts") is None or r.get("executed_scripts")
         for r in execs)
 
 
@@ -1617,13 +1628,26 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
 
 
 def _rerun_error_disclosure(executions: "list[dict] | None") -> "list[dict]":
-    """C3-R25（N6）：执行异常具名披露（超时 / 拉起失败 / rc 缺失）——
-    对应脚本的判定已按保守方向记红。"""
-    return [
-        {"script": str(r.get("script") or ""),
-         "error": str(r.get("error") or "rc missing")}
-        for r in (executions or [])
-        if r.get("error") or r.get("rc") is None]
+    """C3-R25（N6）/C3-R26（D2）：执行异常与不可归因账的具名披露——
+    超时 / 拉起失败 / rc 缺失 / rc=0 且零执行证据，对应脚本的判定已按
+    保守方向记红。"""
+    out: "list[dict]" = []
+    for r in executions or []:
+        script = str(r.get("script") or "")
+        err = r.get("error")
+        if err or r.get("rc") is None:
+            out.append({"script": script,
+                        "error": str(err or "rc missing")})
+            continue
+        ev = r.get("evidence")
+        if (int(r.get("rc") or 0) == 0 and isinstance(ev, dict)
+                and not (ev.get("executed") or ev.get("pairs")
+                         or ev.get("failing"))):
+            out.append({"script": script,
+                        "error": "unattributable: rc=0 with zero "
+                                 "execution evidence (no script headers, "
+                                 "no failure pairs, no failing names)"})
+    return out
 
 
 def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,

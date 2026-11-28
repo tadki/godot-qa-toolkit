@@ -1069,8 +1069,11 @@ def test_r7_new_passing_universe_identity_green():
 
     baseline = {"test_verdicts": {
         "test_old.gd::test_ok": {"verdict": "green"}}}
+    # C3-R26（D2）：真跑通过的账带脚本头与通过标记（零执行证据 =
+    # 保守红第五形态）
     executions = [{"script": "tests/unit/test_new_green.gd", "rc": 0,
-                   "out": "ok"}]
+                   "out": "res://tests/unit/test_new_green.gd\n"
+                          "* test_cov_a\n* test_cov_b\nRun Summary\n"}]
     baseline["tests_face"] = {
         "tests/unit/test_new_green.gd": "sha",
         "tests/unit/test_old.gd": "sha"}

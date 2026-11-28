@@ -13,7 +13,11 @@ GUT 臂。
 - 新 feature 身份按重跑腿账补进判定表（§SPEC-025 语义完备性）。
 
 夹具（决策 19 口径）：install_recipe 真实布局，pristine/注入哈希由真实
-build_recipe 现算；编译测试名取自真实编译命名函数（gherkin_verdict_fixtures）。
+build_recipe 现算；本文件涉及 gherkin 身份分段的位置一律用真实编译器
+命名函数 `gherkin/compile.py:_ident(scenario, 位次)` 派生编译测试名
+（zz_d5_probe 的实际 scenario 内容 "s"；腿账宇宙用真实 KOL scenario
+名），`failing_tests` 由真实解析器 `_parse_failing_tests` 从 GUT 运行
+流提取——不手写第二段。
 """
 
 from __future__ import annotations
@@ -36,6 +40,13 @@ def _make_feature_project(tmp_path: Path) -> Path:
     install_recipe(proj)
     ensure_addon_metadata(proj)
     return proj
+
+
+def _compiled(scenario: str, index: int, case: int = 0) -> str:
+    """真实编译产物命名：`_ident(scenario.name, 位次) + "_<case:02d>"`。"""
+    from godot_qa_toolkit.gherkin.compile import _ident
+
+    return f"{_ident(scenario, index)}_{case:02d}"
 
 
 def _add_feature(proj: Path, key: str) -> None:
@@ -113,6 +124,10 @@ def test_feature_deletion_enters_changed_surface(tmp_path):
 
     recipe, err = build_recipe(proj)
     assert err is None, err
+    # zz_d5_probe.feature 的真实内容是 "Scenario: s"（_add_feature）——
+    # 身份第二段按真实编译命名函数派生（决策 19）
+    zz_ident = (f"gherkin://feature/zz_d5_probe::"
+                f"{_compiled('s', 0)}")
     doc = {"feature_sha256": (recipe.get("gherkin_face") or {})
            .get("feature_sha256"),
            "recipe_hash_pristine": _fresh_recipe_hash(str(proj.resolve())),
@@ -125,9 +140,7 @@ def test_feature_deletion_enters_changed_surface(tmp_path):
                                  "line_pairs": 0, "script_line_pairs": 0,
                                  "line_to_tests": {}},
                     "gherkin": {"feature_to_lines": {"zz_d5_probe": {}},
-                                "test_to_lines": {
-                                    "gherkin://feature/zz_d5_probe::t_00":
-                                        {}}}}}
+                                "test_to_lines": {zz_ident: {}}}}}
     _add_feature(proj, "zz_d5_probe2")
     _changed, drift, _ok = _prepare_drift_state(
         doc, str(proj), [])
@@ -202,26 +215,51 @@ def test_arm_full_ledger_names_reason_and_resets_counter(tmp_path):
 def test_new_feature_identities_added_from_leg_universe():
     """新增 feature 的规范身份不在基线表 → 按重跑腿宇宙与执行账补表
     （通过 green / 失败 red+new；§SPEC-025 语义完备性）。D5 前该参数
-    不存在（TypeError = 旧行为不补表）。"""
-    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+    不存在（TypeError = 旧行为不补表）。
 
-    baseline = {"test_verdicts": {
-        "gherkin://feature/alpha::keep_00": {"verdict": "green"}}}
-    fresh = {"executions": [{"rc": 1, "out": "...",
-                             "failing_tests": ["new_failing_00"],
-                             "executed_scripts": ["res://g/new.gd"]}]}
+    决策 19：身份第二段用真实编译命名函数 `_ident` 按真实 KOL scenario
+    名派生；`failing_tests` 用真实解析器 `_parse_failing_tests` 从 GUT
+    运行流提取（D3 根因形态——手写第二段 + 手写失败名——不得复现）。"""
+    from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+    from godot_qa_toolkit.mutation.gutrun import _parse_failing_tests
+    from gherkin_fixtures import ensure_addon_metadata  # noqa: F401 — 同源布局
+    from tests.unit.gherkin_verdict_fixtures import (
+        FAIL_SCENARIO,
+        PASS_SCENARIO,
+    )
+
+    # 两个 feature 的场景位次按真实编译纪律固定（同 scenario 同名编译）
+    keep_name = _compiled(PASS_SCENARIO, 0)      # alpha 的通过场景
+    ok_name = _compiled(PASS_SCENARIO, 1)        # beta 的通过场景
+    fail_name = _compiled(FAIL_SCENARIO, 1)      # beta 的失败场景
+    ident_alpha = f"gherkin://feature/alpha::{keep_name}"
+    ident_beta_ok = f"gherkin://feature/beta::{ok_name}"
+    ident_beta_fail = f"gherkin://feature/beta::{fail_name}"
+
+    # failing_tests 用真实解析器从 GUT 运行流提取（截断前提取的腿账形态）
+    gut_out = "\n".join([
+        "res://gherkin/generated/test_beta.gd",
+        f"* {ok_name}", "  assert ok  [passed]",
+        f"* {fail_name}", "  assertion failed  [Failed]",
+    ])
+    failing_tests = sorted(_parse_failing_tests(gut_out))
+    assert fail_name in failing_tests
+
+    baseline = {"test_verdicts": {ident_alpha: {"verdict": "green"}}}
+    fresh = {"executions": [{"rc": 1, "out": gut_out[-4000:],
+                             "failing_tests": failing_tests,
+                             "executed_scripts": [
+                                 "res://gherkin/generated/test_beta.gd"]}]}
     merged = _merged_test_verdicts(
         baseline, [], rerun_scripts=set(), dropped_scripts=set(),
         removed_rels=set(), fresh_gherkin=fresh,
         gherkin_rerun={"alpha", "beta"}, gherkin_dropped=set(),
-        gherkin_identities=["gherkin://feature/alpha::keep_00",
-                            "gherkin://feature/beta::new_ok_00",
-                            "gherkin://feature/beta::new_failing_00"])
-    assert merged["gherkin://feature/beta::new_ok_00"] == {"verdict": "green"}
-    entry = merged["gherkin://feature/beta::new_failing_00"]
+        gherkin_identities=[ident_alpha, ident_beta_ok, ident_beta_fail])
+    assert merged[ident_beta_ok] == {"verdict": "green"}
+    entry = merged[ident_beta_fail]
     assert entry["verdict"] == "red", entry
     assert entry["classification"] == "new", entry
-    assert merged["gherkin://feature/alpha::keep_00"]["verdict"] == "green"
+    assert merged[ident_alpha]["verdict"] == "green"
 
 
 # ───────────────────── GUT 侧因素仍两臂全量（守卫，语义不回退） ─────────────────────

@@ -1010,7 +1010,7 @@ def _gherkin_renewal_section(
         removed: "set[str]", arm_full_reason: "str | None",
         timeout_s: int, causal: bool, target_files: "list[str]",
         raw_recipe: dict, out_path: "str | Path", t0: float
-        ) -> "tuple[dict, dict | None, list[dict], float, dict | None, str | None]":
+        ) -> "tuple[dict, set[str], set[str], dict | None, list[dict], float, dict | None, str | None]":
     """gherkin 臂增量段（C3-R28/D5 零行为拆分）：重跑面 → 腿（臂级
     全量跑全部盘上 feature；腿跑不了降级两臂全量）→ 合并。返回
     (invalidation, fresh_gherkin, gh_executions, gh_exec_s,
@@ -1024,7 +1024,8 @@ def _gherkin_renewal_section(
             root, gherkin_rerun, templates, recipe, causal, timeout_s,
             arm_full_reason, target_files, raw_recipe, out_path, classes, t0)
     if full_face_fallback:
-        return invalidation, None, [], 0.0, None, full_face_fallback
+        return (invalidation, set(), set(), None, [], 0.0, None,
+                full_face_fallback)
     baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
     if isinstance(baseline_gherkin, dict) and baseline_gherkin or \
             fresh_gherkin:
@@ -1037,8 +1038,8 @@ def _gherkin_renewal_section(
     invalidation = {**invalidation,
                     "gherkin_rerun": sorted(gherkin_rerun),
                     "gherkin_dropped": sorted(gherkin_dropped)}
-    return invalidation, fresh_gherkin, gh_executions, gh_exec_s, \
-        merged_gherkin, None
+    return (invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin,
+            gh_executions, gh_exec_s, merged_gherkin, None)
 
 
 def _run_attribution_increment_locked(
@@ -1094,8 +1095,9 @@ def _run_attribution_increment_locked(
     # SEE-1631 §SPEC-016：gherkin 臂增量腿——只重跑失效 feature（与
     # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
     # （与 gut 重跑同一插桩文本单源）。
-    invalidation, fresh_gherkin, gh_executions, gh_exec_s, merged_gherkin, \
-        full_face_fallback = _gherkin_renewal_section(
+    invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin, \
+        gh_executions, gh_exec_s, merged_gherkin, full_face_fallback = \
+        _gherkin_renewal_section(
             baseline, root, arm_targets, recipe, classes, invalidation,
             removed, gherkin_arm_full_reason, timeout_s, attribution_causal,
             target_files, raw_recipe, out_path, t0)
@@ -1112,9 +1114,6 @@ def _run_attribution_increment_locked(
     merge_collisions: list = []
     from .attribution import _gherkin_feature_of as _gfo
 
-    # gherkin 重跑面 / dropped 由臂段写回 invalidation（零行为拆分回填）
-    gherkin_rerun = set(invalidation.get("gherkin_rerun") or [])
-    gherkin_dropped = set(invalidation.get("gherkin_dropped") or [])
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),

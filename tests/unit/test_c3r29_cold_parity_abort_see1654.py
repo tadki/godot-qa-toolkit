@@ -1,11 +1,8 @@
-"""SEE-1654 C3-R29（D6 + D7）：cold 车道 parity 同判与中止退出语义。
+"""SEE-1654 C3-R29（D7）· C3-R30（决策 22）：中止退出语义。
 
-D6：地图源判定基线下，cold 车道与 worker 通道同判——地图判定被实跑
-证伪（方向 A：地图说绿实跑红）→ 具名 `baseline_map_mismatch` fail-loud、
-零 mutant；方向 B（地图说红实跑绿）维持「排除 + 披露」残余（门不判方
-向 B）；非地图源（cold legacy / off）门不启用；影子拉起失败 = 门不可用
-披露跳过。GUT 失败名经真实解析器 `_parse_failing_tests` 提取（决策 19：
-GUT 输出形态与解析器同源，不手写失败名集合）。
+D6 的 cold parity 门已按决策 22 回退（Owner 2026-11-24 裁决：默认地图
+源下 mutant 执行前零基线/验证面运行；「假绿概率微乎其微」）——门与门
+专属测试项已删，cold 车道「地图说绿实跑红」按残余披露，不运行。
 
 D7：中止就是失败——run_error 中止形态（基线脏中止等）经 `_inject_one`
 收尾后 ok 不得被四计数重算翻真；同一中止原因经两处装载时 failures 逐字
@@ -14,132 +11,7 @@ D7：中止就是失败——run_error 中止形态（基线脏中止等）经 `
 
 from __future__ import annotations
 
-import pytest
-
-from godot_qa_toolkit.mutation import runner as _runner
 from godot_qa_toolkit.mutation.reporting import _break_on_baseline_result
-from godot_qa_toolkit.mutation.verdict_source import BaselineSourceError
-
-
-# ---------------------------------------------------------------------------
-# 真实形态夹具：GUT 运行流经真实解析器提取失败名（决策 19）
-# ---------------------------------------------------------------------------
-
-def _gut_tail(failing: list[str], passing: list[str]) -> str:
-    """真实 GUT 运行流形态：res:// 脚本头 + `* 测试名` + [Failed]/[passed]。"""
-    lines = ["res://tests/unit/test_face.gd"]
-    for n in passing:
-        lines += [f"* {n}", "  assert ok  [passed]"]
-    for n in failing:
-        lines += [f"* {n}", "  assertion failed  [Failed]"]
-    return "\n".join(lines)
-
-
-def _slot():
-    return type("S", (), {"root": "/tmp/shadow" })()
-
-
-def _install_gate(monkeypatch: pytest.MonkeyPatch, tail: str,
-                  calls: list) -> None:
-    """把 cold parity 腿的实跑替换为真实解析器解析的运行流（零 Godot 单元
-    面；调用留痕供「门是否启用」断言）。"""
-    def fake_run_baseline(project_root, tests_glob, timeout_s):
-        calls.append((project_root, tests_glob, timeout_s))
-        return (1 if "Failed]" in tail else 0), tail, 0.01
-
-    monkeypatch.setattr(_runner, "_run_baseline", fake_run_baseline)
-
-
-def _gate(monkeypatch, *, map_source: bool, baseline_reds: list[str],
-          real_reds: list[str], mutants: list | None = None,
-          calls: list | None = None) -> None:
-    from godot_qa_toolkit.mutation.gutrun import _parse_failing_tests
-
-    tail = _gut_tail(real_reds, ["t_ok_00"])
-    _install_gate(monkeypatch, tail, calls if calls is not None else [])
-    snap = {"source": "map"} if map_source else None
-    _runner._cold_parity_gate(
-        slot=_slot(), project_root="/tmp/whatever", tests_glob=None,
-        mutants=mutants if mutants is not None else [object()],
-        baseline_failures=set(_parse_failing_tests(
-            _gut_tail(baseline_reds, ["t_ok_00"]))),
-        baseline_snapshot=snap)
-
-
-# ---------------------------------------------------------------------------
-# D6：cold 车道 parity 门
-# ---------------------------------------------------------------------------
-
-def test_cold_parity_direction_a_named_invalidation(monkeypatch):
-    """方向 A（地图说绿实跑红）：具名 baseline_map_mismatch 批量作废——
-    不得静默产出批量假 kill（099bbe6/cfc7c71 上无此门 = NameError/静默）。"""
-    with pytest.raises(BaselineSourceError, match="baseline_map_mismatch"):
-        _gate(monkeypatch, map_source=True,
-              baseline_reds=[], real_reds=["test_red_always"])
-
-
-def test_cold_parity_direction_b_not_rejected(monkeypatch):
-    """方向 B（地图说红实跑绿）：维持「排除 + 披露」残余——门不判方向 B
-    （观察缺红不触发作废）。"""
-    _gate(monkeypatch, map_source=True,
-          baseline_reds=["test_red_always"], real_reds=[])
-
-
-def test_cold_parity_match_passes(monkeypatch):
-    """地图红集与实跑一致 → 门放行（零失配）。"""
-    _gate(monkeypatch, map_source=True,
-          baseline_reds=["test_red_always"], real_reds=["test_red_always"])
-
-
-def test_cold_parity_off_for_non_map_source(monkeypatch):
-    """非地图源（cold legacy / off）：门不启用——无地图可证伪，实跑成本
-    不支付（S-3②：cold legacy 维持原语义）。"""
-    calls: list = []
-    _install_gate(monkeypatch, _gut_tail(["test_red_always"], []), calls)
-    snap = None
-    _runner._cold_parity_gate(
-        slot=_slot(), project_root="/tmp/whatever", tests_glob=None,
-        mutants=[object()], baseline_failures=set(),
-        baseline_snapshot=snap)
-    assert calls == []
-
-
-def test_cold_parity_launch_failure_skips_gate(monkeypatch):
-    """影子拉起失败 = 门不可用：具名披露后跳过（不误判失配）。尾部带
-    既有 launch-failure marker（与 `_loop_baseline` 同一识别规则）。"""
-    def fake_run_baseline(project_root, tests_glob, timeout_s):
-        return 127, ("error: failed to load script res://x.gd — "
-                     "Godot launch failed"), 0.01
-
-    monkeypatch.setattr(_runner, "_run_baseline", fake_run_baseline)
-    err = capsys_stderr(lambda: _runner._cold_parity_gate(
-        slot=_slot(), project_root="/p", tests_glob=None, mutants=[object()],
-        baseline_failures=set(), baseline_snapshot={"source": "map"}))
-    assert "cold parity gate unavailable" in err
-
-
-def capsys_stderr(fn):
-    import io
-    from contextlib import redirect_stderr
-
-    buf = io.StringIO()
-    with redirect_stderr(buf):
-        try:
-            fn()
-        except BaseException:
-            pass
-    return buf.getvalue()
-
-
-def test_cold_parity_gate_skips_zero_mutants(monkeypatch):
-    """零 mutant（无腿可作废）：门不支付实跑。"""
-    calls: list = []
-    _install_gate(monkeypatch, _gut_tail(["test_red_always"], []), calls)
-    _runner._cold_parity_gate(
-        slot=_slot(), project_root="/tmp/whatever", tests_glob=None,
-        mutants=[], baseline_failures=set(),
-        baseline_snapshot={"source": "map"})
-    assert calls == []
 
 
 # ---------------------------------------------------------------------------

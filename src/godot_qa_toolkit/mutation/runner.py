@@ -1045,10 +1045,6 @@ def _loop_legs(path, project_root, original_src, backup, mutants, tests_glob,
                 slot_info["worker_channel"] = degraded_worker_disclosure(
                     slot_info.get("worker_channel") or {}, fatal_events)
         else:
-            # C3-R29（D6）：cold 车道 parity 门先于逐 mutant 循环——失配
-            # 即具名作废、零 mutant（与 worker 通道同判）。
-            _cold_parity_gate(slot, project_root, tests_glob, mutants,
-                              baseline_failures, baseline_snapshot)
             with clock.stage("per_mutant"):
                 raw_pairs = _run_cold_legs(
                     path, project_root, original_src, backup, mutants,
@@ -1092,40 +1088,6 @@ def _map_parity_gate(slot_info: dict, precomputed_baseline) -> None:
                 "baseline_map_mismatch: attribution-map verdict "
                 "baseline diverged from real execution "
                 f"(parity gate) — batch invalidated: {ev}")
-
-
-def _cold_parity_gate(slot, project_root: str, tests_glob: str | None,
-                      mutants: list, baseline_failures: set[str],
-                      baseline_snapshot: dict | None) -> None:
-    """C3-R29（D6）：cold 车道 parity 门——与 worker 通道同判。
-
-    地图源判定基线下，对**未注入**影子面实跑一次全脸：观察到「地图说
-    绿、实跑红」的额外真红（方向 A）→ 具名 `baseline_map_mismatch`
-    fail-loud、零 mutant（批量作废，不得产出批量假 kill）；方向 B（地
-    图说红实跑绿）维持既有「排除 + 披露」残余，本门不判方向 B。非地图
-    源（cold legacy / off）无地图可证伪，门不启用（S-3②：cold legacy
-    runner 维持原语义）。autoload / GUT 域 / 场景持有三种判冷原因经同
-    一 cold 分支进入，同口径覆盖。影子面拉起失败 = 门不可用，具名披露
-    后跳过（不误判失配）。"""
-    if not mutants or not baseline_snapshot_from_map(baseline_snapshot):
-        return
-    rc, tail, _elapsed = _run_baseline(
-        str(slot.root), tests_glob,
-        int(_adaptive_timeout or 0) or _LEG_TIMEOUT_FLOOR)
-    if rc != 0 and _looks_like_godot_launch_failure(tail):
-        print("mutation: cold parity gate unavailable (launch failure) "
-              "— skipped (disclosed)", file=sys.stderr)
-        return
-    observed = _parse_failing_tests(tail)
-    expected = {str(n) for n in (baseline_failures or ())}
-    extra = sorted(observed - expected)
-    if extra:
-        from .verdict_source import BaselineSourceError
-
-        raise BaselineSourceError(
-            "baseline_map_mismatch: attribution-map verdict baseline "
-            "diverged from real execution (cold parity gate) — batch "
-            f"invalidated: real reds not in map={extra[:6]}")
 
 
 def _mutant_slot_disclosures(slot_info: dict, idpack: dict, slot,

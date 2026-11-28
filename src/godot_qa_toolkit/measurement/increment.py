@@ -1602,8 +1602,9 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     - 基线表原样继承（未重跑身份逐位不变）；
     - 重跑脚本的身份按脚本执行账重算：rc==0 且无解析失败名 → green；
       有失败名 → red/new（增量形态新树的失败如实记 new）；
-    - gherkin 重跑键（feature_changed/new）随重跑腿执行账重算（rc==0 →
-      green，否则维持基线值）；
+    - gherkin 重跑键（feature_changed/new）随重跑腿执行账逐名重算
+      （C3-R27/D3：按与身份段同命名空间的编译测试名 `failing_tests`——
+      通过 green，失败 red 分类沿基线，失败名缺失或空集保守整键红 N6）；
     - 删除测试脚本（完整路径身份，C3-R24/N1）与删除生产文件触达的
       身份剔除。
     C3-R22（D4）：规范身份去重——升级过渡（旧 basename 形态基线 × 新

@@ -221,8 +221,9 @@ def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
     out = compile_keys_to_suite(root, keys, suite_dir)
     identities = {k: (out["manifests"].get(k) or {}).get("attribution")
                   or [] for k in keys}
-    # §SPEC-025/D8（R4）：test_name → scenario 映射（执行账失败名回写
-    # scenario 名用；manifest 在 suite 回收后仍可判定逐 scenario 红绿）。
+    # §SPEC-025/D8（R4）：test_name → scenario 映射（执行账
+    # failing_scenarios 回写用，仅披露——C3-R27/D3 起判定按
+    # failing_tests，不经本映射）。
     scenario_of_test = _scenario_map_from_manifests(out, keys)
     for k in keys:
         replay_check(root, k, suite_dir=suite_dir)
@@ -285,7 +286,8 @@ def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
                              gate_root=root)
         full_out = (r.stdout or "") + "\n" + (r.stderr or "")
         # C3-R24（N2）：失败名在截断之前从完整输出提取——截断尾部可能
-        # 把失败名切掉，failing_scenarios 空集会把失败 scenario 记绿。
+        # 把失败名切掉，判定将因失败名缺失退到 N6 保守整键红（C3-R27/D3：
+        # 判定证据是同命名空间的 failing_tests）。
         # C3-R25（N5）：gutrun 在 mutation/ 包——measurement 包内的
         # `from .gutrun` 是错误相对导入，GUT 一跑完即 ModuleNotFoundError。
         # C3-R26（D2）：执行脚本头同在截断前提取——rc=0 且零执行证据
@@ -309,10 +311,11 @@ def _gherkin_leg_execute(root: Path, gen_res: str, started_files: dict,
 
 def _failing_scenarios_backfill(executions: list[dict],
                                 scenario_of_test: dict) -> None:
-    """§SPEC-025/D8（R4）：执行账失败名（编译 test_name）回写为
-    scenario 名——verdict 重算按 scenario 粒度。C3-R24（N2）：优先消费
-    截断前提取的失败名（failing_tests 键）；旧形态账（无该键）回退解析
-    截断尾部。"""
+    """§SPEC-025/D8（R4）：执行账失败名（编译 test_name）经桥映射回写为
+    scenario 名（`failing_scenarios`）——只作执行账披露（C3-R27/D3：判定
+    按与身份段同命名空间的 `failing_tests` 逐名比对，不消费本回写）。
+    C3-R24（N2）：优先消费截断前提取的失败名（failing_tests 键）；旧形态
+    账（无该键）回退解析截断尾部。"""
     # C3-R25（N5）：同 `_gherkin_leg_execute`——必须指向 mutation 包的
     # gutrun（C2-R4 起这条错误相对导入只被「scenario_of_test 非空」
     # 掩盖：任何 feature 重跑腿的成功路径都必崩）
@@ -380,8 +383,9 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
             identity_rewrite=rw)
         for xdg in xdg_homes:
             shutil.rmtree(xdg, ignore_errors=True)
-        # §SPEC-025/D8（R4）：执行账失败名（编译 test_name）回写为
-        # scenario 名（failing_scenarios）——verdict 重算按 scenario 粒度。
+        # §SPEC-025/D8（R4）：执行账失败名（编译 test_name）经桥映射回写
+        # scenario 名（failing_scenarios）——仅执行账披露（C3-R27/D3：判定
+        # 按 failing_tests 逐名，见 _verdict_gherkin_rerun）。
         if scenario_of_test:
             _failing_scenarios_backfill(executions, scenario_of_test)
         return fresh, executions

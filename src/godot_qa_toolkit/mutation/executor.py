@@ -908,6 +908,12 @@ def _inject_one(r: dict, ctx: dict) -> None:
         _inject_reused(r, ctx)
     _inject_uncovered(r, s, ctx)
     _inject_diff_disclosure(s, ctx)
+    # C3-R29（D7）：中止就是失败——run_error 中止形态（基线脏中止 /
+    # 启动失败 / 超时中止等）的 ok 由中止契约承载，整个计数收尾跳过
+    # （中止信封无计数键；并行/cold 通道下中止计数全 0 → ok 曾被翻真、
+    # exit 0，违反 §SPEC-033 退出语义）。串行路径本就不经此收尾。
+    if s.get("run_error"):
+        return
     total = s["mutants"]
     s["kill_rate"] = round(s["killed"] / total, 4) if total else 0.0
     r["ok"] = (s["survived"] == 0 and s["timeout"] == 0

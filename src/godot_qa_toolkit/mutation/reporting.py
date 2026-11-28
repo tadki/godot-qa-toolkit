@@ -121,11 +121,16 @@ def _baseline_skip_unsupported_result(file: str, names: list[str],
     }
 
 
-def _break_on_baseline_result(file: str, names: list[str]) -> dict:
+def _break_on_baseline_result(file: str, names: list[str],
+                              trigger: str = "--break-on-baseline-failure"
+                              ) -> dict:
     """SEE-1606 P2：`--break-on-baseline-failure` 的基线脏中止契约。
 
     与 baseline 超时/启动失败同档（run_error 中止形态），但带具名基线
     失败清单供机器消费；此路径零 mutant GUT。
+    C3-R29（D7）：`trigger` = 实际触发的旗标（`--fail-on-red-baseline`
+    与 break-on-baseline-failure 通道合流后，文案必须指向真实触发者，
+    不得硬编码另一旗标名）。
     """
     failures = sorted(names)
     return {
@@ -135,15 +140,15 @@ def _break_on_baseline_result(file: str, names: list[str]) -> dict:
             "file": file,
             "run_error": True,
             "error": (f"baseline has {len(failures)} failing test(s) and "
-                      "--break-on-baseline-failure is set"),
+                      f"{trigger} is set"),
             "break_on_baseline_failure": True,
             "baseline_dirty": True,
             "baseline_failures": len(failures),
             "baseline_failure_names": failures,
         },
         "failures": [{
-            "reason": ("baseline failures present with "
-                       f"--break-on-baseline-failure: {failures[:3]}")}],
+            "reason": (f"baseline failures present with {trigger}: "
+                       f"{failures[:3]}")}],
     }
 
 

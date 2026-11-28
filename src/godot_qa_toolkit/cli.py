@@ -945,9 +945,15 @@ def _kill_bail_flag(args: argparse.Namespace) -> bool | None:
 
 def _baseline_break_flag(args: argparse.Namespace) -> bool:
     """SEE-1623 M3：`--fail-on-red-baseline` 与 break-on-baseline-failure
-    通道合流（红基线快速失败）——编排与串行两条路径的单一出处。"""
-    return (getattr(args, "break_on_baseline_failure", False)
+    通道合流（红基线快速失败）——编排与串行两条路径的单一出处。
+    C3-R29（D7）：登记实际触发的旗标，中止文案指向真实触发者。"""
+    flag = (getattr(args, "break_on_baseline_failure", False)
             or getattr(args, "fail_on_red_baseline", False))
+    if flag and getattr(args, "fail_on_red_baseline", False) \
+            and not getattr(args, "break_on_baseline_failure", False):
+        from .mutation.runner import set_baseline_break_trigger
+        set_baseline_break_trigger("--fail-on-red-baseline")
+    return flag
 
 
 def _dispatch_mutation(args: argparse.Namespace, binary_kind: str) -> dict:

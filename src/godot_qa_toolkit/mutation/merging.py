@@ -8,6 +8,8 @@ chunk worker、聚合累加、单文件 summary 组装、attention 投影与输�
 
 from __future__ import annotations
 
+import json
+
 from .reporting import SURVIVOR_DETAIL_KEYS, SURVIVORS_CAP
 from .coverlink import coverage_prefilter_summary
 
@@ -120,7 +122,16 @@ def _accumulate_chunk(agg: dict, cr: dict,
     rss = s.get("rss_peak_mb")
     if isinstance(rss, (int, float)):
         agg["rss_peak_mb"] = max(agg["rss_peak_mb"], float(rss))
-    agg["failures"].extend(cr.get("failures", []))
+    # C3-R29（D7）：同一中止原因经两处装载（settled + chunk abort）时
+    # failures 逐字重复——按整条 failure 去重（逐字相同 = 同一原因，
+    # 重复条目零信息量）。
+    known = {json.dumps(f, sort_keys=True, ensure_ascii=False)
+             for f in agg["failures"]}
+    for f in cr.get("failures", []):
+        key = json.dumps(f, sort_keys=True, ensure_ascii=False)
+        if key not in known:
+            known.add(key)
+            agg["failures"].append(f)
     agg["scoped"] = bool(s.get("scoped"))
     agg["budget"] = s.get("budget")
     agg["baseline_reused"] = bool(s.get("baseline_reused"))
@@ -194,11 +205,21 @@ def _merge_results(chunks: list[dict], chunk_results: list[dict],
             agg["attention"] = chunk.get("attention")
     results = [_file_summary(agg, passthrough_keys, resumed_present)
                for agg in per_file.values()]
+    # C3-R29（D7）：顶层 failures 跨文件同因去重（基线为跨文件共享面，
+    # 多文件同批中止的 reason 逐字相同——重复条目零信息量）。
+    seen: set = set()
+    failures: list = []
+    for r in results:
+        for f in r.get("failures", []):
+            key = json.dumps(f, sort_keys=True, ensure_ascii=False)
+            if key not in seen:
+                seen.add(key)
+                failures.append(f)
     return {
         "tool": "mutation",
         "ok": all(r["ok"] for r in results),
         "jobs": len(chunks),
-        "failures": [f for r in results for f in r.get("failures", [])],
+        "failures": failures,
         "results": results,
     }
 

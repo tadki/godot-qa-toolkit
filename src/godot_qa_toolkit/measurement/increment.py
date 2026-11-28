@@ -916,10 +916,13 @@ def run_attribution_increment(project_root: "str | Path",
                               rerun_full_face_ratio: float
                               = DEFAULT_RERUN_FULL_FACE_RATIO,
                               gherkin_rerun_full_face_ratio: float
-                              = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
+                              = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO,
+                              gherkin_arm_full_reason: "str | None" = None
                               ) -> dict:
     """C3-R14（§SPEC-032③）插桩互斥外壳：增量腿同样把插桩文本写进源
-    树，与测量臂共用 `<root>/.qa-cache/probe-rw.lock` 串行化。"""
+    树，与测量臂共用 `<root>/.qa-cache/probe-rw.lock` 串行化。
+    `gherkin_arm_full_reason`（C3-R28/D5）：refresh 阶梯判定 feature 面
+    自身需要全量时强制走臂级重建（reason 具名随台账）。"""
     from .backup import probe_rw_lock
 
     with probe_rw_lock(project_root):
@@ -929,7 +932,8 @@ def run_attribution_increment(project_root: "str | Path",
             attribution_causal=attribution_causal,
             calibration_every=calibration_every,
             rerun_full_face_ratio=rerun_full_face_ratio,
-            gherkin_rerun_full_face_ratio=gherkin_rerun_full_face_ratio)
+            gherkin_rerun_full_face_ratio=gherkin_rerun_full_face_ratio,
+            gherkin_arm_full_reason=gherkin_arm_full_reason)
 
 
 def _load_baseline_with_conservation(baseline_path: str | Path) -> dict:
@@ -955,7 +959,8 @@ def _run_attribution_increment_locked(
         rerun_full_face_ratio: float
         = DEFAULT_RERUN_FULL_FACE_RATIO,
         gherkin_rerun_full_face_ratio: float
-        = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO
+        = DEFAULT_GHERKIN_RERUN_FULL_FACE_RATIO,
+        gherkin_arm_full_reason: "str | None" = None
         ) -> dict:
     """增量重建主入口（含产物落盘与 provenance）。C3-R14：插桩互斥
     外壳 + §SPEC-025 表守恒入口检查。"""
@@ -972,6 +977,17 @@ def _run_attribution_increment_locked(
     classes, invalidation, rerun, reason = _increment_decision(
         root, recipe, baseline, changed_files, since_full, calibration_every,
         rerun_full_face_ratio, gherkin_rerun_full_face_ratio)
+    if gherkin_arm_full_reason:
+        # C3-R28（D5/决策 20）：refresh 阶梯判定 feature 面自身需要全量
+        # （缺 `feature_sha256` 键）→ 强制臂级重建，reason 具名随台账。
+        gherkin_arm_full_reason = str(gherkin_arm_full_reason)
+        reason = "incremental"
+    elif reason == "gherkin_rerun_surface_too_large_fallback":
+        # C3-R28（D5/决策 20）：feature 面重跑面超比例上限 → 只重建
+        # feature 臂（gherkin 腿跑全部盘上 feature 键，reason 具名随
+        # 台账）；GUT 臂零进程原样继承——不再回退两臂全量。
+        gherkin_arm_full_reason = reason
+        reason = "incremental"
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
@@ -996,6 +1012,11 @@ def _run_attribution_increment_locked(
     # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
     # （与 gut 重跑同一插桩文本单源）。
     gherkin_rerun = set(invalidation.get("feature_rerun") or [])
+    if gherkin_arm_full_reason:
+        # 臂级全量：重跑面 = 全部盘上 feature（与失效面同一盘上检测源）。
+        from ..mutation.truth_select import _features_disk_sha256
+
+        gherkin_rerun = set(_features_disk_sha256(root))
     gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
     templates = prepare_attr_templates(root, arm_targets, recipe,
                                        attribution_causal)
@@ -1029,6 +1050,8 @@ def _run_attribution_increment_locked(
     # 路径只在合并面里——基线面没有新文件）
     face_after = _merged_tests_face(root, baseline, classes)
     merge_collisions: list = []
+    from .attribution import _gherkin_feature_of as _gfo
+
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
@@ -1036,13 +1059,17 @@ def _run_attribution_increment_locked(
         tests_face=face_after,
         arm_identities=sorted((merged.get("test_to_lines") or {}).keys()),
         collisions=merge_collisions,
-        legacy_families=legacy_families)
+        legacy_families=legacy_families,
+        gherkin_identities=sorted(
+            k for k in ((merged_gherkin or {}).get("test_to_lines") or {})
+            if _gfo(str(k)) in gherkin_rerun))
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
         executions, merged_gherkin=merged_gherkin,
         gh_exec_s=gh_exec_s, gh_executions=gh_executions,
-        merged_verdicts=merged_verdicts, merge_collisions=merge_collisions)
+        merged_verdicts=merged_verdicts, merge_collisions=merge_collisions,
+        gherkin_arm_full_reason=gherkin_arm_full_reason)
     return _increment_emit(root, out_path, artifact, merged, classes, rerun,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
@@ -1445,7 +1472,8 @@ def _gherkin_leg_exec_source(fresh_gherkin: "dict | None",
     return None
 
 def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
-                           gherkin_rerun: set) -> None:
+                           gherkin_rerun: set,
+                           identities: "list[str] | None" = None) -> None:
     """gherkin 重跑键（feature_changed/new）：**逐名**按重跑腿**全部**
     执行账判定（多分片/多 rep 任一失败都算失败）——失败名与身份第二段
     **同一命名空间**（编译测试名 `failing_tests`，C3-R27/D3；执行账的
@@ -1454,12 +1482,16 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
     基线（pre_existing/suspected_intolerant 保持 §SPEC-017 车道，基线绿
     而失败 = new）。失败名缺失（旧形态账）**或空集**（腿失败但零可归因
     名——不可归因）保守整键红（N6）。`gherkin_dropped` 的剔除由
-    `_merged_test_verdicts` 无条件消费（D9）。"""
+    `_merged_test_verdicts` 无条件消费（D9）。`identities`（C3-R28/D5）：
+    重跑臂的规范身份清单——新 feature 的身份不在基线表，按腿账补表
+    （§SPEC-025 语义完备性：新增 feature 的判定必须进表）。"""
     from .attribution import _gherkin_feature_of
 
     gh_ok = _gherkin_rerun_all_passed(fresh_gherkin)
     failing_tests = _gherkin_failing_tests(fresh_gherkin)
-    for ident in list(merged):
+    idents = [i for i in (identities or []) if i not in merged] \
+        + list(merged)
+    for ident in idents:
         key = _gherkin_feature_of(str(ident))
         if key is None or key not in gherkin_rerun:
             continue
@@ -1604,7 +1636,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
                           tests_face: "dict[str, str] | None" = None,
                           arm_identities: "list[str] | None" = None,
                           collisions: "list[dict] | None" = None,
-                          legacy_families: "dict | None" = None
+                          legacy_families: "dict | None" = None,
+                          gherkin_identities: "list[str] | None" = None
                           ) -> "dict | None":
     """§SPEC-025：增量 verdict 表合并（重跑重算 / 未重跑继承 / 删除剔除）。
 
@@ -1638,7 +1671,8 @@ def _merged_test_verdicts(baseline: dict, executions: list[dict],
     _verdict_add_new_identities(merged, per_script, rerun_scripts,
                                tests_face, arm_identities)
     if fresh_gherkin is not None:
-        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun)
+        _verdict_gherkin_rerun(merged, fresh_gherkin, gherkin_rerun,
+                               identities=gherkin_identities)
     _canonical_verdict_dedup(merged, tests_face, arm_identities, collisions,
                              legacy_families=families)
     return merged
@@ -1676,7 +1710,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               gh_exec_s: float = 0.0,
                               gh_executions: "list[dict] | None" = None,
                               merged_verdicts: "dict | None" = None,
-                              merge_collisions: "list[dict] | None" = None
+                              merge_collisions: "list[dict] | None" = None,
+                              gherkin_arm_full_reason: "str | None" = None
                               ) -> dict:
     removed = set(classes.get("prod_removed") or [])
     # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
@@ -1729,7 +1764,10 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),
         "increment": {
-            "mode": "incremental",
+            # C3-R28（D5）：臂级全量时 mode/reason 携带具名原因（feature
+            # 臂重建；对外响应 mode 仍取 status 预言的 full/increment）。
+            "mode": gherkin_arm_full_reason or "incremental",
+            "reason": gherkin_arm_full_reason,
             "base_recipe_hash": baseline.get("report_recipe_hash"),
             "changed_files": classes,
             "rerun_scripts": rerun_list,
@@ -1739,7 +1777,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                 invalidation.get("gherkin_rerun") or []),
             "gherkin_dropped_features": sorted(
                 invalidation.get("gherkin_dropped") or []),
-            "increments_since_full": since_full + 1,
+            "increments_since_full": 0 if gherkin_arm_full_reason
+            else since_full + 1,
             "calibration_policy": ("full face every N increments or on "
                                    "hash mismatch / new prod file / "
                                    "oversized rerun surface (deleted prod "

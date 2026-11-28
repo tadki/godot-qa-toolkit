@@ -444,13 +444,21 @@ def recipe_hash(recipe: dict) -> str:
 
     C3-R14（定案 4/§SPEC-016）：`gherkin_face.feature_sha256` 是 feature
     内容失效面（per-feature 增量通道的对比基准），不参与 wholesale
-    hash——feature 编辑走 feature_changed，不再被判成环境失配。"""
+    hash——feature 编辑走 feature_changed，不再被判成环境失配。
+    C3-R28（D5/决策 20）：feature 结构名单（`features` / `count`）同样
+    摘出 wholesale——feature 新增 / 删除走 feature 臂增量（新增 → 重跑
+    该 feature；删除 → 剔除身份与边），不再判环境失配两臂全量；名单
+    变化仍由 map 的 `feature_sha256` 对账检测（status 因素
+    `feature_sha256: new|removed=[…]`）。gherkin 适配器指纹、wiring 与
+    scope 规则摘要仍在 wholesale（GUT 侧因素，变化照旧全量）。"""
     basis = {k: v for k, v in recipe.items()
              if k not in ("recipe_hash", "project_root")}
     gf = basis.get("gherkin_face")
     if isinstance(gf, dict):
         gf2 = dict(gf)
         gf2.pop("feature_sha256", None)
+        gf2.pop("features", None)
+        gf2.pop("count", None)
         basis["gherkin_face"] = gf2
     return canonical_sha256(basis)
 

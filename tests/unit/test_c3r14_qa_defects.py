@@ -221,15 +221,24 @@ def test_recipe_hash_ignores_feature_content():
     assert recipe_hash(a) == recipe_hash(b)
 
 
-def test_recipe_hash_changes_with_feature_structure():
-    """结构面（features key/source）仍在 hash 内：feature 增删仍失配。"""
+def test_recipe_hash_ignores_feature_structure():
+    """C3-R28（D5/决策 20）：结构面（features/count）摘出 wholesale
+    hash——feature 增删不再判环境失配两臂全量；名单变化由 face 级
+    `feature_sha256` 对账检测（feature 臂增量：新增 → 重跑该 feature，
+    删除 → 剔除身份与边），检测语义由本断言保留。"""
     from godot_qa_toolkit.measurement.recipe import recipe_hash
 
     a = _mk_recipe("sha-AAA")
     b = _mk_recipe("sha-AAA")
     b["gherkin_face"]["features"] = [
         {"key": "other_feature", "source": "res://x/other.feature"}]
-    assert recipe_hash(a) != recipe_hash(b)
+    b["gherkin_face"]["count"] = 1
+    b["gherkin_face"]["feature_sha256"] = {"other_feature": "sha-BBB"}
+    assert recipe_hash(a) == recipe_hash(b)
+    # 车道检测通道仍在：face 级指纹随名单变化（status 的
+    # `feature_sha256: new|removed=` 因素源）
+    assert a["gherkin_face"]["feature_sha256"] != \
+        b["gherkin_face"]["feature_sha256"]
 
 
 def test_feature_drift_marks_changed_feature(tmp_path):

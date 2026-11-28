@@ -491,6 +491,10 @@ def _feature_drift(root: Path, doc: dict, changed: "set[str]",
             changed.add(rel)
     for key in sorted(set(baseline_sha) - seen_keys):
         drift.add(f"feature_removed:{key}")
+        # C3-R28（D5/决策 20）：删除也进变更面——feature 臂增量（身份与
+        # 边剔除、不重跑）。合成规范 rel：normalize 无损回到同一 key，
+        # classify 按基线 key 判 feature_removed。
+        changed.add(f"addons/gqt_gherkin/features/{key}.feature")
 
 
 def _content_removal_drift(root: Path, fingerprint: dict,
@@ -617,7 +621,9 @@ def _prepare_drift_state(doc: dict, project_root: str,
 
 
 def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
-                               changed: list[str], timeout_s: int) -> None:
+                               changed: list[str], timeout_s: int,
+                               gherkin_arm_full_reason: "str | None" = None
+                               ) -> None:
     """增量续新（只重跑失效面）：目标面取自基线 target_files（建图时
     的测量宇宙），recipe 由当前树现场构建（build_recipe 单源）。
     §SPEC-029 表 #5：不可归因变更（`uid://`/动态 load/非 .gd——
@@ -660,7 +666,8 @@ def _prepare_increment_renewal(doc: dict, project_root: str, path: str,
     try:
         run_attribution_increment(
             project_root, targets, recipe, path, changed, tmp,
-            timeout_s=timeout_s)
+            timeout_s=timeout_s,
+            gherkin_arm_full_reason=gherkin_arm_full_reason)
         import os as _os
         tmp_doc = load_map(tmp)
         assert_map_fresh(project_root, tmp_doc, targets)

@@ -229,6 +229,9 @@ def _planned_action(root: str, doc: dict,
     except Exception as e:  # noqa: BLE001 — unknown_changed_paths 等具名拒绝
         return "full", drift or f"increment_not_eligible: {e}"
     if reason != "incremental":
+        if reason == "gherkin_rerun_surface_too_large_fallback":
+            # C3-R28（D5）：feature 臂级全量预测具名（对外 mode 不变）。
+            return "full", drift or f"gherkin_arm_full: {reason}"
         return "full", drift
     return "increment", None
 
@@ -411,9 +414,22 @@ def _refresh_locked(root: str, files: "list[str]",
                     f"refresh failed (map unreadable): {e}") from e
             changed, drift, pristine_ok = _prepare_drift_state(doc, root,
                                                                files)
-            if changed and drift and pristine_ok:
+            # C3-R28（D4/D5）：GUT 侧因素（配置面 pristine / 工具链面）
+            # 在场 → 两臂全量（或具名失败）；全净时 feature 面变化走
+            # feature 臂（增量或臂级全量），GUT 臂零进程原样继承。
+            report_drift = _report_hash_drift_reason(root, doc)
+            gut_dirty = not pristine_ok or report_drift is not None
+            if changed and drift and not gut_dirty:
                 _prepare_increment_renewal(doc, root, path, changed,
                                            timeout_s)
+            elif not gut_dirty and not changed and drift and all(
+                    d.startswith("feature_sha256 missing") for d in drift):
+                # D5：仅 feature 面缺指纹 → 臂级重建（reason 具名随台账，
+                # GUT 臂原样继承）。
+                _prepare_increment_renewal(
+                    doc, root, path, sorted(changed), timeout_s,
+                    gherkin_arm_full_reason=
+                    "gherkin_face_missing_fingerprint_full")
             else:
                 _prepare_full_rebuild(root, files, path, timeout_s)
     except (MapContractError, BaselineSourceError, SelectionError,

@@ -332,7 +332,7 @@ def test_d14_gherkin_leg_executions_flow():
     run_gherkin_increment_leg 常驻测试覆盖。C3-R27/D3：判定按
     failing_tests——与身份段同一命名空间（编译测试名）逐名）。"""
     from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
-    from tests.unit.test_c3r27_gherkin_verdict_namespace_see1654 import (
+    from tests.unit.gherkin_verdict_fixtures import (
         FAIL_SCENARIO,
         FEATURE,
         PASS_SCENARIO,

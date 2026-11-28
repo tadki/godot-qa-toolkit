@@ -86,7 +86,7 @@ def test_d8_gherkin_per_scenario_not_whole_feature():
     """重跑腿 rc=1 且失败名（编译测试名命名空间，与身份段同形）在场：
     仅失败身份红，通过身份保持 green（qa_extra 整体标红的 D8 回归面；
     C3-R27/D3：scenario 名不是身份分段，判定按 failing_tests 逐名）。"""
-    from tests.unit.test_c3r27_gherkin_verdict_namespace_see1654 import (
+    from tests.unit.gherkin_verdict_fixtures import (
         FAIL_SCENARIO,
         FEATURE,
         PASS_SCENARIO,

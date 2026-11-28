@@ -44,6 +44,7 @@ from .attribution import (
     ATTRIBUTION_SCHEMA,
     _derive_views_from_line_facts,
     _fid_by_line_from_registry,
+    _gherkin_feature_of,
     _line_facts_views,
     _line_pair_counts,
     _probe_surface_lines,
@@ -976,9 +977,8 @@ def _gherkin_rerun_surface(root: Path, invalidation: dict,
 def _gherkin_leg_or_full_fallback(
         root: Path, gherkin_rerun: "set[str]", templates: dict,
         recipe: dict, causal: bool, timeout_s: int,
-        arm_full_reason: "str | None", target_files: "list[str]",
-        raw_recipe: dict, out_path: "str | Path", classes: dict,
-        t0: float) -> "tuple[dict | None, list[dict], float, str | None]":
+        arm_full_reason: "str | None"
+        ) -> "tuple[dict | None, list[dict], float, str | None]":
     """gherkin 腿调用（零行为拆分）。臂级全量的腿跑不了（如预检必红
     夹具——R12 已知形态）→ 具名披露后返回两臂全量降级标记；不削弱
     「判不新鲜的任何原因 prepare 都必须自己修好」。普通增量的腿失败
@@ -1008,13 +1008,12 @@ def _gherkin_renewal_section(
         baseline: dict, root: Path, arm_targets: "list[str]",
         recipe: dict, classes: dict, invalidation: dict,
         removed: "set[str]", arm_full_reason: "str | None",
-        timeout_s: int, causal: bool, target_files: "list[str]",
-        raw_recipe: dict, out_path: "str | Path", t0: float
+        timeout_s: int, causal: bool
         ) -> "tuple[dict, set[str], set[str], dict | None, list[dict], float, dict | None, str | None]":
     """gherkin 臂增量段（C3-R28/D5 零行为拆分）：重跑面 → 腿（臂级
-    全量跑全部盘上 feature；腿跑不了降级两臂全量）→ 合并。返回
-    (invalidation, fresh_gherkin, gh_executions, gh_exec_s,
-    merged_gherkin, full_face_fallback)。"""
+    全量跑全部盘上 feature；腿跑不了降级两臂全量）→ 合并。返回 8 元组
+    (invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin,
+    gh_executions, gh_exec_s, merged_gherkin, full_face_fallback)。"""
     gherkin_rerun = _gherkin_rerun_surface(root, invalidation,
                                            arm_full_reason)
     gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
@@ -1022,7 +1021,7 @@ def _gherkin_renewal_section(
     fresh_gherkin, gh_executions, gh_exec_s, full_face_fallback = \
         _gherkin_leg_or_full_fallback(
             root, gherkin_rerun, templates, recipe, causal, timeout_s,
-            arm_full_reason, target_files, raw_recipe, out_path, classes, t0)
+            arm_full_reason)
     if full_face_fallback:
         return (invalidation, set(), set(), None, [], 0.0, None,
                 full_face_fallback)
@@ -1099,8 +1098,7 @@ def _run_attribution_increment_locked(
         gh_executions, gh_exec_s, merged_gherkin, full_face_fallback = \
         _gherkin_renewal_section(
             baseline, root, arm_targets, recipe, classes, invalidation,
-            removed, gherkin_arm_full_reason, timeout_s, attribution_causal,
-            target_files, raw_recipe, out_path, t0)
+            removed, gherkin_arm_full_reason, timeout_s, attribution_causal)
     if full_face_fallback:
         # 臂级全量的腿跑不了 → 两臂全量自愈（决策 20 不削弱自愈）。
         return _fallback_full_face(root, target_files, raw_recipe, out_path,
@@ -1112,8 +1110,6 @@ def _run_attribution_increment_locked(
     # 路径只在合并面里——基线面没有新文件）
     face_after = _merged_tests_face(root, baseline, classes)
     merge_collisions: list = []
-    from .attribution import _gherkin_feature_of as _gfo
-
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),
@@ -1124,7 +1120,7 @@ def _run_attribution_increment_locked(
         legacy_families=legacy_families,
         gherkin_identities=sorted(
             k for k in ((merged_gherkin or {}).get("test_to_lines") or {})
-            if _gfo(str(k)) in gherkin_rerun))
+            if _gherkin_feature_of(str(k)) in gherkin_rerun))
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,

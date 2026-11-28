@@ -14,8 +14,6 @@ D7：中止就是失败——run_error 中止形态（基线脏中止等）经 `
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from godot_qa_toolkit.mutation import runner as _runner

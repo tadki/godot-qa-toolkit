@@ -22,10 +22,7 @@ build_recipe 现算；本文件涉及 gherkin 身份分段的位置一律用真�
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-
-import pytest
 
 
 def _make_feature_project(tmp_path: Path) -> Path:
@@ -222,7 +219,6 @@ def test_new_feature_identities_added_from_leg_universe():
     运行流提取（D3 根因形态——手写第二段 + 手写失败名——不得复现）。"""
     from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
     from godot_qa_toolkit.mutation.gutrun import _parse_failing_tests
-    from gherkin_fixtures import ensure_addon_metadata  # noqa: F401 — 同源布局
     from tests.unit.gherkin_verdict_fixtures import (
         FAIL_SCENARIO,
         PASS_SCENARIO,

@@ -948,7 +948,9 @@ def _loop_baseline(workdir, path, project_root, tests_glob, timeout_s,
                    precomputed_baseline, timeout_factor,
                    break_on_baseline_failure: bool = False) -> tuple:
     """workdir 备份 + baseline 实测/复用 + 自适应 timeout 锚 + 启动失败守卫。
-    baseline 永远实测（判定语义锚）；快照 elapsed 只喂预算锚。"""
+    判定基线优先复用调用方预取的快照（地图源判定基线，§SPEC-021/决策 6
+    单一真源）；无快照时才实测——实测 rc/tail 是判定语义锚；快照
+    elapsed 只喂预算锚。"""
     backup_path = os.path.join(workdir, "original.gd")
     shutil.copy2(str(path), backup_path)
     if precomputed_baseline is None:

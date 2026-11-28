@@ -781,11 +781,13 @@ def _prepare_mapping_face(args: argparse.Namespace, _truth) -> "int | None":
     接管面以外）：单文件目标存在性校验 → 自动导入 → 映射续新（契约
     `refresh`，§SPEC-035/S1）。
 
-    A20（SEE-1594 S5）：显式 `--select full` 是全脸审计——不需要映射，不得
-    被无关映射的生成/校验失败阻断（需要 prefilter 的 line/fn/file 默认路径
-    仍自动生成/复用新鲜映射；不可用 fail-loud）。
-    SEE-1623 M1：显式 `--tests` 同理——用户接管测试面，映射非必需，不触发
-    映射构建/续新（prepare_required/映射构建都不该拦显式面）。
+    默认（map 源，§SPEC-021）下 full-face / 显式 `--tests` 入口同样先
+    经 `_mapping_face_gate` 自动续新映射，再终止准备链（显式面不被
+    prepare_required/映射构建失败拦下）。
+    A20（SEE-1594 S5）：仅 cold 源（legacy A20 / off）下显式 `--select
+    full` 是全脸审计——不需要映射，不触发映射构建/续新，不得被无关
+    映射的生成/校验失败阻断。SEE-1623 M1 的显式 `--tests` 同理只在
+    cold 源语义下成立。
 
     返回 rc 非 None 即终止（调用方原样返回）。"""
     if getattr(args, "dry_run", False):

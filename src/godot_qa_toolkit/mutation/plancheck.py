@@ -206,8 +206,10 @@ def _map_problem(root: Path, target_file: str | None) -> list[dict]:
          "last_cost": st.get("last_cost"),
          "estimated_cost": "map build/renew: baseline preflight + "
                            "instrumented GUT, ~2m15s (KOL 实测 135-137s)"},
+        # C3-R28（L-C/B11）：无旗标即自动建图（prepare 自动续新）——
+        # 提示指向真实行为，不再写"rerun with --auto-prepare"。
         "gqt measure map-update --project-root .  (~2m15s) — or rerun "
-        "with --auto-prepare to build it automatically, or --select full "
+        "to let prepare renew the map automatically, or --select full "
         "to skip the map",
         level="P1",
         source=".qa-cache/attribution-map.json (conventional)",

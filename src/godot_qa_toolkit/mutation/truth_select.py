@@ -859,6 +859,10 @@ def _evaluate(root: str, rel: str, doc: dict) -> dict:
             reason = "tests_face_drift"
         elif "recipe_hash_pristine stale" in msg:
             reason = "recipe_hash_stale"
+        elif "unbuildable" in msg:
+            # C3-R28（D4）：配置面建图时可构建、现在不可构建的 granular
+            # reason（选面出口与 status 因素同一标签族——不新鲜原因全部具名）
+            reason = "recipe_unbuildable"
         elif "report_recipe_hash drift" in msg:
             # C3-R23（R1）：工具链面漂移的 granular reason（选面出口
             # 与 status 因素同一标签族——不新鲜原因全部具名）

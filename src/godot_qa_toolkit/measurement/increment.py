@@ -1691,6 +1691,9 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
         "recipe_hash_pristine": baseline.get("recipe_hash_pristine"),
+        # C3-R28（D4）：建图时事实沿基线继承（配置面可构建性由全量重建
+        # 重新写入；增量不改写）
+        "recipe_buildable": baseline.get("recipe_buildable"),
         # C3-R15（定案 4/§SPEC-016）：feature 内容指纹随增量产物前进，
         # 供 status/增量的 feature 失效面对账（per-feature 重跑通道）。
         "feature_sha256": (recipe.get("gherkin_face") or {})

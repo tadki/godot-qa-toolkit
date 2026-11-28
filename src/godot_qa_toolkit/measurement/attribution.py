@@ -958,6 +958,12 @@ def _attribution_artifact(recipe_hash: str, recipe_pristine_hash: str | None,
         # SEE-1581：pristine recipe hash（注入 toolchain 之前）——消费方
         # 新鲜判据用它做零 godot 依赖的现算对照
         "recipe_hash_pristine": recipe_pristine_hash,
+        # C3-R28（D4）：建图时事实——build_recipe 成功是建图前置条件，
+        # 本文件在场即证明建图时配置面可构建；新鲜度对账据此区分「建图
+        # 时可构建、现在不可构建」（具名过期）与「建图时即不可构建」
+        # （合成夹具形态，跳过 pristine 对账保持现状）。增量产物沿基线
+        # 继承同一事实。
+        "recipe_buildable": True,
         "project_root": str(project_root),
         "identity": _ATTRIBUTION_IDENTITY,
         "causal": causal_meta,

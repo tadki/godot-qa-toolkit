@@ -80,7 +80,20 @@ def _assert_recipe_pristine(project_root: str, doc: dict) -> None:
         raise BaselineSourceError(
             "baseline_source=map: recipe_hash_pristine stale vs current "
             "tree — rebuild the map")
-    # pristine=None（fixture/不可构建 recipe）→ 跳过该项（其余门仍在）
+    if pristine is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：建图时事实（recipe_buildable）证明配置面在建图
+        # 时可构建，现在 build_recipe 失败 = 配置面被删除/损坏/不可解析
+        # ——具名过期，不得静默判新鲜（§SPEC-029：配置面任一变化具名
+        # 全量）。
+        raise BaselineSourceError(
+            "baseline_source=map: recipe unbuildable from the current "
+            "tree — the map was built from a buildable recipe face "
+            "(recipe_buildable) but the recipe can no longer be built "
+            "(config face deleted/corrupted/unparseable since the build, "
+            "e.g. .gutconfig.json) — restore the config, then full "
+            "rebuild")
+    # pristine=None 且无建图事实（合成夹具/建图时即不可构建）→ 跳过该
+    # 项保持现状（其余门仍在）
 
 
 def _assert_report_recipe_hash(project_root: str, doc: dict) -> None:
@@ -96,6 +109,15 @@ def _assert_report_recipe_hash(project_root: str, doc: dict) -> None:
     if not (isinstance(stored, str) and stored):
         return
     computed = _current_report_recipe_hash(str(Path(project_root).resolve()))
+    if computed is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：工具链面同一判别——建图时可构建、现在不可构建
+        # → 具名过期，不得静默跳过。
+        raise BaselineSourceError(
+            "baseline_source=map: report_recipe_hash unbuildable — "
+            "recipe buildable at map build time (stored "
+            f"{stored[:12]}) cannot be built from the current tree "
+            "(config face deleted/corrupted/unparseable since the "
+            "build) — restore the config, then full rebuild")
     if computed is not None and computed != stored:
         raise BaselineSourceError(
             "baseline_source=map: report_recipe_hash drift — stored "
@@ -396,7 +418,9 @@ def _map_drift(doc: dict, project_root: str, files: list[str]
     for raw in files:
         p = Path(raw)
         rel = str(p.resolve().relative_to(root)) if p.is_absolute() \
-            else str(p)
+            else str(raw)
+        # C3-R28（L-B）：非绝对路径原样保留——`str(Path(raw))` 的 POSIX
+        # 折叠会把 `res://…` 收成 `res:/…`（因素文案丢斜杠）。
         targets[rel] = shas.get(rel)
     for rel, want in targets.items():
         _sha_drift(root, rel, want, changed, drift)
@@ -584,6 +608,11 @@ def _prepare_drift_state(doc: dict, project_root: str,
     if pristine is not None and pristine != doc.get("recipe_hash_pristine"):
         pristine_ok = False
         drift.append("recipe_hash_pristine")
+    if pristine is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：配置面建图时可构建、现在不可构建 → 并入漂移面
+        # （refresh 阶梯据此走全量腿；全量腿在 recipe 构建处具名失败）。
+        pristine_ok = False
+        drift.append("recipe_unbuildable")
     return changed, drift, pristine_ok
 
 

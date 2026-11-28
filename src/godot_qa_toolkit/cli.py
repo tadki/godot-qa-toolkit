@@ -543,10 +543,16 @@ def _p1_gate_continues(args: argparse.Namespace, p1: list) -> bool:
     return True
 
 
-def _p1_gate_notice(args: argparse.Namespace) -> str:
-    """P1 阻断的修复提示（定案 20 后无显式 map 只读形态）。"""
-    return ("preconditions missing — fix the listed items or rerun "
-            "with --auto-prepare to build them automatically")
+def _p1_gate_notice(args: argparse.Namespace, p1: list) -> str:
+    """P1 阻断的修复提示（定案 20 后无显式 map 只读形态）。
+
+    C3-R28（L-C/B11）：`--auto-prepare` 只出现在它真能补的问题上——
+    剩余 P1 里有 `auto_prepare_covered` 的问题才提示该旗标；补不了的
+    （如 `gutconfig_missing`）只提示修复列表本身。"""
+    if any(p.get("auto_prepare_covered") for p in p1):
+        return ("preconditions missing — fix the listed items or rerun "
+                "with --auto-prepare to build them automatically")
+    return "preconditions missing — fix the listed items first"
 
 
 def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
@@ -566,7 +572,7 @@ def _p1_prepare_gate(args: argparse.Namespace, plan: dict) -> "int | None":
         p1 = [p for p in p1 if p not in map_blockers]
     if not _p1_gate_continues(args, p1):
         return None
-    _notice = _p1_gate_notice(args)
+    _notice = _p1_gate_notice(args, p1)
     # SEE-1623 M7：信封归一——plan 只在 summary（顶层 error/plan 键撤销），
     # failures 恒在场（§SPEC-1312 flat 契约：{tool, ok, summary, failures}）。
     return _emit({"tool": "mutation", "ok": False,
@@ -1550,7 +1556,10 @@ def cmd_measure_map_update(args: argparse.Namespace) -> int:
                "map_path": getattr(view, "map_path", None),
                "already_fresh": outcome.get("already_fresh", False),
                "fresh": outcome.get("fresh")}
-    if not reason:
+    if not reason and not outcome.get("already_fresh", False):
+        # C3-R28（L-A/B7）：reason 只在本次涉及重建时在场——台账里的
+        # `increment.reason` 是上一次重建的原因，`fresh` 响应（本次什么
+        # 都没做）不得回显。
         reason = ((getattr(view, "doc", None) or {}).get("increment")
                   or {}).get("reason")
     if reason:

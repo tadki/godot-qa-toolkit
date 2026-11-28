@@ -54,6 +54,14 @@ def _report_hash_drift_reason(root: str, doc: dict) -> "str | None":
     from .truth_select import _current_report_recipe_hash
 
     computed = _current_report_recipe_hash(str(Path(root).resolve()))
+    if computed is None and doc.get("recipe_buildable"):
+        # C3-R28（D4）：建图时可构建、现在不可构建 → 具名全量原因
+        # （调用方带 `report_recipe_hash:` 前缀，属强制全量因素族）。
+        return ("recipe unbuildable from the current tree — the map was "
+                "built from a buildable recipe face but the recipe can "
+                "no longer be built (config face deleted/corrupted/"
+                "unparseable since the build, e.g. .gutconfig.json) — "
+                "restore the config, then full rebuild")
     if computed is None or computed == stored:
         return None
     return (f"stored {str(stored)[:12]} != computed {str(computed)[:12]} "

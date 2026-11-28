@@ -974,32 +974,32 @@ def _gherkin_rerun_surface(root: Path, invalidation: dict,
     return set(_features_disk_sha256(root))
 
 
-def _gherkin_leg_or_full_fallback(
-        root: Path, gherkin_rerun: "set[str]", templates: dict,
-        recipe: dict, causal: bool, timeout_s: int,
-        arm_full_reason: "str | None"
-        ) -> "tuple[dict | None, list[dict], float, str | None]":
-    """gherkin 腿调用（零行为拆分）。臂级全量的腿跑不了（如预检必红
-    夹具——R12 已知形态）→ 具名披露后返回两臂全量降级标记；不削弱
-    「判不新鲜的任何原因 prepare 都必须自己修好」。普通增量的腿失败
-    维持具名失败契约不变（arm_full_reason 为 None 原样抛出）。"""
+def _gherkin_leg_run(root: Path, gherkin_rerun: "set[str]", templates: dict,
+                     recipe: dict, causal: bool, timeout_s: int
+                     ) -> "tuple[dict | None, list[dict], float, str | None]":
+    """gherkin 腿调用。C3-R31（决策 25/§SPEC-039）：腿失败（预检 / 编译 /
+    适配器 / suite 一族——全量重建会记该臂 invalid 的同一族）不抛出、
+    不降级——返回该臂 invalid 的具名原因，由调用方把 feature 臂记为
+    invalid + 原因（GUT 臂原样继承、命令成功、地图回到新鲜）；
+    `run_gherkin_increment_leg` 的其余异常原样抛出（fail-loud）。"""
     if not gherkin_rerun:
         return None, [], 0.0, None
     from .increment_runner import run_gherkin_increment_leg
     from ..coverage.evidence import make_run_uuid
+    from ..gherkin.addon import AddonError
+    from ..gherkin.run import GherkinRunError
+    from ..gherkin.suite import SuiteError
 
     t_gh = time.monotonic()
     try:
         fresh_gherkin, gh_executions = run_gherkin_increment_leg(
             root, sorted(gherkin_rerun), templates, recipe, causal,
             make_run_uuid(), timeout_s)
-    except Exception as e:
-        if not arm_full_reason:
-            raise
-        print(f"measure: arm-level feature face rebuild failed "
-              f"({type(e).__name__}: {e}) — falling back to full "
-              f"rebuild", file=sys.stderr)
-        return None, [], 0.0, arm_full_reason
+    except (GherkinRunError, SuiteError, AddonError) as e:
+        reason = f"feature arm rebuild failed: {type(e).__name__}: {e}"
+        print(f"measure: feature arm invalid — {reason}; GUT arm "
+              f"results kept (decision 25: arms decoupled)", file=sys.stderr)
+        return None, [], 0.0, reason
     return fresh_gherkin, gh_executions, round(time.monotonic() - t_gh, 3), \
         None
 
@@ -1010,21 +1010,21 @@ def _gherkin_renewal_section(
         removed: "set[str]", arm_full_reason: "str | None",
         timeout_s: int, causal: bool
         ) -> "tuple[dict, set[str], set[str], dict | None, list[dict], float, dict | None, str | None]":
-    """gherkin 臂增量段（C3-R28/D5 零行为拆分）：重跑面 → 腿（臂级
-    全量跑全部盘上 feature；腿跑不了降级两臂全量）→ 合并。返回 8 元组
-    (invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin,
-    gh_executions, gh_exec_s, merged_gherkin, full_face_fallback)。"""
+    """gherkin 臂增量段（C3-R28/D5 拆分；C3-R31/决策 25 臂解耦）：重跑面
+    → 腿 → 合并。返回 (invalidation, gherkin_rerun, gherkin_dropped,
+    fresh_gherkin, gh_executions, gh_exec_s, merged_gherkin,
+    arm_invalid_reason)——arm_invalid_reason 非空 = feature 臂本轮
+    invalid（具名原因随 arms_state 披露），GUT 臂与判定表原样继承。"""
     gherkin_rerun = _gherkin_rerun_surface(root, invalidation,
                                            arm_full_reason)
     gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
     templates = prepare_attr_templates(root, arm_targets, recipe, causal)
-    fresh_gherkin, gh_executions, gh_exec_s, full_face_fallback = \
-        _gherkin_leg_or_full_fallback(
-            root, gherkin_rerun, templates, recipe, causal, timeout_s,
-            arm_full_reason)
-    if full_face_fallback:
+    fresh_gherkin, gh_executions, gh_exec_s, arm_invalid_reason = \
+        _gherkin_leg_run(root, gherkin_rerun, templates, recipe, causal,
+                         timeout_s)
+    if arm_invalid_reason:
         return (invalidation, set(), set(), None, [], 0.0, None,
-                full_face_fallback)
+                arm_invalid_reason)
     baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
     if isinstance(baseline_gherkin, dict) and baseline_gherkin or \
             fresh_gherkin:
@@ -1095,15 +1095,10 @@ def _run_attribution_increment_locked(
     # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
     # （与 gut 重跑同一插桩文本单源）。
     invalidation, gherkin_rerun, gherkin_dropped, fresh_gherkin, \
-        gh_executions, gh_exec_s, merged_gherkin, full_face_fallback = \
+        gh_executions, gh_exec_s, merged_gherkin, arm_invalid_reason = \
         _gherkin_renewal_section(
             baseline, root, arm_targets, recipe, classes, invalidation,
             removed, gherkin_arm_full_reason, timeout_s, attribution_causal)
-    if full_face_fallback:
-        # 臂级全量的腿跑不了 → 两臂全量自愈（决策 20 不削弱自愈）。
-        return _fallback_full_face(root, target_files, raw_recipe, out_path,
-                                   classes, full_face_fallback,
-                                   attribution_causal, timeout_s, t0)
     # SEE-1631 §SPEC-025：verdict 表守恒——重跑身份按新执行结果重算
     # （脚本级执行账 out 解析失败名），未重跑身份原样继承，删除剔除。
     # C3-R6：新测试身份补表需要**合并后**的 tests_face（新文件的完整
@@ -1121,13 +1116,20 @@ def _run_attribution_increment_locked(
         gherkin_identities=sorted(
             k for k in ((merged_gherkin or {}).get("test_to_lines") or {})
             if _gherkin_feature_of(str(k)) in gherkin_rerun))
+    if arm_invalid_reason:
+        # C3-R31（决策 25/§SPEC-039）：feature 臂 invalid——其判定行
+        # 不出场（GUT 臂判定与 arms_state 原样继承）。
+        merged_verdicts = {
+            k: v for k, v in (merged_verdicts or {}).items()
+            if not str(k).startswith("gherkin://")}
     artifact = _build_increment_artifact(
         baseline, merged, recipe, root, classes,
         sorted(rerun), invalidation, since_full, arm_exec_s,
         executions, merged_gherkin=merged_gherkin,
         gh_exec_s=gh_exec_s, gh_executions=gh_executions,
         merged_verdicts=merged_verdicts, merge_collisions=merge_collisions,
-        gherkin_arm_full_reason=gherkin_arm_full_reason)
+        gherkin_arm_full_reason=gherkin_arm_full_reason,
+        gherkin_arm_invalid_reason=arm_invalid_reason)
     return _increment_emit(root, out_path, artifact, merged, classes, rerun,
                            invalidation, arm_exec_s, t0)
 def _fallback_reason(hash_ok: bool, classes: dict, since_full: int,
@@ -1769,17 +1771,38 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                               gh_executions: "list[dict] | None" = None,
                               merged_verdicts: "dict | None" = None,
                               merge_collisions: "list[dict] | None" = None,
-                              gherkin_arm_full_reason: "str | None" = None
+                              gherkin_arm_full_reason: "str | None" = None,
+                              gherkin_arm_invalid_reason: "str | None" = None
                               ) -> dict:
     removed = set(classes.get("prod_removed") or [])
     # SEE-1631 §SPEC-016：gherkin 臂继承（merged_gherkin None = 基线无
     # gherkin 臂，arms.gherkin 键不出场）；删除生产文件触达的 gherkin 边
     # 同步 purge。
+    # C3-R31（决策 25/§SPEC-039）：feature 臂本轮 invalid → 行事实不出场
+    # （arms.gherkin 缺省、判定表无 gherkin:// 行），GUT 臂原样继承。
     carried_gherkin = merged_gherkin
     if carried_gherkin is None:
         carried_gherkin = _carried_gherkin_arm(baseline, removed)
+    if gherkin_arm_invalid_reason:
+        carried_gherkin = None
+    # C3-R31（§SPEC-039）：判定表无 gherkin:// 行——invalid 臂的判定
+    # 不出场（装配点保证产物形态，任一调用方一致）。
+    merged_verdicts = merged_verdicts if merged_verdicts is not None else \
+        dict(baseline.get("test_verdicts") or {})
+    if gherkin_arm_invalid_reason:
+        merged_verdicts = {k: v for k, v in merged_verdicts.items()
+                           if not str(k).startswith("gherkin://")}
     targets = _effective_targets(baseline, root, removed)
     gh_state_out = _carried_gherkin_state(baseline, carried_gherkin)
+    if gherkin_arm_invalid_reason:
+        gh_state_out = {"state": "invalid",
+                        "invalid_reason": gherkin_arm_invalid_reason}
+    elif gherkin_arm_full_reason and carried_gherkin:
+        # C3-R31（§SPEC-039）：臂级全量腿成功 → 该臂状态按本轮真实结果
+        # 重算（invalid 不被永久钉死；键集与全量成功臂一致）。
+        gh_state_out = {"state": "valid", "invalid_reason": None,
+                        "invalid_evidence": None, "excluded_tests": [],
+                        "pairs": int(carried_gherkin.get("pairs") or 0)}
     return {
         "schema_version": ATTRIBUTION_SCHEMA,
         "report_recipe_hash": recipe["recipe_hash"],
@@ -1818,7 +1841,8 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
         "identity_collisions": list(merge_collisions or []),
         "arms_state": {**dict(baseline.get("arms_state") or {}),
                        **({"gherkin": gh_state_out}
-                          if carried_gherkin else {})},
+                          if (carried_gherkin or gherkin_arm_invalid_reason)
+                          else {})},
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),
         "increment": _increment_ledger(

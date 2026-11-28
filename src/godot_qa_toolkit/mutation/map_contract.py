@@ -369,27 +369,39 @@ def refresh(project_root: str, files: "list[str] | None" = None,
 
 def _renewal_ladder(doc: dict, root: str, path: str, files: "list[str]",
                     changed: "list[str]", drift: "list[str]",
-                    pristine_ok: bool, timeout_s: int) -> None:
-    """续新阶梯（C3-R28 零行为拆分）：GUT 侧因素（配置面 pristine /
-    工具链面）在场 → 两臂全量（D4：配置面不可构建在 recipe 构建处具名
-    失败）；全净时 feature 面变化走 feature 臂（增量；D5：删除进变更面
-    剔除身份与边不重跑），仅 feature 面自身需要全量（缺 `feature_sha256`
-    键）→ 臂级重建（reason 具名，GUT 臂零进程原样继承）。"""
-    from .verdict_source import _prepare_full_rebuild, _prepare_increment_renewal
+                    timeout_s: int) -> None:
+    """续新阶梯（C3-R31/S-4：「因素 → status 预言 → refresh 实际动作」
+    单一出处——因素面与 status 共用 `_factor_report` /
+    `_FORCED_FULL_FACTORS`，预言即实际动作）：
 
-    report_drift = _report_hash_drift_reason(root, doc)
-    gut_dirty = not pristine_ok or report_drift is not None
-    if changed and drift and not gut_dirty:
-        _prepare_increment_renewal(doc, root, path, changed, timeout_s)
-    elif not gut_dirty and not changed and drift and all(
-            d.startswith("feature_sha256 missing") for d in drift):
-        # D5：仅 feature 面缺指纹 → 臂级重建（reason 具名随台账，
-        # GUT 臂原样继承）。
+    ① 缺 `feature_sha256` 键 → 只重建 feature 臂（决策 25/§SPEC-039；
+       reason 具名随台账；feature 面同时有漂移不改变分流）
+    ② 其余强制全量因素（缺判定表 / 视图构造失败 / schema / arms /
+       recipe / 工具链面漂移）→ 两臂全量重建（§SPEC-040：结构性缺失
+       不可继承，feature 面同时有漂移不改变分流）
+    ③ 因素面全净、feature/内容/测试面有漂移 → 增量（D5：删除进变更面）
+    ④ 无漂移却进入续新（理论不可达的兜底）→ 两臂全量
+    """
+    from .verdict_source import (
+        _prepare_full_rebuild,
+        _prepare_increment_renewal,
+    )
+
+    _fresh, factors = _factor_report(root, doc, files)
+    missing_feature_key = any(f.startswith("feature_sha256_missing:")
+                              for f in factors)
+    if missing_feature_key:
         _prepare_increment_renewal(
             doc, root, path, sorted(changed), timeout_s,
             gherkin_arm_full_reason="gherkin_face_missing_fingerprint_full")
-    else:
+        return
+    if any(f.startswith(_FORCED_FULL_FACTORS) for f in factors):
         _prepare_full_rebuild(root, files, path, timeout_s)
+        return
+    if changed and drift:
+        _prepare_increment_renewal(doc, root, path, changed, timeout_s)
+        return
+    _prepare_full_rebuild(root, files, path, timeout_s)
 
 
 def _refresh_locked(root: str, files: "list[str]",
@@ -437,10 +449,10 @@ def _refresh_locked(root: str, files: "list[str]",
                 # MutationSelectionError）→ 具名 MapContractError
                 raise MapContractError(
                     f"refresh failed (map unreadable): {e}") from e
-            changed, drift, pristine_ok = _prepare_drift_state(doc, root,
-                                                               files)
+            changed, drift, _pristine_ok = _prepare_drift_state(doc, root,
+                                                                files)
             _renewal_ladder(doc, root, path, files, changed, drift,
-                            pristine_ok, timeout_s)
+                            timeout_s)
     except (MapContractError, BaselineSourceError, SelectionError,
             MutationSelectionError):
         raise

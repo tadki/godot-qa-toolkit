@@ -206,31 +206,42 @@ def _gherkin_leg_compile_suite(root: Path, keys: list[str], run_uuid: str
     from ..gherkin.addon import AddonError, compile_preflight, \
         run_validator_preflight
     from ..gherkin.run import GherkinRunError, replay_check
-    from ..gherkin.suite import SuiteError, compile_keys_to_suite
+    from ..gherkin.suite import (
+        SuiteError,
+        compile_keys_to_suite,
+        create_suite_dir,
+    )
     from .attribution import _gherkin_identity_rewrite
 
     try:
         compile_preflight(root)
     except AddonError as e:
         raise GherkinRunError(f"gherkin preflight failed: {e}") from e
-    suite_dir = root / "gherkin" / "generated" / f".gqt-run-{run_uuid[:12]}"
-    if suite_dir.exists():
-        raise SuiteError(
-            f"private suite dir already exists: {suite_dir}")
-    suite_dir.mkdir(parents=True)
-    out = compile_keys_to_suite(root, keys, suite_dir)
-    identities = {k: (out["manifests"].get(k) or {}).get("attribution")
-                  or [] for k in keys}
-    # §SPEC-025/D8（R4）：test_name → scenario 映射（执行账
-    # failing_scenarios 回写用，仅披露——C3-R27/D3 起判定按
-    # failing_tests，不经本映射）。
-    scenario_of_test = _scenario_map_from_manifests(out, keys)
-    for k in keys:
-        replay_check(root, k, suite_dir=suite_dir)
+    # C3-R31：私有 suite 目录经 `create_suite_dir` 创建——所有权标记
+    # （`.gqt-owner`）是 `_cleanup_suite_dir` 的删除前提；此前裸 mkdir
+    # 缺标记 → 清理恒判「调用方持有」→ 失败路径目录全部泄漏。
+    # 本函数自回收：预检/编译/重放/validator 任一步失败零 `.gqt-run-*`
+    # 残留（决策 25 零残留要求；失败路径早于调用方 try/finally）。
+    suite_dir = create_suite_dir(root, run_uuid=run_uuid[:12])
     try:
-        run_validator_preflight(root)
-    except AddonError as e:
-        raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+        out = compile_keys_to_suite(root, keys, suite_dir)
+        identities = {k: (out["manifests"].get(k) or {}).get("attribution")
+                      or [] for k in keys}
+        # §SPEC-025/D8（R4）：test_name → scenario 映射（执行账
+        # failing_scenarios 回写用，仅披露——C3-R27/D3 起判定按
+        # failing_tests，不经本映射）。
+        scenario_of_test = _scenario_map_from_manifests(out, keys)
+        for k in keys:
+            replay_check(root, k, suite_dir=suite_dir)
+        try:
+            run_validator_preflight(root)
+        except AddonError as e:
+            raise GherkinRunError(f"gherkin preflight failed: {e}") from e
+    except BaseException:
+        from .arms import _cleanup_suite_dir
+
+        _cleanup_suite_dir(suite_dir, root)
+        raise
     gen_res = ("res://" + suite_dir.joinpath("generated")
                .relative_to(root).as_posix())
     rw = _gherkin_identity_rewrite(root, [{"suite_dir": str(suite_dir),
@@ -357,6 +368,8 @@ def run_gherkin_increment_leg(root: Path, feature_keys: list[str],
         return None, []
     suite_dir, _identities, gen_res, rw, scenario_of_test = \
         _gherkin_leg_compile_suite(root, keys, run_uuid)
+    # C3-R31：compile_suite 的私有 suite 目录由它自己回收——预检/编译/
+    # 适配器失败不得在夹具树残留 `.gqt-run-*`（决策 25 零残留要求）。
     started_files, instrumented, hook_files = _gherkin_leg_texts(
         templates, run_uuid, causal)
     xdg_homes: list[str] = []

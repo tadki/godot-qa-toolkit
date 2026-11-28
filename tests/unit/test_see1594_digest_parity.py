@@ -69,8 +69,12 @@ def test_recipe_hash_equals_old_basis_formula(tmp_path):
              if k not in ("recipe_hash", "project_root")}
     # C3-R14（定案 4/§SPEC-016）：公式更新——basis 里 gherkin_face 的
     # feature_sha256（feature 内容失效面）摘除，其余同旧公式。
+    # C3-R28（D5/决策 20）：公式再更新——feature 结构名单（features /
+    # count）一并摘除，feature 增删走 feature 臂增量不判环境失配。
     gf = dict(recipe.get("gherkin_face") or {})
     gf.pop("feature_sha256", None)
+    gf.pop("features", None)
+    gf.pop("count", None)
     basis["gherkin_face"] = gf
     old = hashlib.sha256(json.dumps(
         basis, ensure_ascii=False, sort_keys=True,

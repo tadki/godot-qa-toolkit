@@ -83,19 +83,26 @@ def test_d8_gut_rerun_unparseable_failure_conservative_red():
 
 
 def test_d8_gherkin_per_scenario_not_whole_feature():
-    """重跑腿 rc=1 且 failing_scenarios 在场：仅失败 scenario 红，通过的
-    scenario 保持 green（qa_extra 4 scenario 整体标红的 D8 回归面）。"""
+    """重跑腿 rc=1 且失败名（编译测试名命名空间，与身份段同形）在场：
+    仅失败身份红，通过身份保持 green（qa_extra 整体标红的 D8 回归面；
+    C3-R27/D3：scenario 名不是身份分段，判定按 failing_tests 逐名）。"""
+    from tests.unit.test_c3r27_gherkin_verdict_namespace_see1654 import (
+        FAIL_SCENARIO,
+        FEATURE,
+        PASS_SCENARIO,
+        _ident_of,
+        _leg_account,
+        _test_name,
+    )
+
     merged = {
-        "gherkin://feature/qa_extra::even": {"verdict": "green"},
-        "gherkin://feature/qa_extra::odd": {"verdict": "green"},
-        "gherkin://feature/qa_extra::mean": {"verdict": "green"},
+        _ident_of(_test_name(PASS_SCENARIO)): {"verdict": "green"},
+        _ident_of(_test_name(FAIL_SCENARIO)): {"verdict": "green"},
     }
-    fresh = {"executions": [{"rc": 1, "out": "...",
-                             "failing_scenarios": ["mean"]}]}
-    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={"qa_extra"})
-    assert merged["gherkin://feature/qa_extra::mean"]["verdict"] == "red"
-    assert merged["gherkin://feature/qa_extra::even"] == {"verdict": "green"}
-    assert merged["gherkin://feature/qa_extra::odd"] == {"verdict": "green"}
+    fresh = {"executions": [_leg_account([FAIL_SCENARIO], [PASS_SCENARIO])]}
+    _verdict_gherkin_rerun(merged, fresh, gherkin_rerun={FEATURE})
+    assert merged[_ident_of(_test_name(FAIL_SCENARIO))]["verdict"] == "red"
+    assert merged[_ident_of(_test_name(PASS_SCENARIO))] == {"verdict": "green"}
 
 
 def test_d8_gherkin_unattributable_conservative_red():

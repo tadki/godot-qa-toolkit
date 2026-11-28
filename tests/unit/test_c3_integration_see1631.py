@@ -325,27 +325,35 @@ def test_d13_red_fixture_map_source_smoke(tmp_path, monkeypatch, capsys):
         s.get("suspect", 0) <= total
 
 
-def test_d14_gherkin_leg_executions_flow(tmp_path, monkeypatch):
-    """D14：真实增量路径 gherkin 腿执行账（failing_scenarios）流入
-    verdict 合成——不再整腿保守红（最小夹具：合成腿账注入真实合并
-    函数；腿端回写由 run_gherkin_increment_leg 常驻测试覆盖）。"""
+def test_d14_gherkin_leg_executions_flow():
+    """D14：真实增量路径 gherkin 腿执行账（failing_tests /
+    failing_scenarios）流入 verdict 合成——不再整腿保守红（最小夹具：
+    真实编译命名 + 真实解析链派生的腿账注入真实合并函数；腿端回写由
+    run_gherkin_increment_leg 常驻测试覆盖。C3-R27/D3：判定按
+    failing_tests——与身份段同一命名空间（编译测试名）逐名）。"""
     from godot_qa_toolkit.measurement.increment import _merged_test_verdicts
+    from tests.unit.test_c3r27_gherkin_verdict_namespace_see1654 import (
+        FAIL_SCENARIO,
+        FEATURE,
+        PASS_SCENARIO,
+        _ident_of,
+        _leg_account,
+        _test_name,
+    )
 
     baseline = {"test_verdicts": {
-        "gherkin://feature/qa_extra::even": {"verdict": "green"},
-        "gherkin://feature/qa_extra::mean": {"verdict": "green"},
-        "gherkin://feature/qa_extra::clamp": {"verdict": "green"},
+        _ident_of(_test_name(PASS_SCENARIO)): {"verdict": "green"},
+        _ident_of(_test_name(FAIL_SCENARIO)): {"verdict": "green"},
     }}
-    # 真实腿账形态：run_gherkin_increment_leg 回写 failing_scenarios
-    fresh = {"executions": [{"rc": 1, "out": "...",
-                             "failing_scenarios": ["mean"]}]}
+    # 真实腿账形态：run_gherkin_increment_leg 写 failing_tests（编译测试
+    # 名，截断前提取）并回写 failing_scenarios（scenario 名，桥映射）
+    fresh = {"executions": [_leg_account([FAIL_SCENARIO], [PASS_SCENARIO])]}
     merged = _merged_test_verdicts(
         baseline, [], rerun_scripts=set(), dropped_scripts=set(),
         removed_rels=set(), fresh_gherkin=fresh,
-        gherkin_rerun={"qa_extra"}, gherkin_dropped=set())
-    assert merged["gherkin://feature/qa_extra::mean"]["verdict"] == "red"
-    assert merged["gherkin://feature/qa_extra::even"] == {"verdict": "green"}
-    assert merged["gherkin://feature/qa_extra::clamp"] == {"verdict": "green"}
+        gherkin_rerun={FEATURE}, gherkin_dropped=set())
+    assert merged[_ident_of(_test_name(FAIL_SCENARIO))]["verdict"] == "red"
+    assert merged[_ident_of(_test_name(PASS_SCENARIO))] == {"verdict": "green"}
 
 
 def test_d15_explicit_stale_refreshes_not_refuses(tmp_path, monkeypatch):

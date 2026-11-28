@@ -1402,19 +1402,23 @@ def _gherkin_rerun_all_passed(fresh_gherkin: dict) -> bool:
         for r in execs)
 
 
-def _gherkin_failing_scenarios(fresh_gherkin: dict) -> "set[str] | None":
-    """§SPEC-025/D8（R4）：重跑腿逐 scenario 失败名集合（全部执行账并集
-    ——多分片/多 rep 任一失败都算）。执行账带 `failing_scenarios`（编译
-    manifest test_name → scenario 回写）时返回该集合；缺席（旧形态账）
-    返回 None = 无法归因，调用方保守整键处理。"""
+def _gherkin_failing_tests(fresh_gherkin: dict) -> "set[str] | None":
+    """§SPEC-025/D8（R4）·C3-R27（D3）：重跑腿逐名失败名集合——与规范
+    身份第二段**同一命名空间**（编译测试名；全部执行账并集——多分片/
+    多 rep 任一失败都算）。执行账带 `failing_tests`（截断前
+    `_parse_failing_tests` 提取）时返回该集合；缺席（旧形态账）返回
+    None = 无法归因，调用方保守整键处理。执行账的 `failing_scenarios`
+    是 scenario 名（`scenario_of_test` 桥回写），与身份段不同命名空间
+    ——不得在此比对（D3 根因：两空间永不相等，失败场景被强制 green
+    且增量路径无法恢复）。"""
     failing: set[str] = set()
     seen = False
     for r in (fresh_gherkin.get("executions") or []):
-        fs = r.get("failing_scenarios")
-        if fs is None:
+        ft = r.get("failing_tests")
+        if ft is None:
             continue
         seen = True
-        failing |= {str(x) for x in fs}
+        failing |= {str(x) for x in ft}
     return failing if seen else None
 
 
@@ -1433,16 +1437,19 @@ def _gherkin_leg_exec_source(fresh_gherkin: "dict | None",
 
 def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
                            gherkin_rerun: set) -> None:
-    """gherkin 重跑键（feature_changed/new）：**逐 scenario** 按重跑腿
-    **全部**执行账判定（多分片/多 rep 任一失败都算失败）——通过身份
+    """gherkin 重跑键（feature_changed/new）：**逐名**按重跑腿**全部**
+    执行账判定（多分片/多 rep 任一失败都算失败）——失败名与身份第二段
+    **同一命名空间**（编译测试名 `failing_tests`，C3-R27/D3；执行账的
+    `failing_scenarios` 是 scenario 名命名空间，不在此比对）：通过身份
     green（不得随 feature 级 rc 整体标红）；失败或不一致 → red，分类沿
     基线（pre_existing/suspected_intolerant 保持 §SPEC-017 车道，基线绿
-    而失败 = new）。`gherkin_dropped` 的剔除由 `_merged_test_verdicts`
-    无条件消费（D9）。"""
+    而失败 = new）。失败名缺失（旧形态账）**或空集**（腿失败但零可归因
+    名——不可归因）保守整键红（N6）。`gherkin_dropped` 的剔除由
+    `_merged_test_verdicts` 无条件消费（D9）。"""
     from .attribution import _gherkin_feature_of
 
     gh_ok = _gherkin_rerun_all_passed(fresh_gherkin)
-    failing_scenarios = _gherkin_failing_scenarios(fresh_gherkin)
+    failing_tests = _gherkin_failing_tests(fresh_gherkin)
     for ident in list(merged):
         key = _gherkin_feature_of(str(ident))
         if key is None or key not in gherkin_rerun:
@@ -1450,13 +1457,13 @@ def _verdict_gherkin_rerun(merged: dict, fresh_gherkin: dict,
         if gh_ok:
             merged[ident] = {"verdict": "green"}
             continue
-        # 失败腿：scenario 名可归因时逐名判定（通过 scenario 不标红）；
-        # 失败名缺失（旧形态账）**或空集**（腿失败但零可归因名——不可
-        # 归因）都保守整键红（C3-R25/N6：不得按空集逐 scenario 放绿，
-        # 与 gut 腿「rc!=0 无失败名 = 保守红」对齐）。
-        scenario = str(ident).split("::", 1)[1] \
+        # 失败腿：编译测试名（身份第二段，`failing_tests` 同命名空间）
+        # 逐名判定（通过的测试名不标红）；失败名缺失（旧形态账）**或
+        # 空集**（腿失败但零可归因名——不可归因）都保守整键红（C3-R25/N6：
+        # 不得按空集逐名放绿，与 gut 腿「rc!=0 无失败名 = 保守红」对齐）。
+        test_name = str(ident).split("::", 1)[1] \
             if "::" in str(ident) else ""
-        failed = (not failing_scenarios) or scenario in failing_scenarios
+        failed = (not failing_tests) or test_name in failing_tests
         if not failed:
             merged[ident] = {"verdict": "green"}
             continue

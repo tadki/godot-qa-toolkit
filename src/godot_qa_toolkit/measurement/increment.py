@@ -949,6 +949,98 @@ def _load_baseline_with_conservation(baseline_path: str | Path) -> dict:
     return baseline
 
 
+def _arm_full_gate(reason: str,
+                   forced: "str | None") -> "tuple[str | None, str]":
+    """臂级闸（C3-R28/D5 零行为拆分）：refresh 阶梯强制（缺
+    `feature_sha256` 键）或 feature 重跑面超自身比例上限 → 臂级全量
+    （reason 具名随台账，GUT 臂零进程原样继承）；其余回退原因维持
+    两臂全量（GUT 侧因素 / 周期校准）。"""
+    if forced:
+        return str(forced), "incremental"
+    if reason == "gherkin_rerun_surface_too_large_fallback":
+        return reason, "incremental"
+    return None, reason
+
+
+def _gherkin_rerun_surface(root: Path, invalidation: dict,
+                           arm_full_reason: "str | None") -> "set[str]":
+    """gherkin 重跑面（零行为拆分）：失效面；臂级全量 = 全部盘上
+    feature（同一盘上检测源）。"""
+    if not arm_full_reason:
+        return set(invalidation.get("feature_rerun") or [])
+    from ..mutation.verdict_source import _features_disk_sha256
+
+    return set(_features_disk_sha256(root))
+
+
+def _gherkin_leg_or_full_fallback(
+        root: Path, gherkin_rerun: "set[str]", templates: dict,
+        recipe: dict, causal: bool, timeout_s: int,
+        arm_full_reason: "str | None", target_files: "list[str]",
+        raw_recipe: dict, out_path: "str | Path", classes: dict,
+        t0: float) -> "tuple[dict | None, list[dict], float, str | None]":
+    """gherkin 腿调用（零行为拆分）。臂级全量的腿跑不了（如预检必红
+    夹具——R12 已知形态）→ 具名披露后返回两臂全量降级标记；不削弱
+    「判不新鲜的任何原因 prepare 都必须自己修好」。普通增量的腿失败
+    维持具名失败契约不变（arm_full_reason 为 None 原样抛出）。"""
+    if not gherkin_rerun:
+        return None, [], 0.0, None
+    from .increment_runner import run_gherkin_increment_leg
+    from ..coverage.evidence import make_run_uuid
+
+    t_gh = time.monotonic()
+    try:
+        fresh_gherkin, gh_executions = run_gherkin_increment_leg(
+            root, sorted(gherkin_rerun), templates, recipe, causal,
+            make_run_uuid(), timeout_s)
+    except Exception as e:
+        if not arm_full_reason:
+            raise
+        print(f"measure: arm-level feature face rebuild failed "
+              f"({type(e).__name__}: {e}) — falling back to full "
+              f"rebuild", file=sys.stderr)
+        return None, [], 0.0, arm_full_reason
+    return fresh_gherkin, gh_executions, round(time.monotonic() - t_gh, 3), \
+        None
+
+
+def _gherkin_renewal_section(
+        baseline: dict, root: Path, arm_targets: "list[str]",
+        recipe: dict, classes: dict, invalidation: dict,
+        removed: "set[str]", arm_full_reason: "str | None",
+        timeout_s: int, causal: bool, target_files: "list[str]",
+        raw_recipe: dict, out_path: "str | Path", t0: float
+        ) -> "tuple[dict, dict | None, list[dict], float, dict | None, str | None]":
+    """gherkin 臂增量段（C3-R28/D5 零行为拆分）：重跑面 → 腿（臂级
+    全量跑全部盘上 feature；腿跑不了降级两臂全量）→ 合并。返回
+    (invalidation, fresh_gherkin, gh_executions, gh_exec_s,
+    merged_gherkin, full_face_fallback)。"""
+    gherkin_rerun = _gherkin_rerun_surface(root, invalidation,
+                                           arm_full_reason)
+    gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
+    templates = prepare_attr_templates(root, arm_targets, recipe, causal)
+    fresh_gherkin, gh_executions, gh_exec_s, full_face_fallback = \
+        _gherkin_leg_or_full_fallback(
+            root, gherkin_rerun, templates, recipe, causal, timeout_s,
+            arm_full_reason, target_files, raw_recipe, out_path, classes, t0)
+    if full_face_fallback:
+        return invalidation, None, [], 0.0, None, full_face_fallback
+    baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
+    if isinstance(baseline_gherkin, dict) and baseline_gherkin or \
+            fresh_gherkin:
+        merged_gherkin = _merge_gherkin_arm(
+            baseline_gherkin, fresh_gherkin,
+            rerun_keys=gherkin_rerun, dropped_keys=gherkin_dropped,
+            removed_rels=removed)
+    else:
+        merged_gherkin = None
+    invalidation = {**invalidation,
+                    "gherkin_rerun": sorted(gherkin_rerun),
+                    "gherkin_dropped": sorted(gherkin_dropped)}
+    return invalidation, fresh_gherkin, gh_executions, gh_exec_s, \
+        merged_gherkin, None
+
+
 def _run_attribution_increment_locked(
         project_root: str | Path, target_files: list[str],
         recipe: dict, baseline_path: str | Path,
@@ -977,17 +1069,8 @@ def _run_attribution_increment_locked(
     classes, invalidation, rerun, reason = _increment_decision(
         root, recipe, baseline, changed_files, since_full, calibration_every,
         rerun_full_face_ratio, gherkin_rerun_full_face_ratio)
-    if gherkin_arm_full_reason:
-        # C3-R28（D5/决策 20）：refresh 阶梯判定 feature 面自身需要全量
-        # （缺 `feature_sha256` 键）→ 强制臂级重建，reason 具名随台账。
-        gherkin_arm_full_reason = str(gherkin_arm_full_reason)
-        reason = "incremental"
-    elif reason == "gherkin_rerun_surface_too_large_fallback":
-        # C3-R28（D5/决策 20）：feature 面重跑面超比例上限 → 只重建
-        # feature 臂（gherkin 腿跑全部盘上 feature 键，reason 具名随
-        # 台账）；GUT 臂零进程原样继承——不再回退两臂全量。
-        gherkin_arm_full_reason = reason
-        reason = "incremental"
+    gherkin_arm_full_reason, reason = _arm_full_gate(
+        reason, gherkin_arm_full_reason)
     if reason != "incremental":
         # 全脸回退必须传 **raw recipe**（run_measurement 自行注入并计算
         # pristine hash；传已注入配方会把 pristine 写成注入 hash → 映射
@@ -1011,54 +1094,16 @@ def _run_attribution_increment_locked(
     # SEE-1631 §SPEC-016：gherkin 臂增量腿——只重跑失效 feature（与
     # gut_full 同粒度），其余 feature 原样继承；templates 为 attr 模板
     # （与 gut 重跑同一插桩文本单源）。
-    gherkin_rerun = set(invalidation.get("feature_rerun") or [])
-    if gherkin_arm_full_reason:
-        # 臂级全量：重跑面 = 全部盘上 feature（与失效面同一盘上检测源）。
-        from ..mutation.verdict_source import _features_disk_sha256
-
-        gherkin_rerun = set(_features_disk_sha256(root))
-    gherkin_dropped = _baseline_gherkin_dropped(baseline, classes)
-    templates = prepare_attr_templates(root, arm_targets, recipe,
-                                       attribution_causal)
-    gh_exec_s = 0.0
-    gh_executions: list[dict] = []
-    fresh_gherkin = None
-    if gherkin_rerun:
-        from .increment_runner import run_gherkin_increment_leg
-        from ..coverage.evidence import make_run_uuid
-
-        t_gh = time.monotonic()
-        try:
-            fresh_gherkin, gh_executions = run_gherkin_increment_leg(
-                root, sorted(gherkin_rerun), templates, recipe,
-                attribution_causal, make_run_uuid(), timeout_s)
-        except Exception as e:
-            if not gherkin_arm_full_reason:
-                raise
-            # C3-R28（D5/决策 20）：臂级全量的腿跑不了（如预检必红夹具
-            # ——R12 已知形态）→ 具名披露后降级两臂全量自愈；不削弱
-            # 「判不新鲜的任何原因 prepare 都必须自己修好」。普通增量的
-            # 腿失败维持具名失败契约不变（无 gherkin_arm_full_reason）。
-            print(f"measure: arm-level feature face rebuild failed "
-                  f"({type(e).__name__}: {e}) — falling back to full "
-                  f"rebuild", file=sys.stderr)
-            return _fallback_full_face(root, target_files, raw_recipe,
-                                       out_path, classes,
-                                       gherkin_arm_full_reason,
-                                       attribution_causal, timeout_s, t0)
-        gh_exec_s = round(time.monotonic() - t_gh, 3)
-    baseline_gherkin = (baseline.get("arms") or {}).get("gherkin")
-    if isinstance(baseline_gherkin, dict) and baseline_gherkin or \
-            fresh_gherkin:
-        merged_gherkin = _merge_gherkin_arm(
-            baseline_gherkin, fresh_gherkin,
-            rerun_keys=gherkin_rerun, dropped_keys=gherkin_dropped,
-            removed_rels=removed)
-    else:
-        merged_gherkin = None
-    invalidation = {**invalidation,
-                    "gherkin_rerun": sorted(gherkin_rerun),
-                    "gherkin_dropped": sorted(gherkin_dropped)}
+    invalidation, fresh_gherkin, gh_executions, gh_exec_s, merged_gherkin, \
+        full_face_fallback = _gherkin_renewal_section(
+            baseline, root, arm_targets, recipe, classes, invalidation,
+            removed, gherkin_arm_full_reason, timeout_s, attribution_causal,
+            target_files, raw_recipe, out_path, t0)
+    if full_face_fallback:
+        # 臂级全量的腿跑不了 → 两臂全量自愈（决策 20 不削弱自愈）。
+        return _fallback_full_face(root, target_files, raw_recipe, out_path,
+                                   classes, full_face_fallback,
+                                   attribution_causal, timeout_s, t0)
     # SEE-1631 §SPEC-025：verdict 表守恒——重跑身份按新执行结果重算
     # （脚本级执行账 out 解析失败名），未重跑身份原样继承，删除剔除。
     # C3-R6：新测试身份补表需要**合并后**的 tests_face（新文件的完整
@@ -1778,38 +1823,50 @@ def _build_increment_artifact(baseline: dict, merged: dict, recipe: dict,
                           if carried_gherkin else {})},
         "baseline_failures_meta": baseline.get("baseline_failures_meta"),
         "notes": list(baseline.get("notes") or []),
-        "increment": {
-            # C3-R28（D5）：臂级全量时 mode/reason 携带具名原因（feature
-            # 臂重建；对外响应 mode 仍取 status 预言的 full/increment）。
-            "mode": gherkin_arm_full_reason or "incremental",
-            "reason": gherkin_arm_full_reason,
-            "base_recipe_hash": baseline.get("report_recipe_hash"),
-            "changed_files": classes,
-            "rerun_scripts": rerun_list,
-            "dropped_scripts": sorted(invalidation["dropped"]),
-            "rerun_sources": invalidation["sources"],
-            "gherkin_rerun_features": sorted(
-                invalidation.get("gherkin_rerun") or []),
-            "gherkin_dropped_features": sorted(
-                invalidation.get("gherkin_dropped") or []),
-            "increments_since_full": 0 if gherkin_arm_full_reason
-            else since_full + 1,
-            "calibration_policy": ("full face every N increments or on "
-                                   "hash mismatch / new prod file / "
-                                   "oversized rerun surface (deleted prod "
-                                   "files stay incremental: edge purge + "
-                                   "toucher rerun, SEE-1610 §SPEC-N1); "
-                                   "gherkin features rerun per invalidation "
-                                   "surface, own ratio cap (SEE-1631 "
-                                   "§SPEC-016)"),
-            "event_counts_stale": True,
-            "arm_exec_s": arm_exec_s,
-            "gherkin_leg_exec_s": gh_exec_s,
-            "gherkin_leg_executions": gh_executions or [],
-            "rerun_executions": executions or [],
-            # C3-R25（N6）：执行异常的具名披露（对应脚本判定已保守记红）
-            "rerun_execution_errors": _rerun_error_disclosure(executions),
-        },
+        "increment": _increment_ledger(
+            baseline, classes, rerun_list, invalidation, since_full,
+            arm_exec_s, gh_exec_s, gh_executions, executions,
+            gherkin_arm_full_reason),
+    }
+
+
+def _increment_ledger(baseline: dict, classes: dict, rerun_list: list[str],
+                      invalidation: dict, since_full: int, arm_exec_s: float,
+                      gh_exec_s: float, gh_executions: "list[dict] | None",
+                      executions: "list[dict] | None",
+                      gherkin_arm_full_reason: "str | None") -> dict:
+    """增量台账块（C3-R28 零行为拆分）。D5：臂级全量时 mode/reason 携带
+    具名原因（feature 臂重建；对外响应 mode 仍取 status 预言的
+    full/increment）、`increments_since_full` 归零。"""
+    return {
+        "mode": gherkin_arm_full_reason or "incremental",
+        "reason": gherkin_arm_full_reason,
+        "base_recipe_hash": baseline.get("report_recipe_hash"),
+        "changed_files": classes,
+        "rerun_scripts": rerun_list,
+        "dropped_scripts": sorted(invalidation["dropped"]),
+        "rerun_sources": invalidation["sources"],
+        "gherkin_rerun_features": sorted(
+            invalidation.get("gherkin_rerun") or []),
+        "gherkin_dropped_features": sorted(
+            invalidation.get("gherkin_dropped") or []),
+        "increments_since_full": 0 if gherkin_arm_full_reason
+        else since_full + 1,
+        "calibration_policy": ("full face every N increments or on "
+                               "hash mismatch / new prod file / "
+                               "oversized rerun surface (deleted prod "
+                               "files stay incremental: edge purge + "
+                               "toucher rerun, SEE-1610 §SPEC-N1); "
+                               "gherkin features rerun per invalidation "
+                               "surface, own ratio cap (SEE-1631 "
+                               "§SPEC-016)"),
+        "event_counts_stale": True,
+        "arm_exec_s": arm_exec_s,
+        "gherkin_leg_exec_s": gh_exec_s,
+        "gherkin_leg_executions": gh_executions or [],
+        "rerun_executions": executions or [],
+        # C3-R25（N6）：执行异常的具名披露（对应脚本判定已保守记红）
+        "rerun_execution_errors": _rerun_error_disclosure(executions),
     }
 
 def _merged_production_content(root: Path, baseline: dict,

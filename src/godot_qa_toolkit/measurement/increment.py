@@ -1112,6 +1112,9 @@ def _run_attribution_increment_locked(
     merge_collisions: list = []
     from .attribution import _gherkin_feature_of as _gfo
 
+    # gherkin 重跑面 / dropped 由臂段写回 invalidation（零行为拆分回填）
+    gherkin_rerun = set(invalidation.get("gherkin_rerun") or [])
+    gherkin_dropped = set(invalidation.get("gherkin_dropped") or [])
     merged_verdicts = _merged_test_verdicts(
         baseline, executions or [], rerun, invalidation["dropped"], removed,
         _gherkin_leg_exec_source(fresh_gherkin, gh_executions),

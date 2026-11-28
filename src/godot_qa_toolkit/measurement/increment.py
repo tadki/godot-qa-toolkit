@@ -628,6 +628,45 @@ def _merged_identities(key: str, arm: dict, fresh: dict, dropped: set[str],
     return base
 
 
+def _canonicalize_one_family_entry(merged: dict, ident: str, nm: str,
+                                   fam: tuple, collisions:
+                                   "list[dict] | None") -> None:
+    """单个旧 basename 条目的删除家族处置（原样搬动的三分支）——唯一
+    幸存者改写规范形态（幸存者判定保留、产物单一形态）；多幸存者无法
+    消歧原样保留 + 具名披露；整族已删兜底剔除。"""
+    _dead, survivors = fam
+    full_survivors = [f"res://{r}" for r in survivors]
+    if len(full_survivors) == 1:
+        canon = f"{full_survivors[0]}::{nm}"
+        if canon not in merged and ident in merged:
+            merged[canon] = merged.pop(ident)
+            if collisions is not None:
+                collisions.append({
+                    "basename_key": ident,
+                    "candidates": sorted({ident, canon}),
+                    "resolved": canon,
+                    "reason": "legacy_basename_identity_"
+                              "canonicalized_after_delete",
+                })
+    elif len(full_survivors) > 1:
+        if collisions is not None:
+            collisions.append({
+                "basename_key": ident,
+                "candidates": sorted(full_survivors),
+                "resolved": "",
+                "reason": "legacy_basename_identity_ambiguous_after_delete",
+            })
+    elif ident in merged:
+        merged.pop(ident, None)
+        if collisions is not None:
+            collisions.append({
+                "basename_key": ident,
+                "candidates": sorted({ident}),
+                "resolved": "",
+                "reason": "legacy_basename_identity_dropped_with_family",
+            })
+
+
 def _canonicalize_deleted_families(merged: dict, families: dict,
                                    collisions: "list[dict] | None") -> None:
     """C3-R24（N1/§SPEC-038⑤）：删除家族的旧 basename 条目处置——唯一
@@ -642,37 +681,7 @@ def _canonicalize_deleted_families(merged: dict, families: dict,
         fam = families.get(Path(sc).name)
         if fam is None:
             continue
-        _dead, survivors = fam
-        full_survivors = [f"res://{r}" for r in survivors]
-        if len(full_survivors) == 1:
-            canon = f"{full_survivors[0]}::{nm}"
-            if canon not in merged and ident in merged:
-                merged[canon] = merged.pop(ident)
-                if collisions is not None:
-                    collisions.append({
-                        "basename_key": ident,
-                        "candidates": sorted({ident, canon}),
-                        "resolved": canon,
-                        "reason": "legacy_basename_identity_"
-                                  "canonicalized_after_delete",
-                    })
-        elif len(full_survivors) > 1:
-            if collisions is not None:
-                collisions.append({
-                    "basename_key": ident,
-                    "candidates": sorted(full_survivors),
-                    "resolved": "",
-                    "reason": "legacy_basename_identity_ambiguous_after_delete",
-                })
-        elif ident in merged:
-            merged.pop(ident, None)
-            if collisions is not None:
-                collisions.append({
-                    "basename_key": ident,
-                    "candidates": sorted({ident}),
-                    "resolved": "",
-                    "reason": "legacy_basename_identity_dropped_with_family",
-                })
+        _canonicalize_one_family_entry(merged, ident, nm, fam, collisions)
 
 
 def _disclose_unresolvable_legacy(merged: dict, tests_by_base: dict,
